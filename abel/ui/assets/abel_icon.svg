@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- ABEL icon: active-learning feedback loop wrapping a mouse silhouette.
+       Palette matches the app theme: navy #0D1B2A, blue #1565C0, cyan #42A5F5,
+       light highlight #90CAF9 / #E3F2FD. -->
+  <defs>
+    <linearGradient id="loopGrad" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1E88E5"/>
+      <stop offset="1" stop-color="#42A5F5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded navy tile -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#0D1B2A"/>
+  <rect x="8.5" y="8.5" width="239" height="239" rx="51.5" fill="none"
+        stroke="#1565C0" stroke-opacity="0.45" stroke-width="3"/>
+
+  <!-- Active-learning feedback ring: large two-arc cycle, fills the frame -->
+  <g fill="none" stroke="url(#loopGrad)" stroke-width="16" stroke-linecap="round">
+    <path d="M 178.5 200.1 A 88 88 0 0 1 55.9 77.5"/>
+    <path d="M 77.5 55.9 A 88 88 0 0 1 200.1 178.5"/>
+  </g>
+  <!-- Big, distinct arrowheads showing the cycle direction -->
+  <g fill="url(#loopGrad)">
+    <polygon points="76.5,48.0 70.5,95.0 34.5,69.8"/>
+    <polygon points="179.5,208.0 185.5,161.0 221.5,186.2"/>
+  </g>
+
+  <!-- Mouse silhouette: smaller, centered, with clear space inside the loop -->
+  <g transform="translate(56.7,62.5) scale(0.62)">
+    <path d="M 170 128
+             C 168 116, 160 108, 148 107
+             C 128 100, 106 103, 94 116
+             C 84 126, 86 138, 98 145
+             C 120 156, 150 152, 170 134
+             Z" fill="#E3F2FD"/>
+    <!-- ear -->
+    <circle cx="120" cy="108" r="13" fill="#E3F2FD"/>
+    <!-- tail -->
+    <path d="M 96 142 C 74 154, 62 132, 76 118"
+          fill="none" stroke="#E3F2FD" stroke-width="10" stroke-linecap="round"/>
+    <!-- eye + nose keypoint accents -->
+    <circle cx="156" cy="123" r="4" fill="#0D1B2A"/>
+    <circle cx="170" cy="131" r="6" fill="#42A5F5"/>
+  </g>
+</svg>

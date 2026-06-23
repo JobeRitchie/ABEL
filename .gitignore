@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Local data, examples, and exports (kept locally, not committed) ---
+Examples/
+CIE EXPORTS/
+Validation data/
+
+# --- Research paper drafts / generated documents (kept locally) ---
+*.docx
+ABEL_Introduction_Plan.docx
+
+# --- Logs and run artifacts ---
+logs/
+*.log
+
+# --- ABEL project working folders (if a project is created in-tree) ---
+derived/
+raw/
+exports/
+temp/
+backups/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# --- External validation / meta-analysis suite (kept local, not committed) ---
+abel/validation/
+run_validation.bat
+tests/test_validation_engine.py
+abel_validation_runs/
+NSF.behaviors.yaml

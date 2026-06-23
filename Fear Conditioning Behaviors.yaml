@@ -1,0 +1,122 @@
+behaviors:
+- behavior_id: no_behavior
+  name: No Behavior
+  short_name: none
+  description: Universal negative label indicating none of the defined behaviors.
+  operational_definition: Use when the clip does not contain any behavior currently
+    defined in this project.
+  inclusion_criteria: No defined target behavior is present.
+  exclusion_criteria: Any clip where a defined behavior is clearly present.
+  min_duration_sec: 0.0
+  parent_category: null
+  review_priority: 999
+  color: '#90A4AE'
+  keyboard_shortcut: n
+  is_active: true
+  notes: ''
+  version_history: []
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: 8d0d257b-bbf9-474d-8880-9d57d30805c4
+  name: Explore
+  short_name: Explore
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#4A90E2'
+  keyboard_shortcut: e
+  is_active: true
+  notes: ''
+  version_history: []
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: b1747aa5-dbd7-405b-8c4c-3559623ffeeb
+  name: Rear
+  short_name: Rear
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#d51fe2'
+  keyboard_shortcut: r
+  is_active: true
+  notes: ''
+  version_history: []
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: ad1d092e-94a8-4668-8aea-95fb8c76e3f6
+  name: Groom
+  short_name: Groom
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#45e245'
+  keyboard_shortcut: g
+  is_active: true
+  notes: ''
+  version_history: []
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: 9485b99f-f3b7-4d46-860b-1bbd11e80841
+  name: Freeze
+  short_name: Freeze
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#e28317'
+  keyboard_shortcut: f
+  is_active: true
+  notes: ''
+  version_history: []
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: e877e248-cfa8-4d9c-8cf1-a6b144bb4105
+  name: Shocked
+  short_name: Shocked
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#e20000'
+  keyboard_shortcut: s
+  is_active: true
+  notes: ''
+  version_history: []
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
