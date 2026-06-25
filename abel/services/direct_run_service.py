@@ -230,6 +230,14 @@ class DirectRunService:
         if not project_state_path.exists():
             write_json(project_state_path, {"schema_version": "0.3.0"})
 
+        # ── Carry the Features-tab toggle state into the target project ──
+        # The Feature Extraction tab persists its settings to THREE places, but
+        # only project.yaml's feature_extraction block is mirrored above. Copy
+        # the other two so the new project's checkboxes (feature groups +
+        # robustness/invariant features) match the source instead of silently
+        # reverting to defaults.
+        self._carry_feature_settings(source_project_root, target_project_root)
+
         # NOTE: ROIs are intentionally NOT inherited from the source project.
         # They are pixel coordinates tied to the source's camera/frame geometry
         # and almost never valid on new footage.  The Direct Use tab writes the
@@ -720,6 +728,53 @@ class DirectRunService:
 
     # ── Helpers ──────────────────────────────────────────────────────
 
+    @staticmethod
+    def _carry_feature_settings(
+        source_project_root: Path, target_project_root: Path,
+    ) -> None:
+        """Mirror the source's feature-selection config into the target project.
+
+        Copies the two config files the Features tab writes besides
+        project.yaml:
+
+        * ``config/feature_exclusions.json`` — disabled feature groups
+          (per-keypoint kinematics, global movement, oscillation, orientation).
+        * ``config/experiment.yaml`` → ``behavior_model.invariant_features`` —
+          the robustness toggles (egocentric, body-length norm, relative
+          geometry, head direction, joint angles, spine curvature, clip deltas).
+
+        Without this, the new project opens with all of these reverted to their
+        defaults rather than the values the source model was configured with.
+        """
+        src_cfg = source_project_root / "config"
+        dst_cfg = target_project_root / "config"
+        dst_cfg.mkdir(parents=True, exist_ok=True)
+
+        # feature_exclusions.json — copy wholesale (it is purely feature
+        # selection state) when the target doesn't already have one.
+        try:
+            src_excl = src_cfg / "feature_exclusions.json"
+            dst_excl = dst_cfg / "feature_exclusions.json"
+            if src_excl.exists() and not dst_excl.exists():
+                shutil.copy2(src_excl, dst_excl)
+        except Exception as exc:
+            logger.warning("Could not carry feature_exclusions.json: %s", exc)
+
+        # experiment.yaml — merge only the invariant_features block so we don't
+        # drag along unrelated, possibly project-specific experiment config.
+        try:
+            src_exp = src_cfg / "experiment.yaml"
+            if src_exp.exists():
+                src_data = read_yaml(src_exp, {}) or {}
+                inv = (src_data.get("behavior_model") or {}).get("invariant_features")
+                if isinstance(inv, dict) and inv:
+                    dst_exp = dst_cfg / "experiment.yaml"
+                    dst_data = read_yaml(dst_exp, {}) or {} if dst_exp.exists() else {}
+                    dst_data.setdefault("behavior_model", {})["invariant_features"] = dict(inv)
+                    write_yaml(dst_exp, dst_data)
+        except Exception as exc:
+            logger.warning("Could not carry invariant_features: %s", exc)
+
     def _behavior_display_name(
         self, bid: str, snapshot: WorkflowSnapshot,
     ) -> str:
@@ -744,12 +799,29 @@ class DirectRunService:
         """
         if bool(getattr(snapshot, "use_video_features", False)):
             return True
+        # An explicit "on" captured from the source's Features tab is a
+        # deliberate user choice — honour it even when the snapshot's own flag
+        # was lost.  Without this, a video-trained project whose model
+        # run_settings.json omits the key gets silently downgraded to
+        # pose-only, and the new project runs with no video/context features.
+        fx = getattr(snapshot, "feature_extraction_settings", None) or {}
+        if bool(fx.get("use_video_features")):
+            return True
         # Backward-compat: snapshot predates the flag.
         trained = WorkflowSnapshotService()._trained_use_video_features(
             source_project_root, snapshot.model_version,
         )
         if trained is not None:
             return trained
+        # Fall back to the source project.yaml's Features-tab settings.
+        try:
+            src_proj = read_yaml(source_project_root / "project.yaml", {}) or {}
+            if bool((src_proj.get("feature_extraction") or {}).get("use_video_features")):
+                return True
+            if bool((src_proj.get("behavior_model") or {}).get("use_video_features")):
+                return True
+        except Exception:
+            pass
         # Last resort: the source project computed context features at all.
         return (
             source_project_root / "derived" / "context_features"

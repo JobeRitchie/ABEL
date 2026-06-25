@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QEvent, QSize, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -81,6 +82,62 @@ _BTN_PRIMARY = (
     "QPushButton:hover { background: #1976D2; }"
     "QPushButton:disabled { background: #263238; color: #546E7A; }"
 )
+
+
+class _CollapsibleSection(QWidget):
+    """A titled section whose body collapses to a single header row.
+
+    Used to declutter the Direct Use tab: each pipeline step lives in its own
+    collapsible section so the user can focus on one step at a time.  Build the
+    step's widgets into :pyattr:`content_layout`.
+    """
+
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._toggle = QToolButton()
+        self._toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self._toggle.setArrowType(Qt.ArrowType.DownArrow)
+        self._toggle.setText(title)
+        self._toggle.setCheckable(True)
+        self._toggle.setChecked(True)
+        self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._toggle.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._toggle.setStyleSheet(
+            "QToolButton { color: #90CAF9; font-size: 13px; font-weight: 700;"
+            " border: none; background: transparent; padding: 5px 2px;"
+            " text-align: left; }"
+            "QToolButton:hover { color: #BBDEFB; }"
+        )
+        self._toggle.clicked.connect(self._on_toggle)
+
+        self._content = QWidget()
+        self.content_layout = QVBoxLayout(self._content)
+        self.content_layout.setContentsMargins(16, 2, 4, 8)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(self._toggle)
+        lay.addWidget(self._content)
+        self.setStyleSheet(
+            "_CollapsibleSection { border-top: 1px solid #1E3A5F; }"
+        )
+
+    def _on_toggle(self, checked: bool) -> None:
+        self._toggle.setArrowType(
+            Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow
+        )
+        self._content.setVisible(checked)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._toggle.setChecked(expanded)
+        self._on_toggle(expanded)
 
 
 class _StepCard(QWidget):
@@ -292,8 +349,8 @@ class DirectUseTab(QWidget):
         desc.setStyleSheet("font-size: 11px; color: #607D8B; padding-bottom: 2px;")
 
         # ── Step 1: Source project ────────────────────────────────────
-        source_box = QGroupBox("Step 1 — Source Project (trained model)")
-        source_lay = QVBoxLayout(source_box)
+        source_box = _CollapsibleSection("Step 1 — Source Project (trained model)")
+        source_lay = source_box.content_layout
         source_lay.setSpacing(4)
 
         src_row = QHBoxLayout()
@@ -316,8 +373,8 @@ class DirectUseTab(QWidget):
         source_lay.addWidget(self._snap_detail)
 
         # ── Step 2: Input data ────────────────────────────────────────
-        data_box = QGroupBox("Step 2 — Input Data")
-        data_lay = QVBoxLayout(data_box)
+        data_box = _CollapsibleSection("Step 2 — Input Data")
+        data_lay = data_box.content_layout
         data_lay.setSpacing(6)
 
         instr = QLabel(
@@ -428,8 +485,8 @@ class DirectUseTab(QWidget):
         data_lay.addLayout(pxmm_row)
 
         # ── Step 3: Keypoint Mapping ──────────────────────────────────
-        kp_box = QGroupBox("Step 3 — Keypoint Mapping")
-        kp_lay = QVBoxLayout(kp_box)
+        kp_box = _CollapsibleSection("Step 3 — Keypoint Mapping")
+        kp_lay = kp_box.content_layout
         kp_lay.setSpacing(6)
         kp_desc = QLabel(
             "The model was trained on specific pose keypoints. If your new DLC "
@@ -472,8 +529,8 @@ class DirectUseTab(QWidget):
         kp_lay.addWidget(self._kp_table)
 
         # ── Step 3: Define ROIs ───────────────────────────────────────
-        roi_box = QGroupBox("Step 4 — Define ROIs")
-        roi_lay = QVBoxLayout(roi_box)
+        roi_box = _CollapsibleSection("Step 4 — Define ROIs")
+        roi_lay = roi_box.content_layout
         roi_lay.setSpacing(6)
 
         roi_desc = QLabel(
@@ -543,13 +600,44 @@ class DirectUseTab(QWidget):
         self._roi_subject_box.setVisible(False)  # hidden until scope = "subject"
         roi_lay.addWidget(self._roi_subject_box)
 
-        # Canvas
+        # Canvas (inside a scroll area so it can be zoomed beyond the viewport)
         self._roi_canvas = _ROICanvas()
-        self._roi_canvas.setMinimumHeight(280)
-        self._roi_canvas.setMaximumHeight(400)
         self._roi_canvas.roi_n_changed.connect(self._on_roi_n_drawn)
         self._roi_canvas.crop_changed.connect(self._on_roi_crop_drawn)
-        roi_lay.addWidget(self._roi_canvas)
+        self._roi_scroll = QScrollArea()
+        self._roi_scroll.setWidgetResizable(True)
+        self._roi_scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._roi_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._roi_scroll.setMinimumHeight(300)
+        self._roi_scroll.setMaximumHeight(460)
+        self._roi_scroll.setWidget(self._roi_canvas)
+        # Re-fit the zoom whenever the viewport is resized.
+        self._roi_scroll.viewport().installEventFilter(self)
+        roi_lay.addWidget(self._roi_scroll)
+
+        # Zoom control row
+        roi_zoom_row = QHBoxLayout()
+        roi_zoom_row.setSpacing(6)
+        roi_zoom_lbl = QLabel("Zoom:")
+        roi_zoom_lbl.setStyleSheet("font-size: 11px; color: #78909C;")
+        self._roi_zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self._roi_zoom_slider.setMinimum(100)   # 1.0×  (fit to view)
+        self._roi_zoom_slider.setMaximum(600)   # 6.0×
+        self._roi_zoom_slider.setValue(100)
+        self._roi_zoom_slider.setSingleStep(25)
+        self._roi_zoom_slider.setPageStep(50)
+        self._roi_zoom_slider.setToolTip(
+            "Enlarge the frame to draw ROIs more precisely. Kept when you move "
+            "to the next subject."
+        )
+        self._roi_zoom_slider.valueChanged.connect(self._on_roi_zoom_changed)
+        self._roi_zoom_value = QLabel("Fit")
+        self._roi_zoom_value.setFixedWidth(46)
+        self._roi_zoom_value.setStyleSheet("font-size: 11px; color: #B0BEC5;")
+        roi_zoom_row.addWidget(roi_zoom_lbl)
+        roi_zoom_row.addWidget(self._roi_zoom_slider, 1)
+        roi_zoom_row.addWidget(self._roi_zoom_value)
+        roi_lay.addLayout(roi_zoom_row)
 
         # Frame controls row
         roi_ctrl_row = QHBoxLayout()
@@ -657,8 +745,8 @@ class DirectUseTab(QWidget):
         roi_lay.addLayout(roi_spins_row)
 
         # ── Step 4: Run ───────────────────────────────────────────────
-        run_box = QGroupBox("Step 5 — Run Pipeline")
-        run_lay = QVBoxLayout(run_box)
+        run_box = _CollapsibleSection("Step 5 — Run Pipeline")
+        run_lay = run_box.content_layout
         run_lay.setSpacing(6)
 
         btn_row = QHBoxLayout()
@@ -756,6 +844,11 @@ class DirectUseTab(QWidget):
         # Initialise dynamic ROI spinboxes and draw-mode combo
         self._rebuild_roi_spinboxes_du(1)
         self._rebuild_draw_mode_du()
+
+        # Declutter: collapse the two tallest steps by default so the workflow
+        # reads as a compact checklist; the user expands them when needed.
+        kp_box.set_expanded(False)
+        roi_box.set_expanded(False)
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -1377,6 +1470,29 @@ class DirectUseTab(QWidget):
         ret, frame = self._roi_video_cap.read()
         if ret and frame is not None:
             self._roi_canvas.set_frame(frame)
+            # Re-apply the current zoom so it persists across frame/subject loads.
+            self._apply_roi_zoom()
+
+    # ── ROI zoom ─────────────────────────────────────────────────────
+
+    def _on_roi_zoom_changed(self, value: int) -> None:
+        zoom = value / 100.0
+        self._roi_zoom_value.setText("Fit" if value <= 100 else f"{zoom:.2g}×")
+        self._apply_roi_zoom()
+
+    def _apply_roi_zoom(self) -> None:
+        """Push the current zoom factor + viewport size to the ROI canvas."""
+        zoom = self._roi_zoom_slider.value() / 100.0
+        self._roi_canvas.set_zoom(zoom, self._roi_scroll.viewport().size())
+
+    def eventFilter(self, obj, event) -> bool:
+        # Keep the frame fitted/zoomed correctly when the viewport resizes.
+        if (
+            obj is self._roi_scroll.viewport()
+            and event.type() == QEvent.Type.Resize
+        ):
+            self._apply_roi_zoom()
+        return super().eventFilter(obj, event)
 
     def _on_roi_draw_mode_changed(self) -> None:
         mode = self._roi_draw_mode.currentData() or "roi_0"

@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPoint, QRect, Signal
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -98,6 +98,11 @@ class _ROICanvas(QWidget):
         self._img_w: int = 1
         self._img_h: int = 1
         self._pixmap: QPixmap | None = None
+        # Optional user zoom (multiplier on the fit-to-viewport scale).  Only
+        # active once :py:meth:`set_zoom` is given a viewport size; until then
+        # the canvas keeps its default auto-fit behaviour.
+        self._zoom: float = 1.0
+        self._viewport: "QSize | None" = None
 
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -122,6 +127,42 @@ class _ROICanvas(QWidget):
         self._img_w, self._img_h = w, h
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888)
         self._pixmap = QPixmap.fromImage(qimg)
+        self._recalculate_transform()
+        # Re-apply any active user zoom now that the image dimensions are known.
+        self._apply_zoom()
+        self.update()
+
+    # ── User zoom ─────────────────────────────────────────────────────
+
+    def set_zoom(self, zoom: float, viewport: "QSize | None" = None) -> None:
+        """Enlarge the displayed frame by *zoom* × the fit-to-viewport scale.
+
+        *viewport* is the size of the scroll-area viewport the canvas lives in;
+        it must be supplied at least once to activate zooming.  ``zoom == 1.0``
+        fits the frame to the viewport (no letterboxing); larger values make the
+        frame bigger so a surrounding scroll area can pan around it.
+        """
+        self._zoom = max(1.0, float(zoom))
+        if viewport is not None:
+            self._viewport = viewport
+        self._apply_zoom()
+
+    def _apply_zoom(self) -> None:
+        # No viewport supplied → zoom feature unused (e.g. ROIDefinitionTab),
+        # keep the original auto-fit/Expanding behaviour untouched.
+        if self._viewport is None:
+            return
+        if self._pixmap is None or not self._img_w or not self._img_h:
+            self.setMinimumSize(320, 240)
+            self.setMaximumSize(16_777_215, 16_777_215)
+            return
+        vw = max(1, self._viewport.width())
+        vh = max(1, self._viewport.height())
+        fit = min(vw / self._img_w, vh / self._img_h)
+        scale = fit * self._zoom
+        disp_w = max(1, int(self._img_w * scale))
+        disp_h = max(1, int(self._img_h * scale))
+        self.setFixedSize(disp_w, disp_h)
         self._recalculate_transform()
         self.update()
 
