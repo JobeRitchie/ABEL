@@ -2,7 +2,6 @@
 
 Implements:
 - behavior-adaptive expert benchmarking by feature family
-- multi-scale benchmarking
 - confound-aware analysis when non-target labels are sufficient
 - baseline vs advanced comparator summaries
 - publication-quality diagnostic plots (PNG + SVG)
@@ -30,20 +29,17 @@ from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 class BehaviorAdaptiveBenchmarkConfig:
     enabled: bool = False
     enable_modality_benchmarking: bool = True
-    enable_multiscale_benchmarking: bool = True
     enable_confound_analysis: bool = True
     regenerate_diagnostics: bool = False
     export_high_resolution: bool = True
     save_artifacts: bool = True
     diagnostics_enabled: bool = True
     cache_features: bool = True
-    scales_sec: tuple[float, ...] = (0.1, 0.2, 0.25, 0.5, 1.0, 2.0)
     primary_metric: str = "ap"
     min_examples_per_class: int = 12
     min_examples_for_learned_weights: int = 75
     use_gpu_if_available: bool = True
     quick_feature_test: bool = False
-    compare_all_scales: bool = False
     subset_max_sessions: int = 6
     subset_max_segments_per_scale: int = 25000
     cpu_parallel_workers: int = 0
@@ -52,6 +48,9 @@ class BehaviorAdaptiveBenchmarkConfig:
 
 class BehaviorAdaptiveBenchmarkService:
     """Run Phase 1 benchmarking and diagnostics in an opt-in, baseline-safe manner."""
+
+    # Single segment window (seconds) used for all Phase 1 benchmarking.
+    SEGMENT_SCALE_SEC = 0.5
 
     def __init__(self) -> None:
         self._feature_cache = BehaviorAdaptiveFeatureCacheService()
@@ -82,20 +81,17 @@ class BehaviorAdaptiveBenchmarkService:
             "phase1": {
                 "enabled": False,
                 "enable_modality_benchmarking": True,
-                "enable_multiscale_benchmarking": True,
                 "enable_confound_analysis": True,
                 "diagnostics_enabled": True,
                 "cache_features": True,
                 "regenerate_diagnostics": False,
                 "export_high_resolution": True,
                 "save_artifacts": True,
-                "scales_sec": [0.1, 0.2, 0.25, 0.5, 1.0, 2.0],
                 "primary_metric": "ap",
                 "min_examples_per_class": 12,
                 "min_examples_for_learned_weights": 75,
                 "use_gpu_if_available": True,
                 "quick_feature_test": False,
-                "compare_all_scales": False,
                 "subset_max_sessions": 6,
                 "subset_max_segments_per_scale": 25000,
                 "cpu_parallel_workers": 0,
@@ -127,41 +123,25 @@ class BehaviorAdaptiveBenchmarkService:
         merged = dict(phase1)
         merged.update(behavior_overrides)
 
-        scales = merged.get("scales_sec", [0.1, 0.2, 0.25, 0.5, 1.0, 2.0])
-        try:
-            scales_tuple = tuple(float(v) for v in scales)
-        except Exception:
-            scales_tuple = (0.1, 0.2, 0.25, 0.5, 1.0, 2.0)
-
         return BehaviorAdaptiveBenchmarkConfig(
             enabled=bool(merged.get("enabled", False)),
             enable_modality_benchmarking=bool(merged.get("enable_modality_benchmarking", True)),
-            enable_multiscale_benchmarking=bool(merged.get("enable_multiscale_benchmarking", True)),
             enable_confound_analysis=bool(merged.get("enable_confound_analysis", True)),
             regenerate_diagnostics=bool(merged.get("regenerate_diagnostics", False)),
             export_high_resolution=bool(merged.get("export_high_resolution", True)),
             save_artifacts=bool(merged.get("save_artifacts", True)),
             diagnostics_enabled=bool(merged.get("diagnostics_enabled", True)),
             cache_features=bool(merged.get("cache_features", True)),
-            scales_sec=scales_tuple,
             primary_metric=str(merged.get("primary_metric", "ap")),
             min_examples_per_class=int(merged.get("min_examples_per_class", 12)),
             min_examples_for_learned_weights=int(merged.get("min_examples_for_learned_weights", 75)),
             use_gpu_if_available=bool(merged.get("use_gpu_if_available", True)),
             quick_feature_test=bool(merged.get("quick_feature_test", False)),
-            compare_all_scales=bool(merged.get("compare_all_scales", False)),
             subset_max_sessions=int(merged.get("subset_max_sessions", 6)),
             subset_max_segments_per_scale=int(merged.get("subset_max_segments_per_scale", 25000)),
             cpu_parallel_workers=int(merged.get("cpu_parallel_workers", 0)),
             cpu_use_process_pool=bool(merged.get("cpu_use_process_pool", True)),
         )
-
-    @staticmethod
-    def _pick_representative_scale(scales: list[float]) -> float:
-        if not scales:
-            return 0.5
-        target = 0.5
-        return float(min(scales, key=lambda x: abs(float(x) - target)))
 
     @staticmethod
     def _subset_sessions_from_reviews(review_intervals: pd.DataFrame, max_sessions: int) -> list[str]:
@@ -840,33 +820,7 @@ class BehaviorAdaptiveBenchmarkService:
             plt.close(fig)
             outputs["feature_family_comparison"] = str(png)
 
-        # 2) Multi-scale AP plot
-        valid_scales = sorted(
-            [
-                (float(v.get("scale_sec", 0.0)), float(v.get("ap", float("nan"))))
-                for v in scale_results.values()
-                if isinstance(v, dict) and v.get("status") == "ok"
-            ],
-            key=lambda kv: kv[0],
-        )
-        if valid_scales:
-            xs = [v[0] for v in valid_scales]
-            ys = [v[1] for v in valid_scales]
-            fig, ax = plt.subplots(figsize=(8.2, 4.6))
-            ax.plot(xs, ys, marker="o", linewidth=2.0)
-            ax.set_xlabel("Window size (seconds)")
-            ax.set_ylabel("AP")
-            ax.set_ylim(0.0, 1.0)
-            ax.set_title(f"Multi-Scale Performance - {behavior_id}")
-            ax.grid(True, alpha=0.25)
-            fig.tight_layout()
-            png = run_diag_dir / "multiscale_performance.png"
-            svg = run_diag_dir / "multiscale_performance.svg"
-            self._save_figure(fig, png, svg, dpi=dpi)
-            plt.close(fig)
-            outputs["multiscale_performance"] = str(png)
-
-        # 3) Confusion matrix
+        # 2) Confusion matrix
         cm = np.asarray(confound_results.get("confusion_matrix", []), dtype=float)
         labels = list(confound_results.get("labels", []))
         if cm.ndim == 2 and cm.size > 0:
@@ -889,7 +843,7 @@ class BehaviorAdaptiveBenchmarkService:
             plt.close(fig)
             outputs["confusion_matrix_phase1"] = str(png)
 
-        # 4) Target-vs-top-confound margin histogram
+        # 3) Target-vs-top-confound margin histogram
         margin = dict(confound_results.get("margin_histogram") or {})
         has_margin = any(len(margin.get(k, [])) > 0 for k in ("tp", "fp", "fn"))
         if has_margin:
@@ -911,7 +865,7 @@ class BehaviorAdaptiveBenchmarkService:
             plt.close(fig)
             outputs["target_confound_margin_histogram"] = str(png)
 
-        # 5) Baseline vs best expert PR curve
+        # 4) Baseline vs best expert PR curve
         best_name = None
         best_ap = -1.0
         for name, row in expert_results.items():
@@ -945,7 +899,7 @@ class BehaviorAdaptiveBenchmarkService:
                 plt.close(fig)
                 outputs["pr_curve_comparison_phase1"] = str(png)
 
-        # 6) Reliability plot for best expert
+        # 5) Reliability plot for best expert
         if best_name:
             best = dict(expert_results.get(best_name) or {})
             rel = dict(best.get("reliability") or {})
@@ -996,9 +950,6 @@ class BehaviorAdaptiveBenchmarkService:
             label = str(main.get("label", "other_behavior"))
             cards.append(f"Top confound behavior was '{label}' for this target.")
         rec = dict(summary.get("recommendations") or {})
-        best_scale = rec.get("best_scale_sec")
-        if best_scale is not None:
-            cards.append(f"Recommended timescale was {float(best_scale):.2f}s based on validation AP.")
         best_family = rec.get("best_family")
         if best_family:
             cards.append(f"Recommended feature family was '{best_family}'.")
@@ -1042,14 +993,8 @@ class BehaviorAdaptiveBenchmarkService:
         confound_map = self._derive_confound_map(review_intervals, safe_behavior, settings)
         self.save_settings(project_root, settings)
 
-        # When multiscale benchmarking is disabled, collapse to a single
-        # representative scale so per-scale expert training is minimal.
-        if not cfg.enable_multiscale_benchmarking:
-            selected_scales = [self._pick_representative_scale([float(v) for v in cfg.scales_sec])]
-        else:
-            selected_scales = [float(v) for v in cfg.scales_sec]
-            if cfg.quick_feature_test and not cfg.compare_all_scales:
-                selected_scales = [self._pick_representative_scale(selected_scales)]
+        # Benchmarking runs at a single representative segment window.
+        selected_scales = [float(self.SEGMENT_SCALE_SEC)]
 
         # Determine which sessions to build the Phase 1 cache for.
         # Priority order:
@@ -1253,16 +1198,6 @@ class BehaviorAdaptiveBenchmarkService:
                 best_ap = ap
                 best_expert = name
 
-        best_scale_sec = None
-        best_scale_ap = -1.0
-        for row in scale_results.values():
-            if row.get("status") != "ok":
-                continue
-            ap = float(row.get("ap", -1.0))
-            if ap > best_scale_ap:
-                best_scale_ap = ap
-                best_scale_sec = float(row.get("scale_sec", 0.0))
-
         baseline_ap = float((baseline_metrics.get("segment_level") or {}).get("pr_auc", float("nan")))
 
         summary: dict[str, Any] = {
@@ -1272,16 +1207,14 @@ class BehaviorAdaptiveBenchmarkService:
             "config": {
                 "enabled": cfg.enabled,
                 "enable_modality_benchmarking": cfg.enable_modality_benchmarking,
-                "enable_multiscale_benchmarking": cfg.enable_multiscale_benchmarking,
                 "enable_confound_analysis": cfg.enable_confound_analysis,
                 "diagnostics_enabled": cfg.diagnostics_enabled,
-                "scales_sec": list(cfg.scales_sec),
+                "segment_scale_sec": float(self.SEGMENT_SCALE_SEC),
                 "primary_metric": cfg.primary_metric,
                 "min_examples_for_learned_weights": cfg.min_examples_for_learned_weights,
                 "use_gpu_if_available": cfg.use_gpu_if_available,
                 "gpu_backend_active": gpu_available,
                 "quick_feature_test": cfg.quick_feature_test,
-                "compare_all_scales": cfg.compare_all_scales,
                 "subset_max_sessions": cfg.subset_max_sessions,
                 "subset_max_segments_per_scale": cfg.subset_max_segments_per_scale,
                 "cpu_parallel_workers": cfg.cpu_parallel_workers,
@@ -1300,7 +1233,6 @@ class BehaviorAdaptiveBenchmarkService:
             },
             "recommendations": {
                 "best_family": best_expert,
-                "best_scale_sec": best_scale_sec,
                 "learned_family_weights": learned_weights,
                 "soft_adaptation_alpha": float(alpha),
             },
@@ -1350,7 +1282,6 @@ class BehaviorAdaptiveBenchmarkService:
         behavior_cfg = behavior_overrides.setdefault(safe_behavior, {})
         behavior_cfg["latest_phase1_run"] = timestamp
         behavior_cfg["recommended_family"] = best_expert
-        behavior_cfg["recommended_scale_sec"] = best_scale_sec
         behavior_cfg["learned_family_weights"] = learned_weights
         behavior_cfg["soft_adaptation_alpha"] = float(alpha)
         self.save_settings(project_root, settings)

@@ -72,7 +72,24 @@ from abel.services.uncertainty_service import UncertaintyScoringService, Uncerta
 from abel.services.workflow_snapshot_service import WorkflowSnapshot, WorkflowSnapshotService
 from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 from abel.utils.eta_estimator import StageEtaEstimator
+from abel.utils.run_timeline import RunTimeline, Stage
+from abel.ui.widgets.progress_panel import ProgressPanel
 from abel.workers.task_worker import TaskWorker
+
+# Ordered Active-Learning pipeline stages, with status-text fragments used to
+# map the free-text progress reports onto the timeline.  Order matters.
+_AL_PIPELINE_STAGES: tuple[tuple[str, str, float, tuple[str, ...]], ...] = (
+    # (key, label, weight, status fragments that indicate this stage)
+    ("setup", "Detect backend & prepare", 0.5, ("backend", "Preparing", "Detecting", "manifest")),
+    ("preprocess", "Pose/context features", 6.0, ("Preprocess", "Processed session", "Reused", "Consolidat", "session preprocessing")),
+    ("representations", "Build representations", 3.0, ("representation",)),
+    ("training_set", "Assemble training set", 1.0, ("training labels", "Assembl", "training set")),
+    ("train", "Train classifier", 3.0, ("Training model", "Train Classifier", "Training the")),
+    ("inference", "Score & uncertainty", 2.0, ("uncertainty", "Scoring")),
+    ("candidates", "Generate candidates", 1.0, ("candidates", "Selecting")),
+    ("evaluation", "Evaluate & report", 2.0, ("Evaluat", "report")),
+    ("phase1", "Phase 1 diagnostics", 1.0, ("Phase 1", "phase1")),
+)
 
 logger = logging.getLogger("abel")
 
@@ -155,6 +172,7 @@ class ActiveLearningTab(QWidget):
         self._status = QLabel("Open a project to run active learning.")
         self._status.setWordWrap(True)
         self._pipeline_step_scale: int = 1  # set to 100 during pipeline runs for sub-step bar resolution
+        self._pipeline_timeline: RunTimeline | None = None
 
         self._mode = QComboBox()
         self._mode.addItem("Uncertainty", userData="uncertainty")
@@ -377,10 +395,6 @@ class ActiveLearningTab(QWidget):
         self._phase1_modality.setChecked(True)
         self._phase1_modality.setToolTip("Compare pose, visual, motion, context, and fused experts.")
 
-        self._phase1_multiscale = QCheckBox("Benchmark time scales")
-        self._phase1_multiscale.setChecked(False)
-        self._phase1_multiscale.setToolTip("Evaluate AP across multiple temporal windows.")
-
         self._phase1_confound = QCheckBox("Run confound analysis")
         self._phase1_confound.setChecked(False)
         self._phase1_confound.setToolTip("Estimate top non-target confounds when labels are available.")
@@ -396,9 +410,6 @@ class ActiveLearningTab(QWidget):
 
         self._phase1_export_hires = QCheckBox("Export publication quality (PNG+SVG)")
         self._phase1_export_hires.setChecked(True)
-
-        self._phase1_scales = QLineEdit("0.1, 0.2, 0.25, 0.5, 1.0, 2.0")
-        self._phase1_scales.setToolTip("Seconds. Example: 0.1,0.2,0.25,0.5,1.0,2.0")
 
         self._queue_weighted_enable = QCheckBox("Enable weighted queue scoring")
         self._queue_weighted_enable.setChecked(False)
@@ -642,6 +653,9 @@ class ActiveLearningTab(QWidget):
             "QPushButton:disabled { background: #1A2027; color: #37474F; }"
         )
 
+        self._pipeline_panel = ProgressPanel("Active Learning pipeline")
+        self._pipeline_panel.hide()
+
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)
         self._progress.hide()
@@ -684,7 +698,6 @@ class ActiveLearningTab(QWidget):
         self._viz_selector.addItem("Confusion Matrix", userData="confusion")
         self._viz_selector.addItem("PR Curve", userData="pr")
         self._viz_selector.addItem("Feature Family Comparison", userData="feature_family")
-        self._viz_selector.addItem("Multi-Scale Performance", userData="multiscale")
         self._viz_selector.addItem("Target-vs-Confound Margin", userData="margin")
         self._viz_selector.addItem("Calibration", userData="calibration")
         self._viz_selector.addItem("Queue Composition", userData="queue")
@@ -816,6 +829,7 @@ class ActiveLearningTab(QWidget):
         root.addWidget(form_box)
         root.addLayout(btn_row)
         root.addWidget(self._status)
+        root.addWidget(self._pipeline_panel)
         root.addWidget(self._progress)
         root.addWidget(self._log)
 
@@ -954,12 +968,10 @@ class ActiveLearningTab(QWidget):
             self._split_strategy.setCurrentIndex(idx_split)
         self._phase1_enable.setChecked(False)
         self._phase1_modality.setChecked(True)
-        self._phase1_multiscale.setChecked(False)
         self._phase1_confound.setChecked(False)
         self._phase1_diagnostics.setChecked(True)
         self._phase1_regenerate.setChecked(False)
         self._phase1_export_hires.setChecked(True)
-        self._phase1_scales.setText("0.1, 0.2, 0.25, 0.5, 1.0, 2.0")
         self._candidate_focus_pct.setValue(50)
         self._queue_weighted_enable.setChecked(False)
         self._queue_enable_disagreement.setChecked(True)
@@ -1000,12 +1012,10 @@ class ActiveLearningTab(QWidget):
         self._split_strategy.currentIndexChanged.connect(lambda _i: self._persist_ui_settings_to_project())
         self._phase1_enable.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._phase1_modality.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._phase1_multiscale.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._phase1_confound.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._phase1_diagnostics.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._phase1_regenerate.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._phase1_export_hires.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._phase1_scales.textChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._queue_weighted_enable.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._queue_enable_disagreement.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._queue_enable_diversity.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
@@ -1101,7 +1111,6 @@ class ActiveLearningTab(QWidget):
                 "validation_pct": 25,
                 "max_train_samples_per_class": 1000,
                 "phase1_enable": False,
-                "phase1_scales": "1.0",
             },
         }
 
@@ -1128,8 +1137,6 @@ class ActiveLearningTab(QWidget):
             self._validation_pct.setValue(int(cfg.get("validation_pct", self._validation_pct.value())))
             if "phase1_enable" in cfg:
                 self._phase1_enable.setChecked(bool(cfg["phase1_enable"]))
-            if "phase1_scales" in cfg:
-                self._phase1_scales.setText(str(cfg["phase1_scales"]))
         finally:
             self._applying_quick_profile = False
 
@@ -1546,12 +1553,10 @@ class ActiveLearningTab(QWidget):
             "split_strategy": str(self._split_strategy.currentData() or "group_shuffle_session"),
             "phase1_enable": bool(self._phase1_enable.isChecked()),
             "phase1_modality": bool(self._phase1_modality.isChecked()),
-            "phase1_multiscale": bool(self._phase1_multiscale.isChecked()),
             "phase1_confound": bool(self._phase1_confound.isChecked()),
             "phase1_diagnostics": bool(self._phase1_diagnostics.isChecked()),
             "phase1_regenerate": bool(self._phase1_regenerate.isChecked()),
             "phase1_export_hires": bool(self._phase1_export_hires.isChecked()),
-            "phase1_scales": str(self._phase1_scales.text() or ""),
             "candidate_focus_pct": int(self._candidate_focus_pct.value()),
             "queue_weighted_enable": bool(self._queue_weighted_enable.isChecked()),
             "queue_enable_disagreement": bool(self._queue_enable_disagreement.isChecked()),
@@ -1668,12 +1673,10 @@ class ActiveLearningTab(QWidget):
 
             self._phase1_enable.setChecked(bool(ui.get("phase1_enable", False)))
             self._phase1_modality.setChecked(bool(ui.get("phase1_modality", True)))
-            self._phase1_multiscale.setChecked(bool(ui.get("phase1_multiscale", True)))
             self._phase1_confound.setChecked(bool(ui.get("phase1_confound", True)))
             self._phase1_diagnostics.setChecked(bool(ui.get("phase1_diagnostics", True)))
             self._phase1_regenerate.setChecked(bool(ui.get("phase1_regenerate", False)))
             self._phase1_export_hires.setChecked(bool(ui.get("phase1_export_hires", True)))
-            self._phase1_scales.setText(str(ui.get("phase1_scales", "0.1, 0.2, 0.25, 0.5, 1.0, 2.0")))
             self._candidate_focus_pct.setValue(int(ui.get("candidate_focus_pct", 50)))
             self._queue_weighted_enable.setChecked(bool(ui.get("queue_weighted_enable", False)))
             self._queue_enable_disagreement.setChecked(bool(ui.get("queue_enable_disagreement", True)))
@@ -1936,6 +1939,13 @@ class ActiveLearningTab(QWidget):
 
         checkboxes: dict[str, QCheckBox] = {}
 
+        # Reflect any exclusions already stored project-wide (Feature Audit, or a
+        # previous save) so the dialog shows the true, unified exclusion state.
+        from abel.utils.feature_exclusions import load_exclusion_spec, set_excluded_columns
+        if self._project_root is not None:
+            _file_excl, _ = load_exclusion_spec(self._project_root)
+            self._excluded_feature_cols = set(self._excluded_feature_cols) | _file_excl
+
         # Classify columns into display groups by naming convention.
         _pose_prefixes = (
             "forepaw_", "nose_velocity", "head_pitch", "body_orientation",
@@ -2001,9 +2011,19 @@ class ActiveLearningTab(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self._excluded_feature_cols = {col for col, cb in checkboxes.items() if not cb.isChecked()}
+        shown_unchecked = {col for col, cb in checkboxes.items() if not cb.isChecked()}
+        if self._project_root is not None:
+            # Persist to config/feature_exclusions.json — the single source of
+            # truth every downstream stage (training, UMAP, evaluation,
+            # benchmarks) reads — preserving exclusions for columns not shown here.
+            merged = set_excluded_columns(
+                self._project_root, list(checkboxes.keys()), shown_unchecked
+            )
+            self._excluded_feature_cols = set(merged)
+        else:
+            self._excluded_feature_cols = shown_unchecked
         self._persist_ui_settings_to_project()
-        n_excluded = len(self._excluded_feature_cols)
+        n_excluded = len(shown_unchecked)
         n_total = len(cols)
         self._status.setText(
             f"Feature configuration saved: {n_total - n_excluded}/{n_total} features included"
@@ -2281,21 +2301,6 @@ class ActiveLearningTab(QWidget):
         self._status.setText("Guided active-learning settings applied.")
         QMessageBox.information(self, "Guided Settings Applied", summary)
 
-    def _parse_phase1_scales(self) -> list[float]:
-        raw = str(self._phase1_scales.text() or "").replace(";", ",")
-        parts = [p.strip() for p in raw.split(",") if p.strip()]
-        values: list[float] = []
-        for token in parts:
-            try:
-                val = float(token)
-            except ValueError:
-                continue
-            if val > 0.0:
-                values.append(val)
-        if not values:
-            values = [0.1, 0.2, 0.25, 0.5, 1.0, 2.0]
-        return sorted(set(values))
-
     def _persist_phase1_settings_to_config(self, payload: dict[str, Any]) -> None:
         if self._project_root is None:
             return
@@ -2305,7 +2310,6 @@ class ActiveLearningTab(QWidget):
             {
                 "enabled": bool(payload.get("phase1_enable", False)),
                 "enable_modality_benchmarking": bool(payload.get("phase1_modality", True)),
-                "enable_multiscale_benchmarking": bool(payload.get("phase1_multiscale", True)),
                 "enable_confound_analysis": bool(payload.get("phase1_confound", True)),
                 "diagnostics_enabled": bool(payload.get("phase1_diagnostics", True)),
                 "regenerate_diagnostics": bool(payload.get("phase1_regenerate", False)),
@@ -2313,7 +2317,6 @@ class ActiveLearningTab(QWidget):
                 # Keep Phase 1 subset/quick behavior consistent with the main
                 # pipeline quick-test toggle visible in the UI.
                 "quick_feature_test": bool(payload.get("quick_test", False)),
-                "scales_sec": self._parse_phase1_scales(),
             }
         )
         settings["phase1"] = phase1
@@ -2328,14 +2331,10 @@ class ActiveLearningTab(QWidget):
         try:
             self._phase1_enable.setChecked(bool(phase1.get("enabled", self._phase1_enable.isChecked())))
             self._phase1_modality.setChecked(bool(phase1.get("enable_modality_benchmarking", self._phase1_modality.isChecked())))
-            self._phase1_multiscale.setChecked(bool(phase1.get("enable_multiscale_benchmarking", self._phase1_multiscale.isChecked())))
             self._phase1_confound.setChecked(bool(phase1.get("enable_confound_analysis", self._phase1_confound.isChecked())))
             self._phase1_diagnostics.setChecked(bool(phase1.get("diagnostics_enabled", self._phase1_diagnostics.isChecked())))
             self._phase1_regenerate.setChecked(bool(phase1.get("regenerate_diagnostics", self._phase1_regenerate.isChecked())))
             self._phase1_export_hires.setChecked(bool(phase1.get("export_high_resolution", self._phase1_export_hires.isChecked())))
-            scales = phase1.get("scales_sec", self._parse_phase1_scales())
-            if isinstance(scales, list):
-                self._phase1_scales.setText(", ".join(str(float(v)).rstrip("0").rstrip(".") for v in scales))
         finally:
             self._loading_ui_settings = False
 
@@ -2666,8 +2665,8 @@ class ActiveLearningTab(QWidget):
         phase1_enable = QCheckBox("Enable adaptive benchmarks", dlg)
         phase1_enable.setChecked(bool(self._phase1_enable.isChecked()))
         _info(phase1_enable,
-              "Runs diagnostic tests comparing feature families (pose, motion, context) and "
-              "temporal scales. Valuable for understanding which features drive your model. "
+              "Runs diagnostic tests comparing feature families (pose, motion, context). "
+              "Valuable for understanding which features drive your model. "
               "Most useful for publication or when model performance plateaus.",
               "High — adds 5-20 min. Run only when you need diagnostic insight.")
         form.addRow(phase1_enable)
@@ -2678,13 +2677,6 @@ class ActiveLearningTab(QWidget):
               "Compare pose, visual, motion, context, and fused expert accuracy.",
               "Moderate — trains multiple sub-models.")
         form.addRow(phase1_modality)
-
-        phase1_multiscale = QCheckBox("Benchmark time scales", dlg)
-        phase1_multiscale.setChecked(bool(self._phase1_multiscale.isChecked()))
-        _info(phase1_multiscale,
-              "Test which temporal window durations capture the behavior best.",
-              "High — trains across multiple window sizes.")
-        form.addRow(phase1_multiscale)
 
         phase1_confound = QCheckBox("Confound analysis", dlg)
         phase1_confound.setChecked(bool(self._phase1_confound.isChecked()))
@@ -2704,10 +2696,6 @@ class ActiveLearningTab(QWidget):
         phase1_export_hires = QCheckBox("Export publication quality (PNG+SVG)", dlg)
         phase1_export_hires.setChecked(bool(self._phase1_export_hires.isChecked()))
         form.addRow(phase1_export_hires)
-
-        phase1_scales = QLineEdit(dlg)
-        phase1_scales.setText(str(self._phase1_scales.text() or ""))
-        form.addRow("Scale set (sec):", phase1_scales)
 
         phase1_run_btn = QPushButton("Run Phase 1 Benchmarks Now", dlg)
         phase1_run_btn.clicked.connect(lambda: (dlg.accept(), self._run_phase1_benchmarks()))
@@ -2838,12 +2826,10 @@ class ActiveLearningTab(QWidget):
             self._all_behavior_competition_margin.setValue(float(competition_margin.value()))
             self._phase1_enable.setChecked(bool(phase1_enable.isChecked()))
             self._phase1_modality.setChecked(bool(phase1_modality.isChecked()))
-            self._phase1_multiscale.setChecked(bool(phase1_multiscale.isChecked()))
             self._phase1_confound.setChecked(bool(phase1_confound.isChecked()))
             self._phase1_diagnostics.setChecked(bool(phase1_diagnostics.isChecked()))
             self._phase1_regenerate.setChecked(bool(phase1_regenerate.isChecked()))
             self._phase1_export_hires.setChecked(bool(phase1_export_hires.isChecked()))
-            self._phase1_scales.setText(str(phase1_scales.text() or ""))
             self._candidate_focus_pct.setValue(int(candidate_focus_pct.value()))
             self._queue_weighted_enable.setChecked(bool(queue_weighted_enable.isChecked()))
             self._queue_enable_disagreement.setChecked(bool(queue_enable_disagreement.isChecked()))
@@ -3056,7 +3042,6 @@ class ActiveLearningTab(QWidget):
         diag_src_root = latest_diag_dir if (latest_diag_dir is not None and latest_diag_dir.exists()) else diag_root
         for name in [
             "feature_family_comparison.png",
-            "multiscale_performance.png",
             "target_confound_margin_histogram.png",
             "calibration_reliability_phase1.png",
         ]:
@@ -3388,6 +3373,9 @@ class ActiveLearningTab(QWidget):
         self._progress.setFormat("Initializing…")
         self._cancel_flag[0] = False
         self._append_log("Starting full active-learning pipeline.")
+        self._start_pipeline_timeline(
+            include_phase1=bool(self._phase1_enable.isChecked() and self._phase1_diagnostics.isChecked())
+        )
 
         worker = TaskWorker(self._run_pipeline_task, self._pipeline_progress_updated.emit, self._cancel_flag)
         worker.signals.finished.connect(self._on_pipeline_finished)
@@ -7647,6 +7635,9 @@ class ActiveLearningTab(QWidget):
             no_behavior_sample_weight=float(self._no_behavior_sample_weight.value()),
             allow_co_occurring_behaviors=bool(cfg.allow_co_occurring_behaviors),
             include_imported=bool(self._include_imported.isChecked()),
+            # Per-run exclusions are applied at training time (not baked into the
+            # representation), so the prebuilt representation cache is reused.
+            excluded_feature_cols=tuple(sorted(self._excluded_feature_cols)),
         )
 
     def _segment_candidate_config(
@@ -9041,6 +9032,7 @@ class ActiveLearningTab(QWidget):
         self._set_busy(False)
         self._cancel_flag[0] = False
         self._pipeline_step_scale = 1
+        self._finish_pipeline_timeline()
         self._refresh_saved_model_options()
         summary: _RunSummary = payload["summary"]
         self._snapshot_evaluation_graphs_for_model(summary.model_version, target_behavior=str(payload.get("target_behavior", "")))
@@ -9590,6 +9582,8 @@ class ActiveLearningTab(QWidget):
     def _on_failed(self, traceback_text: str) -> None:
         self._set_busy(False)
         self._cancel_flag[0] = False
+        if self._pipeline_timeline is not None:
+            self._pipeline_panel.stop()
         if "PIPELINE_CANCELLED_BY_USER" in traceback_text:
             self._status.setText("Active-learning run stopped.")
             self._progress.setFormat("Stopped")
@@ -9713,12 +9707,6 @@ class ActiveLearningTab(QWidget):
                 "- Compares AP/F1 across modality experts.\n"
                 "- Helps verify whether behavior-adaptive modality weighting is useful."
             )
-        elif selected == "multiscale":
-            text = (
-                "Multi-scale performance:\n"
-                "- Plots validation AP versus temporal window size.\n"
-                "- Identifies whether short or longer windows separate this behavior better."
-            )
         elif selected == "margin":
             text = (
                 "Target-vs-confound margin:\n"
@@ -9832,7 +9820,6 @@ class ActiveLearningTab(QWidget):
             "confusion": [eval_dir / "confusion_matrix.png"],
             "pr": [eval_dir / "PR_curve.png"],
             "feature_family": [_diag_file("feature_family_comparison.png")],
-            "multiscale": [_diag_file("multiscale_performance.png")],
             "margin": [_diag_file("target_confound_margin_histogram.png")],
             "calibration": [_diag_file("calibration_reliability_phase1.png")],
             "queue": [_queue_file("queue_composition.png")],
@@ -9846,7 +9833,6 @@ class ActiveLearningTab(QWidget):
                 eval_dir / "confusion_matrix.png",
                 eval_dir / "PR_curve.png",
                 _diag_file("feature_family_comparison.png"),
-                _diag_file("multiscale_performance.png"),
                 _diag_file("target_confound_margin_histogram.png"),
                 _diag_file("calibration_reliability_phase1.png"),
                 _queue_file("queue_composition.png"),
@@ -9897,9 +9883,97 @@ class ActiveLearningTab(QWidget):
         self._render_visualization_pixmap()
 
     @Slot(int, int, str, str)
+    # ── Stage-aware pipeline timeline (rich progress + ETA) ─────────────
+
+    def _start_pipeline_timeline(self, *, include_phase1: bool) -> None:
+        stages = [
+            Stage(key, label, weight=weight)
+            for key, label, weight, _frags in _AL_PIPELINE_STAGES
+            if key != "phase1" or include_phase1
+        ]
+        self._pipeline_timeline = RunTimeline(stages, history=self._load_pipeline_timeline_history())
+        self._pipeline_panel.set_stages([(s.key, s.label) for s in stages])
+        self._pipeline_panel.set_snapshot_provider(
+            lambda: self._pipeline_timeline.snapshot() if self._pipeline_timeline else None
+        )
+        self._pipeline_panel.show()
+        self._pipeline_timeline.start()
+        self._pipeline_timeline.start_stage("setup")
+        self._pipeline_panel.update_snapshot(self._pipeline_timeline.snapshot())
+
+    @staticmethod
+    def _stage_key_for_status(status: str) -> str | None:
+        if not status:
+            return None
+        low = status.lower()
+        for key, _label, _w, frags in _AL_PIPELINE_STAGES:
+            for frag in frags:
+                if frag.lower() in low:
+                    return key
+        return None
+
+    def _advance_pipeline_timeline(self, status: str) -> None:
+        tl = self._pipeline_timeline
+        if tl is None:
+            return
+        key = self._stage_key_for_status(status)
+        if key is None:
+            self._pipeline_panel.update_snapshot(tl.snapshot())
+            return
+        order = [s[0] for s in _AL_PIPELINE_STAGES]
+        try:
+            target_idx = order.index(key)
+        except ValueError:
+            return
+        # Complete every earlier stage and (re)start the current one.
+        snap = {s.key: s for s in tl.snapshot().stages}
+        for k in order[:target_idx]:
+            if k in snap and snap[k].state in ("pending", "running"):
+                tl.complete_stage(k)
+        if key in snap and snap[key].state == "pending":
+            tl.start_stage(key)
+        self._pipeline_panel.update_snapshot(tl.snapshot())
+
+    def _finish_pipeline_timeline(self) -> None:
+        tl = self._pipeline_timeline
+        if tl is None:
+            return
+        for s in tl.snapshot().stages:
+            if s.state in ("pending", "running"):
+                tl.complete_stage(s.key)
+        self._save_pipeline_timeline_history()
+        self._pipeline_panel.update_snapshot(tl.snapshot())
+        self._pipeline_panel.stop()
+
+    def _pipeline_timeline_history_path(self) -> Path | None:
+        if self._project_root is None:
+            return None
+        return self._project_root / "derived" / "evaluation" / "al_pipeline_timeline.json"
+
+    def _load_pipeline_timeline_history(self) -> dict:
+        path = self._pipeline_timeline_history_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            return read_json(path, {}) or {}
+        except Exception:
+            return {}
+
+    def _save_pipeline_timeline_history(self) -> None:
+        path = self._pipeline_timeline_history_path()
+        if path is None or self._pipeline_timeline is None:
+            return
+        try:
+            from abel.storage.file_store import write_json  # noqa: PLC0415
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(path, self._pipeline_timeline.to_history())
+        except Exception:
+            pass
+
     def _apply_pipeline_progress(self, value: int, maximum: int, log_line: str, status: str) -> None:
         maximum = max(1, int(maximum))
         value = max(0, min(int(value), maximum))
+        self._advance_pipeline_timeline(status)
         self._progress.setRange(0, maximum)
         self._progress.setValue(value)
         # Extract finish time from log_line for the progress bar label.

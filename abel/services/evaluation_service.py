@@ -1020,6 +1020,8 @@ class EvaluationService:
         # _numeric_feature_columns returns [] and this block is skipped,
         # which is intentional — prob_cols are already the best features.
         raw_feature_cols = self._numeric_feature_columns(seg_df)
+        from abel.utils.feature_exclusions import apply_feature_exclusions
+        raw_feature_cols = apply_feature_exclusions(project_root, raw_feature_cols)
         if raw_feature_cols:
             work_raw = merged.merge(seg_df[["segment_id"] + raw_feature_cols], on="segment_id", how="left", suffixes=("", "_raw"))
             # Resolve column names after merge (avoid duplicates with prob cols).
@@ -1583,6 +1585,11 @@ class EvaluationService:
         ]
         if "segment_id" not in meta_cols:
             return {"error": "segment_features.parquet has no segment_id column."}
+        # Honour project-level feature exclusions (Active Learning / Feature
+        # Audit) so the unsupervised embedding uses the same feature set as the
+        # rest of the Active Learning workflow.
+        from abel.utils.feature_exclusions import apply_feature_exclusions
+        feature_cols = apply_feature_exclusions(project_root, feature_cols)
         if not feature_cols:
             return {"error": "No numeric feature columns found for unsupervised UMAP."}
 

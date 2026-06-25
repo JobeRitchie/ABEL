@@ -395,6 +395,7 @@ class CandidateGenerationService:
             merged,
             feedback=feedback,
             config=config,
+            project_root=self._project_root,
         )
 
         ranked = ranked[
@@ -805,6 +806,7 @@ class CandidateGenerationService:
         random_seed: int | None = None,
         all_behavior_aware: bool = True,
         all_behavior_competition_margin: float = 0.05,
+        project_root: Path | None = None,
     ) -> pd.DataFrame:
         out = df.copy()
 
@@ -888,6 +890,11 @@ class CandidateGenerationService:
             }
             and pd.api.types.is_numeric_dtype(out[c])
         ]
+        # Honour project feature exclusions so diversity distances use the same
+        # feature set as the rest of the Active Learning workflow.
+        if project_root is not None:
+            from abel.utils.feature_exclusions import apply_feature_exclusions
+            numeric_cols = apply_feature_exclusions(project_root, numeric_cols)
         if len(numeric_cols) > 80:
             numeric_cols = numeric_cols[:80]
 

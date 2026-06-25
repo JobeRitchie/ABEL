@@ -213,7 +213,11 @@ class InfoTab(QWidget):
             self._check_worker = None
         self._check_btn.setEnabled(self._svc.is_git_repo())
         if not status.ok:
-            self._set_status(f"⚠ Could not check: {status.error}", "#FFB74D")
+            # Keep the status line short; put the full (possibly multi-line)
+            # git error in the log where it can be read and copied.
+            first_line = status.error.splitlines()[0] if status.error else "unknown error"
+            self._set_status(f"⚠ Could not check: {first_line}", "#FFB74D")
+            self._append(f"Check failed:\n{status.error}")
             self._install_btn.setEnabled(False)
             return
         if status.update_available:

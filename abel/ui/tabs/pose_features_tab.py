@@ -1,12 +1,21 @@
-"""Pose Features tab — extract kinematic feature windows from DLC pose files.
+"""Pose Features tab — extract features and pre-build the Active-Learning cache.
 
-This is step 1 of the analysis pipeline.  No video is decoded here —
-pose cleaning and feature computation run directly on the tracking CSV/H5.
+This is the feature-preparation step of the pipeline.  It runs in two phases:
+
+1. **Kinematic windows** (``.npz``) — fast, pose-only, used by motif/syllable
+   discovery.  No video is decoded in this phase.
+2. **Active-Learning prep** — frame-pose parquet, video context features (when
+   "Include video features" is enabled), and the cached frame/segment
+   representations.  This is the heavy work that used to run on the first
+   Active-Learning training run; doing it here makes that run fast.
+
+Everything is content/config-cached, so re-running only rebuilds genuinely
+changed sessions (new clips, changed window/stride).
 
 Pipeline:
     Data Import → Behavior Definitions → Seed Examples
-    → **Pose Features** ← here
-    → Behavior Representations → Candidate Generation → Review
+    → **Features** ← here
+    → Active Learning (trains on the cache) → Candidate Generation → Review
 """
 
 from __future__ import annotations
@@ -42,12 +51,50 @@ from PySide6.QtCore import QThreadPool
 
 from abel.models.schemas import PoseFeaturePreset, PoseSmoothingSettings
 from abel.services.behavior_service import BehaviorService
+from abel.services.feature_prep_service import (
+    STAGE_CONSOLIDATE,
+    STAGE_PREPROCESS,
+    STAGE_REPRESENTATIONS,
+    FeaturePrepService,
+    PrepConfig,
+    SessionJob,
+)
 from abel.services.import_service import ImportService
 from abel.services.pose_features_service import PoseFeaturesService, PoseFeatureConfig
 from abel.services.roi_service import ROIService
-from abel.storage.file_store import read_yaml, write_yaml
+from abel.storage.file_store import read_json, read_yaml, write_yaml
 from abel.ui.smoothing_preview_dialog import SmoothingPreviewDialog
+from abel.ui.widgets.progress_panel import ProgressPanel
+from abel.utils.run_timeline import RunTimeline, Stage
 from abel.workers.task_worker import TaskWorker
+
+# Timeline stage for the fast pose-only (.npz) kinematic extraction that the
+# Features tab has always done, before the heavier Active-Learning prep stages.
+STAGE_KINEMATICS = "kinematics"
+
+
+class _SignalPrepObserver:
+    """Bridges :class:`FeaturePrepService` progress (worker thread) to the tab's
+    Qt signals, which Qt delivers safely on the GUI thread.
+    """
+
+    def __init__(self, tab: "PoseFeaturesTab") -> None:
+        self._tab = tab
+
+    def stage_start(self, key: str, label: str, total_units: int) -> None:
+        self._tab._prep_stage_start.emit(key, label, int(total_units))
+
+    def stage_advance(self, key: str, done_units: int, message: str) -> None:
+        self._tab._prep_stage_advance.emit(key, int(done_units), message)
+
+    def stage_done(self, key: str) -> None:
+        self._tab._prep_stage_done.emit(key)
+
+    def stage_skip(self, key: str, message: str) -> None:
+        self._tab._prep_stage_skip.emit(key, message)
+
+    def log(self, message: str) -> None:
+        self._tab._prep_log.emit(message)
 
 logger = logging.getLogger("abel")
 
@@ -58,6 +105,14 @@ class PoseFeaturesTab(QWidget):
     # Emitted from the background worker thread; Qt delivers it to the GUI thread.
     _progress_updated = Signal(int, str)  # (value, format_text)
     segmentation_completed = Signal()  # emitted after a successful extraction run
+
+    # Structured prep-progress signals — emitted from the worker thread and
+    # delivered (queued) to GUI-thread slots that drive the timeline + panel.
+    _prep_stage_start = Signal(str, str, int)   # (key, label, total_units)
+    _prep_stage_advance = Signal(str, int, str)  # (key, done_units, message)
+    _prep_stage_done = Signal(str)               # (key)
+    _prep_stage_skip = Signal(str, str)          # (key, message)
+    _prep_log = Signal(str)                      # (message)
 
     def __init__(
         self,
@@ -78,8 +133,16 @@ class PoseFeaturesTab(QWidget):
         self._cancel_flag: list[bool] = [False]
         self._current_preset: PoseFeaturePreset | None = None
         self._last_run_preset: PoseFeaturePreset | None = None
+        self._last_run_session_ids: list[str] = []
         self._preview_dialog: SmoothingPreviewDialog | None = None
+        self._prep = FeaturePrepService()
+        self._timeline: RunTimeline | None = None
         self._progress_updated.connect(self._apply_progress)
+        self._prep_stage_start.connect(self._on_prep_stage_start)
+        self._prep_stage_advance.connect(self._on_prep_stage_advance)
+        self._prep_stage_done.connect(self._on_prep_stage_done)
+        self._prep_stage_skip.connect(self._on_prep_stage_skip)
+        self._prep_log.connect(self._append_log)
 
         # ── No-project placeholder ──────────────────────────────────────
         self._no_project = QLabel(
@@ -413,6 +476,10 @@ class PoseFeaturesTab(QWidget):
         self._progress.setFormat("Idle")
         self._progress.setValue(0)
 
+        # Rich stage-aware progress + ETA panel (hidden until a run starts).
+        self._prep_panel = ProgressPanel("Feature preparation")
+        self._prep_panel.hide()
+
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setMinimumHeight(80)
@@ -450,9 +517,10 @@ class PoseFeaturesTab(QWidget):
 
         # Feature explanation banner
         info_label = QLabel(
-            "ℹ  Pose feature extraction runs on tracking files only — no video is decoded.\n"
-            "Feature matrices are saved to derived/pose_features/ and used by\n"
-            "downstream representation modeling and candidate generation."
+            "ℹ  Running here also prepares everything Active Learning needs: pose-feature\n"
+            "tables, video context (when enabled), and the cached frame/segment\n"
+            "representations. Active Learning then just trains on the cache — so the\n"
+            "first training run is fast. Re-runs are cheap; only changed clips/settings rebuild."
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet(
@@ -462,6 +530,7 @@ class PoseFeaturesTab(QWidget):
 
         right_layout.addWidget(info_label)
         right_layout.addLayout(run_row)
+        right_layout.addWidget(self._prep_panel)
         right_layout.addWidget(self._progress)
         right_layout.addWidget(QLabel("Log:"))
         right_layout.addWidget(self._log)
@@ -1088,16 +1157,39 @@ class PoseFeaturesTab(QWidget):
 
         self._cancel_flag[0] = False
         self._last_run_preset = preset
+        self._last_run_session_ids = [c.session_id for c in configs]
         self._run_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
         self._result_table.setRowCount(0)
         self._progress.setMaximum(len(configs))
         self._progress.setValue(0)
         self._progress.setFormat(f"0 / {len(configs)} sessions")
+
+        # ── Build the run timeline + show the rich progress panel ─────────
+        use_video = self._p_use_video.isChecked()
+        n = len(configs)
+        stages = [
+            Stage(STAGE_KINEMATICS, "Kinematic windows (.npz)", weight=2.0, total_units=n),
+            Stage(STAGE_PREPROCESS,
+                  "Pose + context features" if use_video else "Pose features (parquet)",
+                  weight=(8.0 if use_video else 3.0), total_units=n),
+            Stage(STAGE_CONSOLIDATE, "Consolidate feature caches", weight=0.5),
+            Stage(STAGE_REPRESENTATIONS, "Build representations", weight=3.0),
+        ]
+        self._timeline = RunTimeline(stages, history=self._load_timeline_history())
+        self._prep_panel.set_stages([(s.key, s.label) for s in stages])
+        self._prep_panel.set_snapshot_provider(
+            lambda: self._timeline.snapshot() if self._timeline else None
+        )
+        self._prep_panel.show()
+        self._timeline.start()
+        self._timeline.start_stage(STAGE_KINEMATICS, total_units=n)
+        self._refresh_prep_panel()
+
         self._append_log(
-            f"Starting pose feature extraction: {len(configs)} session(s), "
+            f"Starting feature preparation: {n} session(s), "
             f"preset '{preset.name}' ({preset.window_duration_sec}s windows, "
-            f"{preset.stride_sec}s stride)."
+            f"{preset.stride_sec}s stride){', video context ON' if use_video else ''}."
         )
 
         worker = TaskWorker(self._run_all, configs, preset)
@@ -1114,17 +1206,20 @@ class PoseFeaturesTab(QWidget):
             result = self._service.extract_features(cfg, cancel_flag=self._cancel_flag)
             results.append(result)
             done = i + 1
-            # Signal crosses the thread boundary safely; Qt queues delivery on the GUI thread.
+            # Signals cross the thread boundary safely; Qt queues GUI-thread delivery.
             self._progress_updated.emit(done, f"{done} / {len(configs)} sessions")
+            self._prep_stage_advance.emit(
+                STAGE_KINEMATICS, done, f"Kinematic windows {done}/{len(configs)}: {cfg.session_id}."
+            )
         return results
 
     def _on_finished(self, results: list) -> None:
-        self._run_btn.setEnabled(True)
-        self._cancel_btn.setEnabled(False)
+        """Phase 1 (.npz extraction) done — record it, then start the heavy prep."""
+        self._prep_stage_done.emit(STAGE_KINEMATICS)
         self._sync_behavior_model_segment_settings(self._last_run_preset, results)
         total_windows = sum(r.n_windows for r in results)
         self._progress.setFormat(
-            f"Done — {len(results)} session(s), {total_windows} total windows"
+            f"Kinematics done — {len(results)} session(s), {total_windows} windows"
         )
         self._progress.setValue(self._progress.maximum())
         self._result_table.setRowCount(0)
@@ -1143,20 +1238,146 @@ class PoseFeaturesTab(QWidget):
             for w in r.warnings:
                 self._append_log(f"  ⚠ [{r.session_id}] {w}")
         self._append_log(
-            f"Feature extraction complete: {len(results)} session(s), "
-            f"{total_windows} windows ready for downstream modeling."
+            f"Kinematic extraction complete: {len(results)} session(s), "
+            f"{total_windows} windows."
         )
-        # Refresh session status column on next event cycle to avoid painter conflict
         QTimer.singleShot(0, self._refresh_sessions)
         self.segmentation_completed.emit()
+
+        # ── Phase 2: build the cacheable Active-Learning inputs ───────────
+        if self._cancel_flag[0]:
+            self._finish_prep_ui("Cancelled.")
+            return
+        jobs = self._build_prep_jobs(self._last_run_session_ids, self._last_run_preset)
+        if not jobs:
+            self._finish_prep_ui("No sessions available for representation prep.")
+            return
+        cfg = PrepConfig(
+            use_video_features=self._p_use_video.isChecked(),
+            segment_window_frames=max(8, int(round(
+                float(self._last_run_preset.window_duration_sec) * float(self._last_run_preset.source_fps)))),
+            segment_stride_frames=max(1, int(round(
+                float(self._last_run_preset.stride_sec) * float(self._last_run_preset.source_fps)))),
+            reuse_cached=True,
+        )
+        self._append_log("Building Active-Learning inputs (pose parquet, context, representations)…")
+        worker = TaskWorker(self._run_prep_task, jobs, cfg)
+        worker.signals.finished.connect(self._on_prep_finished)
+        worker.signals.failed.connect(self._on_error)
+        self._pool.start(worker)
+
+    def _run_prep_task(self, jobs: list, cfg: PrepConfig):
+        observer = _SignalPrepObserver(self)
+        return self._prep.prepare(
+            self._project_root, jobs, cfg,
+            observer=observer, cancel_flag=self._cancel_flag,
+        )
+
+    def _on_prep_finished(self, result) -> None:
+        self._save_timeline_history()
+        msg = (
+            f"Preparation complete — {result.n_segment_rows} segment row(s) ready. "
+            f"Reused {result.n_sessions_reused} cached session(s), "
+            f"processed {result.n_sessions_processed}."
+        )
+        self._append_log("✓ " + msg)
+        self._finish_prep_ui(msg)
+        QTimer.singleShot(0, self._refresh_sessions)
+
+    def _finish_prep_ui(self, status: str) -> None:
+        self._run_btn.setEnabled(True)
+        self._cancel_btn.setEnabled(False)
+        self._refresh_prep_panel()
+        self._prep_panel.stop()
+        self._progress.setFormat(status)
 
     def _on_error(self, traceback_text: str) -> None:
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
         self._progress.setFormat("Error")
-        self._append_log("Extraction failed:")
+        self._prep_panel.stop()
+        self._append_log("Feature preparation failed:")
         self._append_log(traceback_text[:600])
-        logger.error("Pose feature extraction error:\n%s", traceback_text)
+        logger.error("Feature preparation error:\n%s", traceback_text)
+
+    # ── Prep timeline plumbing ──────────────────────────────────────────
+
+    def _build_prep_jobs(self, session_ids: list[str], preset: PoseFeaturePreset | None) -> list:
+        if not session_ids or self._manifest is None or preset is None:
+            return []
+        subject_by_session = {
+            str(s.session_id): str(getattr(s, "subject_id", "") or s.session_id)
+            for s in getattr(self._manifest, "linked_sessions", [])
+        }
+        jobs: list[SessionJob] = []
+        for sid in session_ids:
+            pose_path = self._imports.pose_path_for_session(self._manifest, sid)
+            if not pose_path:
+                continue
+            video_path = self._imports.video_path_for_session(self._manifest, sid)
+            jobs.append(SessionJob(
+                session_id=str(sid),
+                subject_id=subject_by_session.get(str(sid), str(sid)),
+                pose_path=pose_path,
+                video_path=video_path,
+                fps=float(preset.source_fps),
+            ))
+        return jobs
+
+    def _refresh_prep_panel(self) -> None:
+        if self._timeline is not None:
+            self._prep_panel.update_snapshot(self._timeline.snapshot())
+
+    @Slot(str, str, int)
+    def _on_prep_stage_start(self, key: str, label: str, total_units: int) -> None:
+        if self._timeline is not None:
+            self._timeline.start_stage(key, total_units=total_units)
+            self._refresh_prep_panel()
+
+    @Slot(str, int, str)
+    def _on_prep_stage_advance(self, key: str, done_units: int, message: str) -> None:
+        if self._timeline is not None:
+            self._timeline.advance(key, done_units)
+            self._refresh_prep_panel()
+
+    @Slot(str)
+    def _on_prep_stage_done(self, key: str) -> None:
+        if self._timeline is not None:
+            self._timeline.complete_stage(key)
+            self._refresh_prep_panel()
+
+    @Slot(str, str)
+    def _on_prep_stage_skip(self, key: str, message: str) -> None:
+        if self._timeline is not None:
+            self._timeline.skip_stage(key)
+            if message:
+                self._append_log(message)
+            self._refresh_prep_panel()
+
+    def _timeline_history_path(self) -> Path | None:
+        if self._project_root is None:
+            return None
+        return self._project_root / "derived" / "evaluation" / "feature_prep_timeline.json"
+
+    def _load_timeline_history(self) -> dict:
+        path = self._timeline_history_path()
+        if path is None or not path.exists():
+            return {}
+        try:
+            return read_json(path, {}) or {}
+        except Exception:
+            return {}
+
+    def _save_timeline_history(self) -> None:
+        path = self._timeline_history_path()
+        if path is None or self._timeline is None:
+            return
+        try:
+            from abel.storage.file_store import write_json  # noqa: PLC0415
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_json(path, self._timeline.to_history())
+        except Exception:
+            pass
 
     @Slot(int, str)
     def _apply_progress(self, value: int, text: str) -> None:

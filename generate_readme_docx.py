@@ -837,7 +837,7 @@ stages = [
      "embedding similarity score (see Section 13.6)."),
     ("11. Evaluation", "Computes held-out precision, recall, F1, and PR-AUC on the validation "
      "split; generates PR curve, confusion matrix, and UMAP/PCA separation plot."),
-    ("12. Phase 1 Adaptive Benchmarking (optional)", "When enabled, runs multi-scale and multi-modality "
+    ("12. Phase 1 Adaptive Benchmarking (optional)", "When enabled, runs multi-modality "
      "benchmarking to characterise the behavior's discriminability (see Section 18)."),
 ]
 for name, desc in stages:
@@ -1305,17 +1305,9 @@ add_bullet("Spatial features (distance/angle to ROI)")
 add_bullet("Full combined feature vector")
 
 add_para(
-    "Performance (Average Precision at the representative split scale, default 0.5 s) is "
+    "Performance (Average Precision at the representative segment window, 0.5 s) is "
     "compared across modalities to identify which feature groups are most informative for "
     "the specific behavior."
-)
-
-add_heading("Multi-Scale Benchmarking", 2)
-add_para(
-    "Classifiers are trained at multiple temporal scales simultaneously "
-    "(default scales: 0.1, 0.2, 0.25, 0.5, 1.0, 2.0 seconds). "
-    "The AP vs. scale curve identifies the optimal window duration for the behavior, "
-    "which can inform preset selection for subsequent active-learning runs."
 )
 
 add_heading("Confound Analysis", 2)
@@ -1327,9 +1319,9 @@ add_para(
 )
 
 add_heading("Outputs", 2)
-add_bullet("derived/analysis/benchmarks/{behavior_id}/: CSV tables of metrics per modality and scale.")
+add_bullet("derived/analysis/benchmarks/{behavior_id}/: CSV tables of metrics per modality.")
 add_bullet("derived/analysis/diagnostics/{behavior_id}/: publication-quality PNG and SVG plot "
-           "files showing AP vs. scale curves, modality comparison bar charts, and calibration "
+           "files showing modality comparison bar charts and calibration "
            "reliability diagrams.")
 
 section_break()

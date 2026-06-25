@@ -13,6 +13,8 @@ Network shares owned by a different account make git refuse to operate with a
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -21,6 +23,50 @@ from typing import Callable
 
 # Hide the transient console window git would otherwise flash on Windows.
 SUBPROCESS_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+# Shown when git can't be located at all.
+GIT_MISSING_MSG = (
+    "Git was not found. Install Git for Windows from "
+    "https://git-scm.com/download/win, then restart ABEL."
+)
+
+
+def _git_error(proc: subprocess.CompletedProcess, fallback: str) -> str:
+    """Best-effort human-readable error from a failed git call."""
+    parts = [(proc.stderr or "").strip(), (proc.stdout or "").strip()]
+    msg = "\n".join(p for p in parts if p)
+    return msg or fallback
+
+
+def find_git() -> str | None:
+    """Locate the git executable, even when it isn't on this process's PATH.
+
+    GUI apps launched from a shortcut or ``.bat`` inherit whatever PATH existed
+    when the launcher was created, so a Git install made *after* that point is
+    invisible to ``shutil.which`` even though git is on disk. Fall back to the
+    standard Git-for-Windows install locations before giving up — this is the
+    usual reason "Check for Updates" reports git as missing.
+    """
+    found = shutil.which("git")
+    if found:
+        return found
+    if os.name != "nt":
+        return None
+    candidates: list[Path] = []
+    for env in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if not base:
+            continue
+        root = Path(base)
+        # System installs live under <ProgramFiles>\Git; user installs under
+        # %LOCALAPPDATA%\Programs\Git.
+        for git_root in (root / "Git", root / "Programs" / "Git"):
+            candidates.append(git_root / "cmd" / "git.exe")
+            candidates.append(git_root / "bin" / "git.exe")
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return None
 
 
 @dataclass
@@ -48,6 +94,8 @@ class UpdateService:
 
     def __init__(self, repo_root: Path | None = None) -> None:
         self._repo_root = Path(repo_root) if repo_root else self._detect_repo_root()
+        self._git_exe: str | None = None
+        self._git_resolved = False
 
     @staticmethod
     def _detect_repo_root() -> Path:
@@ -65,9 +113,21 @@ class UpdateService:
     # git plumbing
     # ------------------------------------------------------------------
 
+    def git_executable(self) -> str | None:
+        """Resolved path to git, or ``None`` if it can't be found. Cached."""
+        if not self._git_resolved:
+            self._git_exe = find_git()
+            self._git_resolved = True
+        return self._git_exe
+
+    def _git_cmd(self) -> str:
+        # Fall back to the bare name so subprocess raises a FileNotFoundError
+        # that callers translate into GIT_MISSING_MSG.
+        return self.git_executable() or "git"
+
     def _git(self, *args: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["git", *args],
+            [self._git_cmd(), *args],
             cwd=str(self._repo_root),
             capture_output=True,
             text=True,
@@ -83,13 +143,20 @@ class UpdateService:
             return  # let the real git call surface its own error
         if r.returncode == 0:
             return
-        if "dubious ownership" not in (r.stderr or "").lower():
+        stderr = r.stderr or ""
+        if "dubious ownership" not in stderr.lower():
             return
         candidates = {str(self._repo_root), str(self._repo_root).replace("\\", "/")}
+        # Git names the exact path it objects to (e.g. UNC/network shares whose
+        # form differs from our resolved root); trust that verbatim too.
+        m = re.search(r"repository at '([^']+)'", stderr)
+        if m:
+            candidates.add(m.group(1))
         for val in candidates:
             try:
                 subprocess.run(
-                    ["git", "config", "--global", "--add", "safe.directory", val],
+                    [self._git_cmd(), "config", "--global",
+                     "--add", "safe.directory", val],
                     capture_output=True, text=True, timeout=10,
                     creationflags=SUBPROCESS_NO_WINDOW,
                 )
@@ -114,20 +181,22 @@ class UpdateService:
                 error="Not a git checkout — in-app updates are unavailable for "
                 "this install."
             )
+        if self.git_executable() is None:
+            return UpdateStatus(error=GIT_MISSING_MSG)
         self.ensure_safe_directory()
         try:
             fetch = self._git("fetch", self.REMOTE, timeout=30)
             if fetch.returncode != 0:
-                return UpdateStatus(error=fetch.stderr.strip() or "git fetch failed")
+                return UpdateStatus(error=_git_error(fetch, "git fetch failed"))
             rev = self._git(
                 "rev-list", f"HEAD..{self.REMOTE}/{self.BRANCH}", "--count", timeout=15
             )
             if rev.returncode != 0:
-                return UpdateStatus(error=rev.stderr.strip() or "git rev-list failed")
+                return UpdateStatus(error=_git_error(rev, "git rev-list failed"))
             behind = int((rev.stdout or "0").strip() or "0")
             return UpdateStatus(behind=behind, current=self.current_commit())
         except FileNotFoundError:
-            return UpdateStatus(error="git not found — please install Git.")
+            return UpdateStatus(error=GIT_MISSING_MSG)
         except subprocess.TimeoutExpired:
             return UpdateStatus(error="Timed out — check your network connection.")
         except Exception as exc:  # pragma: no cover - defensive
@@ -138,10 +207,13 @@ class UpdateService:
         if not self.is_git_repo():
             line_cb("Not a git checkout — cannot update.")
             return False
+        if self.git_executable() is None:
+            line_cb(GIT_MISSING_MSG)
+            return False
         self.ensure_safe_directory()
         try:
             proc = subprocess.Popen(
-                ["git", "pull", self.REMOTE, self.BRANCH],
+                [self._git_cmd(), "pull", self.REMOTE, self.BRANCH],
                 cwd=str(self._repo_root),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -149,7 +221,7 @@ class UpdateService:
                 creationflags=SUBPROCESS_NO_WINDOW,
             )
         except FileNotFoundError:
-            line_cb("git not found — please install Git.")
+            line_cb(GIT_MISSING_MSG)
             return False
         except Exception as exc:  # pragma: no cover - defensive
             line_cb(f"Error: {exc}")

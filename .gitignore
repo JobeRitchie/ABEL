@@ -39,6 +39,11 @@ Thumbs.db
 .idea/
 .vscode/
 
+# --- Stray Office / spreadsheet junk (data exports kept locally) ---
+*.xlsx
+*.xls
+~$*
+
 # --- External validation / meta-analysis suite (kept local, not committed) ---
 abel/validation/
 run_validation.bat

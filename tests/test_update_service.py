@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from abel.services.update_service import UpdateService, UpdateStatus
+import abel.services.update_service as mod
+from abel.services.update_service import (
+    GIT_MISSING_MSG,
+    UpdateService,
+    UpdateStatus,
+    find_git,
+)
 
 
 def test_status_flags() -> None:
@@ -80,12 +86,66 @@ def test_check_reports_fetch_error(monkeypatch, tmp_path: Path) -> None:
     assert "could not resolve host" in st.error
 
 
+def test_find_git_prefers_path(monkeypatch) -> None:
+    monkeypatch.setattr(mod.shutil, "which", lambda name: r"C:\path\git.exe")
+    assert find_git() == r"C:\path\git.exe"
+
+
+def test_find_git_falls_back_to_program_files(monkeypatch, tmp_path: Path) -> None:
+    # git is installed but not on PATH (the stale-PATH GUI scenario).
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(mod.os, "name", "nt")
+    git_exe = tmp_path / "Git" / "cmd" / "git.exe"
+    git_exe.parent.mkdir(parents=True)
+    git_exe.write_text("", encoding="utf-8")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    assert find_git() == str(git_exe)
+
+
+def test_check_reports_missing_git(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    svc = UpdateService(repo_root=tmp_path)
+    monkeypatch.setattr(svc, "git_executable", lambda: None)
+    st = svc.check()
+    assert not st.ok
+    assert st.error == GIT_MISSING_MSG
+
+
+def test_pull_reports_missing_git(monkeypatch, tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    svc = UpdateService(repo_root=tmp_path)
+    monkeypatch.setattr(svc, "git_executable", lambda: None)
+    lines: list[str] = []
+    assert svc.pull(lines.append) is False
+    assert GIT_MISSING_MSG in lines
+
+
+def test_safe_directory_uses_path_from_error(monkeypatch, tmp_path: Path) -> None:
+    svc = UpdateService(repo_root=tmp_path)
+    monkeypatch.setattr(svc, "git_executable", lambda: "git")
+
+    reported = "C:/some/weird//share"
+
+    def fake_git(*args: str, timeout: float = 30.0) -> _R:
+        return _R(128, "", f"fatal: detected dubious ownership in repository at '{reported}'")
+
+    monkeypatch.setattr(svc, "_git", fake_git)
+
+    added: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        added.append(cmd[-1])
+        return _R(0)
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    svc.ensure_safe_directory()
+    assert reported in added
+
+
 def test_relaunch_prefers_launcher_bat(monkeypatch, tmp_path: Path) -> None:
     (tmp_path / "run_abel.bat").write_text("echo hi", encoding="utf-8")
     svc = UpdateService(repo_root=tmp_path)
     spawned: dict = {}
-
-    import abel.services.update_service as mod
 
     def fake_popen(cmd, **kwargs):
         spawned["cmd"] = cmd

@@ -38,6 +38,10 @@ class TrainingConfig:
     allow_co_occurring_behaviors: bool = False  # expand pipe-separated labels into per-behavior rows
     adaptive_complexity: bool = True  # auto-tune n_estimators/max_depth from data
     drop_zero_variance_features: bool = True  # remove features with zero variance before training
+    # Per-run feature exclusions chosen in the Active Learning tab.  Applied at
+    # training time (segment level) — NOT baked into the representation cache —
+    # so toggling exclusions never forces a representation rebuild.
+    excluded_feature_cols: tuple[str, ...] = ()
     enable_feature_augmentation: bool = True  # augment positive training examples with jitter + dropout
     augmentation_jitter_sigma: float = 0.05   # noise level as fraction of per-feature std
     augmentation_dropout_prob: float = 0.10   # fraction of features randomly zeroed per copy
@@ -796,6 +800,24 @@ class ActiveLearningTrainerService:
                         )
         except Exception as exc:
             logger.debug("Could not load feature exclusions: %s", exc)
+
+        # ── Apply per-run (Active Learning tab) feature exclusions ──
+        # These come from the in-tab feature-selection UI and are applied here
+        # rather than in the representation so the cache is never invalidated.
+        if cfg.excluded_feature_cols:
+            _run_excl = set(cfg.excluded_feature_cols)
+            before = len(feature_cols)
+            feature_cols = [c for c in feature_cols if c not in _run_excl]
+            n_run_excl = before - len(feature_cols)
+            if n_run_excl > 0:
+                logger.info(
+                    "Applied %d per-run feature exclusion(s) from the Active Learning tab; "
+                    "%d features remain.",
+                    n_run_excl, len(feature_cols),
+                )
+                _log(f"Applied {n_run_excl} per-run feature exclusions (Active Learning selection).")
+        if not feature_cols:
+            raise ValueError("No numeric feature columns remain after feature exclusions.")
 
         # ── Drop dead features ─────────────────────────────────────
         # Columns that are constant, all-zero, or nearly all-NaN carry

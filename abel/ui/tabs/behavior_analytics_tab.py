@@ -669,6 +669,7 @@ class BehaviorAnalyticsTab(QWidget):
             "eb_linewidth": 1.0,         # error bar line thickness in points
             "force_fit": True,           # auto-resize canvas to content
             "show_indiv_points": True,
+            "show_stats": True,          # overlay significance brackets/stars on charts
             "max_w": 700,
             "max_h": 420,
             "scale": 100,               # canvas scale % (50-200)
@@ -1313,6 +1314,17 @@ class BehaviorAnalyticsTab(QWidget):
             self._active_grouping_factor = "__interaction__"
         else:
             self._active_grouping_factor = ""
+
+    def _refresh_group_selectors(self) -> None:
+        """Rebuild the factor/group selectors on every group-aware sub-tab.
+
+        Called whenever factor definitions or per-session factor assignments
+        change. Without this, only the Graphs tab was refreshed, leaving the
+        Velocity and Session Sections selectors empty until a full data reload.
+        """
+        self._graphs_tab._refresh_factor_selector()
+        self._sections_tab.on_groups_updated()
+        self._velocity_tab.on_groups_updated()
 
     def _session_groups_for_controls(
         self, controls: dict[str, str]
@@ -3490,6 +3502,7 @@ class _SummaryStatsWidget(QWidget):
             self._host._session_factors[label].pop(fname, None)
         self._host._sync_session_groups()
         self.rebuild()
+        self._host._refresh_group_selectors()
         self._host._graphs_tab.update_graph()
         self._host._save_group_state()
 
@@ -3896,6 +3909,7 @@ class _SummaryStatsWidget(QWidget):
         self._session_table.blockSignals(False)
         self._host._sync_session_groups()
         self.rebuild()
+        self._host._refresh_group_selectors()
         self._host._graphs_tab.update_graph()
         self._host._save_group_state()
 
@@ -3922,7 +3936,7 @@ class _SummaryStatsWidget(QWidget):
         )
         self._host._sync_session_groups()
         self._refresh_session_table()
-        self._host._graphs_tab._refresh_factor_selector()
+        self._host._refresh_group_selectors()
         self._host._save_group_state()
 
     def _remove_factor(self) -> None:
@@ -3941,7 +3955,7 @@ class _SummaryStatsWidget(QWidget):
         self._host._sync_session_groups()
         self._refresh_session_table()
         self.rebuild()
-        self._host._graphs_tab._refresh_factor_selector()
+        self._host._refresh_group_selectors()
         self._host._graphs_tab.update_graph()
         self._host._save_group_state()
 
@@ -4459,7 +4473,7 @@ class _SummaryStatsWidget(QWidget):
         self._host._sync_session_groups()
         self._refresh_session_table()
         self.rebuild()
-        self._host._graphs_tab._refresh_factor_selector()
+        self._host._refresh_group_selectors()
         self._host._graphs_tab.update_graph()
         self._host._status.setText(
             f"Auto-grouped sessions by type: {', '.join(types)}"
@@ -5881,6 +5895,8 @@ class _GraphsWidget(QWidget):
 
     def _annotate_stats(self, ax: Any, x_positions: list[float], y_top: float) -> None:
         """Draw a significance bracket above two bars if stats results are available."""
+        if not self._gs().get("show_stats", True):
+            return
         ls = self._host._last_stats_result
         if not ls or len(x_positions) != 2:
             return
@@ -5993,7 +6009,7 @@ class _GraphsWidget(QWidget):
         if len(group_names) == 2:
             y_top = float(max(m + eb for m, eb in zip(g_means, g_ebs)))
             self._annotate_stats(ax, [0.0, 1.0], y_top)
-        elif len(group_names) > 2:
+        elif len(group_names) > 2 and gs.get("show_stats", True):
             ls = self._host._last_stats_result
             if ls and ls.get("metric") == self._get_metric():
                 _pv = ls.get("pval")
@@ -6573,7 +6589,8 @@ class _GraphsWidget(QWidget):
                 ax.scatter(np.full(len(vals), gi) + jitter, vals,
                            color="white", edgecolors="black", linewidths=0.5, s=25, zorder=5)
         # Inline significance annotation (independent of the stats panel)
-        if len(group_names) == 2:
+        _show_stats = self._gs().get("show_stats", True)
+        if _show_stats and len(group_names) == 2:
             try:
                 from scipy.stats import ttest_ind as _ttest_on_ax  # type: ignore[import-untyped]
                 _a0 = sess_agg.loc[sess_agg["group"] == group_names[0], metric].to_numpy()
@@ -6594,7 +6611,7 @@ class _GraphsWidget(QWidget):
                                 color="black", fontweight="bold", zorder=7)
             except Exception:
                 pass
-        elif len(group_names) > 2:
+        elif _show_stats and len(group_names) > 2:
             try:
                 from scipy.stats import f_oneway as _fow_on_ax  # type: ignore[import-untyped]
                 _arrs = [sess_agg.loc[sess_agg["group"] == g, metric].to_numpy()
@@ -6725,7 +6742,10 @@ class _GraphsWidget(QWidget):
     # -- settings dialog ----------------------------------------------
 
     def _open_settings_dialog(self) -> None:
-        gs = self._gs()
+        # Bind to the real settings dict (not self._gs(), which returns a
+        # throwaway font-scaled copy when a figure is on screen — writes to it
+        # would be discarded and never persist).
+        gs = self._host._graph_settings
         dlg = QDialog(self)
         dlg.setWindowTitle("Graph Settings")
         dlg.resize(380, 380)
@@ -6797,6 +6817,13 @@ class _GraphsWidget(QWidget):
             "Overlay individual subject data points on top of bar/line charts."
         )
 
+        show_stats_check = QCheckBox("Show statistics on graph", dlg)
+        show_stats_check.setChecked(gs.get("show_stats", True))
+        show_stats_check.setToolTip(
+            "Overlay significance brackets / stars (p-values) on comparison charts.\n"
+            "Uncheck to hide them; the stats panel/popup is unaffected."
+        )
+
         force_fit_check = QCheckBox("Force fit to canvas size", dlg)
         force_fit_check.setChecked(gs.get("force_fit", False))
         force_fit_check.setToolTip(
@@ -6846,6 +6873,7 @@ class _GraphsWidget(QWidget):
         form.addRow("Error bar cap width:", eb_capsize_spin)
         form.addRow("Error bar line thickness:", eb_lw_spin)
         form.addRow(indiv_points_check)
+        form.addRow(show_stats_check)
         form.addRow(force_fit_check)
         form.addRow("Max display width:", max_w_spin)
         form.addRow("Max display height:", max_h_spin)
@@ -6875,6 +6903,7 @@ class _GraphsWidget(QWidget):
         gs["eb_capsize"] = eb_capsize_spin.value()
         gs["eb_linewidth"] = eb_lw_spin.value()
         gs["show_indiv_points"] = indiv_points_check.isChecked()
+        gs["show_stats"] = show_stats_check.isChecked()
         gs["force_fit"] = force_fit_check.isChecked()
         gs["max_w"] = max_w_spin.value()
         gs["max_h"] = max_h_spin.value()
@@ -10525,6 +10554,7 @@ class _BehaviorMotifWidget(QWidget):
             "eb_linewidth": 1.0,         # error bar line thickness in points
             "force_fit": False,
             "show_indiv_points": False,
+            "show_stats": True,          # overlay significance stars on charts
         }
 
         # ── per-panel result caches ───────────────────────────────────
@@ -11554,7 +11584,7 @@ class _BehaviorMotifWidget(QWidget):
                        error_kw={"elinewidth": _mgs_lw, "capthick": _mgs_lw} if error_style != "None" else {})
             # Significance stars from permutation test (filtered by selected comparisons)
             active_pval_mats = self._pval_mat_filtered(pval_mats)
-            if active_pval_mats:
+            if active_pval_mats and mgs.get("show_stats", True):
                 for _xi, (_pi, _pj) in enumerate(pairs):
                     _min_p = min(float(_pm[_pi, _pj]) for _pm in active_pval_mats.values())
                     if _min_p < 0.05:
@@ -12361,7 +12391,10 @@ class _BehaviorMotifWidget(QWidget):
                                    s=22, zorder=5)
 
         # Significance stars — drawn above the tallest bar+error across all groups
+        _show_stats = mgs.get("show_stats", True)
         for xi, it in enumerate(items):
+            if not _show_stats:
+                break
             pval_pairs = it.get("pval_pairs") or {}
             if pval_pairs:
                 sig = self._sig_for_pairs(pval_pairs)
@@ -12530,7 +12563,7 @@ class _BehaviorMotifWidget(QWidget):
                     pval = it.get("pval", 1.0)
                     sig = ("***" if pval < 0.001 else "**" if pval < 0.01 else "*"
                            if pval < 0.05 else "")
-                if sig:
+                if sig and self._motif_graph_settings.get("show_stats", True):
                     ax_bar.text(
                         1.01, 0.5, sig, transform=ax_bar.transAxes,
                         ha="left", va="center", fontsize=9, color="black",
@@ -12927,7 +12960,10 @@ class _BehaviorMotifWidget(QWidget):
             active_pval_occ = self._pval_mat_filtered(
                 {k: np.array(v) for k, v in pval_occ_raw.items()}
             )
+            _hmm_show_stats = self._motif_graph_settings.get("show_stats", True)
             for pair_key, pvals_arr in active_pval_occ.items():
+                if not _hmm_show_stats:
+                    break
                 for st in range(n_states):
                     p = float(pvals_arr[st])
                     if p < 0.05:
@@ -13147,6 +13183,13 @@ class _BehaviorMotifWidget(QWidget):
         indiv_points_check.setChecked(gs.get("show_indiv_points", False))
         indiv_points_check.setToolTip("Jittered scatter dots showing each session's value on motif bar charts.")
 
+        show_stats_check = QCheckBox("Show statistics on graph", dlg)
+        show_stats_check.setChecked(gs.get("show_stats", True))
+        show_stats_check.setToolTip(
+            "Overlay significance stars (p-values) on transition, motif and HMM\n"
+            "bar charts. Uncheck to hide them; the stats popups are unaffected."
+        )
+
         force_fit_check = QCheckBox("Force fit to canvas size", dlg)
         force_fit_check.setChecked(gs.get("force_fit", False))
         force_fit_check.setToolTip(
@@ -13162,6 +13205,7 @@ class _BehaviorMotifWidget(QWidget):
         form.addRow("Error bar cap width:", eb_capsize_spin)
         form.addRow("Error bar line thickness:", eb_lw_spin)
         form.addRow(indiv_points_check)
+        form.addRow(show_stats_check)
         form.addRow(force_fit_check)
 
         buttons = QDialogButtonBox(
@@ -13183,6 +13227,7 @@ class _BehaviorMotifWidget(QWidget):
         gs["eb_capsize"] = eb_capsize_spin.value()
         gs["eb_linewidth"] = eb_lw_spin.value()
         gs["show_indiv_points"] = indiv_points_check.isChecked()
+        gs["show_stats"] = show_stats_check.isChecked()
         gs["force_fit"] = force_fit_check.isChecked()
         # Apply the default size to heatmap/motif/HMM canvases.
         # The transition network canvas is resized on next render based on cell_px.
@@ -13807,7 +13852,7 @@ class _SessionSectionsWidget(QWidget):
             ],
         },
         {
-            "name": "Fear Extinction (Context B)",
+            "name": "Trace Fear Extinction",
             "sections": [
                 {"name": "Baseline (Context B)", "duration": 120},
                 {"name": "Tone 1", "duration": 20},
@@ -13849,6 +13894,7 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "Tone 19", "duration": 20},
                 {"name": "ITI 19", "duration": 60},
                 {"name": "Tone 20", "duration": 20},
+                {"name": "ITI 20", "duration": 60},
             ],
         },
         {
@@ -13915,6 +13961,7 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "Tone 19", "duration": 20},
                 {"name": "ITI 19", "duration": 60},
                 {"name": "Tone 20", "duration": 20},
+                {"name": "ITI 20", "duration": 60},
             ],
         },
     ]
@@ -14995,7 +15042,11 @@ class _SessionSectionsWidget(QWidget):
             pos = 0
             while pos < len(idxs):
                 chunk = idxs[pos:pos + bin_size]
-                if len(chunk) >= bin_size:
+                # Average any full bin, and also any trailing remainder of 2+
+                # into a final partial bin (e.g. 19 ITIs at bin 5 ->
+                # 1-5, 6-10, 11-15, 16-19) rather than splitting it out. A
+                # lone straggler (len 1) can't be averaged, so it stays as-is.
+                if len(chunk) >= 2:
                     first_name = sec_names[chunk[0]]
                     last_name = sec_names[chunk[-1]]
                     n0 = self._trailing_int(first_name)
@@ -15017,7 +15068,8 @@ class _SessionSectionsWidget(QWidget):
                     label_to_src_names[label] = src_names
                     label_to_avg_dur[label] = avg_dur
                 else:
-                    # Leftover shorter than bin size remains unbinned.
+                    # Lone straggler (single section) can't be averaged;
+                    # it remains unbinned under its own name.
                     for idx in chunk:
                         nm = sec_names[idx]
                         idx_to_label[idx] = nm

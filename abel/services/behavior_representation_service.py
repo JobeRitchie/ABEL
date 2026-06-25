@@ -24,6 +24,10 @@ class RepresentationConfig:
     # invalidates the content/config-hash representation cache so segment
     # features are rebuilt with the new, jitter-robust delta.
     feature_version: str = "representation_v2"
+    # DEPRECATED / no-op: feature exclusions are applied at training time, not
+    # baked into the representation, so the cache stays valid across exclusion
+    # changes.  Retained only for call-site compatibility.  See
+    # ActiveLearningTrainerService for where exclusions are actually applied.
     excluded_feature_cols: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -82,12 +86,16 @@ class BehaviorRepresentationService:
     @staticmethod
     def _config_signature(config: "RepresentationConfig") -> dict:
         """Signature of the representation config that is baked into the cache."""
+        # NOTE: ``excluded_feature_cols`` is deliberately NOT part of the cache
+        # signature.  Feature exclusions are applied at *training* time (see
+        # ActiveLearningTrainerService), so the representation always contains
+        # all features and the cache stays valid regardless of which features a
+        # user chooses to exclude downstream.
         return {
             "window_size_frames": int(config.window_size_frames),
             "window_stride_frames": int(config.window_stride_frames),
             "feature_version": str(config.feature_version),
             "model_version": str(config.model_version),
-            "excluded_feature_cols": sorted(str(c) for c in config.excluded_feature_cols),
         }
 
     ZSCORE_STATS_FILENAME = "zscore_stats.parquet"
@@ -164,7 +172,12 @@ class BehaviorRepresentationService:
         config: RepresentationConfig | None = None,
         session_ids: set[str] | None = None,
         progress_cb: Callable[[str], None] | None = None,
+        ensure_only: bool = False,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        # ``ensure_only`` skips loading the (potentially multi-GB) cached frame
+        # and segment parquet on a full cache hit — the caller only wants the
+        # cache to *exist* (e.g. pre-building during feature extraction), not
+        # the dataframes.  Returns empty frames in that case.
         config = config or RepresentationConfig()
 
         def _progress(msg: str) -> None:
@@ -226,6 +239,9 @@ class BehaviorRepresentationService:
 
         if _frame_cached.exists() and _seg_cached.exists() and _manifest_cached.exists():
             if not session_ids:
+                if ensure_only:
+                    _progress("Representation: cache hit — already prepared (skipping load).")
+                    return pd.DataFrame(), pd.DataFrame()
                 _progress("Representation: cache hit — loading existing frame and segment features...")
                 return pd.read_parquet(_frame_cached), pd.read_parquet(_seg_cached)
             else:
@@ -379,18 +395,16 @@ class BehaviorRepresentationService:
         _progress("Representation: merging pose and context frame tables...")
         frame_df = pose_df.merge(ctx_df, on=join_cols, how="inner") if not ctx_df.empty else pose_df.copy()
 
+        # Feature exclusions are NOT applied here — neither the project-level
+        # config/feature_exclusions.json NOR the per-run ``excluded_feature_cols``.
+        # The representation builder must compute statistics for ALL available
+        # features so the cache is independent of feature-selection choices and
+        # downstream consumers (trainer, evaluation) can decide what to include.
+        # Applying exclusions at the frame level also created a circular
+        # dependency: dead features were excluded → never got windowed stats →
+        # stayed "dead" even after the underlying data was fixed.  The trainer
+        # applies all exclusions at the segment level instead.
         excluded = {"frame", "animal_id", "session_id", "video_id"}
-        if config.excluded_feature_cols:
-            excluded = excluded | set(config.excluded_feature_cols)
-
-        # NOTE: Feature exclusions from config/feature_exclusions.json are NOT
-        # applied here.  The representation builder must compute statistics for
-        # ALL available features so that downstream consumers (the trainer,
-        # evaluation, etc.) can decide which to include.  Applying exclusions
-        # at the frame level created a circular dependency: dead features were
-        # excluded → never got windowed stats → stayed "dead" even after the
-        # underlying data was fixed.  The trainer already reads
-        # feature_exclusions.json and applies it at the segment level.
 
         feature_cols = [
             c
