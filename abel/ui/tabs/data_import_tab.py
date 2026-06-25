@@ -29,6 +29,7 @@ from abel.models.schemas import ImportManifest, ImportNameSettings, SourceMode
 from abel.services import keypoint_mapping
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
+from abel.ui.body_part_rename_dialog import BodyPartRenameDialog
 from abel.ui.keypoint_mapping_dialog import KeypointMappingDialog
 from abel.ui.pixel_scale_calibration_dialog import PixelScaleCalibrationDialog
 
@@ -83,6 +84,12 @@ class DataImportTab(QWidget):
             "Map keypoints from imported pose files onto the project's canonical\n"
             "keypoint names when DLC files name them differently."
         )
+        rename_parts_btn = QPushButton("Rename Body Parts")
+        rename_parts_btn.setToolTip(
+            "Give body parts brand-new names of your choosing. The new names are\n"
+            "used by all subsequent processing (feature extraction, context\n"
+            "features, trained models)."
+        )
         reapply_subject_btn = QPushButton("Apply Parsing Settings")
         test_pattern_btn = QPushButton("Test Pattern")
 
@@ -93,6 +100,7 @@ class DataImportTab(QWidget):
         remove_session_btn.clicked.connect(self._remove_selected_sessions)
         calibrate_scale_btn.clicked.connect(self._open_pixel_scale_calibrator)
         keypoint_map_btn.clicked.connect(self._open_keypoint_mapping)
+        rename_parts_btn.clicked.connect(self._open_body_part_rename)
         reapply_subject_btn.clicked.connect(self._apply_subject_settings)
         test_pattern_btn.clicked.connect(self._update_subject_preview)
 
@@ -118,6 +126,7 @@ class DataImportTab(QWidget):
             remove_session_btn,
             calibrate_scale_btn,
             keypoint_map_btn,
+            rename_parts_btn,
         ]:
             button_row.addWidget(btn)
 
@@ -505,12 +514,15 @@ class DataImportTab(QWidget):
                         return kps
                 except Exception:
                     pass
-        # Fallback: most common keypoint set among imported files.
+        # Fallback: most common keypoint set among imported files, AFTER
+        # applying any saved renames — so body parts the user deliberately
+        # renamed aren't flagged as a mismatch against their original names.
         from collections import Counter
+        aliases = self._saved_keypoint_aliases()
         counter: Counter[frozenset[str]] = Counter()
         for kps in file_sets.values():
             if kps:
-                counter[frozenset(kps)] += 1
+                counter[frozenset(aliases.get(k, k) for k in kps)] += 1
         if not counter:
             return []
         return sorted(counter.most_common(1)[0][0])
@@ -616,6 +628,52 @@ class DataImportTab(QWidget):
             self._append_log(
                 f"Saved keypoint mapping ({len(rename)} rename rule(s)). "
                 "It will be applied during feature extraction."
+            )
+        self._check_keypoint_consistency()
+
+    def _open_body_part_rename(self) -> None:
+        """Let the user give body parts new names used by all downstream steps."""
+        if not self._project_root:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        if not self._manifest.linked_sessions:
+            QMessageBox.information(self, "No Sessions", "Import and link sessions first.")
+            return
+        file_sets = self._pose_keypoint_sets()
+        found = sorted({kp for kps in file_sets.values() for kp in kps})
+        if not found:
+            QMessageBox.information(
+                self, "Rename Body Parts", "No readable pose files to inspect.")
+            return
+
+        existing = self._saved_keypoint_aliases()  # {original: new}
+        dlg = BodyPartRenameDialog(found, initial_map=existing, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        renames = dlg.result_map  # {original: new}, changed parts only
+
+        # The rename map shares config/keypoint_aliases.json with Keypoint
+        # Mapping (both are {source_name: target_name}).  Preserve any alias
+        # entries for parts not shown here, and replace the rest with the user's
+        # choices — dropping parts they reset back to their original name.
+        merged = {k: v for k, v in existing.items() if k not in set(found)}
+        merged.update(renames)
+
+        from abel.storage.file_store import write_json
+        cfg = self._project_root / "config"
+        cfg.mkdir(parents=True, exist_ok=True)
+        write_json(cfg / "keypoint_aliases.json", merged)
+        self._append_log(
+            f"Renamed {len(renames)} body part(s). The new names will be used "
+            "by all subsequent processing (feature extraction, models)."
+        )
+
+        # Features already built under the old names need re-extraction.
+        fp = self._project_root / "derived" / "pose_features" / "frame_pose.parquet"
+        if fp.exists() and renames:
+            self._append_log(
+                "Note: pose features already exist under the old names — re-run "
+                "feature extraction so the renames take effect everywhere."
             )
         self._check_keypoint_consistency()
 
