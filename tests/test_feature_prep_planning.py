@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from abel.services.feature_prep_service import plan_session_workers
+from pathlib import Path
+
+from abel.services.feature_prep_service import FeaturePrepService, plan_session_workers
 
 
 def test_cpu_only_fills_cores() -> None:
@@ -48,3 +50,31 @@ def test_intra_session_workers_fill_remaining_cores() -> None:
     assert plan.max_workers == 8
     # cpu_cap = 15, ceil(15/8) = 2
     assert plan.intra_session_workers == 2
+
+
+# ── Keypoint-rename cache invalidation ────────────────────────────────
+
+
+def test_no_signature_file_does_not_force_rebuild(tmp_path: Path) -> None:
+    # Projects built before the guard existed keep their caches.
+    assert FeaturePrepService._aliases_changed(tmp_path, {"a": "b"}) is False
+
+
+def test_signature_roundtrip_detects_change(tmp_path: Path) -> None:
+    FeaturePrepService._write_alias_signature(tmp_path, {"bodypart1": "nose"})
+    assert FeaturePrepService._aliases_changed(tmp_path, {"bodypart1": "nose"}) is False
+    # A different rename map is detected.
+    assert FeaturePrepService._aliases_changed(tmp_path, {"bodypart1": "snout"}) is True
+    # So is clearing the renames entirely.
+    assert FeaturePrepService._aliases_changed(tmp_path, {}) is True
+
+
+def test_invalidate_forces_rebuild_for_any_map(tmp_path: Path) -> None:
+    # Even with a matching signature already written, invalidation wins.
+    FeaturePrepService._write_alias_signature(tmp_path, {"bodypart1": "nose"})
+    FeaturePrepService.invalidate_caches(tmp_path)
+    assert FeaturePrepService._aliases_changed(tmp_path, {"bodypart1": "nose"}) is True
+    assert FeaturePrepService._aliases_changed(tmp_path, {}) is True
+    # Writing the real signature again clears the stale state.
+    FeaturePrepService._write_alias_signature(tmp_path, {"bodypart1": "nose"})
+    assert FeaturePrepService._aliases_changed(tmp_path, {"bodypart1": "nose"}) is False

@@ -500,32 +500,35 @@ class DataImportTab(QWidget):
 
         Prefers the keypoints the project's pose features were already built
         with; otherwise falls back to the most common set among imported files.
+        Saved renames are then applied so a deliberately renamed body part is
+        reported under its new name (and so isn't flagged as a mismatch against
+        its original name in :meth:`_check_keypoint_consistency`).
         """
+        raw_canonical: list[str] = []
         if self._project_root:
             fp = self._project_root / "derived" / "pose_features" / "frame_pose.parquet"
             if fp.exists():
                 try:
                     import pyarrow.parquet as pq  # noqa: PLC0415
                     cols = list(pq.read_schema(fp).names)
-                    kps = sorted(
+                    raw_canonical = sorted(
                         c[: -len("_velocity_x")] for c in cols if c.endswith("_velocity_x")
                     )
-                    if kps:
-                        return kps
                 except Exception:
-                    pass
-        # Fallback: most common keypoint set among imported files, AFTER
-        # applying any saved renames — so body parts the user deliberately
-        # renamed aren't flagged as a mismatch against their original names.
-        from collections import Counter
+                    raw_canonical = []
+        if not raw_canonical:
+            # Fallback: most common keypoint set among imported files.
+            from collections import Counter
+            counter: Counter[frozenset[str]] = Counter()
+            for kps in file_sets.values():
+                if kps:
+                    counter[frozenset(kps)] += 1
+            if not counter:
+                return []
+            raw_canonical = sorted(counter.most_common(1)[0][0])
+
         aliases = self._saved_keypoint_aliases()
-        counter: Counter[frozenset[str]] = Counter()
-        for kps in file_sets.values():
-            if kps:
-                counter[frozenset(aliases.get(k, k) for k in kps)] += 1
-        if not counter:
-            return []
-        return sorted(counter.most_common(1)[0][0])
+        return sorted({aliases.get(k, k) for k in raw_canonical})
 
     def _pose_keypoint_sets(self) -> dict[str, list[str]]:
         """Probe each linked pose file for its (normalized) keypoint names."""
@@ -659,6 +662,10 @@ class DataImportTab(QWidget):
         merged = {k: v for k, v in existing.items() if k not in set(found)}
         merged.update(renames)
 
+        if merged == existing:
+            self._append_log("Body-part names unchanged — nothing to update.")
+            return
+
         from abel.storage.file_store import write_json
         cfg = self._project_root / "config"
         cfg.mkdir(parents=True, exist_ok=True)
@@ -668,12 +675,18 @@ class DataImportTab(QWidget):
             "by all subsequent processing (feature extraction, models)."
         )
 
-        # Features already built under the old names need re-extraction.
+        # The rename changes every keypoint-derived column, so any cached pose/
+        # context features are stale.  Mark them for rebuild rather than reusing
+        # them, otherwise the next feature extraction would silently keep the
+        # old names.
+        from abel.services.feature_prep_service import FeaturePrepService
+        FeaturePrepService.invalidate_caches(self._project_root)
+
         fp = self._project_root / "derived" / "pose_features" / "frame_pose.parquet"
-        if fp.exists() and renames:
+        if fp.exists():
             self._append_log(
-                "Note: pose features already exist under the old names — re-run "
-                "feature extraction so the renames take effect everywhere."
+                "Pose features already exist under the old names — re-run feature "
+                "extraction so the renames take effect everywhere."
             )
         self._check_keypoint_consistency()
 

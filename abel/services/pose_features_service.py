@@ -121,6 +121,19 @@ class PoseFeaturesService:
     def set_project(self, project_root: Path) -> None:
         self._project_root = project_root
 
+    def _keypoint_aliases(self) -> dict[str, str] | None:
+        """Project-level ``{original: new}`` body-part rename map, or None.
+
+        Written by Data Import (Keypoint Mapping / Rename Body Parts) and applied
+        on pose load so the kinematic .npz windows use the project's chosen
+        names, consistent with the parquet feature pipeline.
+        """
+        if not self._project_root:
+            return None
+        data = read_json(self._project_root / "config" / "keypoint_aliases.json", {})
+        aliases = {str(k): str(v) for k, v in data.items() if str(k) and str(v)}
+        return aliases or None
+
     def _pixels_per_mm_for_session(self, session_id: str) -> float | None:
         if not self._project_root:
             return None
@@ -198,9 +211,11 @@ class PoseFeaturesService:
         result = PoseFeatureResult(session_id=config.session_id)
         preset = config.preset
 
-        # --- Load ---
+        # --- Load (applying any project keypoint renames) ---
         try:
-            pose = self._pose_service.load(config.pose_path)
+            pose = self._pose_service.load(
+                config.pose_path, keypoint_aliases=self._keypoint_aliases()
+            )
         except Exception as exc:
             result.warnings.append(f"Failed to load pose: {exc}")
             return result
