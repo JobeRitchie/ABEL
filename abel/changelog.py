@@ -11,6 +11,13 @@ VERSION_DATE = "June 26, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.5.3", "June 26, 2026", [
+        "Fixed the Features tab not remembering settings across a project "
+        "reload: restoring presets during project load fired change handlers "
+        "that overwrote the project's saved settings (most visibly flipping the "
+        "\"Include video features\" checkbox back off) before they were read. "
+        "Settings writes are now suspended while a project loads.",
+    ]),
     ("0.5.2", "June 26, 2026", [
         "Cross-project feature compatibility: pairwise inter-keypoint distance "
         "features (dist_A_to_B) are now named in a canonical, order-independent "

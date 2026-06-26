@@ -128,6 +128,10 @@ class PoseFeaturesTab(QWidget):
         self._behavior_service = behavior_service
         self._rois = roi_service or ROIService()
         self._project_root: Path | None = None
+        # Guards against settings being written back while a project is being
+        # loaded — restoring presets/spinboxes during init would otherwise fire
+        # valueChanged and clobber the saved settings before they're read.
+        self._suspend_settings_save = False
         self._manifest = None
         self._pool = QThreadPool.globalInstance()
         self._cancel_flag: list[bool] = [False]
@@ -563,21 +567,29 @@ class PoseFeaturesTab(QWidget):
     def _deferred_project_init(self, project_root: Path) -> None:
         if self._project_root != project_root:
             return
-        self._service.set_project(project_root)
-        self._manifest = self._imports.load_manifest(project_root)
-        self._refresh_presets()
-        self._refresh_sessions()
-        # Restore all extraction settings from project config
-        self._load_extraction_settings()
-        # Load local motion radius from ROI config
+        # Suppress settings writes for the duration of the load: restoring
+        # presets/spinboxes fires valueChanged, which would otherwise persist
+        # default values over the project's saved settings (e.g. flipping the
+        # "Include video features" checkbox back off) before they're loaded.
+        self._suspend_settings_save = True
         try:
-            radius = self._rois.local_motion_radius(project_root)
-            self._local_radius.setValue(radius)
-        except Exception:
-            pass
-        self._update_motion_area_preview()
-        self._load_feature_selection()
-        self._load_robustness_feature_selection()
+            self._service.set_project(project_root)
+            self._manifest = self._imports.load_manifest(project_root)
+            self._refresh_presets()
+            self._refresh_sessions()
+            # Restore all extraction settings from project config
+            self._load_extraction_settings()
+            # Load local motion radius from ROI config
+            try:
+                radius = self._rois.local_motion_radius(project_root)
+                self._local_radius.setValue(radius)
+            except Exception:
+                pass
+            self._update_motion_area_preview()
+            self._load_feature_selection()
+            self._load_robustness_feature_selection()
+        finally:
+            self._suspend_settings_save = False
     def _refresh_presets(self) -> None:
         presets = self._service.load_project_presets()
         self._preset_combo.blockSignals(True)
@@ -632,7 +644,7 @@ class PoseFeaturesTab(QWidget):
 
     def _save_extraction_settings(self, _value: object = None) -> None:
         """Persist all extraction parameters to project.yaml on every change."""
-        if not self._project_root:
+        if not self._project_root or self._suspend_settings_save:
             return
         try:
             path = self._project_root / "project.yaml"
