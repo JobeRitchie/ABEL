@@ -192,17 +192,47 @@ class FeaturePrepService:
         data = read_json(project_root / "config" / "keypoint_aliases.json", {})
         return {str(k): str(v) for k, v in data.items() if str(k) and str(v)}
 
-    # ── Keypoint-rename cache invalidation ────────────────────────────
-    # The per-session pose/context caches embed the body-part names that were
-    # in force when they were built.  When the user renames body parts (Data
-    # Import → Rename Body Parts), those caches become stale, so we record the
-    # alias map each build ran under and force a rebuild when it changes —
-    # otherwise re-running feature extraction would silently reuse the old
-    # names.
+    # ── Feature-cache invalidation ────────────────────────────────────
+    # The per-session caches embed the inputs they were built from, so they go
+    # stale when those inputs change and must be rebuilt — otherwise re-running
+    # feature extraction silently reuses the old result:
+    #   • pose features depend on the body-part rename map.
+    #   • context features additionally depend on the ROI config (target zones,
+    #     subject crop, local-motion radius) and the flow stride.
+    # We record a signature for each so a change to either is detected and only
+    # the affected cache is rebuilt.
+    # Bump when the pose feature *schema* (column names / formulas) changes so
+    # existing caches are rebuilt into the new, cross-project-compatible format.
+    #   v2: canonical (order-independent, sorted) pairwise-distance column names.
+    _POSE_SCHEMA_VERSION = "2"
+
     @staticmethod
-    def _alias_signature(aliases: dict[str, str]) -> str:
-        payload = json.dumps(aliases or {}, sort_keys=True, ensure_ascii=False)
+    def _hash(obj: object) -> str:
+        payload = json.dumps(obj, sort_keys=True, ensure_ascii=False)
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _alias_signature(cls, aliases: dict[str, str]) -> str:
+        return cls._hash(aliases or {})
+
+    @classmethod
+    def _pose_signature(cls, project_root: Path, aliases: dict[str, str]) -> str:
+        return cls._hash({"v": cls._POSE_SCHEMA_VERSION, "aliases": aliases or {}})
+
+    @classmethod
+    def _context_signature(
+        cls, project_root: Path, aliases: dict[str, str], config: "PrepConfig",
+    ) -> str:
+        roi_path = project_root / "config" / "environment_rois.yaml"
+        try:
+            roi_blob = roi_path.read_text(encoding="utf-8") if roi_path.exists() else ""
+        except Exception:
+            roi_blob = ""
+        return cls._hash({
+            "aliases": aliases or {},
+            "roi": roi_blob,
+            "flow_temporal_stride": int(getattr(config, "flow_temporal_stride", 0) or 0),
+        })
 
     @staticmethod
     def _alias_sig_path(project_root: Path) -> Path:
@@ -212,36 +242,107 @@ class FeaturePrepService:
         )
 
     @classmethod
-    def _aliases_changed(cls, project_root: Path, aliases: dict[str, str]) -> bool:
-        """True when the cached features were built under a different rename map.
+    def _pose_changed(cls, project_root: Path, aliases: dict[str, str]) -> bool:
+        """True when the cached pose features were built from a different rename map."""
+        # Content check first: if the cached features still carry a body-part
+        # name that the current aliases should have renamed, they were built
+        # before the rename map was set and are stale — regardless of any
+        # recorded signature.  This is the case where aliases were added after
+        # the features were first extracted.
+        if cls._pose_cache_has_unapplied_aliases(project_root, aliases):
+            return True
+        path = cls._alias_sig_path(project_root)
+        if not path.exists():
+            # No record of how the cache was built.  If a pose cache already
+            # exists it predates schema tracking and may use the old feature
+            # format (e.g. order-dependent distance names), so rebuild once to
+            # guarantee a consistent, cross-project-compatible schema.  If there
+            # is no cache yet, there's nothing to rebuild.
+            return bool(cls.cached_pose_sessions(project_root))
+        prev = read_json(path, {}) or {}
+        # ``signature`` is the legacy (pose-only) key; it lacks the schema
+        # version, so a legacy project's stored value won't match the current
+        # signature and will (correctly) trigger a one-time rebuild.
+        stored = prev.get("pose", prev.get("signature", ""))
+        return str(stored) != cls._pose_signature(project_root, aliases)
 
-        Returns ``False`` when no signature has been recorded yet (a project
-        built before this guard existed) so existing caches aren't needlessly
-        discarded — the signature is written after the next build.
-        """
+    @classmethod
+    def _pose_cache_has_unapplied_aliases(
+        cls, project_root: Path, aliases: dict[str, str],
+    ) -> bool:
+        """True when ``frame_pose.parquet`` still contains a keypoint that the
+        current alias map renames (i.e. the rename was never applied)."""
+        if not aliases:
+            return False
+        fp = project_root / "derived" / "pose_features" / "frame_pose.parquet"
+        if not fp.exists():
+            return False
+        try:
+            import pyarrow.parquet as pq
+            cols = set(pq.read_schema(fp).names)
+        except Exception:
+            return False
+        suffix = "_velocity_x"
+        kps = {c[: -len(suffix)] for c in cols if c.endswith(suffix)}
+        from abel.services.pose_processing_service import normalize_bodypart_name
+        norm_kps = {normalize_bodypart_name(k) for k in kps}
+        for src, dst in aliases.items():
+            ns, nd = normalize_bodypart_name(src), normalize_bodypart_name(dst)
+            if ns != nd and ns in norm_kps:
+                return True
+        return False
+
+    @classmethod
+    def _context_changed(
+        cls, project_root: Path, aliases: dict[str, str], config: "PrepConfig",
+    ) -> bool:
+        """True when cached context features were built from different ROIs/renames."""
         path = cls._alias_sig_path(project_root)
         if not path.exists():
             return False
         prev = read_json(path, {}) or {}
-        return str(prev.get("signature", "")) != cls._alias_signature(aliases)
+        if "context" not in prev:
+            # Legacy signature predates context tracking.  Fall back to mtimes:
+            # the context cache is stale if the ROI config is newer than it.
+            return cls._roi_newer_than_context_cache(project_root)
+        return str(prev.get("context", "")) != cls._context_signature(
+            project_root, aliases, config
+        )
+
+    @staticmethod
+    def _roi_newer_than_context_cache(project_root: Path) -> bool:
+        roi_path = project_root / "config" / "environment_rois.yaml"
+        ctx_dir = project_root / "derived" / "context_features" / "sessions"
+        if not roi_path.exists() or not ctx_dir.exists():
+            return False
+        ctx_files = list(ctx_dir.glob("*.parquet"))
+        if not ctx_files:
+            return False
+        newest_ctx = max(f.stat().st_mtime for f in ctx_files)
+        return roi_path.stat().st_mtime > newest_ctx
 
     @classmethod
-    def _write_alias_signature(cls, project_root: Path, aliases: dict[str, str]) -> None:
+    def _write_signatures(
+        cls, project_root: Path, aliases: dict[str, str], config: "PrepConfig",
+    ) -> None:
         path = cls._alias_sig_path(project_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(path, {"signature": cls._alias_signature(aliases)})
+        write_json(path, {
+            "pose": cls._pose_signature(project_root, aliases),
+            "context": cls._context_signature(project_root, aliases, config),
+        })
 
     @classmethod
     def invalidate_caches(cls, project_root: Path) -> None:
         """Mark the feature caches stale so the next ``prepare`` rebuilds them.
 
-        Called when body parts are renamed.  Writes a sentinel signature that
-        can never equal a real one, which forces a full re-extraction under the
-        new names without destroying any existing files up front.
+        Called when body parts are renamed (which affects both pose and context
+        features).  Writes sentinel signatures that can never equal a real one,
+        forcing a full re-extraction without destroying any files up front.
         """
         path = cls._alias_sig_path(project_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(path, {"signature": "stale"})
+        write_json(path, {"pose": "stale", "context": "stale"})
 
     @staticmethod
     def _parquet_rows(path: Path) -> int:
@@ -296,18 +397,27 @@ class FeaturePrepService:
                 raise PrepCancelledError("PREP_CANCELLED_BY_USER")
 
         # ── Decide which sessions actually need (re)building ──────────────
-        # A body-part rename invalidates every cached pose/context parquet (the
-        # column names changed), so ignore the cache when the alias map differs
-        # from the one the caches were built under.
-        aliases_changed = self._aliases_changed(project_root, aliases)
-        reuse = config.reuse_cached and not aliases_changed
-        if aliases_changed:
+        # Pose features go stale when body parts are renamed; context features
+        # additionally go stale when the ROI config changes.  Discard only the
+        # cache whose inputs changed so an ROI edit doesn't force a (needless)
+        # full pose re-extraction, and vice-versa.
+        pose_changed = self._pose_changed(project_root, aliases)
+        ctx_changed = self._context_changed(project_root, aliases, config)
+        reuse = config.reuse_cached
+        if reuse and pose_changed:
             obs.log(
-                "Body-part renames changed since the last build — rebuilding all "
-                "feature caches so the new names apply."
+                "Pose feature inputs changed (body-part renames or an updated "
+                "feature format) — rebuilding pose features for a consistent, "
+                "cross-project-compatible schema."
             )
-        cached_pose = self.cached_pose_sessions(project_root) if reuse else set()
-        cached_ctx = self.cached_context_sessions(project_root) if reuse else set()
+        if reuse and ctx_changed:
+            obs.log("ROI configuration changed — rebuilding context features for the new ROIs.")
+        cached_pose = (
+            self.cached_pose_sessions(project_root) if reuse and not pose_changed else set()
+        )
+        cached_ctx = (
+            self.cached_context_sessions(project_root) if reuse and not ctx_changed else set()
+        )
 
         pending: list[SessionJob] = []
         for job in jobs:
@@ -325,7 +435,8 @@ class FeaturePrepService:
             obs.stage_start(STAGE_PREPROCESS, f"Extract {feat_label}", len(pending))
             t0 = time.monotonic()
             self._extract_sessions(
-                project_root, pending, config, aliases, obs, result, _check_cancel
+                project_root, pending, config, aliases, obs, result, _check_cancel,
+                cached_pose=cached_pose, cached_ctx=cached_ctx,
             )
             result.timings["preprocess"] = time.monotonic() - t0
             obs.stage_done(STAGE_PREPROCESS)
@@ -396,9 +507,9 @@ class FeaturePrepService:
         )
         obs.stage_done(STAGE_REPRESENTATIONS)
 
-        # Record the rename map these caches were built under so a later rename
-        # is detected and triggers a rebuild.
-        self._write_alias_signature(project_root, aliases)
+        # Record the inputs these caches were built from so a later rename or
+        # ROI edit is detected and triggers a targeted rebuild.
+        self._write_signatures(project_root, aliases, config)
 
         return result
 
@@ -415,7 +526,15 @@ class FeaturePrepService:
         obs: PrepObserver,
         result: PrepResult,
         check_cancel,
+        *,
+        cached_pose: set[str] | None = None,
+        cached_ctx: set[str] | None = None,
     ) -> None:
+        # A session lands here when *either* its pose or context cache is stale.
+        # Skip the part that is still valid so e.g. an ROI-only change rebuilds
+        # context without re-running the (unaffected) pose extraction.
+        cached_pose = cached_pose or set()
+        cached_ctx = cached_ctx or set()
         gpu_info: dict = {}
         try:
             from abel.utils.gpu_optical_flow import gpu_summary
@@ -440,16 +559,22 @@ class FeaturePrepService:
                 result.gpu_warnings.append(msg)
 
         def _process_one(job: SessionJob) -> str:
-            self._pose.extract_and_save_frame_pose_features(
-                project_root=project_root,
-                pose_path=job.pose_path,
-                fps=job.fps,
-                animal_id=job.subject_id,
-                session_id=job.session_id,
-                video_id=job.session_id,
-                keypoint_aliases=aliases,
-            )
-            if config.use_video_features and job.video_path is not None:
+            sid = str(job.session_id)
+            if sid not in cached_pose:
+                self._pose.extract_and_save_frame_pose_features(
+                    project_root=project_root,
+                    pose_path=job.pose_path,
+                    fps=job.fps,
+                    animal_id=job.subject_id,
+                    session_id=job.session_id,
+                    video_id=job.session_id,
+                    keypoint_aliases=aliases,
+                )
+            if (
+                config.use_video_features
+                and job.video_path is not None
+                and sid not in cached_ctx
+            ):
                 ContextFeatureService().compute_frame_context(
                     project_root=project_root,
                     video_path=job.video_path,

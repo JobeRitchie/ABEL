@@ -11,6 +11,19 @@ VERSION_DATE = "June 26, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.5.2", "June 26, 2026", [
+        "Cross-project feature compatibility: pairwise inter-keypoint distance "
+        "features (dist_A_to_B) are now named in a canonical, order-independent "
+        "way, so two projects with the same keypoints listed in a different DLC "
+        "column order produce identical feature columns. This fixes Direct Use "
+        "model reuse failing because the projects had mismatched feature sets.",
+        "Feature extraction now rebuilds cached pose features when keypoint "
+        "renames are applied after a first extraction (previously the rename was "
+        "silently ignored and old body-part names persisted), and rebuilds "
+        "context features when the ROI configuration changes (previously stale "
+        "ROIs were reused). A pose feature-format version forces a one-time "
+        "rebuild so existing projects adopt the compatible schema.",
+    ]),
     ("0.5.1", "June 26, 2026", [
         "Data Import: new \"Rename Body Parts\" tool to give keypoints new names "
         "of your choosing that propagate to all downstream processing (feature "

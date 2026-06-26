@@ -593,7 +593,14 @@ class PoseProcessingService:
                     xj = np.asarray(pose.x[parts[j]], dtype=float)
                     yj = np.asarray(pose.y[parts[j]], dtype=float)
                     dist = np.sqrt((xi - xj) ** 2 + (yi - yj) ** 2)
-                    col_name = f"dist_{p_i}_to_{p_j}"
+                    # Canonical (sorted) pair name so the column is independent
+                    # of the DLC keypoint column order.  Distance is symmetric,
+                    # so two projects with the same keypoints listed in a
+                    # different order would otherwise produce dist_A_to_B vs
+                    # dist_B_to_A and become incompatible for cross-project
+                    # (Direct Use) model reuse.
+                    p_a, p_b = sorted((p_i, p_j))
+                    col_name = f"dist_{p_a}_to_{p_b}"
                     base[col_name] = dist
                     # Skip the normalized variant for the body-length-defining
                     # pair: dist / body_length ≡ 1.0, a constant dead feature.
