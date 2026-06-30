@@ -7,10 +7,50 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "June 26, 2026"
+VERSION_DATE = "June 30, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.6.0", "June 30, 2026", [
+        "Multi-animal tracking: ABEL now loads multi-animal DLC pose files "
+        "(CSV or H5), keeping one cleaned track per tracked individual. Data "
+        "Import gains a visual Identity Map dialog to assign each tracked "
+        "individual to a real subject and to correct identity swaps frame-by-"
+        "frame, and those corrections are applied on load so all downstream "
+        "features see identity-consistent tracks.",
+        "Social features and behaviors: multi-animal projects can extract "
+        "inter-animal interaction (social_*) features, and social-behavior "
+        "fields now appear in the Behavior tab only when the project tracks "
+        "more than one animal. Enabling or disabling social features rebuilds "
+        "the pose feature cache; solo single-animal projects are unaffected.",
+        "Baseline import (Model Refinement): import another project as a "
+        "baseline — a detection summary previews each source behavior with its "
+        "importable example count, model coverage, feature-schema coverage, and "
+        "whether it matches an existing host behavior. Importing brings over "
+        "labeled examples and models, auto-creating matched or new host "
+        "behaviors so the merged training set resolves to defined behaviors. "
+        "Preview and import run off the UI thread.",
+        "Behavior Analytics: ROI zones and inter-keypoint distance measures are "
+        "now exposed as synthetic \"pseudo-behavior\" rows alongside scored "
+        "behaviors, and short on/off runs are debounced so brief flicker no "
+        "longer fragments the analytics.",
+        "Smoothing preview now overlays body-part dots and a centroid trail on "
+        "the video frame so the effect of smoothing/interpolation settings is "
+        "visible directly on the animal.",
+        "Distance-feature canonicalization (extends 0.5.2): symmetric pairwise "
+        "distance columns (dist_a_to_b / dist_b_to_a) are merged onto a single "
+        "canonical sorted name before any statistics are computed, so mixed-"
+        "order pose exports no longer leave half-populated \"dead\" distance "
+        "columns. The representation cache signature now includes a parquet "
+        "footer-statistics digest, and a cache-version bump rebuilds segment "
+        "features under the corrected schema.",
+        "Added a \"clear feature caches\" option that deletes all generated "
+        "feature artefacts so the next run rebuilds every stage from the source "
+        "pose/video — the nuclear option when stale caches are suspected.",
+        "Validation: positive example bouts are now spread across subjects "
+        "using the import manifest's session→subject mapping, giving more "
+        "representative validation cells.",
+    ]),
     ("0.5.3", "June 26, 2026", [
         "Fixed the Features tab not remembering settings across a project "
         "reload: restoring presets during project load fired change handlers "

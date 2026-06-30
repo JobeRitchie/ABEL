@@ -118,6 +118,7 @@ from abel.services.behavioral_motif_service import (
 from abel.services.import_service import ImportService
 from abel.services.project_merge_service import ProjectMergeService
 from abel.services.pose_processing_service import PoseProcessingService
+from abel.services.roi_service import ROIService
 from abel.workers.task_worker import TaskWorker
 
 logger = logging.getLogger("abel")
@@ -125,6 +126,50 @@ logger = logging.getLogger("abel")
 NO_BEHAVIOR_ID = "no_behavior"
 DISTANCE_BEHAVIOR_ID = "__distance_traveled__"
 DISTANCE_BEHAVIOR_NAME = "Distance Traveled"
+
+# ROI occupancy pseudo-behaviors.  Like Distance Traveled, these are synthetic
+# rows that don't come from behavior inference; they reuse the standard summary
+# columns (time_spent_s = time in zone, n_bouts = entries, mean_bout_s = mean
+# visit duration, latency_s = time to first entry).  One per configured zone.
+ROI_BEHAVIOR_PREFIX = "__roi_in_zone__"
+
+
+def roi_behavior_id(zone_index: int) -> str:
+    """Pseudo-behavior id for a 1-based ROI zone index."""
+    return f"{ROI_BEHAVIOR_PREFIX}{zone_index}"
+
+
+def roi_behavior_name(zone_index: int, roi_count: int) -> str:
+    """Display name for an ROI pseudo-behavior."""
+    return "Time in ROI" if roi_count <= 1 else f"Time in ROI {zone_index}"
+
+
+def is_roi_behavior_id(bid: str) -> bool:
+    return str(bid).startswith(ROI_BEHAVIOR_PREFIX)
+
+
+def is_pseudo_behavior_id(bid: str) -> bool:
+    """True for synthetic rows (distance / ROI) that have no raw bout data."""
+    return bid == DISTANCE_BEHAVIOR_ID or is_roi_behavior_id(bid)
+
+
+def _debounce_bool(mask: "np.ndarray", min_run: int) -> "np.ndarray":
+    """Merge runs shorter than *min_run* frames into the preceding run.
+
+    Suppresses single-frame flicker at an ROI boundary so tracking jitter
+    doesn't inflate the entry count.  Processes runs left-to-right so merges
+    propagate; the first run is left untouched (nothing precedes it).
+    """
+    if min_run <= 1 or mask.size == 0:
+        return mask
+    out = mask.copy()
+    change_idx = np.flatnonzero(np.diff(out.astype(np.int8))) + 1
+    bounds = np.concatenate(([0], change_idx, [out.size]))
+    for i in range(len(bounds) - 1):
+        s, e = int(bounds[i]), int(bounds[i + 1])
+        if (e - s) < min_run and s > 0:
+            out[s:e] = out[s - 1]
+    return out
 
 # Sentinel for distinguishing "not yet cached" from "cached value of None".
 _MANIFEST_UNSET = object()
@@ -624,6 +669,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._behaviors = BehaviorService()
         self._imports = ImportService()
         self._pose = PoseProcessingService()
+        self._roi_service = ROIService()
         self._subject_by_session: dict[str, str] = {}
         self._session_by_subject: dict[str, list[str]] = {}
         self._session_type_by_session: dict[str, str] = {}
@@ -1133,7 +1179,7 @@ class BehaviorAnalyticsTab(QWidget):
         adjusted_rows: list[dict[str, Any]] = []
         for row in self._summary_rows:
             bid = str(row.get("behavior_id", ""))
-            if bid == DISTANCE_BEHAVIOR_ID:
+            if is_pseudo_behavior_id(bid):
                 adjusted_rows.append(row)
                 continue
 
@@ -1477,6 +1523,17 @@ class BehaviorAnalyticsTab(QWidget):
         dist_act.toggled.connect(self._on_filter_changed)
         self._behavior_filter_actions.append((DISTANCE_BEHAVIOR_ID, DISTANCE_BEHAVIOR_NAME, dist_act))
 
+        # ROI occupancy pseudo-behaviors (one per configured zone, if any).
+        roi_count = self._configured_roi_count()
+        for zi in range(1, roi_count + 1):
+            rid = roi_behavior_id(zi)
+            rname = roi_behavior_name(zi, roi_count)
+            roi_act = self._behavior_filter_menu.addAction(rname)
+            roi_act.setCheckable(True)
+            roi_act.setChecked(rid in prev_checked if prev_checked else False)
+            roi_act.toggled.connect(self._on_filter_changed)
+            self._behavior_filter_actions.append((rid, rname, roi_act))
+
         # Wire up Select All / Select None
         def _check_all():
             for _bid, _lbl, act in self._behavior_filter_actions:
@@ -1507,10 +1564,11 @@ class BehaviorAnalyticsTab(QWidget):
         """Update the button text to reflect the current selection."""
         selected = self._selected_behavior_ids()
         total = len(self._behavior_filter_actions)
-        # Don't count distance in the "real" behavior total
-        real_total = sum(1 for bid, _, _ in self._behavior_filter_actions if bid != DISTANCE_BEHAVIOR_ID)
-        real_selected = sum(1 for bid in selected if bid != DISTANCE_BEHAVIOR_ID)
-        if real_selected == real_total and DISTANCE_BEHAVIOR_ID not in selected:
+        # Don't count the pseudo-behaviors (distance / ROI) in the "real" total
+        real_total = sum(1 for bid, _, _ in self._behavior_filter_actions if not is_pseudo_behavior_id(bid))
+        real_selected = sum(1 for bid in selected if not is_pseudo_behavior_id(bid))
+        has_pseudo_selected = any(is_pseudo_behavior_id(bid) for bid in selected)
+        if real_selected == real_total and not has_pseudo_selected:
             self._behavior_filter_btn.setText("All behaviors ▾")
         elif not selected:
             self._behavior_filter_btn.setText("(none) ▾")
@@ -1903,6 +1961,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._sections_tab.on_data_loaded()
         self._velocity_tab.on_data_loaded()
         QTimer.singleShot(0, self._compute_and_add_distance_rows)
+        QTimer.singleShot(0, self._compute_and_add_roi_rows)
 
     def _on_refresh_failed(self, traceback_str: str) -> None:
         """Main-thread callback: surface errors and re-enable the button."""
@@ -2359,6 +2418,141 @@ class BehaviorAnalyticsTab(QWidget):
             })
         self._summary_tab.rebuild()
         self._graphs_tab.update_graph()
+
+    def _configured_roi_count(self) -> int:
+        """Number of ROI zones to expose as pseudo-behaviors (0 if none defined).
+
+        Returns the project ``roi_count`` only when at least one zone (project
+        default or any per-subject override) has a non-zero area; otherwise
+        ROIs were never set up for this project and we expose nothing.
+        """
+        if self._project_root is None:
+            return 0
+        try:
+            cfg = self._roi_service.load(self._project_root)
+        except Exception:
+            return 0
+        count = max(0, int(cfg.get("roi_count", 0) or 0))
+        if count <= 0:
+            return 0
+
+        def _has_area(z: Any) -> bool:
+            return (
+                isinstance(z, dict)
+                and int(z.get("w", 0) or 0) > 0
+                and int(z.get("h", 0) or 0) > 0
+            )
+
+        proj_zones = cfg.get("project_rois", {}).get("target_zones", []) or []
+        if any(_has_area(z) for z in proj_zones):
+            return count
+        for s_block in (cfg.get("subject_rois", {}) or {}).values():
+            if any(_has_area(z) for z in (s_block.get("target_zones", []) or [])):
+                return count
+        return 0
+
+    def _compute_and_add_roi_rows(self) -> None:
+        """Compute per-session ROI occupancy and add pseudo-behavior rows.
+
+        One synthetic behavior per configured zone; the standard summary
+        columns carry the ROI metrics (time in zone, entries, mean visit
+        duration, latency to first entry).  Called via QTimer.singleShot so
+        behavior data renders before pose files are loaded.
+        """
+        if self._project_root is None:
+            return
+        existing_sids = {r["session_id"] for r in self._summary_rows}
+        if not existing_sids:
+            return
+        # Drop any stale ROI rows from a previous run.
+        self._summary_rows[:] = [
+            r for r in self._summary_rows
+            if not is_roi_behavior_id(r["behavior_id"])
+        ]
+        roi_count = self._configured_roi_count()
+        if roi_count <= 0:
+            self._summary_tab.rebuild()
+            return
+
+        fps = self._project_fps()
+        for sid in sorted(existing_sids):
+            subject = self._subject_by_session.get(sid, sid)
+            session_label = self._session_label_by_session.get(sid, subject)
+            session_type = self._session_type_by_session.get(sid, "")
+            try:
+                rois = self._roi_service.resolve_target_rois(
+                    self._project_root, f"{subject}::{sid}"
+                )
+            except Exception:
+                rois = []
+            pose = self._get_pose_for_session(sid)
+            for zi in range(roi_count):
+                roi = rois[zi] if zi < len(rois) else None
+                stats = self._compute_session_roi_stats(sid, pose, roi, fps)
+                if stats is None:
+                    continue
+                time_s, n_entries, mean_s, latency_s = stats
+                self._summary_rows.append({
+                    "session_id": sid,
+                    "subject": subject,
+                    "session_label": session_label,
+                    "session_type": session_type,
+                    "behavior_id": roi_behavior_id(zi + 1),
+                    "behavior": roi_behavior_name(zi + 1, roi_count),
+                    "n_bouts": float(n_entries),
+                    "time_spent_s": time_s,
+                    "mean_bout_s": mean_s,
+                    "latency_s": latency_s,
+                    "distance_cm": 0.0,
+                })
+        self._summary_tab.rebuild()
+        self._graphs_tab.update_graph()
+
+    def _compute_session_roi_stats(
+        self, session_id: str, pose: Any, roi: dict | None, fps: float,
+    ) -> tuple[float, int, float, float] | None:
+        """Return ``(time_in_s, n_entries, mean_visit_s, latency_s)`` for one ROI.
+
+        A frame counts as "inside" when the body centroid falls within the ROI
+        rectangle.  Boundary/tracking flicker is debounced so jitter doesn't
+        inflate the entry count.  Returns None when the ROI is undefined
+        (zero area) or pose data is unavailable.
+        """
+        if pose is None or not roi:
+            return None
+        x = int(roi.get("x", 0) or 0)
+        y = int(roi.get("y", 0) or 0)
+        w = int(roi.get("w", 0) or 0)
+        h = int(roi.get("h", 0) or 0)
+        if w <= 0 or h <= 0:
+            return None
+
+        start_idx = self._analysis_prechop_for_session(session_id)
+        cx = np.asarray(pose.centroid_x, dtype=np.float64)[start_idx:]
+        cy = np.asarray(pose.centroid_y, dtype=np.float64)[start_idx:]
+        if cx.size == 0:
+            return None
+
+        inside = (
+            np.isfinite(cx) & np.isfinite(cy)
+            & (cx >= x) & (cx <= x + w)
+            & (cy >= y) & (cy <= y + h)
+        )
+        # Debounce ~0.2 s of boundary flicker so a jittery frame isn't an entry.
+        min_run = max(1, int(round(0.2 * fps))) if fps > 0 else 1
+        inside = _debounce_bool(inside, min_run)
+
+        n_inside = int(inside.sum())
+        time_s = (n_inside / fps) if fps > 0 else 0.0
+        # Entries = out→in transitions; an initial inside run counts as one.
+        entries_mask = inside & ~np.concatenate(([False], inside[:-1]))
+        n_entries = int(entries_mask.sum())
+        mean_s = (time_s / n_entries) if n_entries > 0 else 0.0
+        if n_entries > 0 and fps > 0:
+            latency_s = float(int(np.argmax(inside))) / fps
+        else:
+            latency_s = float("nan")
+        return time_s, n_entries, mean_s, latency_s
 
     def _clear_display(self) -> None:
         self._summary_rows.clear()
@@ -5771,7 +5965,7 @@ class _GraphsWidget(QWidget):
 
         for key, template in wanted.items():
             if key not in processed:
-                if template.get("behavior_id") == DISTANCE_BEHAVIOR_ID:
+                if is_pseudo_behavior_id(template.get("behavior_id", "")):
                     result.append(template)
                 else:
                     result.append({
@@ -5860,8 +6054,9 @@ class _GraphsWidget(QWidget):
         # with no bouts, or the distance pseudo-behavior)
         for key, template in wanted.items():
             if key not in processed:
-                if template.get("behavior_id") == DISTANCE_BEHAVIOR_ID:
-                    # Distance rows need separate handling — keep as-is for now
+                if is_pseudo_behavior_id(template.get("behavior_id", "")):
+                    # Pseudo-behavior rows (distance / ROI) have no raw bouts —
+                    # keep their whole-session values as-is.
                     result.append(template)
                 else:
                     result.append({

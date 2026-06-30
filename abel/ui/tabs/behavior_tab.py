@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QColorDialog,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -152,6 +153,24 @@ class BehaviorTab(QWidget):
         self._f_active = QCheckBox("Behavior is active")
         self._f_active.setChecked(True)
 
+        # Social / interaction behavior (multi-animal projects only). Hidden
+        # unless the project tracks more than one animal.
+        self._f_social = QCheckBox("Social / interaction behavior")
+        self._f_social.setToolTip(
+            "Mark this as an interaction behavior. It is trained on the focal\n"
+            "animal's timeline using inter-animal (social_*) features. Requires a\n"
+            "multi-animal project with interaction features enabled."
+        )
+        self._f_directionality = QComboBox()
+        self._f_directionality.addItems(["none", "directed", "mutual"])
+        self._f_directionality.setToolTip(
+            "directed: labels the focal actor (e.g. the animal that displaces another).\n"
+            "mutual: labels both interacting animals' overlapping segments.\n"
+            "none: solo behavior."
+        )
+        self._f_social.toggled.connect(self._f_directionality.setEnabled)
+        self._f_directionality.setEnabled(False)
+
         form_layout.addRow("Name *", self._f_name)
 
         short_row = QHBoxLayout()
@@ -173,6 +192,18 @@ class BehaviorTab(QWidget):
         dur_row.addStretch()
         form_layout.addRow("Min duration", dur_row)
         form_layout.addRow("", self._f_active)
+
+        self._social_row = QWidget()
+        social_row = QHBoxLayout(self._social_row)
+        social_row.setContentsMargins(0, 0, 0, 0)
+        social_row.addWidget(self._f_social)
+        social_row.addSpacing(12)
+        social_row.addWidget(QLabel("Directionality:"))
+        social_row.addWidget(self._f_directionality)
+        social_row.addStretch()
+        self._social_form_row = self._social_row
+        form_layout.addRow("", self._social_row)
+        self._social_row.setVisible(False)  # shown only for multi-animal projects
 
         # Behavior definition
         self._f_description = QTextEdit()
@@ -231,9 +262,22 @@ class BehaviorTab(QWidget):
         self._project_root = project_root
         self._service.set_project(project_root)
         self._load_co_occurring_setting()
+        self._apply_multi_animal_visibility()
         self.refresh()
         self._clear_form()
         self._set_form_enabled(False)
+
+    def _apply_multi_animal_visibility(self) -> None:
+        """Show social-behavior fields only when the project tracks >1 animal."""
+        multi = False
+        if self._project_root:
+            cfg_path = self._project_root / "project.yaml"
+            if cfg_path.exists():
+                raw = read_yaml(cfg_path, {})
+                multi = int(raw.get("num_animals", 1) or 1) > 1 or not bool(
+                    raw.get("single_animal", True)
+                )
+        self._social_row.setVisible(multi)
 
     def _load_co_occurring_setting(self) -> None:
         if not self._project_root:
@@ -288,6 +332,10 @@ class BehaviorTab(QWidget):
         self._f_shortcut.setText(b.keyboard_shortcut or "")
         self._f_min_dur.setValue(b.min_duration_sec)
         self._f_active.setChecked(b.is_active)
+        self._f_social.setChecked(bool(getattr(b, "is_social", False)))
+        direction = getattr(b, "directionality", "none") or "none"
+        idx = self._f_directionality.findText(direction)
+        self._f_directionality.setCurrentIndex(idx if idx >= 0 else 0)
         self._f_description.setPlainText(b.description)
 
     def _clear_form(self) -> None:
@@ -302,12 +350,14 @@ class BehaviorTab(QWidget):
                 widget.clear()
         self._f_min_dur.setValue(0.5)
         self._f_active.setChecked(True)
+        self._f_social.setChecked(False)
+        self._f_directionality.setCurrentIndex(0)
         self._set_color_btn(self._current_color)
 
     def _set_form_enabled(self, enabled: bool) -> None:
         for w in (
             self._f_name, self._f_short, self._f_color_btn, self._f_shortcut,
-            self._f_min_dur, self._f_active,
+            self._f_min_dur, self._f_active, self._f_social, self._f_directionality,
             self._f_description,
             self._save_btn, self._cancel_btn, self._delete_btn,
         ):
@@ -338,6 +388,8 @@ class BehaviorTab(QWidget):
             keyboard_shortcut=self._f_shortcut.text().strip() or None,
             min_duration_sec=self._f_min_dur.value(),
             is_active=self._f_active.isChecked(),
+            is_social=self._f_social.isChecked(),
+            directionality=self._f_directionality.currentText() if self._f_social.isChecked() else "none",
             description=self._f_description.toPlainText().strip(),
         )
 

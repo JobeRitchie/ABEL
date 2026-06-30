@@ -32,8 +32,10 @@ from PySide6.QtWidgets import (
 )
 
 from abel.ui.behavior_remap_dialog import BehaviorRemapDialog
+from abel.ui.baseline_import_dialog import BaselineImportDialog
 from abel.services.model_refinement_service import (
     COMPAT_THRESHOLD,
+    BaselinePreview,
     ImportRecord,
     ModelRefinementService,
     RefinementPreview,
@@ -90,6 +92,59 @@ class _ImportWorker(QThread):
         self.done.emit(results)
 
 
+class _BaselinePreviewWorker(QThread):
+    """Computes the (I/O-heavy) baseline detection summary off the UI thread."""
+
+    done = Signal(object)  # BaselinePreview | None
+    failed = Signal(str)
+
+    def __init__(self, host_root: Path, source_root: Path, aliases: dict[str, str]) -> None:
+        super().__init__()
+        self._host_root = host_root
+        self._source_root = source_root
+        self._aliases = aliases
+        self._svc = ModelRefinementService()
+
+    def run(self) -> None:
+        try:
+            pv = self._svc.preview_baseline(
+                self._host_root, self._source_root, name_overrides=self._aliases,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Baseline preview failed for %s", self._source_root)
+            self.failed.emit(str(exc))
+            return
+        self.done.emit(pv)
+
+
+class _BaselineImportWorker(QThread):
+    """Runs the baseline import (examples + models) off the UI thread."""
+
+    done = Signal(dict)
+
+    def __init__(
+        self, host_root: Path, source_root: Path,
+        decisions: dict[str, str], aliases: dict[str, str],
+    ) -> None:
+        super().__init__()
+        self._host_root = host_root
+        self._source_root = source_root
+        self._decisions = decisions
+        self._aliases = aliases
+        self._svc = ModelRefinementService()
+
+    def run(self) -> None:
+        try:
+            res = self._svc.import_baseline(
+                self._host_root, self._source_root,
+                behavior_decisions=self._decisions, name_overrides=self._aliases,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Baseline import failed for %s", self._source_root)
+            res = {"status": "error", "error": str(exc)}
+        self.done.emit(res)
+
+
 class ModelRefinementTab(QWidget):
     """Import labeled examples from other projects, then retrain."""
 
@@ -102,6 +157,7 @@ class ModelRefinementTab(QWidget):
         self._previews: dict[str, RefinementPreview] = {}  # str(path) -> preview
         self._imports_by_key: dict[str, ImportRecord] = {}  # "import::<tag>" -> record
         self._worker: _ImportWorker | None = None
+        self._baseline_worker: _BaselinePreviewWorker | _BaselineImportWorker | None = None
         self._aliases: dict[str, str] = {}  # {source_name_lower: host_name}
 
         header = QLabel("Model Refinement")
@@ -122,6 +178,15 @@ class ModelRefinementTab(QWidget):
         self._add_btn = QPushButton("+ Add Source Project…")
         self._add_btn.setStyleSheet(_BTN)
         self._add_btn.clicked.connect(self._add_source)
+        self._baseline_btn = QPushButton("Import Project as Baseline…")
+        self._baseline_btn.setStyleSheet(_BTN)
+        self._baseline_btn.setToolTip(
+            "Seed this project from another project's clips, labeled features, and "
+            "trained models — so you can run those models here or fold the examples "
+            "into your training pool. Works on projects with extracted features that "
+            "haven't trained yet."
+        )
+        self._baseline_btn.clicked.connect(self._import_baseline)
         self._remove_btn = QPushButton("Remove Selected")
         self._remove_btn.setStyleSheet(_BTN)
         self._remove_btn.clicked.connect(self._remove_selected)
@@ -145,6 +210,7 @@ class ModelRefinementTab(QWidget):
         self._remap_btn.setEnabled(False)
         self._remap_btn.clicked.connect(self._open_remap_dialog)
         btn_row.addWidget(self._add_btn)
+        btn_row.addWidget(self._baseline_btn)
         btn_row.addWidget(self._remove_btn)
         btn_row.addWidget(self._clear_btn)
         btn_row.addWidget(self._remove_import_btn)
@@ -262,6 +328,105 @@ class ModelRefinementTab(QWidget):
             return
         self._previews[str(src)] = pv
         self._rebuild_table()
+
+    # ── Baseline import (clips + feature rows + models) ──────────────────
+
+    def _import_baseline(self) -> None:
+        if self._host_root is None:
+            QMessageBox.information(self, "Import Baseline", "Open a project first.")
+            return
+        if self._worker is not None or self._baseline_worker is not None:
+            return
+        path = QFileDialog.getExistingDirectory(self, "Select Source ABEL Project")
+        if not path:
+            return
+        src = Path(path)
+        if src.resolve() == self._host_root.resolve():
+            QMessageBox.information(self, "Import Baseline", "That is the current project.")
+            return
+
+        self._baseline_btn.setEnabled(False)
+        self._add_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._status.setStyleSheet("font-size: 11px; color: #78909C; padding-top: 2px;")
+        self._status.setText(f"Inspecting '{src.name}'…")
+
+        worker = _BaselinePreviewWorker(self._host_root, src, dict(self._aliases))
+        worker.done.connect(lambda pv: self._on_baseline_preview(src, pv))
+        worker.failed.connect(self._on_baseline_preview_failed)
+        self._baseline_worker = worker
+        worker.start()
+
+    def _on_baseline_preview_failed(self, msg: str) -> None:
+        self._baseline_worker = None
+        self._progress.setVisible(False)
+        self._baseline_btn.setEnabled(True)
+        self._add_btn.setEnabled(True)
+        QMessageBox.warning(self, "Import Baseline", f"Could not read project:\n{msg}")
+        self._status.setText("")
+
+    def _on_baseline_preview(self, src: Path, pv: BaselinePreview) -> None:
+        if self._baseline_worker is not None:
+            self._baseline_worker.wait()
+            self._baseline_worker.deleteLater()
+            self._baseline_worker = None
+        self._progress.setVisible(False)
+        self._baseline_btn.setEnabled(True)
+        self._add_btn.setEnabled(True)
+        self._status.setText("")
+
+        if not pv.rows:
+            QMessageBox.information(
+                self, "Import Baseline",
+                f"'{pv.tag}' has no labeled behaviours or trained models to import.",
+            )
+            return
+
+        host_behaviors = self._svc.list_host_behaviors(self._host_root)
+        dlg = BaselineImportDialog(pv, host_behaviors, parent=self)
+        if dlg.exec() != BaselineImportDialog.DialogCode.Accepted:
+            return
+        decisions = dlg.decisions()
+
+        self._baseline_btn.setEnabled(False)
+        self._add_btn.setEnabled(False)
+        self._import_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._status.setStyleSheet("font-size: 11px; color: #78909C; padding-top: 2px;")
+        self._status.setText(f"Importing baseline from '{pv.tag}'…")
+
+        worker = _BaselineImportWorker(
+            self._host_root, src, decisions, dict(self._aliases),
+        )
+        worker.done.connect(self._on_baseline_import_done)
+        self._baseline_worker = worker
+        worker.start()
+
+    def _on_baseline_import_done(self, res: dict) -> None:
+        if self._baseline_worker is not None:
+            self._baseline_worker.wait()
+            self._baseline_worker.deleteLater()
+            self._baseline_worker = None
+        self._progress.setVisible(False)
+        self._baseline_btn.setEnabled(True)
+        self._add_btn.setEnabled(True)
+
+        if res.get("status") == "success":
+            rows = int(res.get("imported_rows", 0))
+            n_models = len(res.get("imported_models", []))
+            clips = int(res.get("review_registered", 0))
+            self._status.setStyleSheet("font-size: 11px; color: #66BB6A; padding-top: 2px;")
+            self._status.setText(
+                f"Imported baseline from '{res.get('tag', '')}': {rows} training "
+                f"row(s), {clips} review clip(s), {n_models} model(s). "
+                "Retrain in Active Learning, or run the imported models directly."
+            )
+        else:
+            self._status.setStyleSheet("font-size: 11px; color: #EF5350; padding-top: 2px;")
+            self._status.setText(
+                f"Baseline import failed: {res.get('error', 'Unknown error')}"
+            )
+        self._reload_imports()
 
     def _remove_selected(self) -> None:
         row = self._table.currentRow()

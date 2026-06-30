@@ -2,7 +2,7 @@
 
 **ABEL — Active-learning Behavior Estimation and Labeling**
 
-Version 0.5.3 · Python ≥ 3.10 · UNC Non-Commercial License
+Version 0.6.0 · Python ≥ 3.10 · UNC Non-Commercial License
 
 ABEL is a local-first desktop application for reproducible, human-in-the-loop
 behavior modeling from DLC-tracked videos. It is built around a pose-first

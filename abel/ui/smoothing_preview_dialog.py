@@ -141,8 +141,14 @@ def _overlay_pose(
     scale: float,
     trail_color: tuple[int, int, int],
     lk_threshold: float,
+    fixed_color: tuple[int, int, int] | None = None,
 ) -> None:
-    """Draw body-part dots and centroid trail onto *canvas* in-place."""
+    """Draw body-part dots and centroid trail onto *canvas* in-place.
+
+    When *fixed_color* is given, all of this animal's keypoints are drawn in that
+    single colour (used to tell apart multiple animals); otherwise each body part
+    uses its own role colour.
+    """
     import cv2  # noqa: PLC0415
 
     h, w = canvas.shape[:2]
@@ -155,8 +161,11 @@ def _overlay_pose(
             break
         alpha = 1.0 - back / (_TRAIL_FRAMES + 1)
         intensity = int(alpha * 180)
-        cx = int(centroid_x[prev] * scale)
-        cy = int(centroid_y[prev] * scale)
+        pcx, pcy = centroid_x[prev], centroid_y[prev]
+        if not (np.isfinite(pcx) and np.isfinite(pcy)):
+            continue  # animal absent at this past frame — no trail point
+        cx = int(pcx * scale)
+        cy = int(pcy * scale)
         if 0 <= cx < w and 0 <= cy < h:
             c = (
                 int(trail_color[0] * alpha),
@@ -168,11 +177,17 @@ def _overlay_pose(
     # Body-part dots
     for pi in range(n_parts):
         conf = float(lk_vals[frame_idx, pi]) if pi < lk_vals.shape[1] else 0.0
-        bx = int(x_vals[frame_idx, pi] * scale)
-        by = int(y_vals[frame_idx, pi] * scale)
+        px, py = x_vals[frame_idx, pi], y_vals[frame_idx, pi]
+        if not (np.isfinite(px) and np.isfinite(py)):
+            continue  # keypoint undetected (animal absent / dropout)
+        bx = int(px * scale)
+        by = int(py * scale)
         if not (0 <= bx < w and 0 <= by < h):
             continue
-        color = _part_color(pi) if conf >= lk_threshold else (60, 60, 60)
+        if conf >= lk_threshold:
+            color = fixed_color if fixed_color is not None else _part_color(pi)
+        else:
+            color = (60, 60, 60)
         radius = 4 if conf >= lk_threshold else 2
         cv2.circle(canvas, (bx, by), radius, color, -1)
         if conf >= lk_threshold:
@@ -183,6 +198,8 @@ def _crop_box_static(
     gray: np.ndarray, x: float, y: float, radius: int = 12,
 ) -> np.ndarray:
     """Extract a square crop from *gray* centred at (*x*, *y*)."""
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return np.zeros((1, 1), dtype=gray.dtype)
     h, w = gray.shape[:2]
     x0 = max(0, int(x) - radius)
     x1 = min(w, int(x) + radius)
@@ -269,12 +286,19 @@ def render_preview_frames(
     local_radius_px: int = 0,
     fps: float = 30.0,
     mog2_var_threshold: int = 16,
+    extra_raw: list[PoseData] | None = None,
+    extra_smooth: list[PoseData] | None = None,
 ) -> PreviewResult:
     """Build rendered frames + per-frame trace arrays (worker thread).
 
     Computes all traces defined in TRACE_CATALOG: video context features
     (MOG2, pixel change, variance), global motion (raw vs smoothed),
     centroid kinematics, and per-bodypart speeds.
+
+    ``extra_raw``/``extra_smooth`` are additional animals (multi-animal sessions);
+    their poses are overlaid on the raw/smoothed panes in distinct per-animal
+    colours so the preview shows every tracked animal.  Traces remain focused on
+    the primary animal (``raw_pose``/``smooth_pose``).
     """
     import cv2  # noqa: PLC0415
     import re   # noqa: PLC0415
@@ -284,6 +308,30 @@ def render_preview_frames(
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         return _empty
+
+    # Distinct BGR colours for additional animals (primary keeps role colours).
+    _EXTRA_COLORS = [
+        (255, 160, 80), (180, 90, 240), (90, 230, 230),
+        (120, 255, 120), (80, 120, 255), (200, 200, 80),
+    ]
+    extra_raw = extra_raw or []
+    extra_smooth = extra_smooth or []
+    extras = []
+    for k, ep in enumerate(extra_raw):
+        es = extra_smooth[k] if k < len(extra_smooth) else ep
+        extras.append({
+            "raw_x": ep.x.to_numpy(dtype=np.float32),
+            "raw_y": ep.y.to_numpy(dtype=np.float32),
+            "raw_lk": ep.likelihood.to_numpy(dtype=np.float32),
+            "sm_x": es.x.to_numpy(dtype=np.float32),
+            "sm_y": es.y.to_numpy(dtype=np.float32),
+            "raw_cx": np.asarray(ep.centroid_x, dtype=np.float64),
+            "raw_cy": np.asarray(ep.centroid_y, dtype=np.float64),
+            "sm_cx": np.asarray(es.centroid_x, dtype=np.float64),
+            "sm_cy": np.asarray(es.centroid_y, dtype=np.float64),
+            "color": _EXTRA_COLORS[k % len(_EXTRA_COLORS)],
+            "n": ep.n_frames,
+        })
 
     raw_x = raw_pose.x.to_numpy(dtype=np.float32)
     raw_y = raw_pose.y.to_numpy(dtype=np.float32)
@@ -459,6 +507,16 @@ def render_preview_frames(
         # ── Full-frame MOG2 then crop around nose ────────────────────
         fgmask_full = fg_sub.apply(gray_ds, learningRate=0.005)
         ncx, ncy = float(sm_x[fi, nose_idx]), float(sm_y[fi, nose_idx])
+        if not (np.isfinite(ncx) and np.isfinite(ncy)):
+            # Primary nose undetected this frame (animal absent). Fall back to the
+            # primary centroid, then any present animal's centroid, then the frame
+            # centre — so the nose-energy trace/inset stay defined without crashing.
+            cand = [(sm_cx[fi], sm_cy[fi])]
+            cand += [(ex["sm_cx"][fi], ex["sm_cy"][fi]) for ex in extras if fi < ex["n"]]
+            ncx, ncy = next(
+                ((cx, cy) for cx, cy in cand if np.isfinite(cx) and np.isfinite(cy)),
+                (w_src / 2.0, h_src / 2.0),
+            )
         ds_ncx, ds_ncy = ncx / _DS, ncy / _DS
         ds_radius = max(4, radius // _DS)
         nose_fgmask = _crop_box_static(fgmask_full, ds_ncx, ds_ncy, ds_radius)
@@ -504,6 +562,23 @@ def render_preview_frames(
             lk_threshold=smoothing.likelihood_threshold,
         )
 
+        # ── Additional animals (multi-animal sessions) ───────────────
+        for ex in extras:
+            if fi >= ex["n"]:
+                continue
+            _overlay_pose(
+                left, ex["raw_x"], ex["raw_y"], ex["raw_lk"],
+                ex["raw_cx"], ex["raw_cy"], fi, scale,
+                trail_color=ex["color"], lk_threshold=smoothing.likelihood_threshold,
+                fixed_color=ex["color"],
+            )
+            _overlay_pose(
+                right, ex["sm_x"], ex["sm_y"], ex["raw_lk"],
+                ex["sm_cx"], ex["sm_cy"], fi, scale,
+                trail_color=ex["color"], lk_threshold=smoothing.likelihood_threshold,
+                fixed_color=ex["color"],
+            )
+
         if scaled_radius > 0:
             h_r, w_r = right.shape[:2]
             overlay = right.copy()
@@ -511,8 +586,11 @@ def render_preview_frames(
                 conf = float(raw_lk[fi, pi]) if pi < raw_lk.shape[1] else 0.0
                 if conf < smoothing.likelihood_threshold:
                     continue
-                bx = int(sm_x[fi, pi] * scale)
-                by = int(sm_y[fi, pi] * scale)
+                sx, sy = sm_x[fi, pi], sm_y[fi, pi]
+                if not (np.isfinite(sx) and np.isfinite(sy)):
+                    continue
+                bx = int(sx * scale)
+                by = int(sy * scale)
                 if 0 <= bx < w_r and 0 <= by < h_r:
                     cv2.circle(overlay, (bx, by), scaled_radius, (120, 200, 255), 1, cv2.LINE_AA)
             cv2.addWeighted(overlay, 0.5, right, 0.5, 0, right)
@@ -848,14 +926,23 @@ class SmoothingPreviewDialog(QDialog):
         _cancel = self._cancel_flag
 
         def _work() -> PreviewResult:
-            raw_pose = _pose_svc.load(pose_path)
-            smooth_pose = _pose_svc.clean_pose(
-                raw_pose,
-                likelihood_threshold=smoothing.likelihood_threshold,
-                interpolate=smoothing.interpolate_dropouts,
-                interpolate_max_gap=smoothing.interpolate_max_gap,
-                smoothing_window=smoothing.smoothing_window,
-            )
+            def _clean(p):
+                return _pose_svc.clean_pose(
+                    p,
+                    likelihood_threshold=smoothing.likelihood_threshold,
+                    interpolate=smoothing.interpolate_dropouts,
+                    interpolate_max_gap=smoothing.interpolate_max_gap,
+                    smoothing_window=smoothing.smoothing_window,
+                )
+
+            # Load every tracked individual; the first is the primary animal
+            # (drives the traces/MOG2) and the rest are overlaid as extras.
+            multi_raw = _pose_svc.load_multi(pose_path)
+            inds = list(multi_raw.individuals)
+            raw_pose = multi_raw.per_individual[inds[0]]
+            smooth_pose = _clean(raw_pose)
+            extra_raw = [multi_raw.per_individual[i] for i in inds[1:]]
+            extra_smooth = [_clean(p) for p in extra_raw]
 
             # Determine start frame using a random 10 s window
             fps_source = 30.0
@@ -874,7 +961,32 @@ class SmoothingPreviewDialog(QDialog):
 
             n_preview = min(int(fps_source * _PREVIEW_SEC), total_vid_frames)
             max_start = max(0, total_vid_frames - n_preview)
-            start_frame = random.randint(0, max_start) if max_start > 0 else 0
+
+            # Prefer a window where at least one animal is actually present —
+            # these videos have long stretches with no mouse, which would render
+            # an empty (and previously crash-prone) preview.  Presence = any
+            # individual has a finite centroid in the window.
+            present = np.zeros(total_vid_frames, dtype=bool)
+            for _ind in inds:
+                p = multi_raw.per_individual[_ind]
+                cx = np.asarray(p.centroid_x, dtype=float)[:total_vid_frames]
+                cy = np.asarray(p.centroid_y, dtype=float)[:total_vid_frames]
+                m = np.isfinite(cx) & np.isfinite(cy)
+                present[: len(m)] |= m
+            if max_start > 0 and present.any():
+                # Use the windowed presence count to bias toward populated windows;
+                # pick randomly among the best-covered candidates for variety.
+                win = max(1, n_preview)
+                csum = np.concatenate([[0], np.cumsum(present.astype(int))])
+                coverage = csum[win : max_start + win + 1] - csum[0 : max_start + 1]
+                best = int(coverage.max())
+                if best > 0:
+                    candidates = np.flatnonzero(coverage >= max(1, int(best * 0.75)))
+                    start_frame = int(random.choice(candidates.tolist()))
+                else:
+                    start_frame = random.randint(0, max_start)
+            else:
+                start_frame = random.randint(0, max_start) if max_start > 0 else 0
 
             return render_preview_frames(
                 video_path=video_path,
@@ -888,6 +1000,8 @@ class SmoothingPreviewDialog(QDialog):
                 local_radius_px=local_radius,
                 fps=fps_source,
                 mog2_var_threshold=mog2_thresh,
+                extra_raw=extra_raw,
+                extra_smooth=extra_smooth,
             )
 
         worker = TaskWorker(_work)

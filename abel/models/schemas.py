@@ -73,6 +73,16 @@ class InvariantFeatureConfig(BaseModel):
     it requires at least three midline keypoints; the feature is all-zero when those
     keypoints are absent."""
 
+    enable_social_features: bool = False
+    """Compute inter-animal (social/interaction) features in multi-animal projects.
+
+    For each focal animal, distances/orientation/contact to every *other* animal
+    in the same session are computed and reduced over conspecifics into a fixed
+    column set (``social_*_min`` = nearest other, ``social_*_mean`` = averaged
+    over others) so the schema is independent of the number of animals.  Has no
+    effect on single-animal projects (no other animals to compare against).
+    Disabled by default."""
+
     enable_clipwise_deltas: bool = False
     """Add clip-wise posture-change features at the window-aggregation stage.
 
@@ -210,6 +220,11 @@ class ProjectConfig(BaseModel):
     assay_name: str = "generic_assay"
     species: str = "mouse"
     single_animal: bool = True
+    num_animals: int = 1
+    """Number of animals tracked per session.  ``1`` (default) is the legacy
+    single-animal path; ``> 1`` enables multi-animal ingestion, per-individual
+    feature extraction, and (when ``enable_social_features`` is set) interaction
+    features.  Kept consistent with ``single_animal`` (single_animal == num_animals <= 1)."""
     expected_pose_formats: list[str] = Field(default_factory=lambda: ["csv", "h5"])
     default_fps: float = 30.0
     default_clip_duration_sec: float = 2.0
@@ -261,6 +276,9 @@ class PoseAsset(BaseModel):
     format: str
     frame_count: int | None = None
     body_parts: list[str] = Field(default_factory=list)
+    individuals: list[str] = Field(default_factory=list)
+    """Detected individuals for a multi-animal pose file (e.g. ["Mouse1","Mouse2"]).
+    Empty for single-animal / 3-level files."""
     has_likelihood: bool = True
     subject_id: str | None = None
     session_id: str | None = None
@@ -283,6 +301,17 @@ class LinkedSession(BaseModel):
     subject_locked: bool = False  # True when subject was set by hand; protected from regex reapply
     pairing_score: float = 0.0
     pairing_notes: str = ""
+    individuals: list[str] = Field(default_factory=list)
+    """Generic individual IDs detected in a multi-animal pose file (e.g.
+    ``["Mouse1", "Mouse2"]``).  Empty for single-animal / 3-level pose files."""
+    individual_subject_map: dict[str, str] = Field(default_factory=dict)
+    """Maps each detected individual to a real project subject identity (e.g.
+    ``{"Mouse1": "green", "Mouse2": "black"}``).  Unmapped individuals fall back
+    to ``{subject_id}:{individual}`` as their ``animal_id``."""
+    identity_corrections: list[dict[str, Any]] = Field(default_factory=list)
+    """User-confirmed identity-swap corrections, each ``{"frame": t, "a": A,
+    "b": B}`` meaning individuals A and B exchange tracks from frame ``t`` onward.
+    Applied on pose load so features see identity-consistent tracks."""
 
 
 class BehaviorDefinition(BaseModel):
@@ -299,6 +328,14 @@ class BehaviorDefinition(BaseModel):
     color: str = "#4A90E2"
     keyboard_shortcut: str | None = None
     is_active: bool = True
+    is_social: bool = False
+    """True for social/interaction behaviors that depend on inter-animal
+    (``social_*``) features.  Requires a multi-animal project (num_animals > 1).
+    Solo behaviors (default) work unchanged on single- and multi-animal projects."""
+    directionality: Literal["none", "directed", "mutual"] = "none"
+    """For social behaviors: ``directed`` labels the focal *actor* (e.g. the
+    animal that displaces another); ``mutual`` labels both interacting animals'
+    overlapping segments positive.  ``none`` for solo behaviors."""
     notes: str = ""
     version_history: list[dict[str, Any]] = Field(default_factory=list)
     prompt_template: dict[str, str] = Field(
@@ -317,6 +354,9 @@ class SeedExample(BaseModel):
     session_id: str
     start_frame: int
     end_frame: int
+    animal_id: str | None = None
+    """Which focal animal in a multi-animal session this seed applies to.  None
+    (default) means the sole animal in a single-animal session, or all animals."""
     label_type: str = "positive"
     quality_flag: str = "clean"
     notes: str = ""
@@ -580,6 +620,9 @@ class ValidationSettings(BaseModel):
     loop_default: bool = True
     autoadvance_default: bool = True
     clip_seconds: float = 2.0
+    # Behavior Grid panel: crop half-width multiplier (>1 zooms out). Persisted
+    # so the reviewer's preferred framing survives project reloads / new grids.
+    behavior_grid_crop_scale: float = 1.0
 
 
 class ValidationClipRecord(BaseModel):

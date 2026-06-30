@@ -1311,6 +1311,19 @@ class BehaviorGridPanel(QWidget):
             sp.setSuffix(" s")
             sp.setFixedWidth(80)
 
+        self._spin_crop = QDoubleSpinBox()
+        self._spin_crop.setRange(0.4, 3.0)
+        self._spin_crop.setSingleStep(0.1)
+        self._spin_crop.setDecimals(1)
+        self._spin_crop.setValue(1.0)
+        self._spin_crop.setSuffix("×")
+        self._spin_crop.setFixedWidth(80)
+        self._spin_crop.setToolTip(
+            "Crop size around each animal. Above 1× shows more surroundings (zoom "
+            "out); below 1× tightens onto the subject."
+        )
+        self._spin_crop.valueChanged.connect(self._on_crop_changed)
+
         self._res_combo = QComboBox()
         for label, _px in _GRID_RESOLUTIONS:
             self._res_combo.addItem(label)
@@ -1337,6 +1350,9 @@ class BehaviorGridPanel(QWidget):
         controls.addWidget(self._spin_pre)
         controls.addWidget(QLabel("After:"))
         controls.addWidget(self._spin_post)
+        controls.addSpacing(10)
+        controls.addWidget(QLabel("Crop:"))
+        controls.addWidget(self._spin_crop)
         controls.addSpacing(10)
         controls.addWidget(QLabel("Resolution:"))
         controls.addWidget(self._res_combo)
@@ -1382,7 +1398,29 @@ class BehaviorGridPanel(QWidget):
         self._player.close_clip()
         self._player.hide()
         self._empty.show()
+        self._restore_crop_scale()
         self._reload_behaviors()
+
+    def _restore_crop_scale(self) -> None:
+        """Load the persisted Crop × value for this project into the spinner."""
+        try:
+            crop = float(self._service.load_settings().behavior_grid_crop_scale)
+        except Exception:
+            crop = 1.0
+        self._spin_crop.blockSignals(True)
+        self._spin_crop.setValue(crop)
+        self._spin_crop.blockSignals(False)
+
+    def _on_crop_changed(self, value: float) -> None:
+        """Persist the Crop × value so it survives project reloads / new grids."""
+        if self._project_root is None:
+            return
+        try:
+            settings = self._service.load_settings()
+            settings.behavior_grid_crop_scale = float(value)
+            self._service.save_settings(settings)
+        except Exception:
+            logger.exception("Behavior grid: failed to persist crop scale")
 
     def _reload_behaviors(self) -> None:
         self._behavior_combo.blockSignals(True)
@@ -1421,6 +1459,7 @@ class BehaviorGridPanel(QWidget):
             int(grid_px),
             bool(self._keypoints_chk.isChecked()),
             Path(out_path),
+            crop_scale=float(self._spin_crop.value()),
         )
         worker.signals.finished.connect(self._on_generated)
         worker.signals.failed.connect(self._on_generate_failed)

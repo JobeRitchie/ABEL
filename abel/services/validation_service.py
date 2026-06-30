@@ -649,6 +649,23 @@ class ValidationService:
                 return float(v.fps)
         return 30.0
 
+    def _session_subject_map(self) -> dict[str, str]:
+        """Map ``session_id -> subject_id`` from the import manifest (best effort).
+
+        Sessions without a resolvable subject are omitted; callers fall back to
+        treating each such session as its own subject.
+        """
+        manifest = self._imports.load_manifest(self._root())
+        if manifest is None:
+            return {}
+        out: dict[str, str] = {}
+        for session in manifest.linked_sessions:
+            sid = str(session.session_id or "").strip()
+            sub = str(getattr(session, "subject_id", "") or "").strip()
+            if sid and sub:
+                out[sid] = sub
+        return out
+
     # ==================================================================
     # Quiz assembly
     # ==================================================================
@@ -1019,13 +1036,16 @@ class ValidationService:
         n_cells: int = 25,
         top_fraction: float = 0.4,
     ) -> list[GridCellSpec]:
-        """Pick up to ``n_cells`` strong positive bouts spread across sessions.
+        """Pick up to ``n_cells`` strong positive bouts spread across subjects.
 
         Bouts are detected per session, filtered to the top ``top_fraction`` by
         mean probability (the confident detections), then chosen round-robin so
-        distinct sessions are preferred; once every session has contributed, more
-        bouts are drawn from already-used sessions, skipping any that frame-overlap
-        an already-chosen bout from that same session.
+        distinct *subjects* are preferred — every subject contributes one bout
+        before any subject contributes a second.  Once unique subjects are
+        exhausted, additional bouts are drawn from subjects that have more than
+        one bout, skipping any that frame-overlap an already-chosen bout from the
+        same session so no bout is duplicated.  Sessions whose subject is unknown
+        (no manifest mapping) are each treated as their own subject.
         """
         import random  # noqa: PLC0415
 
@@ -1055,23 +1075,39 @@ class ValidationService:
         if not pools:
             return []
 
+        # Group sessions by subject so the round-robin prefers unique subjects.
+        # Sessions with no known subject fall back to being their own subject.
+        subject_of = self._session_subject_map()
+        subjects: dict[str, list[str]] = defaultdict(list)
+        for sid in pools:
+            subjects[subject_of.get(sid, sid)].append(sid)
+
         chosen: list[GridCellSpec] = []
         used: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        sessions = list(pools.keys())
-        # Round-robin passes across sessions until full or pools exhausted.
+        subject_keys = list(subjects.keys())
+        # Round-robin passes across subjects until full or every pool is drained.
+        # Pass 1 gives one bout per subject; later passes reuse subjects that have
+        # additional (non-overlapping) bouts.
         while len(chosen) < n_cells and any(pools.values()):
-            random.shuffle(sessions)
-            for sid in sessions:
+            random.shuffle(subject_keys)
+            for subj in subject_keys:
                 if len(chosen) >= n_cells:
                     break
-                pool = pools.get(sid) or []
-                while pool:
-                    s, e, mp = pool.pop()
-                    if any(not (e < us or s > ue) for us, ue in used[sid]):
-                        continue  # overlaps an already-chosen bout from this session
-                    used[sid].append((s, e))
-                    chosen.append(GridCellSpec(sid, int(s), int(e), float(mp)))
-                    break
+                sids = [s for s in subjects[subj] if pools.get(s)]
+                random.shuffle(sids)
+                for sid in sids:
+                    pool = pools[sid]
+                    picked = False
+                    while pool:
+                        s, e, mp = pool.pop()
+                        if any(not (e < us or s > ue) for us, ue in used[sid]):
+                            continue  # overlaps an already-chosen bout from this session
+                        used[sid].append((s, e))
+                        chosen.append(GridCellSpec(sid, int(s), int(e), float(mp)))
+                        picked = True
+                        break
+                    if picked:
+                        break  # one bout per subject per pass
         return chosen[:n_cells]
 
     def render_behavior_grid(
@@ -1083,13 +1119,15 @@ class ValidationService:
         show_keypoints: bool,
         out_path: Path,
         progress_callback: Any = None,
+        crop_scale: float = 1.0,
     ) -> Path:
         """Render a 5×5 looping montage of strong positive bouts to *out_path*.
 
         Each cell is a subject-centred crop of one bout (padded by ``pre_seconds``
-        / ``post_seconds``) with optional pose-keypoint overlay.  Raises
-        ``RuntimeError`` when there is nothing to render or video decoding is
-        unavailable.
+        / ``post_seconds``) with optional pose-keypoint overlay.  ``crop_scale`` is
+        a linear multiplier on each cell's crop half-width (>1 zooms out to show
+        more surroundings, <1 tightens onto the subject).  Raises ``RuntimeError``
+        when there is nothing to render or video decoding is unavailable.
         """
         from abel.services import behavior_grid_render as render  # noqa: PLC0415
 
@@ -1163,6 +1201,7 @@ class ValidationService:
                     cell_px=cell_px,
                     show_keypoints=show_keypoints,
                     out_path=cell_out,
+                    crop_scale=float(crop_scale),
                 )
                 if ok:
                     cell_paths_entry = cell_out

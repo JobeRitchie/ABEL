@@ -14,16 +14,41 @@ from abel.services.provenance_service import ProvenanceService
 from abel.storage.file_store import write_json
 
 
+def canonical_distance_name(col: str) -> str:
+    """Return the canonical (sorted-endpoint) spelling of a pairwise-distance column.
+
+    Pairwise inter-keypoint distances are symmetric, so ``dist_a_to_b`` and
+    ``dist_b_to_a`` (and their ``_norm`` variants) denote the same quantity; the
+    canonical name sorts the two endpoints.  Non-distance columns — and ROI/target
+    distances such as ``*_to_target_dist`` / ``*_to_roi_*`` that don't parse as a
+    keypoint pair — are returned unchanged.  Centralised here so feature extraction,
+    representation building, and model-vs-data alignment at inference all agree on
+    one spelling.
+    """
+    norm = col.endswith("_norm")
+    core = col[: -len("_norm")] if norm else col
+    if not core.startswith("dist_"):
+        return col
+    parts = core[len("dist_") :].split("_to_")
+    if len(parts) != 2:
+        return col
+    a, b = parts
+    return "dist_" + "_to_".join(sorted((a, b))) + ("_norm" if norm else "")
+
+
 @dataclass
 class RepresentationConfig:
     window_size_frames: int = 60
     window_stride_frames: int = 15
     model_version: str = "behavior_repr_v1"
     # v2: clip-wise _delta is now an edge-band average (mean of last k − mean of
-    # first k frames) instead of last-frame − first-frame.  Bumping the version
-    # invalidates the content/config-hash representation cache so segment
-    # features are rebuilt with the new, jitter-robust delta.
-    feature_version: str = "representation_v2"
+    # first k frames) instead of last-frame − first-frame.
+    # v3: pairwise-distance columns are canonicalised (``dist_a_to_b`` /
+    # ``dist_b_to_a`` merged onto the sorted name) so mixed-order pose exports no
+    # longer produce duplicate, half-populated "dead" distance columns.
+    # Bumping the version invalidates the content/config-hash representation cache
+    # so segment features are rebuilt with the current feature definitions.
+    feature_version: str = "representation_v3"
     # DEPRECATED / no-op: feature exclusions are applied at training time, not
     # baked into the representation, so the cache stays valid across exclusion
     # changes.  Retained only for call-site compatibility.  See
@@ -41,21 +66,75 @@ class BehaviorRepresentationService:
     def _parquet_content_sig(path: Path) -> list:
         """Cheap content/structure signature of a parquet file.
 
-        Reads only the footer: row count + sorted column names.  This is
-        independent of file mtime and of byte-level compression differences,
-        so re-saving identical data does not change the signature, while a
-        genuine change (new rows, added/removed feature columns) does.
+        Reads only the footer: row count, sorted column names, and a digest of
+        per-column statistics (min / max / null-count / value-count aggregated
+        across row groups).  All of this comes from the parquet footer, so it is
+        still cheap (no data pages are read) and independent of file mtime or
+        byte-level compression — re-saving identical data yields an identical
+        signature.  The statistics digest closes a correctness gap: re-extracting
+        features with the *same* schema and row count but *different values*
+        (e.g. a smoothing/units change, or a pose re-export) now invalidates the
+        cache, whereas row-count + column-names alone would silently reuse stale
+        segment/training features built from the old values.
         """
         try:
             import pyarrow.parquet as pq
 
             pf = pq.ParquetFile(path)
-            return [int(pf.metadata.num_rows), sorted(pf.schema_arrow.names)]
+            md = pf.metadata
+            names = sorted(pf.schema_arrow.names)
+            return [int(md.num_rows), names, BehaviorRepresentationService._parquet_stats_digest(md)]
         except Exception:
             try:
                 return [int(path.stat().st_size), []]
             except OSError:
                 return [0, []]
+
+    @staticmethod
+    def _parquet_stats_digest(md: object) -> str:
+        """Footer-only digest of per-column statistics; '' when unavailable.
+
+        Aggregates each column's statistics across all row groups (min-of-mins,
+        max-of-maxes, summed null/value counts) so the digest is invariant to
+        how the writer chunked the data into row groups — an identical re-save
+        produces the same digest — while a genuine change in values shifts a
+        min/max/null-count and therefore the digest.
+        """
+        import hashlib  # noqa: PLC0415
+
+        try:
+            per_col: dict[str, list] = {}
+            for rg in range(md.num_row_groups):  # type: ignore[attr-defined]
+                row_group = md.row_group(rg)  # type: ignore[attr-defined]
+                for ci in range(row_group.num_columns):
+                    col = row_group.column(ci)
+                    st = getattr(col, "statistics", None)
+                    if st is None:
+                        continue
+                    name = col.path_in_schema
+                    mn = st.min if st.has_min_max else None
+                    mx = st.max if st.has_min_max else None
+                    nulls = int(st.null_count) if st.has_null_count else -1
+                    nvals = int(getattr(st, "num_values", 0) or 0)
+                    agg = per_col.get(name)
+                    if agg is None:
+                        per_col[name] = [mn, mx, nulls, nvals]
+                    else:
+                        if mn is not None:
+                            agg[0] = mn if agg[0] is None else (mn if mn < agg[0] else agg[0])
+                        if mx is not None:
+                            agg[1] = mx if agg[1] is None else (mx if mx > agg[1] else agg[1])
+                        agg[2] = agg[2] + nulls if agg[2] >= 0 and nulls >= 0 else -1
+                        agg[3] += nvals
+            if not per_col:
+                return ""
+            payload = "|".join(
+                f"{name}:{per_col[name][0]!r}:{per_col[name][1]!r}:{per_col[name][2]}:{per_col[name][3]}"
+                for name in sorted(per_col)
+            )
+            return hashlib.blake2b(payload.encode("utf-8", "replace"), digest_size=16).hexdigest()
+        except Exception:
+            return ""
 
     @classmethod
     def _source_signature(
@@ -97,6 +176,51 @@ class BehaviorRepresentationService:
             "feature_version": str(config.feature_version),
             "model_version": str(config.model_version),
         }
+
+    @staticmethod
+    def _canonicalize_distance_columns(df: pd.DataFrame) -> pd.DataFrame:
+        """Merge non-canonical pairwise-distance columns onto their sorted name.
+
+        Pairwise inter-keypoint distances are symmetric, so ``dist_a_to_b`` and
+        ``dist_b_to_a`` denote the same quantity (likewise their ``_norm``
+        variants).  Pose files that list keypoints in different orders
+        historically produced both spellings; concatenating such sessions yields
+        two half-populated columns per pair with complementary NaNs, each of
+        which can look "dead" (e.g. its delta/trend collapses).  Pose extraction
+        now emits the sorted (canonical) name, but older or mixed caches still
+        contain both spellings.
+
+        This collapses every distance column onto its canonical (sorted) name,
+        combining values so the merged column is fully populated across sessions,
+        and drops the redundant duplicate(s).  Non-distance columns and
+        ROI/target distances (``*_to_target_dist`` / ``*_to_roi_*``) are left
+        untouched.
+        """
+        def _canonical(col: str) -> str | None:
+            canon = canonical_distance_name(col)
+            return canon if canon != col or col.startswith("dist_") else None
+
+        groups: dict[str, list[str]] = {}
+        for col in df.columns:
+            canon = _canonical(col)
+            if canon is None:
+                continue
+            bucket = groups.setdefault(canon, [])
+            # Canonical spelling (if present) takes precedence in the merge.
+            bucket.insert(0, col) if col == canon else bucket.append(col)
+
+        drop: list[str] = []
+        for canon, cols in groups.items():
+            if len(cols) == 1 and cols[0] == canon:
+                continue  # already canonical with no duplicate spelling
+            merged = None
+            for c in cols:
+                merged = df[c] if merged is None else merged.combine_first(df[c])
+            df[canon] = merged
+            drop.extend(c for c in cols if c != canon)
+        if drop:
+            df = df.drop(columns=drop)
+        return df
 
     ZSCORE_STATS_FILENAME = "zscore_stats.parquet"
 
@@ -394,6 +518,18 @@ class BehaviorRepresentationService:
         join_cols = ["frame", "animal_id", "session_id"]
         _progress("Representation: merging pose and context frame tables...")
         frame_df = pose_df.merge(ctx_df, on=join_cols, how="inner") if not ctx_df.empty else pose_df.copy()
+
+        # Collapse symmetric pairwise-distance duplicates (dist_a_to_b /
+        # dist_b_to_a) onto the canonical sorted name before any statistics are
+        # computed, so mixed-order pose exports don't leave half-populated "dead"
+        # distance columns downstream.
+        _n_cols_before = frame_df.shape[1]
+        frame_df = self._canonicalize_distance_columns(frame_df)
+        if frame_df.shape[1] != _n_cols_before:
+            _progress(
+                f"Representation: canonicalised distance columns "
+                f"({_n_cols_before - frame_df.shape[1]} duplicate spelling(s) merged)."
+            )
 
         # Feature exclusions are NOT applied here — neither the project-level
         # config/feature_exclusions.json NOR the per-run ``excluded_feature_cols``.

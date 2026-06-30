@@ -103,13 +103,15 @@ def test_preview_blocks_incompatible_schema(tmp_path: Path) -> None:
     assert pv.coverage < 0.95
 
 
-def test_preview_requires_host_training_set(tmp_path: Path) -> None:
+def test_preview_requires_host_features(tmp_path: Path) -> None:
+    # A host with neither a training set nor extracted segment features can't be
+    # a refinement/baseline target — there's no feature schema to match against.
     root = tmp_path / "host"
     _write_behaviors(root, [{"behavior_id": "no_behavior", "name": "No Behavior"}])
     src = _make_source(tmp_path, FEATS)
     pv = ModelRefinementService().preview(root, src)
     assert not pv.compatible
-    assert "no training set" in pv.reason.lower()
+    assert "extracted features" in pv.reason.lower()
 
 
 def test_import_merges_namespaced_rows(tmp_path: Path) -> None:

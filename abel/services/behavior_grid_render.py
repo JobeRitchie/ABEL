@@ -117,6 +117,7 @@ def render_cell(
     show_keypoints: bool,
     out_path: Path,
     out_fps: float = 30.0,
+    crop_scale: float = 1.0,
 ) -> bool:
     """Render one bout window to a square ``cell_px`` clip; return True on success.
 
@@ -125,6 +126,9 @@ def render_cell(
     the same dynamic-centering used by Clip Review); otherwise a fixed centre crop
     is used.  Keypoints, when enabled, are drawn on the full frame *before*
     cropping so they stay pixel-aligned.
+
+    *crop_scale* is a user-facing linear multiplier on the crop half-width: values
+    above 1 show more surroundings (zoom out), below 1 tighten onto the subject.
     """
     import cv2  # noqa: PLC0415
 
@@ -153,6 +157,10 @@ def render_cell(
 
     vid_h, vid_w = probe.shape[:2]
     m = _scaled_crop_margin(crop_margin_px, vid_w, vid_h, crop_area_scale=crop_area_scale)
+    scale = max(0.1, float(crop_scale))
+    if scale != 1.0:
+        max_margin = max(8, min(vid_w, vid_h) // 2 - 1)
+        m = max(8, min(int(round(m * scale)), max_margin))
 
     use_dynamic = (
         centroid_x is not None

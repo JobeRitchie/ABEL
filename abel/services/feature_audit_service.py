@@ -207,15 +207,27 @@ class FeatureAuditService:
         training_set_path: Path | None = None,
     ) -> FeatureAuditResult:
         """Audit feature health from the training set or segment features."""
-        # Prefer training set if it exists; fall back to segment features.
+        # Choose the freshest feature source.  The training set is a downstream
+        # snapshot assembled at training time; re-running feature extraction
+        # rebuilds derived/representations/segment_features.parquet but NOT the
+        # training set, so a stale training set would otherwise mask the result
+        # of a fresh re-extraction (e.g. reporting dead features that the latest
+        # extraction has already eliminated).  When no explicit path is given,
+        # prefer whichever of the two exists and was written most recently.
         ts_path = training_set_path
         if ts_path is None:
-            ts_path = project_root / "derived" / "training_sets" / "training_set.parquet"
-        if not ts_path.exists():
-            ts_path = project_root / "derived" / "representations" / "segment_features.parquet"
+            candidates = [
+                project_root / "derived" / "training_sets" / "training_set.parquet",
+                project_root / "derived" / "representations" / "segment_features.parquet",
+            ]
+            existing = [p for p in candidates if p.exists()]
+            if not existing:
+                return FeatureAuditResult()
+            ts_path = max(existing, key=lambda p: p.stat().st_mtime)
         if not ts_path.exists():
             return FeatureAuditResult()
 
+        logger.info("Feature audit reading features from %s", ts_path)
         df = pd.read_parquet(ts_path)
         meta_cols = {"segment_id", "label", "label_source", "animal_id", "session_id",
                      "start_frame", "end_frame", "reviewer_confidence"}

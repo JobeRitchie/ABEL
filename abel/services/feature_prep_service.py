@@ -85,6 +85,13 @@ class SessionJob:
     pose_path: Path
     video_path: Path | None
     fps: float
+    individuals: list[str] = field(default_factory=list)
+    """Detected individuals in a multi-animal pose file.  Empty ⇒ legacy
+    single-animal extraction path."""
+    individual_subject_map: dict[str, str] = field(default_factory=dict)
+    """Maps each individual to a real subject identity used as its ``animal_id``."""
+    identity_corrections: list[dict] = field(default_factory=list)
+    """Identity-swap corrections applied on load (see LinkedSession)."""
 
 
 @dataclass
@@ -204,7 +211,8 @@ class FeaturePrepService:
     # Bump when the pose feature *schema* (column names / formulas) changes so
     # existing caches are rebuilt into the new, cross-project-compatible format.
     #   v2: canonical (order-independent, sorted) pairwise-distance column names.
-    _POSE_SCHEMA_VERSION = "2"
+    #   v3: optional multi-animal interaction (social_*) columns.
+    _POSE_SCHEMA_VERSION = "3"
 
     @staticmethod
     def _hash(obj: object) -> str:
@@ -217,7 +225,20 @@ class FeaturePrepService:
 
     @classmethod
     def _pose_signature(cls, project_root: Path, aliases: dict[str, str]) -> str:
-        return cls._hash({"v": cls._POSE_SCHEMA_VERSION, "aliases": aliases or {}})
+        # Fold the social-feature toggle in so enabling/disabling interaction
+        # features rebuilds the pose cache (the column set changes), while solo
+        # single-animal projects keep the same signature regardless of the flag.
+        social = False
+        try:
+            from abel.models.schemas import InvariantFeatureConfig  # noqa: PLC0415
+            social = bool(InvariantFeatureConfig.load_from_project(project_root).enable_social_features)
+        except Exception:
+            social = False
+        return cls._hash({
+            "v": cls._POSE_SCHEMA_VERSION,
+            "aliases": aliases or {},
+            "social": social,
+        })
 
     @classmethod
     def _context_signature(
@@ -343,6 +364,45 @@ class FeaturePrepService:
         path = cls._alias_sig_path(project_root)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, {"pose": "stale", "context": "stale"})
+
+    # Directories under ``derived/`` that hold *only* generated feature caches.
+    # Deleting them forces the next ``prepare`` to rebuild every stage from the
+    # source pose/video — the nuclear option when stale caches are being reused.
+    _CACHE_DIRS = ("pose_features", "context_features", "representations")
+
+    @classmethod
+    def clear_feature_caches(cls, project_root: Path) -> dict[str, object]:
+        """Delete all cached feature artefacts so the next run rebuilds from scratch.
+
+        Removes the pose-feature (.npz kinematic windows, per-session and
+        monolithic parquet, summaries, alias signature), context-feature, and
+        representation caches.  Source pose/video files and project config are
+        untouched.  Returns a summary dict with the directories removed, the
+        number of files deleted, and total bytes freed.
+        """
+        import shutil  # noqa: PLC0415
+
+        derived = project_root / "derived"
+        removed: list[str] = []
+        n_files = 0
+        n_bytes = 0
+        for name in cls._CACHE_DIRS:
+            d = derived / name
+            if not d.exists():
+                continue
+            for f in d.rglob("*"):
+                if f.is_file():
+                    n_files += 1
+                    try:
+                        n_bytes += f.stat().st_size
+                    except OSError:
+                        pass
+            try:
+                shutil.rmtree(d)
+                removed.append(name)
+            except OSError as exc:
+                logger.warning("Failed to remove cache dir %s: %s", d, exc)
+        return {"removed": removed, "n_files": n_files, "n_bytes": n_bytes}
 
     @staticmethod
     def _parquet_rows(path: Path) -> int:
@@ -554,6 +614,12 @@ class FeaturePrepService:
 
         warn_lock = threading.Lock()
 
+        # Project-level invariance/social toggles.  Loaded once here (not baked
+        # into the per-frame default) so multi-animal jobs honor the social flag.
+        # The single-animal path keeps its existing default-config behavior.
+        from abel.models.schemas import InvariantFeatureConfig  # noqa: PLC0415
+        invariant_cfg = InvariantFeatureConfig.load_from_project(project_root)
+
         def _collect_warning(msg: str) -> None:
             with warn_lock:
                 result.gpu_warnings.append(msg)
@@ -561,15 +627,35 @@ class FeaturePrepService:
         def _process_one(job: SessionJob) -> str:
             sid = str(job.session_id)
             if sid not in cached_pose:
-                self._pose.extract_and_save_frame_pose_features(
-                    project_root=project_root,
-                    pose_path=job.pose_path,
-                    fps=job.fps,
-                    animal_id=job.subject_id,
-                    session_id=job.session_id,
-                    video_id=job.session_id,
-                    keypoint_aliases=aliases,
-                )
+                if job.individuals:
+                    # Multi-animal: one row-set per individual (distinct animal_id),
+                    # plus inter-animal social_* columns when enabled.
+                    animal_ids = {
+                        ind: (job.individual_subject_map.get(ind) or f"{job.subject_id or sid}:{ind}")
+                        for ind in job.individuals
+                    }
+                    self._pose.extract_and_save_frame_pose_features_multi(
+                        project_root=project_root,
+                        pose_path=job.pose_path,
+                        fps=job.fps,
+                        session_id=job.session_id,
+                        video_id=job.session_id,
+                        individual_animal_ids=animal_ids,
+                        invariant_config=invariant_cfg,
+                        keypoint_aliases=aliases,
+                        enable_social_features=invariant_cfg.enable_social_features,
+                        identity_corrections=list(job.identity_corrections or []),
+                    )
+                else:
+                    self._pose.extract_and_save_frame_pose_features(
+                        project_root=project_root,
+                        pose_path=job.pose_path,
+                        fps=job.fps,
+                        animal_id=job.subject_id,
+                        session_id=job.session_id,
+                        video_id=job.session_id,
+                        keypoint_aliases=aliases,
+                    )
             if (
                 config.use_video_features
                 and job.video_path is not None

@@ -691,7 +691,15 @@ class EvaluationService:
                     with open(md / "model_state.pkl", "rb") as f:
                         payload = pickle.load(f)
                     clf = payload["model"]
-                    fcols = list(payload["feature_cols"])
+                    # Canonicalise the model's pairwise-distance feature names onto
+                    # the data's sorted spelling so models trained before distance
+                    # canonicalisation (v0.5.2) don't reindex every distance column to
+                    # a missing name (silently zero-filled).  See
+                    # behavior_representation_service.canonical_distance_name.
+                    from abel.services.behavior_representation_service import (
+                        canonical_distance_name,
+                    )
+                    fcols = [canonical_distance_name(str(c)) for c in payload["feature_cols"]]
                     feats = imported_df.reindex(columns=fcols, fill_value=0.0)
                     x = np.nan_to_num(
                         feats.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float),

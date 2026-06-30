@@ -242,6 +242,57 @@ class ModelImportPreview:
         return [i for i in self.items if i.compatible and not i.behavior_matched]
 
 
+@dataclass
+class BaselineBehaviorRow:
+    """One source behaviour in a baseline-import detection summary.
+
+    Combines the example side (labeled clips/feature rows) and the model side
+    (trained model) for a single source behaviour, plus how it maps onto the host.
+    """
+
+    source_behavior_id: str
+    source_name: str
+    example_count: int = 0          # importable labeled examples
+    has_model: bool = False
+    model_coverage: float = 0.0     # 0..1 (0 when no model)
+    model_compatible: bool = False
+    matched_host_id: str = ""       # "" when no existing host behaviour matches
+    matched_host_name: str = ""
+
+    @property
+    def status(self) -> str:
+        return "matched" if self.matched_host_id else "new"
+
+
+@dataclass
+class BaselinePreview:
+    """Detection summary for importing another project as a baseline."""
+
+    source_root: Path
+    tag: str
+    host_is_new: bool = False
+    host_feature_count: int = 0
+    coverage: float = 0.0           # example-feature schema coverage (0..1)
+    schema_ok: bool = False
+    reason: str = ""
+    rows: list[BaselineBehaviorRow] = field(default_factory=list)
+    keypoint_renames: dict[str, str] = field(default_factory=dict)
+    diagnostics: CompatibilityDiagnostics | None = None
+    model_count: int = 0
+
+    @property
+    def total_examples(self) -> int:
+        return sum(r.example_count for r in self.rows)
+
+    @property
+    def matched_rows(self) -> list[BaselineBehaviorRow]:
+        return [r for r in self.rows if r.matched_host_id]
+
+    @property
+    def new_rows(self) -> list[BaselineBehaviorRow]:
+        return [r for r in self.rows if not r.matched_host_id]
+
+
 class ModelRefinementService:
     """Read labeled examples from source projects and merge them into a host."""
 
@@ -280,8 +331,8 @@ class ModelRefinementService:
         host_features = self._host_feature_cols(host_root)
         if host_features is None:
             pv.reason = (
-                "This project has no training set yet. Train a base model "
-                "before refining it with external examples."
+                "This project has no extracted features yet. Run feature "
+                "extraction before importing examples or a baseline."
             )
             return pv
 
@@ -380,12 +431,22 @@ class ModelRefinementService:
         source_root: Path,
         tag: str = "",
         name_overrides: dict[str, str] | None = None,
+        behavior_decisions: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Merge a source project's labeled examples into the host training set.
 
         Re-validates compatibility via ``preview`` first.  ``name_overrides``
         (source name -> host name aliases) is applied to remap differently
         named behaviours; when omitted the host's saved alias table is used.
+
+        ``behavior_decisions`` (source behaviour id -> host id /
+        ``AUTO_CREATE_BEHAVIOR`` / ``SKIP_BEHAVIOR``) lets a baseline import seed a
+        project that has no matching behaviours yet: behaviours chosen for
+        auto-create are added from the source definition, and only the
+        feature-schema half of compatibility is enforced (a brand-new host has no
+        behaviours to match by name).  When omitted, behaviour identity is matched
+        by name/alias exactly as before.
+
         Returns a result dict with ``status`` and, on success, the number of
         imported rows and the snapshot path.
         """
@@ -395,15 +456,34 @@ class ModelRefinementService:
             host_root, source_root, tag=tag, name_overrides=name_overrides,
             compute_diagnostics=False,
         )
-        if not pv.compatible:
+        if behavior_decisions:
+            # The decision set supplies behaviour identity, so only the feature
+            # schema needs to line up here (the importable-by-name gate inside
+            # ``preview`` would otherwise block a not-yet-labeled host).
+            schema_ok = pv.host_feature_count > 0 and pv.coverage >= COMPAT_THRESHOLD
+            if not schema_ok:
+                return {"status": "error", "error": pv.reason or
+                        "Incompatible feature schema.", "preview": pv}
+        elif not pv.compatible:
             return {"status": "error", "error": pv.reason, "preview": pv}
 
         tag = pv.tag
-        host_ts_path = host_root / "derived" / "training_sets" / "training_set.parquet"
-        host_ts = pd.read_parquet(host_ts_path)
-        host_cols = list(host_ts.columns)
 
-        merged, label_to_host = self._merged_labeled(host_root, source_root, pv, name_overrides)
+        # Auto-create any host behaviours the baseline import chose to add as new,
+        # so the training set's labels resolve to defined behaviours downstream.
+        if behavior_decisions:
+            for src_bid, decision in behavior_decisions.items():
+                if decision == AUTO_CREATE_BEHAVIOR:
+                    self._auto_create_behavior(host_root, source_root, src_bid)
+
+        # Host column schema: the assembled training set when it exists, else the
+        # host's extracted segment features (so a features-extracted-but-untrained
+        # project can receive a baseline; merge_and_snapshot creates the file).
+        host_cols = self._host_training_columns(host_root)
+
+        merged, label_to_host = self._merged_labeled(
+            host_root, source_root, pv, name_overrides, behavior_decisions,
+        )
         if merged.empty:
             return {
                 "status": "error",
@@ -453,8 +533,20 @@ class ModelRefinementService:
             logger.exception("Failed to register imported examples for review")
 
         # Persist a manifest record so this import is listed (and removable)
-        # across sessions in the Model Refinement tab.
-        behaviors = {m.host_name: m.example_count for m in pv.matched_behaviors}
+        # across sessions in the Model Refinement tab.  With a decision set the
+        # name/alias-based ``matched_behaviors`` doesn't capture auto-created /
+        # remapped imports, so count the rows actually written per host behaviour.
+        if behavior_decisions:
+            host_id_to_name = {bid: name for bid, name in self._read_behaviors(host_root).items()}
+            counts = (
+                out["label"].astype(str).value_counts().to_dict() if "label" in out else {}
+            )
+            behaviors = {
+                host_id_to_name.get(str(bid), str(bid)): int(c)
+                for bid, c in counts.items()
+            }
+        else:
+            behaviors = {m.host_name: m.example_count for m in pv.matched_behaviors}
         self._record_import(
             host_root, tag, source_root, int(len(out)),
             int(review_registered), behaviors,
@@ -652,6 +744,7 @@ class ModelRefinementService:
     def _merged_labeled(
         self, host_root: Path, source_root: Path, pv: RefinementPreview,
         name_overrides: dict[str, str] | None,
+        behavior_decisions: dict[str, str] | None = None,
     ) -> tuple[pd.DataFrame, dict[str, str]]:
         """Return ``(merged, label_to_host)`` for the source's importable labels.
 
@@ -676,8 +769,9 @@ class ModelRefinementService:
         }
         label_to_host: dict[str, str] = {}
         for raw_label in labels["review_label"].astype(str).unique():
-            host_bid, _, _ = self._resolve_host_behavior(
+            host_bid = self._decisioned_host_bid(
                 raw_label, source_behaviors, host_name_to_id, name_overrides,
+                behavior_decisions,
             )
             if host_bid:
                 label_to_host[raw_label] = host_bid
@@ -1105,10 +1199,21 @@ class ModelRefinementService:
             except Exception:
                 return None
 
+    @classmethod
+    def _host_feature_path(cls, host_root: Path) -> Path:
+        """On-disk parquet the host's feature columns come from.
+
+        Prefers the assembled training set, but falls back to the raw
+        segment-features store when the host has *extracted features but not yet
+        run active learning* (no training set).  Without the fallback, importing a
+        baseline (examples + models) into a freshly-prepared project would be
+        blocked because the host's feature schema looked empty.  Mirrors
+        :meth:`_source_feature_path`.
+        """
+        return cls._source_feature_path(host_root)
+
     def _host_feature_cols(self, host_root: Path) -> set[str] | None:
-        cols = self._parquet_columns(
-            host_root / "derived" / "training_sets" / "training_set.parquet"
-        )
+        cols = self._parquet_columns(self._host_feature_path(host_root))
         return self._feature_cols(cols) if cols is not None else None
 
     @staticmethod
@@ -1245,6 +1350,54 @@ class ModelRefinementService:
             if host_bid:
                 return host_bid, override_name, True
         return "", "", False
+
+    def _decisioned_host_bid(
+        self,
+        raw_label: str,
+        source_behaviors: dict[str, str],
+        host_name_to_id: dict[str, str],
+        name_overrides: dict[str, str] | None,
+        behavior_decisions: dict[str, str] | None,
+    ) -> str:
+        """Resolve a source label to the host behaviour id it imports as ("" = drop).
+
+        Pure (no side effects): an explicit per-behaviour decision wins, with
+        ``AUTO_CREATE_BEHAVIOR`` resolving to the *source* behaviour id (the id the
+        definition is created under by :meth:`_auto_create_behavior`) and
+        ``SKIP_BEHAVIOR`` dropping the label.  With no decision it falls back to
+        the existing name/alias match, so the examples-only flow is unchanged.
+        """
+        decision = (behavior_decisions or {}).get(str(raw_label))
+        if decision == SKIP_BEHAVIOR:
+            return ""
+        if decision == AUTO_CREATE_BEHAVIOR:
+            return str(raw_label)
+        if decision:
+            return str(decision)
+        host_bid, _, _ = self._resolve_host_behavior(
+            raw_label, source_behaviors, host_name_to_id, name_overrides,
+        )
+        return host_bid
+
+    def _host_training_columns(self, host_root: Path) -> list[str]:
+        """Column schema for host training rows.
+
+        Uses the assembled training set's columns when it exists; otherwise
+        derives them from the host's extracted segment features plus the standard
+        training-set bookkeeping columns, so a features-extracted-but-untrained
+        project gets a well-formed ``training_set.parquet`` on first baseline
+        import (``merge_and_snapshot_training_set`` creates the file).
+        """
+        ts_path = self._source_training_path(host_root)
+        ts_cols = self._parquet_columns(ts_path)
+        if ts_cols:
+            return list(ts_cols)
+        seg_cols = self._parquet_columns(self._source_segment_features_path(host_root)) or []
+        host_cols = list(seg_cols)
+        for c in ("segment_id", "label", "label_source", "reviewer_confidence", "session_id"):
+            if c not in host_cols:
+                host_cols.append(c)
+        return host_cols
 
     # ------------------------------------------------------------------
     # Behaviour name remapping
@@ -1715,3 +1868,172 @@ class ModelRefinementService:
         )
         logger.info("Removed %d imported model(s) for '%s' from %s.", removed, tag, host_root.name)
         return {"status": "success", "tag": tag, "removed_models": removed}
+
+    # ------------------------------------------------------------------
+    # Baseline import — seed a new project from another project's whole basis
+    # ------------------------------------------------------------------
+    #
+    # Unlike example import (training rows only) or model import (models only),
+    # this brings over a source project's *clips + labeled feature rows + trained
+    # models* together, governed by one per-behaviour decision set, so a project
+    # that has extracted features but not yet run active learning can either run
+    # the imported models immediately or fold the imported clips/features into its
+    # own training pool and train/refine.
+
+    def _host_is_new(self, host_root: Path) -> bool:
+        """True when the host has no training set, no behaviours, and no models.
+
+        Such a project has (at most) extracted features — the baseline-import
+        target — so the summary can tell the user they're seeding a fresh project
+        rather than refining an existing one.
+        """
+        if self._source_training_path(host_root).exists():
+            return False
+        if any(b not in _PASSTHROUGH_LABELS for b in self._read_behaviors(host_root)):
+            return False
+        mdir = self._models_dir(host_root)
+        if mdir.exists():
+            for p in mdir.iterdir():
+                if (p.is_dir() and p.name.startswith("behavior_model_")
+                        and (p / "model_state.pkl").exists()):
+                    return False
+        return True
+
+    def preview_baseline(
+        self,
+        host_root: Path,
+        source_root: Path,
+        name_overrides: dict[str, str] | None = None,
+    ) -> BaselinePreview:
+        """Detection summary for importing ``source_root`` as a baseline.
+
+        Composes the example preview (feature-schema coverage, per-behaviour
+        labeled counts, diagnostics) and the model preview (per-model coverage),
+        and reports whether the host is new vs already has matching behaviours so
+        the UI can warn and require an explicit Accept before importing.
+        """
+        if name_overrides is None:
+            name_overrides = self.load_aliases(host_root)
+        tag = source_root.name
+        pv = BaselinePreview(source_root=source_root, tag=tag)
+
+        ex = self.preview(
+            host_root, source_root, tag=tag, name_overrides=name_overrides,
+            compute_diagnostics=True,
+        )
+        mpv = self.preview_model_import(
+            host_root, source_root, name_overrides=name_overrides,
+            compute_diagnostics=False,
+        )
+
+        pv.host_feature_count = ex.host_feature_count
+        pv.coverage = ex.coverage
+        pv.keypoint_renames = dict(ex.keypoint_renames)
+        pv.diagnostics = ex.diagnostics
+        pv.model_count = len(mpv.items)
+        pv.host_is_new = self._host_is_new(host_root)
+
+        pv.schema_ok = ex.host_feature_count > 0 and ex.coverage >= COMPAT_THRESHOLD
+        if ex.host_feature_count == 0 and mpv.host_feature_count > 0:
+            # Source has no labeled examples to gauge coverage; fall back to
+            # whether any trained model's features the host covers.
+            pv.host_feature_count = mpv.host_feature_count
+            pv.schema_ok = any(it.compatible for it in mpv.items)
+        if not pv.schema_ok:
+            pv.reason = ex.reason or "Incompatible feature schema."
+
+        rows: dict[str, BaselineBehaviorRow] = {}
+        for m in ex.behavior_mappings:
+            bid = m.source_behavior_id
+            if bid in _PASSTHROUGH_LABELS:
+                continue
+            row = rows.setdefault(
+                bid, BaselineBehaviorRow(source_behavior_id=bid, source_name=m.source_name)
+            )
+            row.example_count = m.example_count
+            if m.host_behavior_id:
+                row.matched_host_id = m.host_behavior_id
+                row.matched_host_name = m.host_name
+        for it in mpv.items:
+            bid = it.model.behavior_id
+            if bid in _PASSTHROUGH_LABELS:
+                continue
+            row = rows.setdefault(
+                bid, BaselineBehaviorRow(source_behavior_id=bid, source_name=it.model.behavior_name)
+            )
+            row.has_model = True
+            row.model_coverage = it.coverage
+            row.model_compatible = it.compatible
+            if it.host_behavior_id and not row.matched_host_id:
+                row.matched_host_id = it.host_behavior_id
+                row.matched_host_name = it.host_behavior_name
+
+        pv.rows = sorted(
+            rows.values(), key=lambda r: (-r.example_count, r.source_name.lower())
+        )
+        return pv
+
+    def import_baseline(
+        self,
+        host_root: Path,
+        source_root: Path,
+        behavior_decisions: dict[str, str] | None = None,
+        name_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Import a source project's clips + labeled rows + models as a baseline.
+
+        ``behavior_decisions`` (source behaviour id -> host id /
+        ``AUTO_CREATE_BEHAVIOR`` / ``SKIP_BEHAVIOR``) governs both halves at once.
+        Best-effort: a failure on one half does not abort the other.  Returns a
+        combined summary.
+        """
+        if name_overrides is None:
+            name_overrides = self.load_aliases(host_root)
+        decisions = dict(behavior_decisions or {})
+        tag = source_root.name
+
+        # 1. Clips + labeled feature rows into the training pool.
+        ex_res = self.import_examples(
+            host_root, source_root, tag=tag, name_overrides=name_overrides,
+            behavior_decisions=decisions,
+        )
+
+        # 2. Trained models for the same non-skipped, compatible behaviours.
+        mpv = self.preview_model_import(
+            host_root, source_root, name_overrides=name_overrides,
+            compute_diagnostics=False,
+        )
+        model_dirs = [
+            it.model.model_dir for it in mpv.items
+            if it.compatible and decisions.get(it.model.behavior_id) != SKIP_BEHAVIOR
+        ]
+        if model_dirs:
+            model_res = self.import_models(
+                host_root, source_root, model_dirs,
+                behavior_decisions=decisions, name_overrides=name_overrides,
+            )
+        else:
+            model_res = {"status": "skipped", "imported": [], "skipped": []}
+
+        imported_rows = (
+            int(ex_res.get("imported_rows", 0)) if ex_res.get("status") == "success" else 0
+        )
+        imported_models = list(model_res.get("imported", []))
+        ok = bool(imported_rows or imported_models)
+        logger.info(
+            "Baseline import from '%s' into %s: %d row(s), %d model(s).",
+            tag, host_root.name, imported_rows, len(imported_models),
+        )
+        return {
+            "status": "success" if ok else "error",
+            "tag": tag,
+            "imported_rows": imported_rows,
+            "review_registered": int(ex_res.get("review_registered", 0)),
+            "imported_models": imported_models,
+            "skipped_models": list(model_res.get("skipped", [])),
+            "examples_result": ex_res,
+            "models_result": model_res,
+            "error": "" if ok else (
+                ex_res.get("error") or model_res.get("error") or "Nothing imported."
+            ),
+        }

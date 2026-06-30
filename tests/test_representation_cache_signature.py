@@ -154,3 +154,28 @@ def test_content_change_invalidates(tmp_path: Path):
     _, seg2, msgs2 = _build(project, pose_path, ctx_path, cfg)
     assert _zscored(msgs2), "adding a session must rebuild the cache"
     assert "s3" in set(seg2["session_id"].astype(str)), "new session must appear"
+
+
+def test_value_change_same_schema_invalidates(tmp_path: Path):
+    """Re-extracting features with the SAME schema + row count but DIFFERENT
+    values (e.g. a smoothing/units change or pose re-export) must invalidate the
+    cache.  Row-count + column-names alone miss this; the footer statistics
+    digest catches it."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    pose_path, ctx_path = _make_sources(project)
+    cfg = RepresentationConfig(window_size_frames=30, window_stride_frames=15)
+
+    frame1, _, msgs1 = _build(project, pose_path, ctx_path, cfg)
+    assert _zscored(msgs1), "first build should compute z-scores"
+
+    # Overwrite one session's pose values in place — identical columns, identical
+    # row count, brand-new numbers.
+    pose_sess = pose_path.parent / "sessions" / "s1.parquet"
+    df = pd.read_parquet(pose_sess)
+    df["speed"] = df["speed"].to_numpy() + 100.0  # shifts min/max -> footer stats change
+    df.to_parquet(pose_sess, index=False)
+
+    frame2, _, msgs2 = _build(project, pose_path, ctx_path, cfg)
+    assert _zscored(msgs2), f"value change must rebuild the cache; got {msgs2}"
+    assert not _cache_hit(msgs2), "stale cache must not be reused after a value change"

@@ -172,12 +172,21 @@ class PoseFeaturesTab(QWidget):
         sel_none_btn = QPushButton("Select None")
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setToolTip("Reload sessions and extraction status from project files")
+        clear_cache_btn = QPushButton("Clear Cached Features")
+        clear_cache_btn.setToolTip(
+            "Delete all cached pose, context, and representation features for this "
+            "project so the next extraction run rebuilds everything from scratch.\n\n"
+            "Use this when feature extraction is wrongly skipping work because of "
+            "stale caches. Source pose/video files and settings are not touched."
+        )
         sel_all_btn.clicked.connect(self._select_all)
         sel_none_btn.clicked.connect(self._select_none)
         refresh_btn.clicked.connect(self._refresh_clicked)
+        clear_cache_btn.clicked.connect(self._clear_cached_features)
         sel_row = QHBoxLayout()
         sel_row.addWidget(QLabel("Sessions to process:"))
         sel_row.addStretch()
+        sel_row.addWidget(clear_cache_btn)
         sel_row.addWidget(refresh_btn)
         sel_row.addWidget(sel_all_btn)
         sel_row.addWidget(sel_none_btn)
@@ -464,6 +473,25 @@ class PoseFeaturesTab(QWidget):
         self._clipdelta_status_label.setStyleSheet("color: #90A4AE; font-size: 11px;")
         clipdelta_layout.addWidget(self._clipdelta_status_label)
 
+        # ── Social / Interaction group (multi-animal) ───────────────────
+        social_box = QGroupBox("Social / Interaction (multi-animal)")
+        social_box.setToolTip(
+            "Inter-animal features for projects that track more than one animal.\n"
+            "Has no effect on single-animal sessions."
+        )
+        social_layout = QVBoxLayout(social_box)
+        self._feat_social = QCheckBox(
+            "Interaction features (inter-animal distance, orientation, contact)"
+        )
+        self._feat_social.setChecked(False)
+        self._feat_social.setToolTip(
+            "For each focal animal, computes distance / facing-angle / approach-velocity /\n"
+            "bounding-box overlap to every other animal, reduced over conspecifics into a\n"
+            "fixed set of social_* columns (nearest + mean). Drives social behaviors\n"
+            "(e.g. dominance displacement). Requires a multi-animal pose file."
+        )
+        social_layout.addWidget(self._feat_social)
+        self._feat_social.stateChanged.connect(self._save_robustness_feature_selection)
 
         self._run_btn = QPushButton("▶  Extract Pose Features")
         self._cancel_btn = QPushButton("■  Cancel")
@@ -509,6 +537,7 @@ class PoseFeaturesTab(QWidget):
         left_layout.addWidget(feature_box)
         left_layout.addWidget(robustness_box)
         left_layout.addWidget(clipdelta_box)
+        left_layout.addWidget(social_box)
         left_layout.addStretch()
 
         left_scroll = QScrollArea()
@@ -635,6 +664,51 @@ class PoseFeaturesTab(QWidget):
         self._refresh_sessions()
         self._update_motion_area_preview()
         self._append_log("Session list refreshed.")
+
+    def _clear_cached_features(self) -> None:
+        """Delete all cached features so the next run rebuilds from scratch."""
+        if not self._project_root:
+            QMessageBox.information(self, "No Project", "Open a project first.")
+            return
+        if not self._run_btn.isEnabled():
+            QMessageBox.information(
+                self, "Extraction Running",
+                "Wait for the current extraction to finish before clearing caches.",
+            )
+            return
+        reply = QMessageBox.question(
+            self,
+            "Clear Cached Features",
+            "Delete all cached pose, context, and representation features for this "
+            "project?\n\n"
+            "The next extraction run will rebuild everything from scratch. This fixes "
+            "stale caches that cause feature extraction to be skipped incorrectly.\n\n"
+            "Your source pose/video files and extraction settings are not affected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            info = FeaturePrepService.clear_feature_caches(self._project_root)
+        except Exception as exc:
+            logger.error("Failed to clear feature caches", exc_info=True)
+            QMessageBox.critical(self, "Clear Failed", f"Could not clear caches:\n{exc}")
+            return
+
+        mb = info.get("n_bytes", 0) / (1024 * 1024)
+        removed = ", ".join(info.get("removed", [])) or "nothing (no caches found)"
+        self._append_log(
+            f"Cleared cached features: removed {removed} "
+            f"({info.get('n_files', 0)} files, {mb:.1f} MB freed)."
+        )
+        self._refresh_sessions()
+        QMessageBox.information(
+            self,
+            "Caches Cleared",
+            f"Removed {info.get('n_files', 0)} cached file(s) ({mb:.1f} MB).\n\n"
+            "Run “Extract Pose Features” to rebuild them.",
+        )
 
     # ------------------------------------------------------------------
     # Extraction settings persistence
@@ -848,6 +922,7 @@ class PoseFeaturesTab(QWidget):
             inv["enable_joint_angles"] = self._feat_joint_angles.isChecked()
             inv["enable_spine_curvature"] = self._feat_spine_curvature.isChecked()
             inv["enable_clipwise_deltas"] = self._feat_clipwise_deltas.isChecked()
+            inv["enable_social_features"] = self._feat_social.isChecked()
             cfg_path.parent.mkdir(parents=True, exist_ok=True)
             write_yaml(cfg_path, data)
             n_enabled = sum(
@@ -883,6 +958,7 @@ class PoseFeaturesTab(QWidget):
                 "enable_joint_angles": self._feat_joint_angles,
                 "enable_spine_curvature": self._feat_spine_curvature,
                 "enable_clipwise_deltas": self._feat_clipwise_deltas,
+                "enable_social_features": self._feat_social,
             }
             for field, cb in mapping.items():
                 if field in inv:
@@ -1317,8 +1393,8 @@ class PoseFeaturesTab(QWidget):
     def _build_prep_jobs(self, session_ids: list[str], preset: PoseFeaturePreset | None) -> list:
         if not session_ids or self._manifest is None or preset is None:
             return []
-        subject_by_session = {
-            str(s.session_id): str(getattr(s, "subject_id", "") or s.session_id)
+        session_by_id = {
+            str(s.session_id): s
             for s in getattr(self._manifest, "linked_sessions", [])
         }
         jobs: list[SessionJob] = []
@@ -1327,12 +1403,20 @@ class PoseFeaturesTab(QWidget):
             if not pose_path:
                 continue
             video_path = self._imports.video_path_for_session(self._manifest, sid)
+            sess = session_by_id.get(str(sid))
+            subject_id = str(getattr(sess, "subject_id", "") or sid) if sess else str(sid)
+            individuals = list(getattr(sess, "individuals", []) or []) if sess else []
+            ind_map = dict(getattr(sess, "individual_subject_map", {}) or {}) if sess else {}
+            corrections = list(getattr(sess, "identity_corrections", []) or []) if sess else []
             jobs.append(SessionJob(
                 session_id=str(sid),
-                subject_id=subject_by_session.get(str(sid), str(sid)),
+                subject_id=subject_id,
                 pose_path=pose_path,
                 video_path=video_path,
                 fps=float(preset.source_fps),
+                individuals=individuals,
+                individual_subject_map=ind_map,
+                identity_corrections=corrections,
             ))
         return jobs
 

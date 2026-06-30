@@ -109,6 +109,80 @@ def test_select_grid_bouts_empty_behavior(tmp_path: Path) -> None:
     assert svc.select_grid_bouts("not_a_behavior") == []
 
 
+def _add_subject_manifest(root: Path, mapping: dict[str, str]) -> None:
+    """Write a minimal import manifest mapping session_id -> subject_id."""
+    path = root / "derived" / "review_tables" / "import_manifest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sessions = [
+        {
+            "session_id": sid,
+            "video_asset_id": f"v_{sid}",
+            "pose_asset_id": f"p_{sid}",
+            "subject_id": subject,
+        }
+        for sid, subject in mapping.items()
+    ]
+    path.write_text(json.dumps({"linked_sessions": sessions}), encoding="utf-8")
+
+
+def _make_three_session_project(tmp_path: Path) -> Path:
+    """Three sessions, each with one strong bout (no top-fraction filtering needed)."""
+    root = _make_project(tmp_path)
+    inf_dir = root / "derived" / "inference"
+    manifest = json.loads((inf_dir / "inference_manifest.json").read_text())
+    trace_paths = manifest["trace_paths"]
+    # session_a/b already exist; overwrite b to a single strong bout and add c.
+    for sid in ("session_b", "session_c"):
+        probs = [0.1] * 60
+        for f in range(15, 26):
+            probs[f] = 0.9
+        df = pd.DataFrame({"frame": list(range(60)), "prob_groom": probs})
+        p = inf_dir / f"{sid}__trace.parquet"
+        df.to_parquet(p, index=False)
+        trace_paths[sid] = str(p)
+    # Trim session_a's weaker second bout so each session has exactly one bout.
+    probs_a = [0.1] * 60
+    for f in range(10, 21):
+        probs_a[f] = 0.95
+    pd.DataFrame({"frame": list(range(60)), "prob_groom": probs_a}).to_parquet(
+        inf_dir / "session_a__trace.parquet", index=False
+    )
+    (inf_dir / "inference_manifest.json").write_text(
+        json.dumps({"trace_paths": trace_paths}), encoding="utf-8"
+    )
+    return root
+
+
+def test_select_grid_bouts_prefers_unique_subjects(tmp_path: Path) -> None:
+    root = _make_three_session_project(tmp_path)
+    # session_a and session_b are the same subject; session_c is a second subject.
+    _add_subject_manifest(
+        root, {"session_a": "m1", "session_b": "m1", "session_c": "m2"}
+    )
+    svc = _service(root)
+    # Two cells across two subjects: the lone m2 session must always be chosen,
+    # plus exactly one of the m1 sessions — never two m1 clips.
+    for _ in range(15):
+        specs = svc.select_grid_bouts("groom", n_cells=2, top_fraction=1.0)
+        assert len(specs) == 2
+        sessions = {s.session_id for s in specs}
+        assert "session_c" in sessions
+        assert len(sessions & {"session_a", "session_b"}) == 1
+
+
+def test_select_grid_bouts_reuses_subject_when_short(tmp_path: Path) -> None:
+    root = _make_three_session_project(tmp_path)
+    # All three sessions belong to one subject; with only one unique subject the
+    # grid must still fill multiple cells from its distinct (non-overlapping) bouts.
+    _add_subject_manifest(
+        root, {"session_a": "m1", "session_b": "m1", "session_c": "m1"}
+    )
+    svc = _service(root)
+    specs = svc.select_grid_bouts("groom", n_cells=3, top_fraction=1.0)
+    assert len(specs) == 3
+    assert {s.session_id for s in specs} == {"session_a", "session_b", "session_c"}
+
+
 # ---------------------------------------------------------------------------
 # Grid stitching
 # ---------------------------------------------------------------------------

@@ -6956,6 +6956,11 @@ class ActiveLearningTab(QWidget):
                     & (segment_df["start_frame"] <= int(seed.end_frame))
                     & (segment_df["end_frame"] >= int(seed.start_frame))
                 )
+                # Multi-animal: a seed on a specific focal animal must only label
+                # that animal's segments, not the conspecific's overlapping ones.
+                seed_animal = getattr(seed, "animal_id", None)
+                if seed_animal and "animal_id" in segment_df.columns:
+                    mask = mask & (segment_df["animal_id"].astype(str) == str(seed_animal))
                 hit = segment_df[mask].copy()
                 if hit.empty:
                     continue

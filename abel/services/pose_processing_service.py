@@ -145,6 +145,25 @@ class PoseData(NamedTuple):
     n_frames: int
 
 
+# Sentinel individual key used when a pose file has no ``individuals`` level
+# (single-animal DLC).  Multi-animal files use the real DLC names (Mouse1, …).
+SINGLE_INDIVIDUAL = "__single__"
+
+
+class MultiAnimalPoseData(NamedTuple):
+    """One :class:`PoseData` per tracked individual in a multi-animal file.
+
+    Single-animal files load into a 1-entry mapping (``individuals == []`` is
+    never used as a signal — check ``len(per_individual)``).  All individuals
+    share the same skeleton (body-part list); identity is best-effort from the
+    DLC ``individuals`` header level and may swap across frames.
+    """
+
+    individuals: list[str]                 # file-order individual IDs
+    per_individual: dict[str, PoseData]    # individual_id -> cleaned PoseData
+    n_frames: int
+
+
 class PoseProcessingService:
     """Loads and preprocesses DLC tracking files."""
 
@@ -219,23 +238,236 @@ class PoseProcessingService:
         )
 
     def load_csv(self, path: Path) -> PoseData:
-        """Load a DLC CSV with 3-row MultiIndex header (scorer / bodypart / coord)."""
-        raw = pd.read_csv(path, header=[0, 1, 2], index_col=0)
-        assert isinstance(raw, pd.DataFrame), "pd.read_csv returned non-DataFrame"
-        if raw.columns.nlevels == 3:
-            raw.columns = raw.columns.droplevel(0)  # type: ignore[assignment]
-        return self._parse_pose_df(raw, source=path)
+        """Load a DLC CSV (single- or multi-animal header) as one PoseData.
+
+        Single-animal files (3-row scorer/bodypart/coord header) load as before.
+        Multi-animal files (4-row header with an ``individuals`` level) collapse
+        to the *first* individual for this single-animal entry point so generic
+        consumers (previews, analytics, ROI) keep working; use :meth:`load_multi`
+        for full per-animal handling.
+        """
+        return self._collapse_to_single(self._read_individual_frames(path), source=path)
 
     def load_h5(self, path: Path) -> PoseData:
-        """Load a DLC H5 file."""
+        """Load a DLC H5 file (single- or multi-animal); see :meth:`load_csv`."""
+        return self._collapse_to_single(self._read_individual_frames(path), source=path)
+
+    def _collapse_to_single(
+        self, per_individual_frames: "dict[str, pd.DataFrame]", source: Path,
+    ) -> PoseData:
+        """Parse the first individual from a per-individual frame mapping.
+
+        Used by the single-animal :meth:`load_csv`/:meth:`load_h5` entry points so
+        a multi-animal file doesn't crash code paths that only expect one animal.
+        """
+        keys = list(per_individual_frames.keys())
+        if not keys:
+            raise ValueError(f"Could not extract any body parts from pose file: {source}")
+        if len(keys) > 1:
+            logger.info(
+                "Pose file %s contains %d individuals; single-animal load uses '%s'. "
+                "Use load_multi() for full multi-animal handling.",
+                source, len(keys), keys[0],
+            )
+        return self._parse_pose_df(per_individual_frames[keys[0]], source=source)
+
+    @staticmethod
+    def _csv_has_individuals(path: Path) -> bool:
+        """True when a DLC CSV carries a 4-row header with an ``individuals`` level.
+
+        Multi-animal DLC exports prepend an ``individuals`` row (Mouse1, Mouse2,
+        …) between ``scorer`` and ``bodyparts``.  We detect it cheaply from the
+        first column's header cells without parsing the whole file.
+        """
         try:
-            raw_h5 = pd.read_hdf(str(path), key="df_with_missing")
+            head = pd.read_csv(path, header=None, nrows=4, dtype=str)
         except Exception:
-            raw_h5 = pd.read_hdf(str(path))
-        assert isinstance(raw_h5, pd.DataFrame), "pd.read_hdf returned non-DataFrame"
-        if raw_h5.columns.nlevels == 3:
-            raw_h5.columns = raw_h5.columns.droplevel(0)  # type: ignore[assignment]
-        return self._parse_pose_df(raw_h5, source=path)
+            return False
+        first_col = {
+            str(head.iat[r, 0]).strip().lower()
+            for r in range(min(4, len(head)))
+        }
+        return "individuals" in first_col
+
+    @staticmethod
+    def _split_individuals(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+        """Split a DLC column frame into ``{individual_id: (bodypart, coord) df}``.
+
+        Drops the ``scorer`` level wherever it sits, then groups by the
+        ``individuals`` level if present.  Single-animal frames (no individuals
+        level) return a single entry keyed by :data:`SINGLE_INDIVIDUAL`.  Each
+        returned value is a standard 2-level ``(bodypart, coord)`` frame ready
+        for :meth:`_parse_pose_df`.
+        """
+        cols = df.columns
+        names = [str(n).lower() if n is not None else "" for n in (list(cols.names) or [])]
+        nlevels = cols.nlevels
+
+        # A DLC frame is one of:
+        #   (scorer, bodyparts, coords)               — single animal, 3 levels
+        #   (scorer, individuals, bodyparts, coords)  — multi animal, 4 levels
+        #   (bodyparts, coords)                       — already scorer-stripped
+        # Level names are present for real DLC files but absent for hand-built
+        # frames, so detect the ``individuals`` level by name OR by position.
+        has_individuals = "individuals" in names or nlevels == 4
+
+        if has_individuals:
+            # Drop the scorer level (named, else the leading level).
+            if "scorer" in names:
+                df = df.copy(); df.columns = cols.droplevel(names.index("scorer"))
+            elif nlevels == 4:
+                df = df.copy(); df.columns = cols.droplevel(0)
+            cols = df.columns
+            names = [str(n).lower() if n is not None else "" for n in (list(cols.names) or [])]
+            lvl = names.index("individuals") if "individuals" in names else 0
+            individuals = list(dict.fromkeys(cols.get_level_values(lvl)))
+            return {str(ind): df.xs(ind, axis=1, level=lvl) for ind in individuals}
+
+        # Single animal: strip the leading scorer level (named, or the
+        # conventional 3-level scorer/bodypart/coord layout) so a clean
+        # (bodypart, coord) frame remains.
+        if "scorer" in names:
+            df = df.copy(); df.columns = cols.droplevel(names.index("scorer"))
+        elif nlevels == 3:
+            df = df.copy(); df.columns = cols.droplevel(0)
+        return {SINGLE_INDIVIDUAL: df}
+
+    def _read_individual_frames(self, path: Path) -> dict[str, pd.DataFrame]:
+        """Read a pose file into per-individual ``(bodypart, coord)`` frames."""
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            header = [0, 1, 2, 3] if self._csv_has_individuals(path) else [0, 1, 2]
+            raw = pd.read_csv(path, header=header, index_col=0)
+        elif suffix in (".h5", ".hdf5"):
+            try:
+                raw = pd.read_hdf(str(path), key="df_with_missing")
+            except Exception:
+                raw = pd.read_hdf(str(path))
+        else:
+            raise ValueError(f"Unsupported pose format: {suffix}")
+        assert isinstance(raw, pd.DataFrame), "pose reader returned non-DataFrame"
+        return self._split_individuals(raw)
+
+    def load_multi(
+        self,
+        path: Path,
+        keypoint_aliases: "dict[str, str] | None" = None,
+    ) -> MultiAnimalPoseData:
+        """Load a (possibly multi-animal) pose file into per-individual PoseData.
+
+        Single-animal files yield a 1-entry mapping keyed ``"individual0"``.
+        Multi-animal files key by the DLC individual names (Mouse1, Mouse2, …).
+        ``keypoint_aliases`` renames body parts on load (see :meth:`load`).
+        """
+        per_ind_raw = self._read_individual_frames(path)
+        per_individual: dict[str, PoseData] = {}
+        for ind, df2 in per_ind_raw.items():
+            ind_id = "individual0" if ind == SINGLE_INDIVIDUAL else ind
+            pose = self._parse_pose_df(df2, source=path)
+            if keypoint_aliases:
+                pose = self._apply_keypoint_aliases(pose, keypoint_aliases)
+            per_individual[ind_id] = pose
+        n_frames = max((p.n_frames for p in per_individual.values()), default=0)
+        return MultiAnimalPoseData(
+            individuals=list(per_individual.keys()),
+            per_individual=per_individual,
+            n_frames=n_frames,
+        )
+
+    def load_and_clean_multi(
+        self,
+        path: Path,
+        settings: "PoseSmoothingSettings | None" = None,
+        keypoint_aliases: "dict[str, str] | None" = None,
+        identity_corrections: "list[dict] | None" = None,
+    ) -> MultiAnimalPoseData:
+        """Multi-animal counterpart of :meth:`load_and_clean`.
+
+        Loads every individual, applies the same temporal smoothing to each, and
+        finally applies any user identity-swap corrections so downstream features
+        see the corrected, identity-consistent tracks.
+        """
+        from abel.models.schemas import PoseSmoothingSettings as _S
+        s = settings or _S()
+        multi = self.load_multi(path, keypoint_aliases=keypoint_aliases)
+        cleaned = {
+            ind: self.clean_pose(
+                pose,
+                likelihood_threshold=s.likelihood_threshold,
+                interpolate=s.interpolate_dropouts,
+                interpolate_max_gap=s.interpolate_max_gap,
+                smoothing_window=s.smoothing_window,
+            )
+            for ind, pose in multi.per_individual.items()
+        }
+        multi = multi._replace(per_individual=cleaned)
+        if identity_corrections:
+            multi = self.apply_identity_corrections(multi, identity_corrections)
+        return multi
+
+    @staticmethod
+    def apply_identity_corrections(
+        multi: "MultiAnimalPoseData",
+        corrections: "list[dict]",
+    ) -> "MultiAnimalPoseData":
+        """Return a copy with identity-swap corrections applied.
+
+        Each correction ``{"frame": t, "a": A, "b": B}`` swaps the tracks of
+        individuals A and B for all frames ``>= t`` (a track exchange that undoes
+        a tracker identity flip).  Multiple corrections compose as successive
+        transpositions in frame order, so re-flagging the same pair toggles it
+        back.  Body parts and frame count are preserved; centroids are recomputed.
+        """
+        from collections import defaultdict
+
+        inds = list(multi.individuals)
+        n = multi.n_frames
+        by_frame: "defaultdict[int, list[tuple[str, str]]]" = defaultdict(list)
+        for c in corrections or []:
+            try:
+                f = int(c.get("frame", 0))
+                a, b = str(c.get("a")), str(c.get("b"))
+            except Exception:
+                continue
+            if a in inds and b in inds and a != b and 0 < f < n:
+                by_frame[f].append((a, b))
+        if not by_frame:
+            return multi
+
+        breaks = sorted(by_frame)
+        seg_bounds = [0, *breaks, n]
+        perm = {o: o for o in inds}  # output identity -> source individual
+        parts_x = {o: [] for o in inds}
+        parts_y = {o: [] for o in inds}
+        parts_l = {o: [] for o in inds}
+
+        for k in range(len(seg_bounds) - 1):
+            if k > 0:  # apply this breakpoint's transpositions before the segment
+                for a, b in by_frame[breaks[k - 1]]:
+                    perm[a], perm[b] = perm[b], perm[a]
+            s_idx, e_idx = seg_bounds[k], seg_bounds[k + 1]
+            if e_idx <= s_idx:
+                continue
+            for o in inds:
+                src = multi.per_individual[perm[o]]
+                parts_x[o].append(src.x.iloc[s_idx:e_idx])
+                parts_y[o].append(src.y.iloc[s_idx:e_idx])
+                parts_l[o].append(src.likelihood.iloc[s_idx:e_idx])
+
+        new_per_individual: dict[str, PoseData] = {}
+        for o in inds:
+            x_df = pd.concat(parts_x[o]).reset_index(drop=True)
+            y_df = pd.concat(parts_y[o]).reset_index(drop=True)
+            l_df = pd.concat(parts_l[o]).reset_index(drop=True)
+            cx, cy = PoseProcessingService._compute_centroid(x_df, y_df, l_df)
+            base = multi.per_individual[o]
+            new_per_individual[o] = PoseData(
+                body_parts=base.body_parts,
+                x=x_df, y=y_df, likelihood=l_df,
+                centroid_x=cx, centroid_y=cy,
+                n_frames=len(x_df),
+            )
+        return multi._replace(per_individual=new_per_individual)
 
     def load_and_clean(
         self,
@@ -662,6 +894,287 @@ class PoseProcessingService:
         df.to_parquet(session_out, index=False)
         return df
 
+    # ------------------------------------------------------------------
+    # Multi-animal / interaction (social) features
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _wrap_angle(a: np.ndarray) -> np.ndarray:
+        """Wrap angle(s) to (-pi, pi] without NaN warnings."""
+        return np.arctan2(np.sin(a), np.cos(a))
+
+    @staticmethod
+    def _bbox_iou(focal: "PoseData", other: "PoseData") -> np.ndarray:
+        """Per-frame IoU of the two animals' axis-aligned keypoint bounding boxes."""
+        def _bounds(p: "PoseData") -> tuple[np.ndarray, ...]:
+            xa = p.x.to_numpy(dtype=float)
+            ya = p.y.to_numpy(dtype=float)
+            with np.errstate(invalid="ignore"):
+                return (
+                    np.nanmin(xa, axis=1), np.nanmax(xa, axis=1),
+                    np.nanmin(ya, axis=1), np.nanmax(ya, axis=1),
+                )
+        fx0, fx1, fy0, fy1 = _bounds(focal)
+        ox0, ox1, oy0, oy1 = _bounds(other)
+        iw = np.clip(np.minimum(fx1, ox1) - np.maximum(fx0, ox0), 0.0, None)
+        ih = np.clip(np.minimum(fy1, oy1) - np.maximum(fy0, oy0), 0.0, None)
+        inter = iw * ih
+        area_f = np.clip(fx1 - fx0, 0.0, None) * np.clip(fy1 - fy0, 0.0, None)
+        area_o = np.clip(ox1 - ox0, 0.0, None) * np.clip(oy1 - oy0, 0.0, None)
+        union = area_f + area_o - inter
+        with np.errstate(invalid="ignore", divide="ignore"):
+            iou = np.where(union > 0, inter / union, np.nan)
+        return iou
+
+    # Base inter-animal feature names (per dyad) before reduction over others.
+    _SOCIAL_DISTANCE_BASES = (
+        "dist_centroid_to_centroid",
+        "dist_nose_to_nose",
+        "dist_nose_to_tail_base",
+        "min_keypoint_dist",
+    )
+    _SOCIAL_DIRECTIONAL_BASES = (
+        "facing_angle",
+        "other_facing_focal",
+        "approach_velocity",
+        "bbox_overlap",
+    )
+
+    def compute_frame_social_features(
+        self,
+        focal: "PoseData",
+        others: "dict[str, PoseData]",
+        fps: float,
+        *,
+        focal_body_length: np.ndarray | None = None,
+    ) -> pd.DataFrame:
+        """Per-frame inter-animal (social) features for one focal animal.
+
+        For every *other* animal in the session a dyadic feature set is computed,
+        then reduced over conspecifics into a **fixed** column schema independent
+        of the animal count:
+
+        * ``social_{base}_nearest`` — the value for the closest conspecific
+          (smallest centroid-to-centroid distance) at that frame.
+        * ``social_{base}_mean`` — averaged over all other animals.
+
+        Distance bases additionally get body-length-normalized ``_norm`` variants.
+        For two animals ``nearest`` and ``mean`` coincide.  Frames where an
+        animal is undetected propagate NaN (handled downstream).
+        """
+        n = focal.n_frames
+        if not others:
+            return pd.DataFrame(index=range(n))
+
+        fcx = np.asarray(focal.centroid_x, dtype=float)
+        fcy = np.asarray(focal.centroid_y, dtype=float)
+        f_nose_x, f_nose_y = self._keypoint_xy(focal, ["nose", "snout", "head"])
+        f_axis = self.compute_body_axis_angle(focal)
+        if focal_body_length is None:
+            focal_body_length = self._compute_body_length(focal)
+        safe_bl = np.where(focal_body_length > 1e-3, focal_body_length, np.nan)
+        f_parts = focal.body_parts
+
+        cc_list: list[np.ndarray] = []
+        feats_by_other: list[dict[str, np.ndarray]] = []
+        for opose in others.values():
+            ocx = np.asarray(opose.centroid_x, dtype=float)
+            ocy = np.asarray(opose.centroid_y, dtype=float)
+            dcc = np.hypot(fcx - ocx, fcy - ocy)
+            o_nose_x, o_nose_y = self._keypoint_xy(opose, ["nose", "snout", "head"])
+            o_tail_x, o_tail_y = self._keypoint_xy(opose, ["tail_base", "tailbase", "tail"])
+            d_nn = np.hypot(f_nose_x - o_nose_x, f_nose_y - o_nose_y)
+            d_nt = np.hypot(f_nose_x - o_tail_x, f_nose_y - o_tail_y)
+
+            shared = [p for p in f_parts if p in opose.body_parts]
+            if shared:
+                fx = np.stack([np.asarray(focal.x[p], dtype=float) for p in shared], axis=1)
+                fy = np.stack([np.asarray(focal.y[p], dtype=float) for p in shared], axis=1)
+                ox = np.stack([np.asarray(opose.x[p], dtype=float) for p in shared], axis=1)
+                oy = np.stack([np.asarray(opose.y[p], dtype=float) for p in shared], axis=1)
+                dxx = fx[:, :, None] - ox[:, None, :]
+                dyy = fy[:, :, None] - oy[:, None, :]
+                dmat = np.sqrt(dxx * dxx + dyy * dyy).reshape(n, -1)
+                with np.errstate(invalid="ignore"):
+                    all_nan = np.all(np.isnan(dmat), axis=1)
+                    d_min = np.where(all_nan, np.nan, np.nanmin(np.where(np.isnan(dmat), np.inf, dmat), axis=1))
+            else:
+                d_min = np.full(n, np.nan)
+
+            vfx, vfy = ocx - fcx, ocy - fcy
+            facing = np.abs(self._wrap_angle(np.arctan2(vfy, vfx) - f_axis))
+            o_axis = self.compute_body_axis_angle(opose)
+            other_facing = np.abs(self._wrap_angle(np.arctan2(-vfy, -vfx) - o_axis))
+            approach = -self._finite_diff(dcc, fps)
+            iou = self._bbox_iou(focal, opose)
+
+            cc_list.append(dcc)
+            feats_by_other.append({
+                "dist_centroid_to_centroid": dcc,
+                "dist_nose_to_nose": d_nn,
+                "dist_nose_to_tail_base": d_nt,
+                "min_keypoint_dist": d_min,
+                "facing_angle": facing,
+                "other_facing_focal": other_facing,
+                "approach_velocity": approach,
+                "bbox_overlap": iou,
+            })
+
+        cc = np.stack(cc_list, axis=0)               # (n_others, n)
+        all_nan_frame = np.all(np.isnan(cc), axis=0)
+        nearest_idx = np.argmin(np.where(np.isnan(cc), np.inf, cc), axis=0)
+        frame_ix = np.arange(n)
+
+        out: dict[str, np.ndarray] = {}
+        for base in (*self._SOCIAL_DISTANCE_BASES, *self._SOCIAL_DIRECTIONAL_BASES):
+            stack = np.stack([f[base] for f in feats_by_other], axis=0)
+            with np.errstate(invalid="ignore"):
+                mean_v = np.nanmean(stack, axis=0)
+            near_v = stack[nearest_idx, frame_ix]
+            near_v = np.where(all_nan_frame, np.nan, near_v)
+            out[f"social_{base}_nearest"] = near_v
+            out[f"social_{base}_mean"] = mean_v
+            if base in self._SOCIAL_DISTANCE_BASES:
+                out[f"social_{base}_nearest_norm"] = near_v / safe_bl
+                out[f"social_{base}_mean_norm"] = mean_v / safe_bl
+
+        return pd.DataFrame(out, index=range(n))
+
+    @staticmethod
+    def detect_identity_swaps(
+        multi: "MultiAnimalPoseData",
+        *,
+        max_report: int = 200,
+    ) -> dict:
+        """Flag frames where two individuals' identities may have swapped.
+
+        A swap leaves a tell-tale signature: between consecutive frames two
+        animals each "teleport" to roughly where the *other* one just was.  For
+        every unordered pair we compare the cost of keeping identities (each
+        animal's own displacement) against the cost of swapping them (each animal
+        moving to the other's previous position); a swap is suspected when
+        swapping is the cheaper assignment *and* the motion is abnormally large
+        relative to the typical per-frame step (so ordinary close interactions
+        don't trip it).
+
+        Returns ``{"n_swaps", "frames", "pairs", "scale_px"}`` where ``frames`` is
+        the sorted suspect frame indices (capped at ``max_report``) and ``pairs``
+        maps each ``"A|B"`` to its suspect frame count.
+        """
+        inds = [i for i in multi.individuals if i in multi.per_individual]
+        empty = {"n_swaps": 0, "frames": [], "pairs": {}, "scale_px": 0.0}
+        if len(inds) < 2:
+            return empty
+
+        cents = {
+            i: (
+                np.asarray(multi.per_individual[i].centroid_x, dtype=float),
+                np.asarray(multi.per_individual[i].centroid_y, dtype=float),
+            )
+            for i in inds
+        }
+        n = min(len(cx) for cx, _ in cents.values())
+        if n < 2:
+            return empty
+
+        # Adaptive movement threshold: a robust multiple of the median per-frame
+        # centroid step pooled across individuals (falls back to 15 px).
+        steps: list[np.ndarray] = []
+        for cx, cy in cents.values():
+            steps.append(np.hypot(np.diff(cx[:n]), np.diff(cy[:n])))
+        pooled = np.concatenate(steps) if steps else np.array([])
+        med = float(np.nanmedian(pooled)) if pooled.size else 0.0
+        if not np.isfinite(med):
+            med = 0.0
+        move_thresh = max(15.0, 4.0 * med)
+
+        suspect_frames: set[int] = set()
+        pairs: dict[str, int] = {}
+        for ii in range(len(inds)):
+            for jj in range(ii + 1, len(inds)):
+                a, b = inds[ii], inds[jj]
+                ax, ay = cents[a]
+                bx, by = cents[b]
+                count = 0
+                for t in range(1, n):
+                    pax, pay, cax, cay = ax[t - 1], ay[t - 1], ax[t], ay[t]
+                    pbx, pby, cbx, cby = bx[t - 1], by[t - 1], bx[t], by[t]
+                    if not all(np.isfinite(v) for v in (pax, pay, cax, cay, pbx, pby, cbx, cby)):
+                        continue
+                    stay = np.hypot(cax - pax, cay - pay) + np.hypot(cbx - pbx, cby - pby)
+                    swap = np.hypot(cax - pbx, cay - pby) + np.hypot(cbx - pax, cby - pay)
+                    moved = max(np.hypot(cax - pax, cay - pay), np.hypot(cbx - pbx, cby - pby))
+                    if swap < stay and moved > move_thresh:
+                        suspect_frames.add(t)
+                        count += 1
+                if count:
+                    pairs[f"{a}|{b}"] = count
+
+        frames = sorted(suspect_frames)
+        return {
+            "n_swaps": len(frames),
+            "frames": frames[:max_report],
+            "pairs": pairs,
+            "scale_px": move_thresh,
+        }
+
+    def extract_and_save_frame_pose_features_multi(
+        self,
+        project_root: Path,
+        pose_path: Path,
+        fps: float,
+        session_id: str,
+        video_id: str,
+        individual_animal_ids: "dict[str, str]",
+        invariant_config: "InvariantFeatureConfig | None" = None,
+        keypoint_aliases: "dict[str, str] | None" = None,
+        enable_social_features: bool = False,
+        identity_corrections: "list[dict] | None" = None,
+    ) -> pd.DataFrame:
+        """Extract per-frame features for every individual in a multi-animal file.
+
+        Each individual gets the full solo kinematic feature set with a distinct
+        ``animal_id`` (resolved by ``individual_animal_ids``), plus inter-animal
+        ``social_*`` columns when ``enable_social_features`` and >1 animal.  Any
+        ``identity_corrections`` are applied first so features see identity-
+        consistent tracks.  All individuals' rows are concatenated into a single
+        per-session parquet so the downstream (animal_id, session_id)-keyed
+        pipeline handles each animal as an independent group.
+        """
+        multi = self.load_and_clean_multi(
+            pose_path,
+            keypoint_aliases=keypoint_aliases,
+            identity_corrections=identity_corrections,
+        )
+        poses = multi.per_individual
+        compute_social = enable_social_features and len(poses) > 1
+
+        frames: list[pd.DataFrame] = []
+        for ind, pose in poses.items():
+            animal_id = individual_animal_ids.get(ind) or f"{session_id}:{ind}"
+            df = self.compute_frame_pose_features(
+                pose=pose,
+                fps=fps,
+                animal_id=animal_id,
+                session_id=session_id,
+                video_id=video_id,
+                invariant_config=invariant_config,
+            )
+            if compute_social:
+                others = {o: p for o, p in poses.items() if o != ind}
+                bl = df["body_length_px"].to_numpy(dtype=float) if "body_length_px" in df else None
+                social = self.compute_frame_social_features(pose, others, fps, focal_body_length=bl)
+                if not social.empty:
+                    df = pd.concat([df.reset_index(drop=True), social.reset_index(drop=True)], axis=1)
+            frames.append(df)
+
+        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        out_dir = project_root / "derived" / "pose_features"
+        session_out = out_dir / "sessions" / f"{session_id}.parquet"
+        session_out.parent.mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(session_out, index=False)
+        return combined
+
     @staticmethod
     def consolidate_session_files(project_root: Path) -> Path | None:
         """Merge per-session parquet files into the canonical frame_pose.parquet.
@@ -1064,29 +1577,38 @@ class PoseProcessingService:
     @staticmethod
     def probe_metadata(path: Path) -> dict:
         """Return lightweight metadata (body parts, frame count) without full load."""
-        meta: dict = {"path": str(path), "n_frames": 0, "body_parts": []}
+        meta: dict = {"path": str(path), "n_frames": 0, "body_parts": [], "individuals": []}
+
+        def _summarize(per_ind: dict[str, pd.DataFrame]) -> None:
+            # Body parts are shared across individuals — dedupe across all.
+            parts: list[str] = []
+            seen: set[str] = set()
+            for df2 in per_ind.values():
+                for bp in df2.columns.get_level_values(0).unique():
+                    norm = normalize_bodypart_name(bp)
+                    if norm not in seen:
+                        seen.add(norm)
+                        parts.append(norm)
+            meta["body_parts"] = parts
+            inds = [k for k in per_ind if k != SINGLE_INDIVIDUAL]
+            meta["individuals"] = inds
+
+        svc = PoseProcessingService()
         try:
             if path.suffix.lower() == ".csv":
-                df_head = pd.read_csv(path, header=[0, 1, 2], index_col=0, nrows=0)
-                if df_head.columns.nlevels == 3:
-                    df_head.columns = df_head.columns.droplevel(0)
-                meta["body_parts"] = [
-                    normalize_bodypart_name(bp)
-                    for bp in df_head.columns.get_level_values(0).unique()
-                ]
-                # Count rows (fast)
-                meta["n_frames"] = sum(1 for _ in open(path)) - 3  # 3 header rows
+                n_header = 4 if PoseProcessingService._csv_has_individuals(path) else 3
+                df_head = pd.read_csv(path, header=list(range(n_header)), index_col=0, nrows=0)
+                _summarize(svc._split_individuals(df_head))
+                # Count rows (fast): total lines minus header rows.
+                with open(path) as fh:
+                    meta["n_frames"] = sum(1 for _ in fh) - n_header
             elif path.suffix.lower() in (".h5", ".hdf5"):
                 try:
                     df_h5 = pd.read_hdf(str(path), key="df_with_missing", stop=0)
                 except Exception:
                     df_h5 = pd.read_hdf(str(path), stop=0)
-                if df_h5.columns.nlevels == 3:
-                    df_h5.columns = df_h5.columns.droplevel(0)  # type: ignore[assignment]
-                meta["body_parts"] = [
-                    normalize_bodypart_name(bp)
-                    for bp in df_h5.columns.get_level_values(0).unique()
-                ]
+                assert isinstance(df_h5, pd.DataFrame)
+                _summarize(svc._split_individuals(df_h5))
         except Exception as exc:
             meta["error"] = str(exc)
         return meta

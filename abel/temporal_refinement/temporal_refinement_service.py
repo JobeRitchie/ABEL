@@ -31,7 +31,10 @@ import pandas as pd
 
 from abel.core.constants import APP_SCHEMA_VERSION
 from abel.services.behavior_service import BehaviorService
-from abel.services.behavior_representation_service import BehaviorRepresentationService
+from abel.services.behavior_representation_service import (
+    BehaviorRepresentationService,
+    canonical_distance_name,
+)
 from abel.services.import_service import ImportService
 from abel.services.provenance_service import ProvenanceService
 from abel.storage.file_store import read_json, write_json
@@ -1053,8 +1056,17 @@ class TemporalRefinementService:
                 model_cols = [str(c) for c in list(payload.get("feature_cols", []))]
                 if model is None or not model_cols:
                     continue
+                # Align the model's stored feature names onto the data's canonical
+                # pairwise-distance spelling.  Models trained before distance
+                # canonicalisation (v0.5.2) stored ``dist_b_to_a`` while freshly
+                # extracted features now use the sorted ``dist_a_to_b``; without this
+                # remap every such column reindexes to a missing name and is silently
+                # zero-filled, which is what broke Direct Use for older models.  The
+                # map is 1:1 (a training set can't hold both spellings), so feature
+                # order is preserved.
+                aligned_cols = [canonical_distance_name(c) for c in model_cols]
                 x_by_bid[bid] = dense_segs.reindex(
-                    columns=model_cols, fill_value=0.0
+                    columns=aligned_cols, fill_value=0.0
                 ).to_numpy(dtype=np.float32)
                 active_bids.append(bid)
 

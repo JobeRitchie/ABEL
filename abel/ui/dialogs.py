@@ -34,8 +34,14 @@ class ProjectWizardDialog(QDialog):
         self.root_path = QLineEdit(str(Path.home()))
         self.assay_name = QLineEdit("open_field")
         self.species = QLineEdit("mouse")
-        self.single_animal = QCheckBox("Single-animal project")
-        self.single_animal.setChecked(True)
+        self.num_animals = QSpinBox()
+        self.num_animals.setRange(1, 20)
+        self.num_animals.setValue(1)
+        self.num_animals.setToolTip(
+            "Animals tracked per session. 1 = single-animal (default). >1 enables\n"
+            "multi-animal ingestion (DLC files with an 'individuals' header level),\n"
+            "per-animal feature extraction, and interaction (social) features."
+        )
 
         self.default_fps = QSpinBox()
         self.default_fps.setRange(1, 240)
@@ -71,7 +77,7 @@ class ProjectWizardDialog(QDialog):
         form.addRow("Project root", root_row)
         form.addRow("Assay", self.assay_name)
         form.addRow("Species", self.species)
-        form.addRow("Animal mode", self.single_animal)
+        form.addRow("Number of animals", self.num_animals)
         form.addRow("Default FPS", self.default_fps)
         form.addRow("Default clip duration (sec)", self.clip_duration)
         form.addRow("Default crop margin (px)", self.crop_margin)
@@ -114,7 +120,8 @@ class ProjectWizardDialog(QDialog):
             project_name=self.project_name.text().strip(),
             assay_name=self.assay_name.text().strip(),
             species=self.species.text().strip(),
-            single_animal=self.single_animal.isChecked(),
+            num_animals=int(self.num_animals.value()),
+            single_animal=int(self.num_animals.value()) <= 1,
             expected_pose_formats=["csv", "h5"],
             default_fps=float(self.default_fps.value()),
             default_clip_duration_sec=float(self.clip_duration.text().strip() or 2.0),

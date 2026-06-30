@@ -29,6 +29,7 @@ from abel.models.schemas import ImportManifest, ImportNameSettings, SourceMode
 from abel.services import keypoint_mapping
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
+from abel.ui.animal_identity_dialog import AnimalIdentityDialog
 from abel.ui.body_part_rename_dialog import BodyPartRenameDialog
 from abel.ui.keypoint_mapping_dialog import KeypointMappingDialog
 from abel.ui.pixel_scale_calibration_dialog import PixelScaleCalibrationDialog
@@ -101,6 +102,13 @@ class DataImportTab(QWidget):
         calibrate_scale_btn.clicked.connect(self._open_pixel_scale_calibrator)
         keypoint_map_btn.clicked.connect(self._open_keypoint_mapping)
         rename_parts_btn.clicked.connect(self._open_body_part_rename)
+        identity_map_btn = QPushButton("Map Animal Identities")
+        identity_map_btn.setToolTip(
+            "For multi-animal pose files: assign each detected individual (Mouse1,\n"
+            "Mouse2…) a real subject identity (e.g. green/black) used as its animal_id."
+        )
+        identity_map_btn.clicked.connect(self._open_identity_map)
+        self._identity_map_btn = identity_map_btn
         reapply_subject_btn.clicked.connect(self._apply_subject_settings)
         test_pattern_btn.clicked.connect(self._update_subject_preview)
 
@@ -127,6 +135,7 @@ class DataImportTab(QWidget):
             calibrate_scale_btn,
             keypoint_map_btn,
             rename_parts_btn,
+            identity_map_btn,
         ]:
             button_row.addWidget(btn)
 
@@ -164,7 +173,10 @@ class DataImportTab(QWidget):
         relocate_video_btn.clicked.connect(lambda: self._relocate_sources("video"))
 
         relocate_pose_btn = QPushButton("Set DLC Path")
-        relocate_pose_btn.setToolTip("Point pose files to a new folder (matches by filename).")
+        relocate_pose_btn.setToolTip(
+            "Point pose files to a new folder. Matches by filename, then falls back to "
+            "the DLC stem so a different DLC run of the same recordings still matches."
+        )
         relocate_pose_btn.clicked.connect(lambda: self._relocate_sources("pose"))
 
         copy_row = QHBoxLayout()
@@ -342,6 +354,16 @@ class DataImportTab(QWidget):
             video_name = Path(video.source_path).name if video else session.video_asset_id
             pose_name = Path(pose.source_path).name if pose else session.pose_asset_id
             subject_name = session.subject_id or (video.subject_id if video else "") or ""
+            # For multi-animal sessions, surface the assigned identities (and any
+            # swap corrections) so the result of the identity tool is visible.
+            inds = list(getattr(session, "individuals", []) or [])
+            if inds:
+                id_map = getattr(session, "individual_subject_map", {}) or {}
+                names = [id_map.get(i, i) for i in inds]
+                subject_name = " / ".join(names)
+                n_corr = len(getattr(session, "identity_corrections", []) or [])
+                if n_corr:
+                    subject_name += f"  (⚠ {n_corr} swap fix)"
 
             # Active path: prefer local copy, fall back to source.
             video_active = (video.local_path or video.source_path) if video else ""
@@ -690,6 +712,135 @@ class DataImportTab(QWidget):
             )
         self._check_keypoint_consistency()
 
+    def _multi_animal_sessions(self) -> list:
+        return [s for s in self._manifest.linked_sessions if getattr(s, "individuals", None)]
+
+    def _selected_multi_session(self):
+        """Resolve which multi-animal session to operate on.
+
+        Prefers the table-selected row; falls back to the sole multi-animal
+        session.  Returns the LinkedSession or None (with a user message).
+        """
+        multi = self._multi_animal_sessions()
+        if not multi:
+            QMessageBox.information(
+                self, "No Multi-Animal Sessions",
+                "No imported pose file contains multiple tracked individuals "
+                "(no DLC 'individuals' header level was detected).\n\nIf you imported "
+                "multi-animal files before updating, click Auto Match to re-probe them.",
+            )
+            return None
+        rows = sorted({i.row() for i in self.session_table.selectionModel().selectedRows()})
+        if rows:
+            sid = self.session_table.item(rows[0], 0).text()
+            sess = next((s for s in multi if s.session_id == sid), None)
+            if sess is not None:
+                return sess
+            QMessageBox.information(
+                self, "Select a Multi-Animal Session",
+                "The selected session is single-animal. Select a multi-animal session "
+                "row, or deselect to use the only multi-animal session.",
+            )
+            return None
+        if len(multi) == 1:
+            return multi[0]
+        QMessageBox.information(
+            self, "Select a Session",
+            "Select the multi-animal session row you want to assign identities for.",
+        )
+        return None
+
+    def _open_identity_map(self) -> None:
+        """Visual identity assignment + swap correction for one session."""
+        if not self._manifest.linked_sessions:
+            QMessageBox.information(self, "No Sessions", "Import and link sessions first.")
+            return
+        session = self._selected_multi_session()
+        if session is None:
+            return
+
+        pose_path = self._import_service.pose_path_for_session(self._manifest, session.session_id)
+        if not pose_path:
+            QMessageBox.warning(self, "No Pose File", "Could not resolve this session's pose file.")
+            return
+
+        # Load cleaned multi-animal pose (raw identities — corrections are applied
+        # live inside the dialog for preview, then persisted for extraction).
+        try:
+            multi = PoseProcessingService().load_and_clean_multi(pose_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Pose Load Failed", f"Could not read pose file:\n{exc}")
+            return
+        swap_info = PoseProcessingService.detect_identity_swaps(multi)
+
+        video_path = self._import_service.video_path_for_session(self._manifest, session.session_id)
+        provider, cap = self._make_frame_provider(video_path)
+        default_frame = min(max(0, multi.n_frames // 2), max(0, multi.n_frames - 1))
+        try:
+            dlg = AnimalIdentityDialog(
+                session_label=session.subject_id or session.session_id,
+                multi=multi,
+                frame_provider=provider,
+                n_frames=multi.n_frames,
+                default_frame=default_frame,
+                swap_frames=swap_info.get("frames", []),
+                current_map=dict(getattr(session, "individual_subject_map", {}) or {}),
+                current_corrections=list(getattr(session, "identity_corrections", []) or []),
+                parent=self,
+            )
+            accepted = dlg.exec() == QDialog.DialogCode.Accepted
+        finally:
+            if cap is not None:
+                cap.release()
+        if not accepted:
+            return
+
+        self._import_service.update_session_individual_map(
+            self._manifest, session.session_id, dlg.result_map
+        )
+        self._import_service.update_session_identity_corrections(
+            self._manifest, session.session_id, dlg.result_corrections
+        )
+        # Identity/track changes invalidate any cached features for this session.
+        if self._project_root:
+            from abel.services.feature_prep_service import FeaturePrepService
+            FeaturePrepService.invalidate_caches(self._project_root)
+        ident = ", ".join(f"{k}→{v}" for k, v in dlg.result_map.items())
+        self._append_log(
+            f"Session {session.session_id}: identities [{ident}]; "
+            f"{len(dlg.result_corrections)} swap correction(s). "
+            "Re-run feature extraction to apply."
+        )
+        self._save_manifest(silent=True)
+        self._populate_table(self._manifest)
+
+    @staticmethod
+    def _make_frame_provider(video_path):
+        """Return ``(provider, cap)`` reading BGR frames by index from a video.
+
+        ``provider`` is a callable ``int -> ndarray|None``; ``cap`` is the open
+        OpenCV capture (or None) the caller must release.
+        """
+        if not video_path:
+            return (lambda _i: None), None
+        try:
+            import cv2  # noqa: PLC0415
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                return (lambda _i: None), None
+
+            def _provider(idx: int):
+                try:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+                    ok, frame = cap.read()
+                    return frame if ok else None
+                except Exception:
+                    return None
+
+            return _provider, cap
+        except Exception:
+            return (lambda _i: None), None
+
     def _open_pixel_scale_calibrator(self) -> None:
         if not self._manifest.linked_sessions:
             QMessageBox.information(self, "No Sessions", "Import and link sessions first.")
@@ -911,22 +1062,69 @@ class DataImportTab(QWidget):
             return
 
         folder_path = Path(folder)
+        files = [f for f in folder_path.iterdir() if f.is_file()]
         # Build a lookup of available files in the chosen folder.
-        available = {f.name: f for f in folder_path.iterdir() if f.is_file()}
+        available = {f.name: f for f in files}
+
+        # For pose/DLC files, build a fallback index keyed by the DLC match-key
+        # (the underlying video stem, with the scorer/model suffix stripped).
+        # This lets the same subjects/sessions re-run through a *different* DLC
+        # model relocate cleanly even though the full filenames no longer match.
+        by_key: dict[str, list[Path]] = {}
+        if kind == "pose":
+            for f in files:
+                if f.suffix.lower() in ImportService.POSE_EXTENSIONS:
+                    by_key.setdefault(ImportService._match_key(f), []).append(f)
 
         assets = self._manifest.videos if kind == "video" else self._manifest.poses
         matched = 0
+        lenient = 0
+        ambiguous: list[str] = []
         for asset in assets:
             name = Path(asset.source_path).name
             if name in available:
                 asset.source_path = str(available[name])
                 matched += 1
+                continue
+            if kind == "pose":
+                # Lenient fallback: match by DLC stem when the exact filename
+                # differs (e.g. a different DLC run of the same recordings).
+                asset_path = Path(asset.source_path)
+                key = ImportService._match_key(asset_path)
+                candidates = by_key.get(key, [])
+                if len(candidates) > 1:
+                    # A recording usually exports both .csv and .h5 with the
+                    # same stem; prefer the candidate matching the asset's own
+                    # format so that doesn't read as a genuine ambiguity.
+                    same_ext = [
+                        c for c in candidates
+                        if c.suffix.lower() == asset_path.suffix.lower()
+                    ]
+                    if len(same_ext) == 1:
+                        candidates = same_ext
+                if len(candidates) == 1:
+                    asset.source_path = str(candidates[0])
+                    matched += 1
+                    lenient += 1
+                elif len(candidates) > 1:
+                    ambiguous.append(name)
 
         if matched:
             # Save directly — bypass _save_manifest to avoid triggering auto-copy.
             self._import_service.save_manifest(self._project_root, self._manifest)
             self._populate_table(self._manifest)
-            self._append_log(f"Relocated {matched}/{len(assets)} {label} files to {folder}.")
+            msg = f"Relocated {matched}/{len(assets)} {label} files to {folder}."
+            if lenient:
+                msg += (
+                    f" {lenient} matched leniently by DLC stem "
+                    "(different DLC run of the same recordings)."
+                )
+            if ambiguous:
+                msg += (
+                    f" Skipped {len(ambiguous)} with multiple possible matches "
+                    f"({', '.join(ambiguous[:3])}{'…' if len(ambiguous) > 3 else ''})."
+                )
+            self._append_log(msg)
         else:
             QMessageBox.information(
                 self, "No Matches",

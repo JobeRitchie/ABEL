@@ -55,6 +55,7 @@ class ImportService:
             pose = pose_by_key.get(key)
             if pose is None:
                 continue
+            individuals = list(pose.individuals or [])
             linked.append(
                 LinkedSession(
                     session_id=f"session_{uuid4().hex[:8]}",
@@ -64,9 +65,54 @@ class ImportService:
                     pixels_per_mm=video.pixels_per_mm,
                     pairing_score=1.0,
                     pairing_notes="Auto-matched by filename stem",
+                    individuals=individuals,
+                    # Default each detected individual to itself; the import UI
+                    # lets the user remap to real subject identities (green/black).
+                    individual_subject_map={ind: ind for ind in individuals},
                 )
             )
         return linked
+
+    def update_session_individual_map(
+        self,
+        manifest: ImportManifest,
+        session_id: str,
+        individual_subject_map: dict[str, str],
+    ) -> ImportManifest:
+        """Set the individual→subject identity mapping for a multi-animal session."""
+        session = next((s for s in manifest.linked_sessions if s.session_id == session_id), None)
+        if session is None:
+            return manifest
+        cleaned = {
+            str(ind): (str(name).strip() or str(ind))
+            for ind, name in (individual_subject_map or {}).items()
+            if str(ind) in set(session.individuals)
+        }
+        session.individual_subject_map = cleaned
+        return manifest
+
+    def update_session_identity_corrections(
+        self,
+        manifest: ImportManifest,
+        session_id: str,
+        corrections: list[dict],
+    ) -> ImportManifest:
+        """Set the identity-swap corrections for a multi-animal session."""
+        session = next((s for s in manifest.linked_sessions if s.session_id == session_id), None)
+        if session is None:
+            return manifest
+        valid_inds = set(session.individuals)
+        cleaned: list[dict] = []
+        for c in corrections or []:
+            try:
+                frame = int(c.get("frame"))
+                a, b = str(c.get("a")), str(c.get("b"))
+            except Exception:
+                continue
+            if a in valid_inds and b in valid_inds and a != b and frame > 0:
+                cleaned.append({"frame": frame, "a": a, "b": b})
+        session.identity_corrections = cleaned
+        return manifest
 
     def update_session_subject(self, manifest: ImportManifest, session_id: str, subject_id: str) -> ImportManifest:
         """Update one linked session's subject and mirror to linked assets."""
@@ -580,11 +626,13 @@ class ImportService:
     def _pose_asset(path: Path, settings: ImportNameSettings) -> PoseAsset:
         # Probe body parts and frame count from the pose file header.
         body_parts: list[str] = []
+        individuals: list[str] = []
         frame_count: int | None = None
         try:
             from abel.services.pose_processing_service import PoseProcessingService
             meta = PoseProcessingService.probe_metadata(path)
             body_parts = meta.get("body_parts", [])
+            individuals = meta.get("individuals", []) or []
             n = meta.get("n_frames", 0)
             frame_count = n if n > 0 else None
         except Exception:
@@ -596,6 +644,7 @@ class ImportService:
             format=path.suffix.lower().lstrip("."),
             frame_count=frame_count,
             body_parts=body_parts,
+            individuals=individuals,
             subject_id=ImportService.extract_subject_name(path, settings),
             session_id=ImportService.extract_session_type(path, settings),
         )
