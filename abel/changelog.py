@@ -11,6 +11,25 @@ VERSION_DATE = "June 30, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.6.1", "June 30, 2026", [
+        "Baseline import: when a source project's trained models can't be "
+        "imported because this project is missing some of the feature columns "
+        "they were trained on, the Import Baseline dialog now explains why. A "
+        "new “Diagnose models” helper groups the missing columns into families "
+        "(e.g. video/optical-flow context, inter-keypoint distances, "
+        "oscillation) and gives ordered fixes — most often enabling “Include "
+        "video features” and re-extracting so the host produces the same "
+        "columns. This clarifies the previously confusing case where the "
+        "feature-schema coverage read 100% but models still showed a lower "
+        "percentage and were silently skipped.",
+        "Remove Sessions now also deletes each removed session's syllable "
+        "assignments (derived/syllables/<session>_syllables.npz), which were "
+        "previously left orphaned on disk.",
+        "Maintenance: corrected the default subject-name extraction tests to "
+        "match real separator-delimited filenames, and removed obsolete tests "
+        "for the retired temporal-refinement training internals (temporal "
+        "refinement is now inference-only).",
+    ]),
     ("0.6.0", "June 30, 2026", [
         "Multi-animal tracking: ABEL now loads multi-animal DLC pose files "
         "(CSV or H5), keeping one cleaned track per tracked individual. Data "

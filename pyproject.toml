@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "abel"
-version = "0.6.0"
+version = "0.6.1"
 description = "ABEL (Active-learning Behavior Estimation and Labeling): local-first desktop app for behavioral modeling, review, and export from DLC-tracked rodent videos."
 readme = "README.md"
 requires-python = ">=3.10"

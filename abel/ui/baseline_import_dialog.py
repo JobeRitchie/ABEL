@@ -15,9 +15,12 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QHeaderView,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -26,7 +29,75 @@ from abel.services.model_refinement_service import (
     AUTO_CREATE_BEHAVIOR,
     SKIP_BEHAVIOR,
     BaselinePreview,
+    CoverageDiagnosis,
 )
+
+
+def _format_diagnosis_html(diag: CoverageDiagnosis) -> str:
+    """Render a :class:`CoverageDiagnosis` as a self-contained HTML report."""
+    def _esc(s: str) -> str:
+        return (
+            str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        )
+
+    parts: list[str] = []
+    parts.append(
+        f"<p><b>{diag.models_blocked} of {diag.models_total}</b> trained "
+        f"model(s) can’t be imported into this project "
+        f"(lowest coverage <b>{diag.worst_coverage:.0%}</b>; models need "
+        f"≥98% of their feature columns to exist here).</p>"
+    )
+
+    if diag.missing_groups:
+        parts.append(
+            f"<p><b>Missing feature columns ({diag.missing_total})</b><br>"
+            "These columns exist in the source models but not in this project’s "
+            "extracted features:</p><ul>"
+        )
+        for label, count in diag.missing_groups:
+            parts.append(f"<li>{_esc(label)} — <b>{count}</b></li>")
+        parts.append("</ul>")
+
+    if diag.causes:
+        parts.append("<p><b>Likely cause</b></p><ul>")
+        for c in diag.causes:
+            parts.append(f"<li>{_esc(c)}</li>")
+        parts.append("</ul>")
+
+    if diag.fixes:
+        parts.append("<p><b>How to fix</b></p><ol>")
+        for f in diag.fixes:
+            parts.append(f"<li>{_esc(f)}</li>")
+        parts.append("</ol>")
+
+    if diag.sample_missing:
+        sample = ", ".join(_esc(s) for s in diag.sample_missing)
+        parts.append(
+            "<p style='color:#90A4AE;font-size:11px;'><b>Example missing "
+            f"columns:</b> {sample}…</p>"
+        )
+    return "".join(parts)
+
+
+class BaselineDiagnosisDialog(QDialog):
+    """Read-only helper explaining why baseline models are blocked + how to fix."""
+
+    def __init__(self, diagnosis: CoverageDiagnosis, tag: str,
+                 parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Model coverage — {tag}")
+        self.resize(620, 520)
+        layout = QVBoxLayout(self)
+
+        browser = QTextBrowser(self)
+        browser.setOpenExternalLinks(False)
+        browser.setHtml(_format_diagnosis_html(diagnosis))
+        layout.addWidget(browser, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
 
 
 class BaselineImportDialog(QDialog):
@@ -92,11 +163,31 @@ class BaselineImportDialog(QDialog):
                 f"Keypoint names realigned onto this project's scheme "
                 f"({len(preview.keypoint_renames)} renamed)."
             )
+        diag = preview.coverage_diagnosis
+        if diag is not None and diag.has_blocked_models:
+            warn_lines.append(
+                f"⚠ {diag.models_blocked} of {diag.models_total} trained model(s) "
+                f"can't be imported — this project is missing "
+                f"{diag.missing_total} feature column(s) they were trained on. "
+                "Examples still import; the models won't be copied."
+            )
+
         if warn_lines:
             warn = QLabel("\n".join(warn_lines))
             warn.setWordWrap(True)
             warn.setStyleSheet("color: #FFB74D; font-size: 11px;")
             layout.addWidget(warn)
+
+        # Offer the coverage-diagnosis helper whenever models are blocked.
+        if diag is not None and diag.has_blocked_models:
+            diag_row = QHBoxLayout()
+            diag_btn = QPushButton("Diagnose models — why & how to fix")
+            diag_btn.clicked.connect(
+                lambda: BaselineDiagnosisDialog(diag, preview.tag, self).exec()
+            )
+            diag_row.addWidget(diag_btn)
+            diag_row.addStretch(1)
+            layout.addLayout(diag_row)
 
         intro = QLabel(
             "For each behaviour below choose how to apply it: <i>Auto-create</i> "

@@ -144,6 +144,32 @@ class CompatibilityDiagnostics:
 
 
 @dataclass
+class CoverageDiagnosis:
+    """Human-readable explanation of *why* models can't be imported.
+
+    Built when one or more source models fall below
+    :data:`ModelRefinementService.MODEL_COMPAT_THRESHOLD`: it groups the feature
+    columns the host is missing into recognizable families and pairs them with
+    concrete fixes (usually: match the host's feature-extraction settings to the
+    source's and re-extract).  ``None`` is used when every model is importable.
+    """
+
+    models_blocked: int = 0          # models below the coverage threshold
+    models_total: int = 0
+    worst_coverage: float = 1.0      # lowest per-model coverage (0..1)
+    missing_total: int = 0           # distinct host-aligned columns missing
+    # (group label, count) sorted by count desc — e.g. ("Video / optical-flow", 228)
+    missing_groups: list[tuple[str, int]] = field(default_factory=list)
+    sample_missing: list[str] = field(default_factory=list)  # a few example names
+    causes: list[str] = field(default_factory=list)          # likely reasons
+    fixes: list[str] = field(default_factory=list)           # ordered fix steps
+
+    @property
+    def has_blocked_models(self) -> bool:
+        return self.models_blocked > 0
+
+
+@dataclass
 class ImportRecord:
     """A source whose examples have been imported into this project.
 
@@ -216,10 +242,18 @@ class ModelImportItem:
     host_behavior_name: str = ""
     matched_by_alias: bool = False
     compatible: bool = False        # host covers (nearly) all required features
+    # Model feature columns (host-aligned) the host doesn't have — the concrete
+    # gap behind a sub-threshold coverage.  Used by the coverage diagnosis.
+    missing_columns: list[str] = field(default_factory=list)
 
     @property
     def behavior_matched(self) -> bool:
         return bool(self.host_behavior_id)
+
+    @property
+    def has_model_gap(self) -> bool:
+        """True when this model is below the import coverage threshold."""
+        return not self.compatible
 
 
 @dataclass
@@ -279,6 +313,9 @@ class BaselinePreview:
     keypoint_renames: dict[str, str] = field(default_factory=dict)
     diagnostics: CompatibilityDiagnostics | None = None
     model_count: int = 0
+    # Why models (if any) can't be imported + how to fix it.  None when every
+    # trained model is importable.
+    coverage_diagnosis: "CoverageDiagnosis | None" = None
 
     @property
     def total_examples(self) -> int:
@@ -1596,18 +1633,20 @@ class ModelRefinementService:
             col_rename = self._rename_cols(m.feature_columns, kp_rename) if kp_rename else {}
             renamed = [col_rename.get(c, c) for c in m.feature_columns]
             total = max(len(renamed), 1)
-            present = sum(1 for c in renamed if c in host_features)
+            missing_cols = [c for c in renamed if c not in host_features]
+            present = total - len(missing_cols)
             host_bid, host_name, via_alias = self._resolve_host_behavior(
                 m.behavior_id, source_behaviors, host_name_to_id, name_overrides,
             )
             pv.items.append(ModelImportItem(
                 model=m,
                 coverage=present / total,
-                missing_features=total - present,
+                missing_features=len(missing_cols),
                 host_behavior_id=host_bid,
                 host_behavior_name=host_name,
                 matched_by_alias=via_alias,
                 compatible=(present / total) >= self.MODEL_COMPAT_THRESHOLD,
+                missing_columns=missing_cols,
             ))
 
         if compute_diagnostics and host_features and all_model_cols:
@@ -1622,6 +1661,133 @@ class ModelRefinementService:
                 logger.debug("Failed computing model-import diagnostics", exc_info=True)
 
         return pv
+
+    # Ordered (label, token-substrings) — a missing column is attributed to the
+    # first family whose token it contains, so put the most specific first.
+    _MISSING_FEATURE_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("Video / optical-flow context", (
+            "flow_", "surface_motion_energy", "motion_energy",
+            "_near_target", "_near_nose", "_to_target", "_tmt", "optic",
+        )),
+        ("ROI / zone context", ("roi", "zone", "in_arena", "in_roi", "_target_dist")),
+        ("Oscillation / frequency", (
+            "oscillation", "autocorr", "movement_frequency", "frequency", "_power",
+        )),
+        ("Velocity / speed / acceleration", (
+            "velocity", "_speed", "accel", "jerk",
+        )),
+        ("Orientation / angles / posture", (
+            "orientation", "pitch", "angle", "curvature", "head_direction", "spine",
+        )),
+        ("Inter-keypoint distances", ("dist_", "_to_")),
+    )
+
+    @classmethod
+    def _classify_missing_columns(cls, cols: "set[str]") -> list[tuple[str, int]]:
+        """Group missing column names into recognizable feature families."""
+        counts: dict[str, int] = {}
+        for col in cols:
+            lc = str(col).lower()
+            label = "Other features"
+            for grp_label, tokens in cls._MISSING_FEATURE_GROUPS:
+                if any(tok in lc for tok in tokens):
+                    label = grp_label
+                    break
+            counts[label] = counts.get(label, 0) + 1
+        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    @classmethod
+    def build_coverage_diagnosis(
+        cls,
+        items: list[ModelImportItem],
+        diagnostics: "CompatibilityDiagnostics | None",
+    ) -> "CoverageDiagnosis | None":
+        """Explain why models are blocked and how to fix it (``None`` if none are).
+
+        Aggregates the host-aligned feature columns missing across all
+        below-threshold models, groups them into feature families, and pairs the
+        families (plus any extraction-config mismatches) with concrete fix steps.
+        """
+        blocked = [it for it in items if it.has_model_gap]
+        if not blocked:
+            return None
+
+        missing: set[str] = set()
+        for it in blocked:
+            missing.update(it.missing_columns)
+        groups = cls._classify_missing_columns(missing)
+        group_labels = {label for label, _ in groups}
+
+        diag = CoverageDiagnosis(
+            models_blocked=len(blocked),
+            models_total=len(items),
+            worst_coverage=min((it.coverage for it in blocked), default=1.0),
+            missing_total=len(missing),
+            missing_groups=groups,
+            sample_missing=sorted(missing)[:12],
+        )
+
+        cfg_mismatches = list(diagnostics.config_mismatches) if diagnostics else []
+        video_like = {"Video / optical-flow context", "ROI / zone context"}
+        cfg_text = "; ".join(cfg_mismatches)
+        video_implicated = bool(group_labels & video_like) or (
+            "use_video_features" in cfg_text
+        )
+
+        # ── Likely causes ─────────────────────────────────────────────
+        if video_implicated:
+            diag.causes.append(
+                "This project is missing video/context features (optical flow, "
+                "surface motion energy, target/ROI distances). The source models "
+                "were trained with “Include video features” on, but this project "
+                "extracted pose-only features (or its sessions have no linked video)."
+            )
+        if cfg_mismatches:
+            diag.causes.append(
+                "Feature-extraction settings differ between the projects: "
+                + cfg_text + "."
+            )
+        only_geom = group_labels and group_labels <= {
+            "Inter-keypoint distances", "Orientation / angles / posture", "Other features",
+        }
+        if only_geom and not cfg_mismatches:
+            diag.causes.append(
+                "The missing columns are geometric (distances/angles). The projects "
+                "likely use different pose keypoints, or different invariant-feature "
+                "toggles, so some columns can't be produced here."
+            )
+        if not diag.causes:
+            diag.causes.append(
+                "This project's extracted feature set doesn't include all the "
+                "columns the source models were trained on."
+            )
+
+        # ── Ordered fixes ─────────────────────────────────────────────
+        if video_implicated:
+            diag.fixes.append(
+                "Open the Features tab, enable “Include video features”, and confirm "
+                "every session has a linked video. Then re-run feature extraction."
+            )
+        if cfg_mismatches:
+            diag.fixes.append(
+                "Match these Features-tab settings to the source project, then "
+                "re-extract: " + cfg_text + "."
+            )
+        diag.fixes.append(
+            "After re-extracting, re-open this Import Baseline dialog — model "
+            "coverage should reach ~100% and the models will import."
+        )
+        if only_geom:
+            diag.fixes.append(
+                "If coverage is still low, the projects use different keypoints — "
+                "check the keypoint mapping (Direct Use / keypoint map) so the "
+                "source columns realign onto this project's scheme."
+            )
+        diag.fixes.append(
+            "Alternatively, you can still import the labeled examples now (they "
+            "are unaffected) and train fresh models in this project."
+        )
+        return diag
 
     def import_models(
         self,
@@ -1971,6 +2137,10 @@ class ModelRefinementService:
         pv.rows = sorted(
             rows.values(), key=lambda r: (-r.example_count, r.source_name.lower())
         )
+        # Explain any blocked models (which columns are missing + how to fix).
+        # ``pv.diagnostics`` carries the config-mismatch list from the example
+        # preview (the model preview skips diagnostics for speed).
+        pv.coverage_diagnosis = self.build_coverage_diagnosis(mpv.items, pv.diagnostics)
         return pv
 
     def import_baseline(

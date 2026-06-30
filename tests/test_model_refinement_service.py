@@ -644,3 +644,55 @@ def test_import_blocked_when_incompatible(tmp_path: Path) -> None:
     # Host training set is untouched.
     ts = pd.read_parquet(host / "derived" / "training_sets" / "training_set.parquet")
     assert len(ts) == 2
+
+
+def test_coverage_diagnosis_groups_missing_and_suggests_fixes() -> None:
+    from abel.services.model_refinement_service import (
+        CompatibilityDiagnostics,
+        ModelImportItem,
+        SourceModel,
+    )
+
+    def _item(coverage: float, missing: list[str]) -> ModelImportItem:
+        model = SourceModel(
+            model_dir="behavior_model_X", behavior_id="b", behavior_name="X",
+            feature_columns=[f"f{i}" for i in range(10)],
+        )
+        return ModelImportItem(
+            model=model, coverage=coverage, missing_features=len(missing),
+            compatible=coverage >= 0.98, missing_columns=missing,
+        )
+
+    missing = [
+        "flow_mag_nose", "nose_surface_motion_energy", "body_centroid_to_target_dist",
+        "nose_oscillation_power", "dist_nose_to_tail",
+    ]
+    items = [_item(0.68, missing), _item(0.99, [])]
+    diag_in = CompatibilityDiagnostics(
+        config_mismatches=["use_video_features (host=False, source=True)"]
+    )
+
+    diag = ModelRefinementService.build_coverage_diagnosis(items, diag_in)
+    assert diag is not None
+    assert diag.models_blocked == 1 and diag.models_total == 2
+    assert diag.missing_total == len(missing)
+    groups = dict(diag.missing_groups)
+    # flow + surface motion + centroid-to-target distance are all video/context.
+    assert groups["Video / optical-flow context"] == 3
+    assert "Inter-keypoint distances" in groups
+    # Video features implicated → first fix mentions the Features-tab toggle.
+    assert any("Include video features" in f for f in diag.fixes)
+    assert diag.causes  # at least one likely cause surfaced
+
+
+def test_coverage_diagnosis_none_when_all_models_compatible() -> None:
+    from abel.services.model_refinement_service import ModelImportItem, SourceModel
+
+    model = SourceModel(
+        model_dir="behavior_model_X", behavior_id="b", behavior_name="X",
+        feature_columns=["f0"],
+    )
+    items = [
+        ModelImportItem(model=model, coverage=1.0, missing_features=0, compatible=True),
+    ]
+    assert ModelRefinementService.build_coverage_diagnosis(items, None) is None

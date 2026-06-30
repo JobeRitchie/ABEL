@@ -6,8 +6,11 @@ from abel.services.import_service import ImportService
 
 
 def test_extract_subject_name_default_pattern() -> None:
+    # The default regex captures the leading alphanumeric token up to the first
+    # separator (``_``/``.``/``DLC``), so a separator-delimited name resolves to
+    # the subject id.  Delimiter-less names need a custom regex (see below).
     subject = ImportService.extract_subject_name(
-        Path("DG01BehavioralCamera0.avi"),
+        Path("DG01_BehavioralCamera0.avi"),
         ImportNameSettings(),
     )
     assert subject == "DG01"
@@ -22,8 +25,8 @@ def test_extract_subject_name_custom_pattern() -> None:
 def test_build_manifest_sets_subject_ids() -> None:
     service = ImportService()
     manifest = service.build_manifest(
-        [Path("DG01BehavioralCamera0.avi")],
-        [Path("DG01BehavioralCamera0DLC_resnet50.csv")],
+        [Path("DG01_BehavioralCamera0.avi")],
+        [Path("DG01_BehavioralCamera0DLC_resnet50.csv")],
         subject_name_settings=ImportNameSettings(),
     )
 

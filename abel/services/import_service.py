@@ -302,6 +302,7 @@ class ImportService:
             for path in [
                 project_root / "derived" / "pose_features" / f"{sid}.npz",
                 project_root / "derived" / "pose_cache" / f"{sid}_frame_features.npz",
+                project_root / "derived" / "syllables" / f"{sid}_syllables.npz",
             ]:
                 if path.exists():
                     path.unlink(missing_ok=True)
