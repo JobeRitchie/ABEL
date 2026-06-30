@@ -623,6 +623,9 @@ class ValidationSettings(BaseModel):
     # Behavior Grid panel: crop half-width multiplier (>1 zooms out). Persisted
     # so the reviewer's preferred framing survives project reloads / new grids.
     behavior_grid_crop_scale: float = 1.0
+    # Behavior Grid panel: keypoint-dot size multiplier (1.0 = the default size
+    # that scales with frame height). Persisted alongside the crop scale.
+    behavior_grid_keypoint_scale: float = 1.0
 
 
 class ValidationClipRecord(BaseModel):

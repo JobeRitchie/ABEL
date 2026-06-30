@@ -84,12 +84,27 @@ def test_select_grid_bouts_prefers_distinct_sessions(tmp_path: Path) -> None:
     assert {s.session_id for s in specs} == {"session_a", "session_b"}
 
 
-def test_select_grid_bouts_top_fraction_keeps_confident(tmp_path: Path) -> None:
+def test_select_grid_bouts_prefers_confident_then_backfills(tmp_path: Path) -> None:
     svc = _service(_make_project(tmp_path))
-    # Top 40% by mean prob: weakest bout (0.70 in session_a) should be excluded.
+    # 3 detected bouts: session_a (0.95, 0.70), session_b (0.85). top_fraction=0.4
+    # keeps only 0.95 as "confident", but the grid backfills with the next-
+    # strongest bouts until full rather than leaving cells blank — so all three
+    # are used and the weakest (0.70) appears only after the strong ones.
     specs = svc.select_grid_bouts("groom", n_cells=25, top_fraction=0.4)
-    assert specs
-    assert all(s.mean_prob >= 0.8 for s in specs)
+    assert len(specs) == 3
+    probs = [round(s.mean_prob, 2) for s in specs]
+    assert min(probs) == pytest.approx(0.70, abs=1e-3)  # weakest backfilled in
+    # Within session_a the strong (0.95) bout is chosen before the weak (0.70).
+    a_probs = [round(s.mean_prob, 2) for s in specs if s.session_id == "session_a"]
+    assert a_probs == [0.95, 0.70]
+
+
+def test_select_grid_bouts_top_fraction_orders_confident_first(tmp_path: Path) -> None:
+    svc = _service(_make_project(tmp_path))
+    # With a single confident bout requested, only the strongest is returned.
+    specs = svc.select_grid_bouts("groom", n_cells=1, top_fraction=0.4)
+    assert len(specs) == 1
+    assert specs[0].mean_prob >= 0.9
 
 
 def test_select_grid_bouts_no_same_session_overlap(tmp_path: Path) -> None:

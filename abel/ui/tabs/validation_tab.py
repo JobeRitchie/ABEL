@@ -1312,7 +1312,7 @@ class BehaviorGridPanel(QWidget):
             sp.setFixedWidth(80)
 
         self._spin_crop = QDoubleSpinBox()
-        self._spin_crop.setRange(0.4, 3.0)
+        self._spin_crop.setRange(0.4, 8.0)
         self._spin_crop.setSingleStep(0.1)
         self._spin_crop.setDecimals(1)
         self._spin_crop.setValue(1.0)
@@ -1320,9 +1320,23 @@ class BehaviorGridPanel(QWidget):
         self._spin_crop.setFixedWidth(80)
         self._spin_crop.setToolTip(
             "Crop size around each animal. Above 1× shows more surroundings (zoom "
-            "out); below 1× tightens onto the subject."
+            "out); below 1× tightens onto the subject. (The crop is capped at half "
+            "the source frame, so very large values stop zooming out at the full frame.)"
         )
         self._spin_crop.valueChanged.connect(self._on_crop_changed)
+
+        self._spin_kp_size = QDoubleSpinBox()
+        self._spin_kp_size.setRange(0.3, 5.0)
+        self._spin_kp_size.setSingleStep(0.1)
+        self._spin_kp_size.setDecimals(1)
+        self._spin_kp_size.setValue(1.0)
+        self._spin_kp_size.setSuffix("×")
+        self._spin_kp_size.setFixedWidth(80)
+        self._spin_kp_size.setToolTip(
+            "Size of the overlaid pose-tracking dots. Above 1× draws larger dots, "
+            "below 1× smaller."
+        )
+        self._spin_kp_size.valueChanged.connect(self._on_kp_size_changed)
 
         self._res_combo = QComboBox()
         for label, _px in _GRID_RESOLUTIONS:
@@ -1332,6 +1346,7 @@ class BehaviorGridPanel(QWidget):
 
         self._keypoints_chk = QCheckBox("Show keypoints")
         self._keypoints_chk.setChecked(True)
+        self._keypoints_chk.toggled.connect(self._spin_kp_size.setEnabled)
 
         self._generate_btn = QPushButton("Generate Grid")
         self._generate_btn.setToolTip("Build a fresh random montage with the current settings.")
@@ -1358,6 +1373,8 @@ class BehaviorGridPanel(QWidget):
         controls.addWidget(self._res_combo)
         controls.addSpacing(10)
         controls.addWidget(self._keypoints_chk)
+        controls.addWidget(QLabel("Dot size:"))
+        controls.addWidget(self._spin_kp_size)
         controls.addStretch()
         controls.addWidget(self._generate_btn)
         controls.addWidget(self._export_btn)
@@ -1402,14 +1419,20 @@ class BehaviorGridPanel(QWidget):
         self._reload_behaviors()
 
     def _restore_crop_scale(self) -> None:
-        """Load the persisted Crop × value for this project into the spinner."""
+        """Load persisted Crop × and Dot-size × values for this project."""
         try:
-            crop = float(self._service.load_settings().behavior_grid_crop_scale)
+            settings = self._service.load_settings()
+            crop = float(settings.behavior_grid_crop_scale)
+            kp = float(getattr(settings, "behavior_grid_keypoint_scale", 1.0))
         except Exception:
-            crop = 1.0
+            crop, kp = 1.0, 1.0
         self._spin_crop.blockSignals(True)
         self._spin_crop.setValue(crop)
         self._spin_crop.blockSignals(False)
+        self._spin_kp_size.blockSignals(True)
+        self._spin_kp_size.setValue(kp)
+        self._spin_kp_size.blockSignals(False)
+        self._spin_kp_size.setEnabled(self._keypoints_chk.isChecked())
 
     def _on_crop_changed(self, value: float) -> None:
         """Persist the Crop × value so it survives project reloads / new grids."""
@@ -1421,6 +1444,17 @@ class BehaviorGridPanel(QWidget):
             self._service.save_settings(settings)
         except Exception:
             logger.exception("Behavior grid: failed to persist crop scale")
+
+    def _on_kp_size_changed(self, value: float) -> None:
+        """Persist the keypoint dot-size multiplier across reloads / new grids."""
+        if self._project_root is None:
+            return
+        try:
+            settings = self._service.load_settings()
+            settings.behavior_grid_keypoint_scale = float(value)
+            self._service.save_settings(settings)
+        except Exception:
+            logger.exception("Behavior grid: failed to persist keypoint scale")
 
     def _reload_behaviors(self) -> None:
         self._behavior_combo.blockSignals(True)
@@ -1460,6 +1494,7 @@ class BehaviorGridPanel(QWidget):
             bool(self._keypoints_chk.isChecked()),
             Path(out_path),
             crop_scale=float(self._spin_crop.value()),
+            keypoint_scale=float(self._spin_kp_size.value()),
         )
         worker.signals.finished.connect(self._on_generated)
         worker.signals.failed.connect(self._on_generate_failed)

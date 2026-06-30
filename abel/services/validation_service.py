@@ -1038,14 +1038,18 @@ class ValidationService:
     ) -> list[GridCellSpec]:
         """Pick up to ``n_cells`` strong positive bouts spread across subjects.
 
-        Bouts are detected per session, filtered to the top ``top_fraction`` by
-        mean probability (the confident detections), then chosen round-robin so
-        distinct *subjects* are preferred — every subject contributes one bout
-        before any subject contributes a second.  Once unique subjects are
-        exhausted, additional bouts are drawn from subjects that have more than
-        one bout, skipping any that frame-overlap an already-chosen bout from the
-        same session so no bout is duplicated.  Sessions whose subject is unknown
-        (no manifest mapping) are each treated as their own subject.
+        Bouts are detected per session and split into a *preferred* pool (the top
+        ``top_fraction`` by mean probability — the confident detections) and a
+        *backfill* pool (the rest).  Both pools are filled round-robin so distinct
+        *subjects* are preferred — every subject contributes one bout before any
+        subject contributes a second — and the strongest bout from each session is
+        chosen first.  The preferred pool is exhausted before the backfill pool is
+        touched, so the grid is filled with the most confident detections first and
+        only drops to weaker bouts when needed to fill the remaining cells (rather
+        than leaving them blank).  Bouts that frame-overlap an already-chosen bout
+        from the same session are skipped so no bout is duplicated.  Sessions whose
+        subject is unknown (no manifest mapping) are each treated as their own
+        subject.
         """
         import random  # noqa: PLC0415
 
@@ -1065,49 +1069,62 @@ class ValidationService:
         frac = min(1.0, max(0.0, float(top_fraction)))
         cutoff = float(np.quantile(all_probs, 1.0 - frac)) if frac < 1.0 else -np.inf
 
-        # Keep only confident bouts; shuffle within each session.
-        pools: dict[str, list[tuple[int, int, float]]] = {}
+        # Split each session's bouts into a confident (>= cutoff) pool and a
+        # backfill pool.  Sort ascending by mean prob so ``pool.pop()`` (from the
+        # end) always yields that session's strongest remaining bout first.
+        preferred: dict[str, list[tuple[int, int, float]]] = {}
+        backfill: dict[str, list[tuple[int, int, float]]] = {}
         for sid, bouts in by_session.items():
-            kept = [b for b in bouts if b[2] >= cutoff]
-            if kept:
-                random.shuffle(kept)
-                pools[sid] = kept
-        if not pools:
+            strong = sorted((b for b in bouts if b[2] >= cutoff), key=lambda b: b[2])
+            weak = sorted((b for b in bouts if b[2] < cutoff), key=lambda b: b[2])
+            if strong:
+                preferred[sid] = strong
+            if weak:
+                backfill[sid] = weak
+        if not preferred and not backfill:
             return []
 
-        # Group sessions by subject so the round-robin prefers unique subjects.
         # Sessions with no known subject fall back to being their own subject.
         subject_of = self._session_subject_map()
-        subjects: dict[str, list[str]] = defaultdict(list)
-        for sid in pools:
-            subjects[subject_of.get(sid, sid)].append(sid)
-
         chosen: list[GridCellSpec] = []
         used: dict[str, list[tuple[int, int]]] = defaultdict(list)
-        subject_keys = list(subjects.keys())
-        # Round-robin passes across subjects until full or every pool is drained.
-        # Pass 1 gives one bout per subject; later passes reuse subjects that have
-        # additional (non-overlapping) bouts.
-        while len(chosen) < n_cells and any(pools.values()):
-            random.shuffle(subject_keys)
-            for subj in subject_keys:
-                if len(chosen) >= n_cells:
-                    break
-                sids = [s for s in subjects[subj] if pools.get(s)]
-                random.shuffle(sids)
-                for sid in sids:
-                    pool = pools[sid]
-                    picked = False
-                    while pool:
-                        s, e, mp = pool.pop()
-                        if any(not (e < us or s > ue) for us, ue in used[sid]):
-                            continue  # overlaps an already-chosen bout from this session
-                        used[sid].append((s, e))
-                        chosen.append(GridCellSpec(sid, int(s), int(e), float(mp)))
-                        picked = True
+
+        def _fill_from(pools: dict[str, list[tuple[int, int, float]]]) -> None:
+            """Round-robin across subjects, draining *pools* into ``chosen``."""
+            if not pools:
+                return
+            subjects: dict[str, list[str]] = defaultdict(list)
+            for sid in pools:
+                subjects[subject_of.get(sid, sid)].append(sid)
+            subject_keys = list(subjects.keys())
+            # Pass 1 gives one bout per subject; later passes reuse subjects that
+            # have additional (non-overlapping) bouts.
+            while len(chosen) < n_cells and any(pools.values()):
+                random.shuffle(subject_keys)
+                for subj in subject_keys:
+                    if len(chosen) >= n_cells:
                         break
-                    if picked:
-                        break  # one bout per subject per pass
+                    sids = [s for s in subjects[subj] if pools.get(s)]
+                    random.shuffle(sids)
+                    for sid in sids:
+                        pool = pools[sid]
+                        picked = False
+                        while pool:
+                            s, e, mp = pool.pop()
+                            if any(not (e < us or s > ue) for us, ue in used[sid]):
+                                continue  # overlaps an already-chosen bout here
+                            used[sid].append((s, e))
+                            chosen.append(GridCellSpec(sid, int(s), int(e), float(mp)))
+                            picked = True
+                            break
+                        if picked:
+                            break  # one bout per subject per pass
+
+        # Confident detections first, then backfill the remaining cells with the
+        # next-strongest bouts so the grid is as full as the data allows.
+        _fill_from(preferred)
+        if len(chosen) < n_cells:
+            _fill_from(backfill)
         return chosen[:n_cells]
 
     def render_behavior_grid(
@@ -1120,14 +1137,17 @@ class ValidationService:
         out_path: Path,
         progress_callback: Any = None,
         crop_scale: float = 1.0,
+        keypoint_scale: float = 1.0,
     ) -> Path:
         """Render a 5×5 looping montage of strong positive bouts to *out_path*.
 
         Each cell is a subject-centred crop of one bout (padded by ``pre_seconds``
         / ``post_seconds``) with optional pose-keypoint overlay.  ``crop_scale`` is
         a linear multiplier on each cell's crop half-width (>1 zooms out to show
-        more surroundings, <1 tightens onto the subject).  Raises ``RuntimeError``
-        when there is nothing to render or video decoding is unavailable.
+        more surroundings, <1 tightens onto the subject).  ``keypoint_scale``
+        multiplies the overlaid keypoint-dot size (>1 larger, <1 smaller).  Raises
+        ``RuntimeError`` when there is nothing to render or video decoding is
+        unavailable.
         """
         from abel.services import behavior_grid_render as render  # noqa: PLC0415
 
@@ -1202,6 +1222,7 @@ class ValidationService:
                     show_keypoints=show_keypoints,
                     out_path=cell_out,
                     crop_scale=float(crop_scale),
+                    keypoint_scale=float(keypoint_scale),
                 )
                 if ok:
                     cell_paths_entry = cell_out

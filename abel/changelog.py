@@ -11,6 +11,18 @@ VERSION_DATE = "June 30, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.6.2", "June 30, 2026", [
+        "Behavior Grid: the montage now fills all 25 cells when enough bouts "
+        "exist. It still places the most confident detections first, but "
+        "backfills the remaining cells with the next-strongest bouts instead of "
+        "leaving them blank (previously only the top ~40% by probability were "
+        "shown, so behaviors with fewer strong detections produced a partly "
+        "empty grid).",
+        "Behavior Grid: added a “Dot size” control to scale the overlaid "
+        "pose-tracking keypoints up or down (0.3×–5×), persisted per project.",
+        "Behavior Grid: raised the crop multiplier limit from 3× to 8× for "
+        "wider zoom-out (the crop is still capped at the full source frame).",
+    ]),
     ("0.6.1", "June 30, 2026", [
         "Baseline import: when a source project's trained models can't be "
         "imported because this project is missing some of the feature columns "

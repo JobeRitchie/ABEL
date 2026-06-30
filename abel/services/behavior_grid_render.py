@@ -69,13 +69,15 @@ def draw_keypoints(
     y_row: np.ndarray,
     conf_row: np.ndarray,
     conf_thresh: float = 0.2,
+    point_scale: float = 1.0,
 ) -> np.ndarray:
     """Return a copy of *bgr* with pose dots drawn for one frame's keypoints.
 
     *x_row*, *y_row*, *conf_row* are 1-D arrays of per-part coordinates (in the
     original video's pixel space) and confidences.  Low-confidence or non-finite
     parts are skipped.  Dot size scales with frame height to stay legible after
-    the cell is downscaled.
+    the cell is downscaled; *point_scale* is a user-facing multiplier on that
+    size (>1 draws larger dots, <1 smaller).
     """
     import cv2  # noqa: PLC0415
 
@@ -83,7 +85,8 @@ def draw_keypoints(
     if n_parts <= 0:
         return bgr
     h = bgr.shape[0]
-    radius = max(2, int(round(h / 250)))
+    scale = max(0.1, float(point_scale))
+    radius = max(1, int(round((h / 250) * scale)))
     thickness = max(1, radius // 2)
     out = bgr.copy()
     for p in range(n_parts):
@@ -118,6 +121,7 @@ def render_cell(
     out_path: Path,
     out_fps: float = 30.0,
     crop_scale: float = 1.0,
+    keypoint_scale: float = 1.0,
 ) -> bool:
     """Render one bout window to a square ``cell_px`` clip; return True on success.
 
@@ -200,7 +204,8 @@ def render_cell(
 
             if have_kp and 0 <= fidx < pose_x.shape[0]:
                 frame = draw_keypoints(
-                    frame, pose_x[fidx], pose_y[fidx], pose_conf[fidx]
+                    frame, pose_x[fidx], pose_y[fidx], pose_conf[fidx],
+                    point_scale=keypoint_scale,
                 )
 
             cx, cy = last_cx, last_cy
