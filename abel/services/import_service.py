@@ -12,6 +12,12 @@ from uuid import uuid4
 
 from abel.models.schemas import ImportManifest, ImportNameSettings, LinkedSession, PoseAsset, VideoAsset
 from abel.storage.file_store import read_json, write_json
+from abel.utils.sleap_converter import (
+    SLEAP_POSE_EXTENSIONS,
+    convert_slp_to_dlc,
+    default_converted_path,
+    is_sleap_pose_file,
+)
 
 logger = logging.getLogger("abel")
 
@@ -21,6 +27,42 @@ class ImportService:
 
     VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
     POSE_EXTENSIONS = {".csv", ".h5", ".hdf5"}
+    # SLEAP predictions aren't read directly — they're converted to a DLC ``.h5``
+    # (see :meth:`convert_sleap_poses`) that then flows through the normal path.
+    SLEAP_EXTENSIONS = set(SLEAP_POSE_EXTENSIONS)
+
+    def convert_sleap_poses(
+        self,
+        slp_paths: list[Path],
+        *,
+        reuse_existing: bool = True,
+        progress_cb: Callable[[int, int, str], None] | None = None,
+    ) -> tuple[list[Path], list[tuple[Path, str]]]:
+        """Convert SLEAP ``.slp`` files to DeepLabCut ``.h5`` files.
+
+        Returns ``(converted_paths, failures)`` where ``failures`` is a list of
+        ``(source_path, error_message)``.  Already-converted files are reused
+        when ``reuse_existing`` is set (keyed on the sibling ``*.sleap.h5``).
+        """
+        converted: list[Path] = []
+        failures: list[tuple[Path, str]] = []
+        total = len(slp_paths)
+        for i, slp in enumerate(slp_paths):
+            slp = Path(slp)
+            if progress_cb:
+                progress_cb(i, total, slp.name)
+            try:
+                target = default_converted_path(slp)
+                if reuse_existing and target.exists() and target.stat().st_mtime >= slp.stat().st_mtime:
+                    converted.append(target)
+                    continue
+                converted.append(convert_slp_to_dlc(slp, target))
+            except Exception as exc:  # noqa: BLE001 - surface per-file, keep going
+                logger.warning("SLEAP conversion failed for %s: %s", slp.name, exc)
+                failures.append((slp, str(exc)))
+        if progress_cb:
+            progress_cb(total, total, "done")
+        return converted, failures
 
     def build_manifest(
         self,
@@ -601,6 +643,17 @@ class ImportService:
     @staticmethod
     def _match_key(path: Path) -> str:
         stem = path.stem.lower()
+        # SLEAP prediction exports embed the source video *filename* (with its
+        # extension), e.g. "myvideo.mp4_SLEAP...predictions.sleap" -> "myvideo".
+        # Only strip when the extension sits at a real boundary (followed by a
+        # separator or the end); otherwise a DLC name like "cage.moving_dlc"
+        # would match ".mov" mid-word and be truncated to "cage".
+        for vext in (".mp4", ".avi", ".mov", ".mkv"):
+            vidx = stem.find(vext)
+            if vidx > 0:
+                after = stem[vidx + len(vext): vidx + len(vext) + 1]
+                if after == "" or not after.isalnum():
+                    return stem[:vidx].rstrip("_- .")
         # DLC standard naming: {video_name}DLC_{scorer}_{model}shuffleN_snapshot_N
         # The "DLC_" is appended directly (no leading underscore) to the video stem.
         dlc_idx = stem.find("dlc_")

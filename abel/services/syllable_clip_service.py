@@ -329,6 +329,7 @@ class SyllableClipService:
             pose_cx: np.ndarray | None = None
             pose_cy: np.ndarray | None = None
             pose_path = self._imports.pose_path_for_session(manifest, sess_id)
+            individual_overlays = None
             if pose_path and pose_path.exists():
                 try:
                     pose = self._pose.load_and_clean(pose_path, manifest.smoothing_settings)
@@ -336,6 +337,12 @@ class SyllableClipService:
                     pose_cy = pose.centroid_y
                 except Exception as exc:
                     logger.warning("Could not load pose centroid for %s: %s", sess_id, exc)
+                # Per-animal colored dots + legend (multi-animal disambiguation).
+                sess = next((s for s in manifest.linked_sessions if s.session_id == sess_id), None)
+                imap = dict(getattr(sess, "individual_subject_map", {}) or {}) if sess else {}
+                individual_overlays = self._clip_svc.build_individual_overlays(
+                    self._pose, pose_path, manifest.smoothing_settings, imap
+                )
 
             # Build CandidateWindow list and per-syllable output dirs
             candidate_wins: list[CandidateWindow] = []
@@ -379,6 +386,7 @@ class SyllableClipService:
                     pose_centroid_y=pose_cy,
                     pixels_per_mm=self._imports.pixels_per_mm_for_session(manifest, sess_id),
                     overlay_text=f"Syllable {syl_id:03d}",
+                    individual_overlays=individual_overlays,
                 )
 
                 _prog(

@@ -812,6 +812,16 @@ class ClipExtractionTab(QWidget):
             else:
                 local_warnings.append(f"{sid}: no pose file linked; using static center crop.")
 
+            # Per-animal colored dots + legend for multi-animal review clips.
+            individual_overlays = None
+            if pose_path and pose_path.exists():
+                _sess = next((s for s in manifest.linked_sessions if s.session_id == sid), None)
+                _imap = dict(getattr(_sess, "individual_subject_map", {}) or {}) if _sess else {}
+                individual_overlays = ClipExtractionService.build_individual_overlays(
+                    self._pose_processing, pose_path,
+                    getattr(manifest, "smoothing_settings", None), _imap,
+                )
+
             cfg = ClipExtractionConfig(
                 video_path=video_path,
                 session_id=sid,
@@ -820,6 +830,7 @@ class ClipExtractionTab(QWidget):
                 pose_centroid_x=pose_cx,
                 pose_centroid_y=pose_cy,
                 pixels_per_mm=self._imports.pixels_per_mm_for_session(manifest, sid),
+                individual_overlays=individual_overlays,
             )
             if cfg.pixels_per_mm is None:
                 local_warnings.append(

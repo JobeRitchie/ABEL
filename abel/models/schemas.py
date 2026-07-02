@@ -73,17 +73,18 @@ class InvariantFeatureConfig(BaseModel):
     it requires at least three midline keypoints; the feature is all-zero when those
     keypoints are absent."""
 
-    enable_social_features: bool = False
+    enable_social_features: bool = True
     """Compute inter-animal (social/interaction) features in multi-animal projects.
 
     For each focal animal, distances/orientation/contact to every *other* animal
     in the same session are computed and reduced over conspecifics into a fixed
-    column set (``social_*_min`` = nearest other, ``social_*_mean`` = averaged
+    column set (``social_*_nearest`` = nearest other, ``social_*_mean`` = averaged
     over others) so the schema is independent of the number of animals.  Has no
-    effect on single-animal projects (no other animals to compare against).
-    Disabled by default."""
+    effect on single-animal projects (no other animals to compare against), so it
+    is safe to leave enabled — extraction gates it on ``len(animals) > 1``.
+    Enabled by default."""
 
-    enable_clipwise_deltas: bool = False
+    enable_clipwise_deltas: bool = True
     """Add clip-wise posture-change features at the window-aggregation stage.
 
     For every per-frame angle column (joint angles, head direction, body
@@ -101,7 +102,7 @@ class InvariantFeatureConfig(BaseModel):
     mean/std aggregates discard.  Unlike the other robustness options these are
     computed during segment windowing, not per-frame, so they require the
     relevant base columns (relative geometry / joint angles / head direction) to
-    be present.  Disabled by default."""
+    be present.  Enabled by default."""
 
     @classmethod
     def load_from_project(cls, project_root: "Path") -> "InvariantFeatureConfig":
@@ -357,6 +358,11 @@ class SeedExample(BaseModel):
     animal_id: str | None = None
     """Which focal animal in a multi-animal session this seed applies to.  None
     (default) means the sole animal in a single-animal session, or all animals."""
+    partner_animal_id: str | None = None
+    """For social behaviors: the other animal involved. None for solo behaviors
+    (default) — single-animal seeds are unaffected."""
+    social_role: Literal["none", "actor", "recipient", "mutual"] = "none"
+    """Role of ``animal_id`` in a social behavior; ``none`` for solo (default)."""
     label_type: str = "positive"
     quality_flag: str = "clean"
     notes: str = ""
@@ -445,6 +451,17 @@ class ReviewerLabelRecord(BaseModel):
     confidence: float = 1.0
     notes: str = ""
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    # --- Multi-animal structured labeling (all optional -> back-compatible) ---
+    focal_animal_id: str | None = None
+    """The animal this label is about. None = the sole animal of a single-animal
+    session (legacy records omit this field entirely and still parse)."""
+    partner_animal_id: str | None = None
+    """For social behaviors: the other animal involved (e.g. the recipient of a
+    directed interaction, or the second animal of a mutual one). None for solo."""
+    social_role: Literal["none", "actor", "recipient", "mutual"] = "none"
+    """Role of ``focal_animal_id`` in a social behavior. ``actor``/``recipient``
+    for directed interactions; ``mutual`` for symmetric ones; ``none`` for solo
+    behaviors (the default, so single-animal projects are unaffected)."""
 
 
 class TrainingSetRecord(BaseModel):

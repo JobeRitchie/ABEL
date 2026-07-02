@@ -455,7 +455,7 @@ class PoseFeaturesTab(QWidget):
         self._feat_clipwise_deltas = QCheckBox(
             "Clip-wise deltas (start→end change in angles & proximities)"
         )
-        self._feat_clipwise_deltas.setChecked(False)
+        self._feat_clipwise_deltas.setChecked(True)
         self._feat_clipwise_deltas.setToolTip(
             "For every joint/head/body angle and every inter-keypoint distance, adds two\n"
             "per-window statistics:\n"
@@ -483,7 +483,7 @@ class PoseFeaturesTab(QWidget):
         self._feat_social = QCheckBox(
             "Interaction features (inter-animal distance, orientation, contact)"
         )
-        self._feat_social.setChecked(False)
+        self._feat_social.setChecked(True)
         self._feat_social.setToolTip(
             "For each focal animal, computes distance / facing-angle / approach-velocity /\n"
             "bounding-box overlap to every other animal, reduced over conspecifics into a\n"

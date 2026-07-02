@@ -43,7 +43,9 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
+    QSplitter,
     QToolButton,
     QTableWidget,
     QTableWidgetItem,
@@ -167,7 +169,10 @@ class ActiveLearningTab(QWidget):
         self._pipeline_progress_updated.connect(self._apply_pipeline_progress)
 
         # -- graph size settings ------------------------------------------
-        self._al_graph_settings: dict[str, Any] = {"max_w": 900, "max_h": 450}
+        # Large defaults so the visualization fills its (resizable) splitter
+        # pane instead of being capped to a small centred thumbnail. Users can
+        # still shrink it via the "Graph Size…" dialog.
+        self._al_graph_settings: dict[str, Any] = {"max_w": 2400, "max_h": 1400}
 
         self._status = QLabel("Open a project to run active learning.")
         self._status.setWordWrap(True)
@@ -493,18 +498,35 @@ class ActiveLearningTab(QWidget):
         self._settings_btn.clicked.connect(self._open_settings_dialog)
 
         # --- Compact top-level settings (always visible) ---
+        # Enforce a legible minimum height on the inputs so their text is not
+        # vertically clipped under Windows display scaling (125% / 150%).
+        _input_min_h = self.fontMetrics().height() + 12
+        for _w in (
+            self._target_behavior, self._mode, self._model_name,
+            self._candidate_focus_pct, self._saved_model_combo,
+        ):
+            _w.setMinimumHeight(_input_min_h)
+
+        # Two columns keep the essentials short and readable so the
+        # visualization below gets the vertical space it needs.
         compact_settings = QWidget()
-        compact_form = QFormLayout(compact_settings)
-        compact_form.setContentsMargins(8, 6, 8, 6)
+        compact_cols = QHBoxLayout(compact_settings)
+        compact_cols.setContentsMargins(8, 6, 8, 6)
+        compact_cols.setSpacing(18)
+
+        _grow = QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        compact_form = QFormLayout()
+        compact_form.setContentsMargins(0, 0, 0, 0)
         compact_form.setSpacing(6)
+        compact_form.setFieldGrowthPolicy(_grow)
+        compact_form_right = QFormLayout()
+        compact_form_right.setContentsMargins(0, 0, 0, 0)
+        compact_form_right.setSpacing(6)
+        compact_form_right.setFieldGrowthPolicy(_grow)
+
         compact_form.addRow("Target behavior:", self._target_behavior)
         compact_form.addRow("Selection mode:", self._mode)
-        compact_form.addRow("Model name:", self._model_name)
-        saved_model_row = QHBoxLayout()
-        saved_model_row.addWidget(self._saved_model_combo, 1)
-        saved_model_row.addWidget(self._refresh_saved_models_btn)
-        saved_model_row.addWidget(self._load_saved_model_btn)
-        compact_form.addRow("Saved models:", saved_model_row)
+        compact_form.addRow("Candidate focus:", self._candidate_focus_pct)
 
         # --- Preset row: Quick / Standard / Complete / Recommend ---
         preset_row = QHBoxLayout()
@@ -564,18 +586,31 @@ class ActiveLearningTab(QWidget):
             "background: #0A1929; color: #B0BEC5; font-size: 11px; font-weight: 600;"
         )
 
-        # --- Session scope ---
+        # --- Session scope (right column) ---
         session_scope_row = QHBoxLayout()
         session_scope_row.addWidget(self._session_scope_summary, 1)
         session_scope_row.addWidget(self._select_sessions_btn)
-        compact_form.addRow("Candidate focus:", self._candidate_focus_pct)
-        compact_form.addRow("Sessions:", session_scope_row)
-        compact_form.addRow("Imported data:", self._include_imported)
+        compact_form_right.addRow("Model name:", self._model_name)
+        compact_form_right.addRow("Sessions:", session_scope_row)
+        compact_form_right.addRow("Imported data:", self._include_imported)
+
+        compact_cols.addLayout(compact_form, 1)
+        compact_cols.addLayout(compact_form_right, 1)
+
+        # Saved models spans the full width (three action buttons follow it).
+        saved_model_row = QHBoxLayout()
+        saved_model_row.addWidget(self._saved_model_combo, 1)
+        saved_model_row.addWidget(self._refresh_saved_models_btn)
+        saved_model_row.addWidget(self._load_saved_model_btn)
+        saved_models_form = QFormLayout()
+        saved_models_form.setContentsMargins(8, 0, 8, 0)
+        saved_models_form.addRow("Saved models:", saved_model_row)
 
         form_box = QGroupBox("Active Learning")
         form_layout = QVBoxLayout(form_box)
         form_layout.setSpacing(8)
         form_layout.addWidget(compact_settings)
+        form_layout.addLayout(saved_models_form)
         form_layout.addLayout(preset_row)
         form_layout.addWidget(self._active_settings_summary)
 
@@ -681,8 +716,7 @@ class ActiveLearningTab(QWidget):
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setMinimumHeight(72)
-        self._log.setMaximumHeight(110)
+        self._log.setMinimumHeight(64)
         self._log.verticalScrollBar().rangeChanged.connect(
             lambda _min, _max: self._log.verticalScrollBar().setValue(_max)
         )
@@ -711,10 +745,13 @@ class ActiveLearningTab(QWidget):
         self._update_viz_help_tooltip()
         self._viz_preview = QLabel("Run training/evaluation to generate a separation graph.")
         self._viz_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._viz_preview.setMinimumHeight(220)
+        self._viz_preview.setMinimumHeight(200)
+        self._viz_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
         self._viz_preview.setMaximumSize(
-            int(self._al_graph_settings.get("max_w", 900)),
-            int(self._al_graph_settings.get("max_h", 450)),
+            int(self._al_graph_settings.get("max_w", 2400)),
+            int(self._al_graph_settings.get("max_h", 1400)),
         )
         self._viz_preview.setStyleSheet("border: 1px solid #1A2027; background: #0A1929; border-radius: 4px; color: #546E7A;")
         self._viz_pixmap_original: QPixmap | None = None
@@ -823,16 +860,39 @@ class ActiveLearningTab(QWidget):
         btn_row.addWidget(self._viz_menu_btn)
         btn_row.addWidget(self._settings_btn)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
-        root.addWidget(form_box)
-        root.addLayout(btn_row)
-        root.addWidget(self._status)
-        root.addWidget(self._pipeline_panel)
-        root.addWidget(self._progress)
-        root.addWidget(self._log)
+        # The three functional zones (controls, live pipeline status, and the
+        # visualization) share a vertical splitter so the user can hand space to
+        # whichever matters right now.  The graph gets the lion's share by
+        # default; the middle status zone starts small and is collapsible.
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(True)
+        splitter.setHandleWidth(8)
 
+        # Pane 1 \u2014 controls (settings form + action buttons + status line).
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        controls_layout.addWidget(form_box)
+        controls_layout.addLayout(btn_row)
+        controls_layout.addWidget(self._status)
+        splitter.addWidget(controls_widget)
+
+        # Pane 2 \u2014 live pipeline progress + log (empty until a run starts).
+        status_widget = QWidget()
+        status_layout = QVBoxLayout(status_widget)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(6)
+        status_layout.addWidget(self._pipeline_panel)
+        status_layout.addWidget(self._progress)
+        status_layout.addWidget(self._log)
+        splitter.addWidget(status_widget)
+
+        # Pane 3 \u2014 visualization.
+        viz_widget = QWidget()
+        viz_layout = QVBoxLayout(viz_widget)
+        viz_layout.setContentsMargins(0, 0, 0, 0)
+        viz_layout.setSpacing(6)
         viz_head = QHBoxLayout()
         viz_head.addWidget(self._viz_title)
         viz_head.addStretch(1)
@@ -846,9 +906,21 @@ class ActiveLearningTab(QWidget):
         _al_graph_size_btn.setToolTip("Set maximum display width and height for the visualization panel.")
         _al_graph_size_btn.clicked.connect(self._open_al_graph_size_dialog)
         viz_head.addWidget(_al_graph_size_btn)
+        viz_layout.addLayout(viz_head)
+        viz_layout.addWidget(self._viz_preview, 1)
+        splitter.addWidget(viz_widget)
 
-        root.addLayout(viz_head)
-        root.addWidget(self._viz_preview, 1)
+        # Only the visualization pane should absorb extra vertical space.
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 0)
+        splitter.setStretchFactor(2, 1)
+        splitter.setSizes([260, 170, 640])
+        self._main_splitter = splitter
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+        root.addWidget(splitter, 1)
 
         self._bind_project_setting_persistence()
         self._bind_quick_mode_summary_updates()
@@ -878,14 +950,14 @@ class ActiveLearningTab(QWidget):
         max_w_spin.setSingleStep(50)
         max_w_spin.setSuffix(" px")
         max_w_spin.setToolTip("Maximum display width of the visualization panel in pixels.")
-        max_w_spin.setValue(int(gs.get("max_w", 900)))
+        max_w_spin.setValue(int(gs.get("max_w", 2400)))
 
         max_h_spin = QSpinBox(dlg)
         max_h_spin.setRange(150, 2160)
         max_h_spin.setSingleStep(50)
         max_h_spin.setSuffix(" px")
         max_h_spin.setToolTip("Maximum display height of the visualization panel in pixels.")
-        max_h_spin.setValue(int(gs.get("max_h", 450)))
+        max_h_spin.setValue(int(gs.get("max_h", 1400)))
 
         form.addRow("Max width:", max_w_spin)
         form.addRow("Max height:", max_h_spin)
@@ -9902,9 +9974,28 @@ class ActiveLearningTab(QWidget):
             lambda: self._pipeline_timeline.snapshot() if self._pipeline_timeline else None
         )
         self._pipeline_panel.show()
+        self._ensure_status_pane_visible()
         self._pipeline_timeline.start()
         self._pipeline_timeline.start_stage("setup")
         self._pipeline_panel.update_snapshot(self._pipeline_timeline.snapshot())
+
+    def _ensure_status_pane_visible(self) -> None:
+        """Grow the middle splitter pane just enough to show the live pipeline
+        panel + log when a run starts, without letting it swallow the graph."""
+        splitter = getattr(self, "_main_splitter", None)
+        if splitter is None:
+            return
+        sizes = splitter.sizes()
+        if len(sizes) != 3:
+            return
+        total = sum(sizes)
+        want_mid = max(
+            sizes[1],
+            self._pipeline_panel.sizeHint().height() + self._log.minimumHeight() + 24,
+        )
+        top = sizes[0]
+        viz = max(240, total - top - want_mid)
+        splitter.setSizes([top, want_mid, viz])
 
     @staticmethod
     def _stage_key_for_status(status: str) -> str | None:

@@ -1,4 +1,4 @@
-"""Data import tab for videos and DLC pose files."""
+"""Data import tab for videos and DeepLabCut/SLEAP pose files."""
 
 from __future__ import annotations
 
@@ -23,12 +23,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, Signal
 
 from abel.models.schemas import ImportManifest, ImportNameSettings, SourceMode
 from abel.services import keypoint_mapping
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
+from abel.utils.sleap_converter import is_sleap_pose_file
 from abel.ui.animal_identity_dialog import AnimalIdentityDialog
 from abel.ui.body_part_rename_dialog import BodyPartRenameDialog
 from abel.ui.keypoint_mapping_dialog import KeypointMappingDialog
@@ -40,6 +42,7 @@ class DataImportTab(QWidget):
 
     _copy_progress_signal = Signal(str)
     _copy_log_signal = Signal(str)
+    num_animals_changed = Signal(int)  # emitted when the user changes the project's animal count
 
     def __init__(self, import_service: ImportService, parent=None) -> None:
         super().__init__(parent)
@@ -74,8 +77,22 @@ class DataImportTab(QWidget):
         self._preview_subject = QLabel("DG01")
         self._preview_session = QLabel("")
 
+        # Project-level: number of animals tracked per session (editable here so
+        # it can be corrected without recreating the project).
+        self._num_animals_spin = QSpinBox()
+        self._num_animals_spin.setRange(1, 20)
+        self._num_animals_spin.setValue(1)
+        self._num_animals_spin.setToolTip(
+            "Number of animals tracked per session for this project.\n"
+            "Saved to project.yaml; sets single_animal = (value <= 1).\n"
+            "Multi-animal enables per-individual (and optional social) features."
+        )
+        self._set_num_animals_btn = QPushButton("Set")
+        self._set_num_animals_btn.setToolTip("Save the number of animals to this project.")
+        self._set_num_animals_btn.clicked.connect(self._apply_num_animals)
+
         import_video_btn = QPushButton("Import Videos")
-        import_pose_btn = QPushButton("Import DLC CSV/H5")
+        import_pose_btn = QPushButton("Import Pose (DLC / SLEAP)")
         auto_match_btn = QPushButton("Auto Match")
         save_manifest_btn = QPushButton("Save Import Manifest")
         remove_session_btn = QPushButton("Remove Selected Session(s)")
@@ -216,11 +233,26 @@ class DataImportTab(QWidget):
         )
         settings_help.setWordWrap(True)
 
+        # Project settings (num animals) — separate from filename parsing.
+        num_animals_row = QHBoxLayout()
+        num_animals_row.addWidget(QLabel("Number of animals:"))
+        num_animals_row.addWidget(self._num_animals_spin)
+        num_animals_row.addWidget(self._set_num_animals_btn)
+        num_animals_row.addStretch(1)
+        project_help = QLabel(
+            "Animals tracked per session. Use 2 for a two-mouse dominance session; "
+            "1 for single-animal. Saved to the project immediately."
+        )
+        project_help.setWordWrap(True)
+
         settings_page = QWidget()
         settings_layout = QVBoxLayout(settings_page)
         settings_layout.addWidget(settings_help)
         settings_layout.addLayout(settings_form)
         settings_layout.addLayout(settings_btn_row)
+        settings_layout.addSpacing(12)
+        settings_layout.addWidget(project_help)
+        settings_layout.addLayout(num_animals_row)
         settings_layout.addStretch(1)
 
         self._import_tabs = QTabWidget()
@@ -242,6 +274,32 @@ class DataImportTab(QWidget):
         )
         if project_root:
             self._load_manifest()
+            self._load_num_animals_from_project()
+
+    def _load_num_animals_from_project(self) -> None:
+        """Populate the num-animals spinbox from the project's project.yaml."""
+        val = 1
+        try:
+            import yaml
+            cfg_path = Path(self._project_root) / "project.yaml"
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as fh:
+                    cfg = yaml.safe_load(fh) or {}
+                val = int(cfg.get("num_animals", 1) or 1)
+        except Exception:
+            val = 1
+        self._num_animals_spin.blockSignals(True)
+        self._num_animals_spin.setValue(max(1, min(20, val)))
+        self._num_animals_spin.blockSignals(False)
+
+    def _apply_num_animals(self) -> None:
+        """Persist the number of animals to the project (via main_window)."""
+        if not self._project_root:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        n = int(self._num_animals_spin.value())
+        self.num_animals_changed.emit(n)
+        self._append_log(f"Number of animals set to {n} (single_animal={n <= 1}).")
 
     def _reset_for_project_switch(self) -> None:
         """Clear transient import/upload state before loading another project."""
@@ -295,12 +353,64 @@ class DataImportTab(QWidget):
     def _import_pose(self) -> None:
         selected, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select DeepLabCut pose files",
+            "Select pose files (DeepLabCut or SLEAP)",
             "",
-            "Pose files (*.csv *.h5 *.hdf5)",
+            "Pose files (*.csv *.h5 *.hdf5 *.slp);;"
+            "DeepLabCut (*.csv *.h5 *.hdf5);;SLEAP (*.slp)",
         )
+        if not selected:
+            return
+        paths = [Path(p) for p in selected]
+        sleap_paths = [p for p in paths if is_sleap_pose_file(p)]
+        dlc_paths = [p for p in paths if not is_sleap_pose_file(p)]
+
+        # SLEAP predictions aren't a format ABEL reads directly; offer to convert
+        # them to a DeepLabCut .h5 that flows through the normal import path.
+        if sleap_paths:
+            resp = QMessageBox.question(
+                self,
+                "Convert SLEAP files?",
+                f"{len(sleap_paths)} SLEAP prediction file(s) (.slp) were selected.\n\n"
+                "ABEL reads DeepLabCut-format pose files. Convert these to a "
+                "compatible DeepLabCut .h5 now?\n\n"
+                "Your originals are left untouched — a matching '<name>.sleap.h5' "
+                "is written next to each and imported in its place.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if resp == QMessageBox.Yes:
+                self._append_log(
+                    f"Converting {len(sleap_paths)} SLEAP file(s) to DeepLabCut format..."
+                )
+
+                def _cb(i: int, total: int, name: str) -> None:
+                    if name != "done":
+                        self._append_log(f"  [{i + 1}/{total}] {name}")
+                    QApplication.processEvents()
+
+                converted, failures = self._import_service.convert_sleap_poses(
+                    sleap_paths, progress_cb=_cb
+                )
+                dlc_paths.extend(converted)
+                self._append_log(
+                    f"Converted {len(converted)} of {len(sleap_paths)} SLEAP file(s)."
+                )
+                if failures:
+                    detail = "\n".join(f"- {p.name}: {err}" for p, err in failures[:8])
+                    if len(failures) > 8:
+                        detail += f"\n… and {len(failures) - 8} more."
+                    QMessageBox.warning(
+                        self,
+                        "Some SLEAP files could not be converted",
+                        f"{len(failures)} file(s) failed:\n\n{detail}",
+                    )
+            else:
+                self._append_log(
+                    f"Skipped {len(sleap_paths)} SLEAP file(s) (not converted)."
+                )
+
         existing_resolved = {str(p.resolve()) for p in self._pose_paths}
-        added = [Path(p) for p in selected if str(Path(p).resolve()) not in existing_resolved]
+        added = [p for p in dlc_paths if str(p.resolve()) not in existing_resolved]
         self._pose_paths.extend(added)
         self._append_log(
             f"Added {len(added)} new pose file(s); {len(self._pose_paths)} total."

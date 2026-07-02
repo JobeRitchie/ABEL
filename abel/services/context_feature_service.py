@@ -17,6 +17,7 @@ from abel.services.pose_processing_service import PoseData, PoseProcessingServic
 from abel.services.provenance_service import ProvenanceService
 from abel.services.roi_service import ROIService
 from abel.storage.file_store import read_json, write_json
+from abel.utils import roi_geometry
 
 
 # threading is retained for the gpu_flow_lock parameter used in frame-chunk
@@ -212,27 +213,48 @@ class ContextFeatureService:
         return frame[y0:y1, x0:x1]
 
     @staticmethod
+    def _roi_mean(frame: np.ndarray, roi: dict[str, Any]) -> float:
+        """Mean of *frame* over the pixels enclosed by *roi*'s true shape.
+
+        For rectangles this is the plain bbox-crop mean.  For circles and
+        polygons only the in-shape pixels contribute, so an ROI feature reflects
+        exactly the drawn region rather than its (looser) bounding box.  Returns
+        NaN when the ROI has no in-frame area.
+        """
+        if not roi_geometry.roi_has_area(roi):
+            return float("nan")
+        h, w = frame.shape[:2]
+        bx, by, bw, bh = roi_geometry.roi_bbox(roi)
+        x0 = max(0, bx)
+        y0 = max(0, by)
+        x1 = min(w, bx + bw)
+        y1 = min(h, by + bh)
+        if x1 <= x0 or y1 <= y0:
+            return float("nan")
+        patch = np.asarray(frame[y0:y1, x0:x1], dtype=np.float32)
+        if roi_geometry.roi_shape(roi) == "rect":
+            vals = patch.ravel()
+        else:
+            mask = roi_geometry.roi_mask(roi, x0, y0, y1 - y0, x1 - x0)
+            vals = patch[mask]
+        if vals.size == 0:
+            return float("nan")
+        return float(np.mean(vals))
+
+    @staticmethod
     def _has_roi(roi: dict[str, Any]) -> bool:
-        return int(roi.get("w", 0) or 0) > 0 and int(roi.get("h", 0) or 0) > 0
+        return roi_geometry.roi_has_area(roi)
 
     @staticmethod
     def _roi_center(roi: dict[str, Any]) -> tuple[float, float]:
-        return (
-            float(roi.get("x", 0) or 0) + float(roi.get("w", 0) or 0) / 2.0,
-            float(roi.get("y", 0) or 0) + float(roi.get("h", 0) or 0) / 2.0,
-        )
+        return roi_geometry.roi_center(roi)
 
     @staticmethod
     def _scale_roi_for_ds(roi: dict, inv: float) -> dict:
         """Return *roi* scaled by *inv* (= 1/ds) for spatial downsampling."""
         if inv >= 1.0:
             return roi
-        return {
-            "x": int(int(roi.get("x", 0) or 0) * inv),
-            "y": int(int(roi.get("y", 0) or 0) * inv),
-            "w": max(1, int(int(roi.get("w", 0) or 0) * inv)),
-            "h": max(1, int(int(roi.get("h", 0) or 0) * inv)),
-        }
+        return roi_geometry.scale_roi(roi, inv)
 
     @staticmethod
     def _entropy(values: np.ndarray, bins: int = 16) -> float:
@@ -308,12 +330,7 @@ class ContextFeatureService:
         nose_y = nose_y * inv
         local_radius = max(4, local_radius // ds)
         nose_radius = max(4, 10 // ds)
-        target_roi = {
-            "x": int(int(target_roi.get("x", 0) or 0) * inv),
-            "y": int(int(target_roi.get("y", 0) or 0) * inv),
-            "w": max(1, int(int(target_roi.get("w", 0) or 0) * inv)),
-            "h": max(1, int(int(target_roi.get("h", 0) or 0) * inv)),
-        }
+        target_roi = roi_geometry.scale_roi(target_roi, inv)
         return (body_x, body_y, paw_l_x, paw_l_y, paw_r_x, paw_r_y,
                 nose_x, nose_y, target_roi, local_radius, nose_radius)
 
@@ -558,25 +575,20 @@ class ContextFeatureService:
                     l_patch = ContextFeatureService._crop_box(mag, paw_l_x[frame_idx], paw_l_y[frame_idx])
                     r_patch = ContextFeatureService._crop_box(mag, paw_r_x[frame_idx], paw_r_y[frame_idx])
                     n_patch = ContextFeatureService._crop_box(mag, nose_x[frame_idx], nose_y[frame_idx])
-                    t_patch = (
-                        ContextFeatureService._roi_crop(mag, target_roi)
-                        if has_target
-                        else np.full((1, 1), np.nan, dtype=np.float32)
-                    )
 
                     _sf_mag_paw_l.append(float(np.mean(l_patch)))
                     _sf_mag_paw_r.append(float(np.mean(r_patch)))
                     _sf_mag_nose.append(float(np.mean(n_patch)))
-                    _sf_mag_tmt.append(float(np.mean(t_patch)))
+                    _sf_mag_tmt.append(
+                        ContextFeatureService._roi_mean(mag, target_roi)
+                        if has_target else float("nan")
+                    )
                     _sf_entropy.append(ContextFeatureService._entropy(n_patch.ravel()))
                     for _ei, _eroi in enumerate(_scaled_extra_rois):
-                        _e_has = int(_eroi.get("w", 0) or 0) > 0 and int(_eroi.get("h", 0) or 0) > 0
-                        _e_patch = (
-                            ContextFeatureService._roi_crop(mag, _eroi)
-                            if _e_has
-                            else np.full((1, 1), np.nan, dtype=np.float32)
+                        _sf_mag_extras[_ei].append(
+                            ContextFeatureService._roi_mean(mag, _eroi)
+                            if roi_geometry.roi_has_area(_eroi) else float("nan")
                         )
-                        _sf_mag_extras[_ei].append(float(np.mean(_e_patch)))
 
                     l_vec = np.array([
                         np.mean(ContextFeatureService._crop_box(flow[..., 0], paw_l_x[frame_idx], paw_l_y[frame_idx])),
@@ -983,27 +995,22 @@ class ContextFeatureService:
                     n_patch = ContextFeatureService._crop_box(
                         mag, nose_x[fi], nose_y[fi]
                     )
-                    t_patch = (
-                        ContextFeatureService._roi_crop(mag, target_roi)
-                        if has_target
-                        else np.full((1, 1), np.nan, dtype=np.float32)
-                    )
 
                     _s_mag_paw_l.append(float(np.mean(l_patch)))
                     _s_mag_paw_r.append(float(np.mean(r_patch)))
                     _s_mag_nose.append(float(np.mean(n_patch)))
-                    _s_mag_tmt.append(float(np.mean(t_patch)))
+                    _s_mag_tmt.append(
+                        ContextFeatureService._roi_mean(mag, target_roi)
+                        if has_target else float("nan")
+                    )
                     _s_entropy.append(
                         ContextFeatureService._entropy(n_patch.ravel())
                     )
                     for _ei, _eroi in enumerate(_scaled_extra_rois):
-                        _e_has = int(_eroi.get("w", 0) or 0) > 0 and int(_eroi.get("h", 0) or 0) > 0
-                        _e_patch = (
-                            ContextFeatureService._roi_crop(mag, _eroi)
-                            if _e_has
-                            else np.full((1, 1), np.nan, dtype=np.float32)
+                        _s_mag_extras[_ei].append(
+                            ContextFeatureService._roi_mean(mag, _eroi)
+                            if roi_geometry.roi_has_area(_eroi) else float("nan")
                         )
-                        _s_mag_extras[_ei].append(float(np.mean(_e_patch)))
 
                     l_vec = np.array([
                         np.mean(ContextFeatureService._crop_box(
@@ -1093,8 +1100,20 @@ class ContextFeatureService:
         intra_session_workers: int = 1,
         warning_cb: Callable[[str], None] | None = None,
         keypoint_aliases: "dict[str, str] | None" = None,
+        individual_id: str | None = None,
+        roi_subject_id: str | None = None,
+        identity_corrections: "list[dict] | None" = None,
+        save: bool = True,
     ) -> pd.DataFrame:
         """Compute per-frame context features, optionally across parallel frame chunks.
+
+        Multi-animal: pass ``individual_id`` to compute context from *that*
+        individual's pose (the row ``animal_id`` stays whatever caller passes, so
+        it can match the per-individual pose table). ``roi_subject_id`` selects
+        which subject's ROIs to resolve (the arena ROI is shared per session, so
+        this is usually the session subject, not the individual). ``save=False``
+        returns the frame table without writing — used by
+        :meth:`compute_frame_context_multi` to combine individuals into one file.
 
         Parameters
         ----------
@@ -1119,8 +1138,20 @@ class ContextFeatureService:
         except Exception as exc:
             raise ImportError("opencv-python is required for ContextFeatureService") from exc
 
-        pose = self._pose.load_and_clean(pose_path, keypoint_aliases=keypoint_aliases)
-        target_rois = self._rois.resolve_target_rois(project_root, f"{animal_id}::{session_id}")
+        if individual_id is not None:
+            _multi = self._pose.load_and_clean_multi(
+                pose_path, keypoint_aliases=keypoint_aliases,
+                identity_corrections=identity_corrections,
+            )
+            pose = _multi.per_individual.get(individual_id)
+            if pose is None:
+                pose = next(iter(_multi.per_individual.values()), None)
+            if pose is None:
+                raise ValueError(f"No pose for individual '{individual_id}' in {pose_path}")
+        else:
+            pose = self._pose.load_and_clean(pose_path, keypoint_aliases=keypoint_aliases)
+        _roi_key = f"{roi_subject_id or animal_id}::{session_id}"
+        target_rois = self._rois.resolve_target_rois(project_root, _roi_key)
         # Apply day-label ROI exclusions (e.g. Acclimation sessions have no object present)
         excluded_days = self._rois.get_roi_excluded_days(project_root)
         if excluded_days:
@@ -1444,6 +1475,11 @@ class ContextFeatureService:
                 body_x[:n], body_y[:n], _rx, _ry
             )
 
+        if not save:
+            # Caller (compute_frame_context_multi) will combine individuals and
+            # write a single per-session parquet + provenance.
+            return df
+
         out_dir = project_root / "derived" / "context_features"
         out_dir.mkdir(parents=True, exist_ok=True)
         # Write directly to a per-session parquet file (lock-free).
@@ -1462,6 +1498,67 @@ class ContextFeatureService:
         )
         write_json(out_dir / "frame_context.manifest.json", {"provenance": prov.model_dump(mode="json"), "rows": int(len(df))})
         return df
+
+    def compute_frame_context_multi(
+        self,
+        project_root: Path,
+        video_path: Path,
+        pose_path: Path,
+        individual_animal_ids: "dict[str, str]",
+        session_id: str,
+        roi_subject_id: str | None = None,
+        config: ContextFeatureConfig | None = None,
+        progress_cb: Callable[[int, int, str], None] | None = None,
+        intra_session_workers: int = 1,
+        warning_cb: Callable[[str], None] | None = None,
+        keypoint_aliases: "dict[str, str] | None" = None,
+        identity_corrections: "list[dict] | None" = None,
+    ) -> pd.DataFrame:
+        """Multi-animal context: compute per-individual context and write one
+        combined per-session parquet whose ``animal_id`` matches the per-individual
+        pose table (so the representation merge joins correctly).
+
+        ``individual_animal_ids`` maps each track/individual id -> the ``animal_id``
+        to stamp on its rows (the same mapping used for pose extraction).
+        """
+        config = config or ContextFeatureConfig()
+        parts: list[pd.DataFrame] = []
+        for ind_id, aid in individual_animal_ids.items():
+            d = self.compute_frame_context(
+                project_root=project_root,
+                video_path=video_path,
+                pose_path=pose_path,
+                animal_id=aid,
+                session_id=session_id,
+                config=config,
+                progress_cb=progress_cb,
+                intra_session_workers=intra_session_workers,
+                warning_cb=warning_cb,
+                keypoint_aliases=keypoint_aliases,
+                individual_id=ind_id,
+                roi_subject_id=roi_subject_id,
+                identity_corrections=identity_corrections,
+                save=False,
+            )
+            parts.append(d)
+
+        combined = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+        out_dir = project_root / "derived" / "context_features"
+        (out_dir / "sessions").mkdir(parents=True, exist_ok=True)
+        combined.to_parquet(out_dir / "sessions" / f"{session_id}.parquet", index=False)
+
+        prov = self._provenance.make_provenance(
+            project_root=project_root,
+            model_version=config.model_version,
+            feature_version=config.feature_version,
+            config={
+                "context_feature_config": config.__dict__,
+                "video": str(video_path), "pose": str(pose_path),
+                "multi_animal": True, "individuals": list(individual_animal_ids.values()),
+            },
+        )
+        write_json(out_dir / "frame_context.manifest.json", {"provenance": prov.model_dump(mode="json"), "rows": int(len(combined))})
+        return combined
 
     @staticmethod
     def consolidate_session_files(project_root: Path) -> Path | None:

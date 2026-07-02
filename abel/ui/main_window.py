@@ -217,6 +217,7 @@ class MainWindow(QMainWindow):
         self.home_tab = HomeTab()
         self.dependencies_tab = DependenciesTab(self._dependency_service)
         self.data_import_tab = DataImportTab(self._import_service)
+        self.data_import_tab.num_animals_changed.connect(self._on_num_animals_changed)
         self.behavior_tab = BehaviorTab(self._behavior_service)
         self.seed_tab = SeedExamplesTab(
             self._seed_service, self._behavior_service, self._import_service
@@ -484,6 +485,16 @@ class MainWindow(QMainWindow):
         # Defer only the lightweight stats refresh for the home tab
         root = context.project_root
         QTimer.singleShot(0, lambda: self._update_home_stats(root))
+
+    def _on_num_animals_changed(self, n: int) -> None:
+        """Persist a change to the project's animal count (keeps in-memory config in sync)."""
+        if self._project is None:
+            return
+        cfg = self._project.config
+        cfg.num_animals = int(n)
+        cfg.single_animal = int(n) <= 1
+        self._project_service.save_config(self._project.project_root, cfg)
+        self._logger.info("num_animals set to %d (single_animal=%s)", n, cfg.single_animal)
 
     def _update_home_stats(self, project_root: Path) -> None:
         """Deferred: update home-tab stats after the window has painted."""

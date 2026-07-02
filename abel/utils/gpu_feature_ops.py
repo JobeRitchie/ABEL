@@ -69,6 +69,12 @@ def _is_posture_delta_col(col: str) -> bool:
     # Proximity: inter-keypoint pairwise distances (and normalized variants).
     if col.startswith("dist_") and "_to_" in col:
         return True
+    # Social inter-animal proximity / orientation columns.  A start→end delta on
+    # ``social_dist_*`` captures net approach or retreat across the clip, and on
+    # facing/heading-alignment columns captures turning toward or away.  Rate-like
+    # (approach_velocity), overlap, and contact columns are excluded.
+    if col.startswith("social_"):
+        return "_dist_" in col or "facing" in col or "heading_alignment" in col
     # Angle-like posture descriptors.
     if col.startswith("joint_angle_"):
         return True

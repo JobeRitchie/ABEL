@@ -7,10 +7,50 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "June 30, 2026"
+VERSION_DATE = "July 1, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.7.0", "July 1, 2026", [
+        "SLEAP import: ABEL now imports SLEAP prediction files (.slp) directly. "
+        "Data Import detects a SLEAP pose file, offers to convert it to ABEL's "
+        "DLC-style format, and wires the converted per-individual tracks through "
+        "the same pipeline used for native DeepLabCut output.",
+        "Multi-animal behavior soundboard: the pop-out soundboard now supports "
+        "structured multi-animal labeling — pick a behavior, then designate "
+        "which animal (solo) or which two animals (social: actor → recipient for "
+        "directed interactions, or the pair for mutual ones). A new “Commit” "
+        "button persists the clip's collected labels; each label is shown as a "
+        "removable chip until committed.",
+        "“A mouse is a mouse” pooling: multi-animal labels are keyed to each "
+        "animal's own segment with an identity-agnostic behavior label, so "
+        "instances pool across animals at training time. Directed social "
+        "behaviors label only the actor; mutual behaviors label both animals; "
+        "and multiple behaviors on one animal in one window merge into a "
+        "co-occurring label instead of being dropped as ambiguous.",
+        "Clip identity overlays: multi-animal review clips draw a colored dot "
+        "per tracked animal with a legend (using the same palette as the "
+        "Identity Map) so reviewers can tell which individual is which. Clips "
+        "are now centered on the average centroid over the whole clip, removing "
+        "the jitter that occurred when the per-frame centroid was unstable.",
+        "Social analytics: new per-dyad interaction summaries (inter-animal "
+        "distance, contact time and bouts, approach/advance balance, "
+        "orientation) plus a cohort-pooled dominance HMM with a "
+        "spatial-displacement dominance score and per-session ranking, surfaced "
+        "in the Behavior Analytics tab.",
+        "Per-individual context features: in multi-animal projects, context "
+        "(ROI/video) features are now computed per tracked individual so each "
+        "animal's segments carry their own identity-consistent features.",
+        "Freehand polygon ROIs plus easier num-animals editing; the ROI tab "
+        "uses the full multi-animal session name for a single shared arena ROI.",
+        "Fixes: committed multi-animal soundboard labels now use the resolved "
+        "animal id, so they correctly join to their segment features at training "
+        "time (previously the raw track id was used and every soundboard label "
+        "silently missed the join). Pose/video filename matching no longer "
+        "truncates names containing a dotted “mp4/avi/mov/mkv” letter sequence "
+        "mid-word. The social advance-fraction metric is no longer diluted by "
+        "undetected frames.",
+    ]),
     ("0.6.2", "June 30, 2026", [
         "Behavior Grid: the montage now fills all 25 cells when enough bouts "
         "exist. It still places the most confident detections first, but "

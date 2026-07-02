@@ -212,7 +212,9 @@ class FeaturePrepService:
     # existing caches are rebuilt into the new, cross-project-compatible format.
     #   v2: canonical (order-independent, sorted) pairwise-distance column names.
     #   v3: optional multi-animal interaction (social_*) columns.
-    _POSE_SCHEMA_VERSION = "3"
+    #   v4: social heading-alignment, directed radial-velocity-toward, and
+    #       contact-state (in_contact + duration) columns.
+    _POSE_SCHEMA_VERSION = "4"
 
     @staticmethod
     def _hash(obj: object) -> str:
@@ -626,14 +628,16 @@ class FeaturePrepService:
 
         def _process_one(job: SessionJob) -> str:
             sid = str(job.session_id)
+            # Per-individual animal_id mapping (used by BOTH pose and context so
+            # their frame tables share join keys). Empty for single-animal jobs.
+            animal_ids = {
+                ind: (job.individual_subject_map.get(ind) or f"{job.subject_id or sid}:{ind}")
+                for ind in job.individuals
+            } if job.individuals else {}
             if sid not in cached_pose:
                 if job.individuals:
                     # Multi-animal: one row-set per individual (distinct animal_id),
                     # plus inter-animal social_* columns when enabled.
-                    animal_ids = {
-                        ind: (job.individual_subject_map.get(ind) or f"{job.subject_id or sid}:{ind}")
-                        for ind in job.individuals
-                    }
                     self._pose.extract_and_save_frame_pose_features_multi(
                         project_root=project_root,
                         pose_path=job.pose_path,
@@ -661,19 +665,36 @@ class FeaturePrepService:
                 and job.video_path is not None
                 and sid not in cached_ctx
             ):
-                ContextFeatureService().compute_frame_context(
-                    project_root=project_root,
-                    video_path=job.video_path,
-                    pose_path=job.pose_path,
-                    animal_id=job.subject_id,
-                    session_id=job.session_id,
-                    config=ContextFeatureConfig(
-                        flow_temporal_stride=int(config.flow_temporal_stride)
-                    ),
-                    intra_session_workers=plan.intra_session_workers,
-                    warning_cb=_collect_warning,
-                    keypoint_aliases=aliases,
+                ctx_cfg = ContextFeatureConfig(
+                    flow_temporal_stride=int(config.flow_temporal_stride)
                 )
+                if job.individuals:
+                    # Per-individual context so animal_id matches the pose table.
+                    ContextFeatureService().compute_frame_context_multi(
+                        project_root=project_root,
+                        video_path=job.video_path,
+                        pose_path=job.pose_path,
+                        individual_animal_ids=animal_ids,
+                        session_id=job.session_id,
+                        roi_subject_id=job.subject_id,
+                        config=ctx_cfg,
+                        intra_session_workers=plan.intra_session_workers,
+                        warning_cb=_collect_warning,
+                        keypoint_aliases=aliases,
+                        identity_corrections=list(job.identity_corrections or []),
+                    )
+                else:
+                    ContextFeatureService().compute_frame_context(
+                        project_root=project_root,
+                        video_path=job.video_path,
+                        pose_path=job.pose_path,
+                        animal_id=job.subject_id,
+                        session_id=job.session_id,
+                        config=ctx_cfg,
+                        intra_session_workers=plan.intra_session_workers,
+                        warning_cb=_collect_warning,
+                        keypoint_aliases=aliases,
+                    )
             return str(job.session_id)
 
         done = 0

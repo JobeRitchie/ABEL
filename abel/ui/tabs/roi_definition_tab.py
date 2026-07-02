@@ -13,8 +13,18 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal
-from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QSize, Signal
+from PySide6.QtGui import (
+    QColor,
+    QImage,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QPolygonF,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -38,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from abel.services.import_service import ImportService
 from abel.services.roi_service import ROI_COLORS, MAX_ROIS, ROIService
+from abel.utils import roi_geometry
 
 logger = logging.getLogger("abel")
 
@@ -80,18 +91,23 @@ class _ROICanvas(QWidget):
         Emitted when the subject crop zone is redrawn.
     """
 
-    roi_n_changed = Signal(int, dict)   # (roi_index, {x,y,w,h})
+    roi_n_changed = Signal(int, dict)   # (roi_index, roi_shape_dict)
     roi_changed   = Signal(dict)        # legacy — index 0 only
     crop_changed  = Signal(dict)        # subject crop
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._rois: list[dict[str, int]] = [{"x": 0, "y": 0, "w": 0, "h": 0}]
+        self._rois: list[dict] = [{"x": 0, "y": 0, "w": 0, "h": 0}]
         self._crop: dict[str, int] = {"x": 0, "y": 0, "w": 0, "h": 0}
         # draw_mode is "roi_<index>" or "subject_crop"
         self._draw_mode: str = "roi_0"
+        # shape_mode is "rect", "circle", or "polygon" (applies to roi_* targets;
+        # the subject crop is always a rectangle).
+        self._shape_mode: str = "rect"
         self._drag_origin: QPoint | None = None
         self._drag_rect: QRect | None = None
+        # In-progress freehand polygon trace (canvas-space QPoints).
+        self._freehand_pts: list[QPoint] | None = None
         self._scale: float = 1.0
         self._offset_x: int = 0
         self._offset_y: int = 0
@@ -168,17 +184,9 @@ class _ROICanvas(QWidget):
 
     # ── ROI state setters ─────────────────────────────────────────────
 
-    def set_rois(self, rois: list[dict[str, int]]) -> None:
+    def set_rois(self, rois: list[dict]) -> None:
         """Set all target-zone overlays at once (does not emit signals)."""
-        self._rois = [
-            {
-                "x": int(r.get("x", 0) or 0),
-                "y": int(r.get("y", 0) or 0),
-                "w": int(r.get("w", 0) or 0),
-                "h": int(r.get("h", 0) or 0),
-            }
-            for r in rois
-        ]
+        self._rois = [roi_geometry.normalize_roi(r) for r in rois]
         self.update()
 
     def set_n_rois(self, n: int) -> None:
@@ -189,28 +197,25 @@ class _ROICanvas(QWidget):
         self._rois = self._rois[:n]
         self.update()
 
-    def set_roi(self, roi: dict[str, int]) -> None:
+    def set_roi(self, roi: dict) -> None:
         """Backward-compat: update ROI slot 0 without emitting."""
         if not self._rois:
             self._rois = [{"x": 0, "y": 0, "w": 0, "h": 0}]
-        self._rois[0] = {
-            "x": int(roi.get("x", 0) or 0),
-            "y": int(roi.get("y", 0) or 0),
-            "w": int(roi.get("w", 0) or 0),
-            "h": int(roi.get("h", 0) or 0),
-        }
+        self._rois[0] = roi_geometry.normalize_roi(roi)
         self.update()
 
-    def set_roi_at(self, index: int, roi: dict[str, int]) -> None:
+    def set_roi_at(self, index: int, roi: dict) -> None:
         """Update a specific target-zone slot without emitting."""
         while len(self._rois) <= index:
             self._rois.append({"x": 0, "y": 0, "w": 0, "h": 0})
-        self._rois[index] = {
-            "x": int(roi.get("x", 0) or 0),
-            "y": int(roi.get("y", 0) or 0),
-            "w": int(roi.get("w", 0) or 0),
-            "h": int(roi.get("h", 0) or 0),
-        }
+        self._rois[index] = roi_geometry.normalize_roi(roi)
+        self.update()
+
+    def set_shape_mode(self, mode: str) -> None:
+        """Set the active shape for target-zone drawing (rect/circle/polygon)."""
+        self._shape_mode = mode if mode in ("rect", "circle", "polygon") else "rect"
+        # Abandon any in-progress freehand trace when switching shapes.
+        self._freehand_pts = None
         self.update()
 
     def set_crop(self, roi: dict[str, int]) -> None:
@@ -260,52 +265,129 @@ class _ROICanvas(QWidget):
         h = max(1, int(roi["h"] * self._scale))
         return QRect(x, y, w, h)
 
+    def _image_pt_to_canvas(self, x: float, y: float) -> QPointF:
+        return QPointF(x * self._scale + self._offset_x, y * self._scale + self._offset_y)
+
+    def _paint_roi_shape(
+        self, painter: QPainter, roi: dict, border_c: QColor, fill_c: QColor
+    ) -> QPoint:
+        """Draw *roi* (rect/circle/polygon) and return the label anchor point."""
+        shape = roi_geometry.roi_shape(roi)
+        pen = QPen(border_c, 2, Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        if shape == "circle":
+            c = self._image_pt_to_canvas(
+                float(roi.get("cx", 0) or 0), float(roi.get("cy", 0) or 0)
+            )
+            rr = float(roi.get("r", 0) or 0) * self._scale
+            path = QPainterPath()
+            path.addEllipse(c, rr, rr)
+            painter.fillPath(path, fill_c)
+            painter.drawEllipse(c, rr, rr)
+        elif shape == "polygon":
+            poly = QPolygonF([
+                self._image_pt_to_canvas(px, py)
+                for px, py in roi.get("points", [])
+            ])
+            path = QPainterPath()
+            path.addPolygon(poly)
+            path.closeSubpath()
+            painter.fillPath(path, fill_c)
+            painter.drawPolygon(poly)
+        else:
+            crect = self._image_roi_to_canvas_rect(roi)
+            painter.drawRect(crect)
+            painter.fillRect(crect, fill_c)
+        bx = self._image_roi_to_canvas_rect(roi)
+        return bx.topLeft()
+
     # ── Qt events ─────────────────────────────────────────────────────
 
     def resizeEvent(self, event) -> None:
         self._recalculate_transform()
         super().resizeEvent(event)
 
+    def _active_shape(self) -> str:
+        """Shape to draw for the current target (crop is always a rectangle)."""
+        return "rect" if self._draw_mode == "subject_crop" else self._shape_mode
+
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            origin = event.position().toPoint()
-            self._drag_origin = origin
-            self._drag_rect = QRect(origin, origin)
-            self.update()
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pt = event.position().toPoint()
+        if self._active_shape() == "polygon":
+            self._freehand_pts = [pt]
+        else:
+            self._drag_origin = pt
+            self._drag_rect = QRect(pt, pt)
+        self.update()
 
     def mouseMoveEvent(self, event) -> None:
-        if self._drag_origin is not None:
-            self._drag_rect = QRect(self._drag_origin, event.position().toPoint()).normalized()
+        pt = event.position().toPoint()
+        if self._freehand_pts is not None:
+            # Sample the trace, skipping near-duplicate points to bound size.
+            last = self._freehand_pts[-1]
+            if abs(pt.x() - last.x()) + abs(pt.y() - last.y()) >= 2:
+                self._freehand_pts.append(pt)
+            self.update()
+        elif self._drag_origin is not None:
+            self._drag_rect = QRect(self._drag_origin, pt).normalized()
             self.update()
 
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_origin is not None:
-            rect = QRect(self._drag_origin, event.position().toPoint()).normalized()
-            ix, iy = self._canvas_to_image(rect.topLeft())
-            ix2, iy2 = self._canvas_to_image(rect.bottomRight())
-            w = max(1, ix2 - ix)
-            h = max(1, iy2 - iy)
-            roi = {"x": ix, "y": iy, "w": w, "h": h}
-            self._drag_origin = None
-            self._drag_rect = None
-            if self._draw_mode == "subject_crop":
-                self._crop = roi
-                self.crop_changed.emit(dict(roi))
-            else:
-                # Parse roi_N index
+    def _emit_roi(self, roi: dict) -> None:
+        """Store *roi* into the active target and emit the matching signal."""
+        if self._draw_mode == "subject_crop":
+            self._crop = roi
+            self.crop_changed.emit(dict(roi))
+            return
+        idx = 0
+        if self._draw_mode.startswith("roi_"):
+            try:
+                idx = int(self._draw_mode[4:])
+            except ValueError:
                 idx = 0
-                if self._draw_mode.startswith("roi_"):
-                    try:
-                        idx = int(self._draw_mode[4:])
-                    except ValueError:
-                        idx = 0
-                while len(self._rois) <= idx:
-                    self._rois.append({"x": 0, "y": 0, "w": 0, "h": 0})
-                self._rois[idx] = roi
-                self.roi_n_changed.emit(idx, dict(roi))
-                if idx == 0:
-                    self.roi_changed.emit(dict(roi))
+        while len(self._rois) <= idx:
+            self._rois.append({"x": 0, "y": 0, "w": 0, "h": 0})
+        self._rois[idx] = roi
+        self.roi_n_changed.emit(idx, dict(roi))
+        if idx == 0:
+            self.roi_changed.emit(dict(roi))
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # ── Freehand polygon ──────────────────────────────────────────────
+        if self._freehand_pts is not None:
+            pts_canvas = self._freehand_pts
+            self._freehand_pts = None
+            if len(pts_canvas) >= 3:
+                img_pts = [list(self._canvas_to_image(p)) for p in pts_canvas]
+                roi = roi_geometry.normalize_roi({"shape": "polygon", "points": img_pts})
+                if roi_geometry.roi_has_area(roi):
+                    self._emit_roi(roi)
             self.update()
+            return
+
+        # ── Rectangle / circle (drag defines a bounding box) ──────────────
+        if self._drag_origin is None:
+            return
+        rect = QRect(self._drag_origin, event.position().toPoint()).normalized()
+        ix, iy = self._canvas_to_image(rect.topLeft())
+        ix2, iy2 = self._canvas_to_image(rect.bottomRight())
+        w = max(1, ix2 - ix)
+        h = max(1, iy2 - iy)
+        self._drag_origin = None
+        self._drag_rect = None
+        if self._active_shape() == "circle":
+            r = min(w, h) / 2.0
+            roi = roi_geometry.normalize_roi(
+                {"shape": "circle", "cx": ix + w / 2.0, "cy": iy + h / 2.0, "r": r}
+            )
+        else:
+            roi = {"x": ix, "y": iy, "w": w, "h": h}
+        self._emit_roi(roi)
+        self.update()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -324,16 +406,12 @@ class _ROICanvas(QWidget):
         for idx, roi in enumerate(self._rois):
             if roi.get("w", 0) > 0 and roi.get("h", 0) > 0:
                 border_c, fill_c = colors[idx % len(colors)]
-                crect = self._image_roi_to_canvas_rect(roi)
-                pen = QPen(border_c, 2, Qt.PenStyle.SolidLine)
-                painter.setPen(pen)
-                painter.drawRect(crect)
-                painter.fillRect(crect, fill_c)
+                anchor = self._paint_roi_shape(painter, roi, border_c, fill_c)
                 painter.setPen(border_c)
                 label = f"ROI {idx + 1}" if idx > 0 else "ROI 1 (Target Zone)"
-                label_pt = crect.topLeft() + QPoint(4, -6)
+                label_pt = anchor + QPoint(4, -6)
                 if label_pt.y() < 12:
-                    label_pt = crect.topLeft() + QPoint(4, 14)
+                    label_pt = anchor + QPoint(4, 14)
                 painter.drawText(label_pt, label)
 
         # Subject Crop overlay (green)
@@ -349,8 +427,9 @@ class _ROICanvas(QWidget):
                 label_pt = crect.topLeft() + QPoint(4, 14)
             painter.drawText(label_pt, "Subject Crop")
 
-        # Active drag rubber-band (colour matches current draw mode)
-        if self._drag_rect is not None:
+        # Active preview (colour matches current draw mode) — rectangle/circle
+        # rubber-band or the live freehand-polygon trace.
+        if self._drag_rect is not None or self._freehand_pts is not None:
             if self._draw_mode == "subject_crop":
                 band_color = QColor("#66BB6A")
                 fill_color = QColor(102, 187, 106, 30)
@@ -367,8 +446,18 @@ class _ROICanvas(QWidget):
                 fill_color = QColor(r, g, b, 30)
             pen = QPen(band_color, 2, Qt.PenStyle.DashLine)
             painter.setPen(pen)
-            painter.drawRect(self._drag_rect)
-            painter.fillRect(self._drag_rect, fill_color)
+            if self._freehand_pts is not None and len(self._freehand_pts) >= 2:
+                painter.drawPolyline(QPolygonF([QPointF(p) for p in self._freehand_pts]))
+            elif self._drag_rect is not None and self._active_shape() == "circle":
+                cx = self._drag_rect.center()
+                rr = min(self._drag_rect.width(), self._drag_rect.height()) / 2.0
+                painter.drawEllipse(QPointF(cx), rr, rr)
+                path = QPainterPath()
+                path.addEllipse(QPointF(cx), rr, rr)
+                painter.fillPath(path, fill_color)
+            elif self._drag_rect is not None:
+                painter.drawRect(self._drag_rect)
+                painter.fillRect(self._drag_rect, fill_color)
 
         if self._pixmap is None:
             painter.setPen(QColor("#546E7A"))
@@ -470,12 +559,47 @@ class ROIDefinitionTab(QWidget):
         draw_mode_row.addWidget(QLabel("Draw mode:"))
         draw_mode_row.addWidget(self._draw_mode_combo, 1)
 
+        # Shape selector — applies to target-zone ROIs (the subject crop is
+        # always a rectangle).
+        self._shape_combo = QComboBox()
+        self._shape_combo.addItem("Rectangle", userData="rect")
+        self._shape_combo.addItem("Circle", userData="circle")
+        self._shape_combo.addItem("Freehand polygon", userData="polygon")
+        self._shape_combo.setToolTip(
+            "ROI shape to draw:\n"
+            "• Rectangle — drag a box.\n"
+            "• Circle — drag a box; the inscribed circle is used.\n"
+            "• Freehand polygon — drag to trace an outline, then optionally\n"
+            "  Smooth or Angularize it. Applies to target zones only."
+        )
+        self._shape_combo.currentIndexChanged.connect(self._on_shape_changed)
+
+        self._smooth_btn = QPushButton("Smooth")
+        self._smooth_btn.setToolTip(
+            "Round off a freehand polygon's corners (Chaikin). Operates on the\n"
+            "currently selected target-zone ROI if it is a polygon."
+        )
+        self._smooth_btn.clicked.connect(self._smooth_active_polygon)
+        self._angularize_btn = QPushButton("Angularize")
+        self._angularize_btn.setToolTip(
+            "Simplify a freehand polygon to fewer, cleaner corners\n"
+            "(Douglas–Peucker). Operates on the selected target-zone ROI."
+        )
+        self._angularize_btn.clicked.connect(self._angularize_active_polygon)
+
+        shape_row = QHBoxLayout()
+        shape_row.addWidget(QLabel("Shape:"))
+        shape_row.addWidget(self._shape_combo, 1)
+        shape_row.addWidget(self._smooth_btn)
+        shape_row.addWidget(self._angularize_btn)
+
         canvas_panel = QWidget()
         canvas_layout = QVBoxLayout(canvas_panel)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
         canvas_layout.addWidget(self._canvas, 1)
         canvas_layout.addWidget(canvas_hint)
         canvas_layout.addLayout(draw_mode_row)
+        canvas_layout.addLayout(shape_row)
         canvas_layout.addLayout(frame_nav_row)
         canvas_layout.addLayout(frame_slider_row)
 
@@ -556,6 +680,10 @@ class ROIDefinitionTab(QWidget):
         # Container for dynamically generated per-ROI spinbox groups
         self._roi_spinbox_groups: list[tuple[QSpinBox, QSpinBox, QSpinBox, QSpinBox]] = []
         self._roi_boxes: list[QGroupBox] = []
+        # Authoritative per-slot ROI shape dicts (rect/circle/polygon).  The
+        # spinboxes mirror each shape's bounding box; the canvas is the source
+        # of truth for non-rectangular geometry.
+        self._roi_shapes: list[dict] = [{"x": 0, "y": 0, "w": 0, "h": 0}]
         self._roi_spins_container = QWidget()
         self._roi_spins_layout = QVBoxLayout(self._roi_spins_container)
         self._roi_spins_layout.setContentsMargins(0, 0, 0, 0)
@@ -1043,6 +1171,11 @@ class ROIDefinitionTab(QWidget):
         self._roi_spinbox_groups = []
         self._roi_boxes = []
 
+        # Resize the shape list to n slots, preserving existing shapes.
+        while len(self._roi_shapes) < n:
+            self._roi_shapes.append({"x": 0, "y": 0, "w": 0, "h": 0})
+        self._roi_shapes = self._roi_shapes[:n]
+
         colors = _roi_qcolors()
         for i in range(n):
             hex_c = ROI_COLORS[i % len(ROI_COLORS)]
@@ -1132,16 +1265,31 @@ class ROIDefinitionTab(QWidget):
             for sp in grp:
                 sp.blockSignals(block)
 
-    def _read_all_target_zones(self) -> list[dict[str, int]]:
-        """Read all ROI spinbox groups into a list of dicts."""
-        return [self._read_roi_spins(grp) for grp in self._roi_spinbox_groups]
+    def _read_all_target_zones(self) -> list[dict]:
+        """Return the authoritative shape dict for every ROI slot.
+
+        Rectangular slots are refreshed from their spinboxes (so manual numeric
+        edits are honoured); circle/polygon slots keep the geometry drawn on the
+        canvas.
+        """
+        zones: list[dict] = []
+        for i, grp in enumerate(self._roi_spinbox_groups):
+            shape = self._roi_shapes[i] if i < len(self._roi_shapes) else {}
+            if roi_geometry.roi_shape(shape) == "rect":
+                zones.append(self._read_roi_spins(grp))
+            else:
+                zones.append(roi_geometry.normalize_roi(shape))
+        return zones
 
     def _load_target_zones(self, zones: list[dict]) -> None:
-        """Populate ROI spinboxes from a list of dicts (blocked signals)."""
+        """Populate ROI shapes, spinboxes (bbox mirror), and canvas from dicts."""
         self._block_all_roi_spins(True)
         for i, grp in enumerate(self._roi_spinbox_groups):
-            roi = zones[i] if i < len(zones) else {"x": 0, "y": 0, "w": 0, "h": 0}
-            self._set_roi_spins(grp, roi)
+            raw = zones[i] if i < len(zones) else {"x": 0, "y": 0, "w": 0, "h": 0}
+            shape = roi_geometry.normalize_roi(raw)
+            if i < len(self._roi_shapes):
+                self._roi_shapes[i] = shape
+            self._set_roi_spins(grp, shape)  # spinboxes mirror the bbox
         self._block_all_roi_spins(False)
 
     def _load_scope_values(self) -> None:
@@ -1175,9 +1323,7 @@ class ROIDefinitionTab(QWidget):
             (self._crop_x, self._crop_y, self._crop_w, self._crop_h),
             src.get("subject_crop", {}),
         )
-        self._canvas.set_rois(
-            [self._read_roi_spins(grp) for grp in self._roi_spinbox_groups]
-        )
+        self._canvas.set_rois(list(self._roi_shapes))
         self._canvas.set_crop(src.get("subject_crop", {}))
         # Day exclusions are project-level — always load from project config
         excl_days = cfg.get("roi_excluded_day_labels", [])
@@ -1191,12 +1337,15 @@ class ROIDefinitionTab(QWidget):
     # ── Canvas ↔ spinbox bidirectional sync ───────────────────────────
 
     def _on_canvas_roi_n_changed(self, index: int, roi: dict) -> None:
-        """Canvas drag finished — push result to the matching spinbox group."""
+        """Canvas draw finished — store the shape and mirror its bbox to spins."""
         if index >= len(self._roi_spinbox_groups):
             return
+        shape = roi_geometry.normalize_roi(roi)
+        if index < len(self._roi_shapes):
+            self._roi_shapes[index] = shape
         grp = self._roi_spinbox_groups[index]
         self._block_all_roi_spins(True)
-        self._set_roi_spins(grp, roi)
+        self._set_roi_spins(grp, shape)
         self._block_all_roi_spins(False)
         self._current_subject_dirty = True
 
@@ -1210,6 +1359,63 @@ class ROIDefinitionTab(QWidget):
     def _on_draw_mode_changed(self) -> None:
         mode = str(self._draw_mode_combo.currentData() or "roi_0")
         self._canvas.set_draw_mode(mode)
+        # The subject crop must stay rectangular; disable shape controls for it.
+        is_crop = mode == "subject_crop"
+        for w in (self._shape_combo, self._smooth_btn, self._angularize_btn):
+            w.setEnabled(not is_crop)
+
+    def _on_shape_changed(self) -> None:
+        shape = str(self._shape_combo.currentData() or "rect")
+        self._canvas.set_shape_mode(shape)
+
+    def _active_roi_slot(self) -> int:
+        """Index of the ROI slot the draw-mode combo currently targets."""
+        data = str(self._draw_mode_combo.currentData() or "")
+        if data.startswith("roi_"):
+            try:
+                return int(data[4:])
+            except ValueError:
+                return 0
+        return 0
+
+    def _cleanup_active_polygon(self, mode: str) -> None:
+        """Apply Chaikin smoothing or RDP simplification to the active polygon."""
+        idx = self._active_roi_slot()
+        if idx >= len(self._roi_shapes):
+            return
+        shape = self._roi_shapes[idx]
+        if roi_geometry.roi_shape(shape) != "polygon":
+            QMessageBox.information(
+                self,
+                "Not a Polygon",
+                "Select a target-zone ROI that was drawn as a freehand polygon, "
+                "then use Smooth / Angularize.",
+            )
+            return
+        pts = shape.get("points", [])
+        if mode == "smooth":
+            new_pts = roi_geometry.chaikin_smooth(pts, iterations=2)
+        else:
+            # Epsilon scales with the polygon's size so simplification is
+            # resolution-independent (≈2% of the bounding-box diagonal).
+            _x, _y, w, h = roi_geometry.roi_bbox(shape)
+            eps = max(1.0, 0.02 * (w ** 2 + h ** 2) ** 0.5)
+            new_pts = roi_geometry.rdp_simplify(pts, eps)
+        new_shape = roi_geometry.normalize_roi({"shape": "polygon", "points": new_pts})
+        if not roi_geometry.roi_has_area(new_shape):
+            return
+        self._roi_shapes[idx] = new_shape
+        self._block_all_roi_spins(True)
+        self._set_roi_spins(self._roi_spinbox_groups[idx], new_shape)
+        self._block_all_roi_spins(False)
+        self._canvas.set_roi_at(idx, new_shape)
+        self._current_subject_dirty = True
+
+    def _smooth_active_polygon(self) -> None:
+        self._cleanup_active_polygon("smooth")
+
+    def _angularize_active_polygon(self) -> None:
+        self._cleanup_active_polygon("angularize")
 
     def _cycle_draw_mode(self) -> None:
         """Advance the draw-mode combo to the next item, wrapping around."""
@@ -1220,19 +1426,22 @@ class ROIDefinitionTab(QWidget):
         self._draw_mode_combo.setCurrentIndex(next_idx)
 
     def _on_roi_spinbox_changed(self, roi_index: int) -> None:
-        """ROI spinbox edited manually — reflect on canvas overlay."""
+        """ROI spinbox edited manually — the slot reverts to a rectangle."""
         if roi_index < len(self._roi_spinbox_groups):
             roi = self._read_roi_spins(self._roi_spinbox_groups[roi_index])
+            if roi_index < len(self._roi_shapes):
+                self._roi_shapes[roi_index] = roi
             self._canvas.set_roi_at(roi_index, roi)
         self._current_subject_dirty = True
 
     def _clear_target_roi(self) -> None:
-        """Clear all target-zone spinboxes and canvas overlays."""
+        """Clear all target-zone spinboxes, shapes, and canvas overlays."""
         self._block_all_roi_spins(True)
         for grp in self._roi_spinbox_groups:
             for sp in grp:
                 sp.setValue(0)
         self._block_all_roi_spins(False)
+        self._roi_shapes = [{"x": 0, "y": 0, "w": 0, "h": 0} for _ in self._roi_spinbox_groups]
         self._canvas.set_rois([{"x": 0, "y": 0, "w": 0, "h": 0}] * len(self._roi_spinbox_groups))
         self._current_subject_dirty = True
 
@@ -1377,6 +1586,7 @@ class ROIDefinitionTab(QWidget):
         self._block_all_roi_spins(False)
         for sp in (self._crop_x, self._crop_y, self._crop_w, self._crop_h):
             sp.setValue(0)
+        self._roi_shapes = [dict(empty_roi) for _ in range(n)]
         self._canvas.set_rois([dict(empty_roi)] * n)
         self._canvas.set_crop(empty_roi)
 

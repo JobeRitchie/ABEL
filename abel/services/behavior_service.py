@@ -162,6 +162,110 @@ class BehaviorService:
         return list(_TEMPLATES.keys())
 
     # ------------------------------------------------------------------
+    # Multi-animal structured labels
+    # ------------------------------------------------------------------
+
+    def get(self, behavior_id: str) -> "BehaviorDefinition | None":
+        """Return the behavior definition for ``behavior_id``, or ``None``."""
+        bid = str(behavior_id or "")
+        return next((b for b in self._behaviors if str(b.behavior_id) == bid), None)
+
+    def is_social(self, behavior_id: str) -> bool:
+        b = self.get(behavior_id)
+        return bool(b and b.is_social)
+
+    def label_animal_fields(
+        self,
+        behavior_id: str,
+        focal_animal_id: str | None,
+        partner_animal_id: str | None = None,
+    ) -> dict:
+        """Derive the structured-label animal/role fields for a behavior.
+
+        Returns a dict ready to splat into ``ReviewerLabelRecord`` / ``SeedExample``:
+
+        * **solo** behavior -> ``social_role='none'``, no partner (matches legacy
+          single-animal labels, so single-animal projects are unaffected).
+        * **directed** social -> ``focal`` is the ``actor``; ``partner`` the recipient.
+        * **mutual** social -> ``social_role='mutual'`` for the unordered pair.
+
+        The *training label* stays the behavior id itself (identity-agnostic), so
+        instances pool across animals ("a mouse is a mouse"); the animal fields
+        only tell downstream feature extraction *which* animal(s) to use.
+        """
+        b = self.get(behavior_id)
+        if b is None or not b.is_social:
+            return {
+                "focal_animal_id": focal_animal_id,
+                "partner_animal_id": None,
+                "social_role": "none",
+            }
+        role = "actor" if b.directionality == "directed" else "mutual"
+        return {
+            "focal_animal_id": focal_animal_id,
+            "partner_animal_id": partner_animal_id,
+            "social_role": role,
+        }
+
+    def aggregate_clip_labels(
+        self,
+        labels: "list[dict]",
+        session_id: str,
+        start_frame: int,
+        end_frame: int,
+    ) -> list[dict]:
+        """Fan out per-clip structured labels to per-animal-segment records.
+
+        ``labels`` is a list of ``{behavior_id, focal_animal_id,
+        partner_animal_id}`` (as emitted by the soundboard). Each label is keyed
+        to its focal animal's own segment (``seg_{animal}_{session}_{start}_{end}``)
+        so instances pool by identity-agnostic behavior id at training time
+        ("a mouse is a mouse"). Semantics:
+
+        * **solo** -> labels the focal animal's segment.
+        * **directed social** -> labels only the *actor*'s segment.
+        * **mutual social** -> labels *both* animals' segments (both exhibit it).
+
+        Multiple behaviors landing on the same animal-segment are merged into one
+        pipe-joined ``review_label`` (the co-occurring convention the trainer
+        expands), so they aren't collapsed to ``ambiguous`` and dropped.
+
+        Returns a list of ``{segment_id, review_label, fields}`` dicts, where
+        ``fields`` carries the structured animal/role columns for a single-behavior
+        segment (empty for a merged, multi-behavior segment).
+        """
+        by_segment: dict[str, dict] = {}
+
+        def _apply(bid: str, focal: str, partner: "str | None") -> None:
+            if not bid or not focal:
+                return
+            fields = self.label_animal_fields(bid, focal, partner)
+            seg_id = f"seg_{focal}_{session_id}_{int(start_frame)}_{int(end_frame)}"
+            entry = by_segment.setdefault(seg_id, {"bids": [], "fields": []})
+            if bid not in entry["bids"]:
+                entry["bids"].append(bid)
+                entry["fields"].append(fields)
+
+        for lab in labels:
+            bid = str(lab.get("behavior_id") or "")
+            focal = lab.get("focal_animal_id")
+            partner = lab.get("partner_animal_id")
+            _apply(bid, focal, partner)
+            b = self.get(bid)
+            if partner and b and b.is_social and str(b.directionality) == "mutual":
+                _apply(bid, partner, focal)
+
+        out: list[dict] = []
+        for seg_id, entry in by_segment.items():
+            bids = sorted(set(entry["bids"]))
+            out.append({
+                "segment_id": seg_id,
+                "review_label": "|".join(bids),
+                "fields": entry["fields"][0] if len(bids) == 1 else {},
+            })
+        return out
+
+    # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
 

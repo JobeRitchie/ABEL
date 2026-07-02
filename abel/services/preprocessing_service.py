@@ -142,6 +142,10 @@ class ClipExtractionConfig:
 
     overlay_text: str | None = None  # optional text drawn in top-left of every frame
 
+    static_center: bool = True  # crop on the clip-mean centroid (stable); False = per-frame follow (can jitter)
+
+    individual_overlays: "list | None" = None  # [{name, color(BGR), cx[], cy[]}] -> colored dots + legend per animal
+
 
 
 
@@ -251,6 +255,33 @@ class ClipExtractionService:
         return max(8, min(scaled, max_margin))
 
 
+
+    @staticmethod
+    def build_individual_overlays(pose_svc, pose_path, settings=None, individual_subject_map=None):
+        """Build per-animal overlay dicts for a pose file: ``{name, color(BGR), cx, cy}``.
+
+        Colors come from the shared palette (same as the identity dialog). ``name``
+        uses the session's identity map when available, else the track id. Returns
+        ``None`` for single-animal files (nothing to disambiguate) or on any error.
+        """
+        try:
+            multi = pose_svc.load_and_clean_multi(pose_path, settings)
+        except Exception:
+            return None
+        per = getattr(multi, "per_individual", {}) or {}
+        if len(per) <= 1:
+            return None
+        from abel.utils.individual_colors import color_for_bgr
+        imap = individual_subject_map or {}
+        overlays = []
+        for idx, (ind_id, pdata) in enumerate(per.items()):
+            overlays.append({
+                "name": str(imap.get(ind_id, ind_id)),
+                "color": color_for_bgr(idx),
+                "cx": pdata.centroid_x,
+                "cy": pdata.centroid_y,
+            })
+        return overlays
 
     @staticmethod
 
@@ -628,6 +659,10 @@ class ClipExtractionService:
 
                     overlay_text=config.overlay_text,
 
+                    static_center=config.static_center,
+
+                    individual_overlays=config.individual_overlays,
+
                 )
 
                 if error:
@@ -734,9 +769,19 @@ class ClipExtractionService:
 
         overlay_text: str | None = None,
 
+        static_center: bool = True,
+
+        individual_overlays=None,
+
     ) -> str | None:
 
-        """Write a single video clip cropped around (cx, cy). Returns error string or None."""
+        """Write a single video clip cropped around (cx, cy). Returns error string or None.
+
+        With ``static_center`` (default) the crop stays fixed on ``(cx, cy)`` — which
+        callers pass as the clip-mean centroid — so the view does not jitter when the
+        per-frame centroid is noisy. ``individual_overlays`` draws a colored dot per
+        animal plus a legend so reviewers can tell the animals apart.
+        """
 
         import cv2  # noqa: PLC0415
 
@@ -806,7 +851,11 @@ class ClipExtractionService:
 
 
 
-        use_dynamic_center = pose_centroid_x is not None and pose_centroid_y is not None
+        use_dynamic_center = (
+            not static_center
+            and pose_centroid_x is not None
+            and pose_centroid_y is not None
+        )
 
 
 
@@ -929,6 +978,50 @@ class ClipExtractionService:
                         cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR
 
                     )
+
+                # Per-animal colored dots + legend so reviewers can tell animals apart.
+                if individual_overlays:
+                    cw = max(1, x2 - x1)
+                    ch = max(1, y2 - y1)
+                    sx = out_w / float(cw)
+                    sy = out_h / float(ch)
+                    fidx = start_frame + idx
+                    dot_r = max(3, out_w // 70)
+                    for ov in individual_overlays:
+                        ocx = ov.get("cx")
+                        ocy = ov.get("cy")
+                        if ocx is None or ocy is None:
+                            continue
+                        n_ov = min(len(ocx), len(ocy))
+                        if n_ov <= 0:
+                            continue
+                        fi = 0 if fidx < 0 else (n_ov - 1 if fidx >= n_ov else fidx)
+                        ax = float(ocx[fi])
+                        ay = float(ocy[fi])
+                        if not (np.isfinite(ax) and np.isfinite(ay)):
+                            continue
+                        px = int(round((ax - x1) * sx))
+                        py = int(round((ay - y1) * sy))
+                        if 0 <= px < out_w and 0 <= py < out_h:
+                            color = ov.get("color", (0, 0, 255))
+                            cv2.circle(crop, (px, py), dot_r + 1, (0, 0, 0), -1, cv2.LINE_AA)
+                            cv2.circle(crop, (px, py), dot_r, color, -1, cv2.LINE_AA)
+
+                    lfont = cv2.FONT_HERSHEY_SIMPLEX
+                    lscale = max(0.35, min(0.55, out_w / 420.0))
+                    row_h = max(14, int(18 * lscale / 0.4))
+                    sw = max(8, row_h - 6)
+                    lpad = 4
+                    for i, ov in enumerate(individual_overlays):
+                        name = str(ov.get("name", ""))
+                        color = ov.get("color", (0, 0, 255))
+                        (tw, _th), _bl = cv2.getTextSize(name, lfont, lscale, 1)
+                        total_w = sw + 4 + tw
+                        x0 = max(0, out_w - total_w - lpad)
+                        y0 = lpad + i * row_h
+                        cv2.rectangle(crop, (x0 - 2, y0 - 1), (out_w - lpad + 1, y0 + row_h - 3), (0, 0, 0), -1)
+                        cv2.rectangle(crop, (x0, y0 + 1), (x0 + sw, y0 + sw + 1), color, -1)
+                        cv2.putText(crop, name, (x0 + sw + 4, y0 + sw), lfont, lscale, (255, 255, 255), 1, cv2.LINE_AA)
 
                 if overlay_text:
 

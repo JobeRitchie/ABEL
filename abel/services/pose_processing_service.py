@@ -938,7 +938,12 @@ class PoseProcessingService:
         "other_facing_focal",
         "approach_velocity",
         "bbox_overlap",
+        "heading_alignment",
+        "radial_velocity_toward",
     )
+    # Fraction of the focal body length below which the closest inter-animal
+    # keypoint pair counts as "in contact" (drives the contact-state features).
+    _SOCIAL_CONTACT_BODY_FRAC = 0.5
 
     def compute_frame_social_features(
         self,
@@ -968,6 +973,10 @@ class PoseProcessingService:
 
         fcx = np.asarray(focal.centroid_x, dtype=float)
         fcy = np.asarray(focal.centroid_y, dtype=float)
+        # Focal's own centroid velocity — used to project movement onto the
+        # direction toward each other animal (directed approach/yield signal).
+        f_vx = self._finite_diff(fcx, fps)
+        f_vy = self._finite_diff(fcy, fps)
         f_nose_x, f_nose_y = self._keypoint_xy(focal, ["nose", "snout", "head"])
         f_axis = self.compute_body_axis_angle(focal)
         if focal_body_length is None:
@@ -1007,6 +1016,21 @@ class PoseProcessingService:
             other_facing = np.abs(self._wrap_angle(np.arctan2(-vfy, -vfx) - o_axis))
             approach = -self._finite_diff(dcc, fps)
             iou = self._bbox_iou(focal, opose)
+            # Relative body-axis alignment: cos(Δheading) is +1 when the two
+            # animals point the same way (parallel), −1 when opposed
+            # (anti-parallel), 0 when perpendicular.  Complements facing_angle
+            # (which measures whether the focal points *at* the other).
+            heading_alignment = np.cos(self._wrap_angle(f_axis - o_axis))
+            # Directed movement: focal's centroid velocity projected onto the
+            # unit vector toward the other.  Positive = focal advancing into the
+            # other's space; negative = focal yielding/retreating.  Unlike
+            # approach_velocity (the symmetric rate of pairwise-distance change,
+            # identical for both animals) this is asymmetric, so it can tell
+            # *which* animal advanced and which gave ground — the core signal for
+            # spatial-displacement dominance.
+            with np.errstate(invalid="ignore", divide="ignore"):
+                safe_dcc = np.where(dcc > 1e-6, dcc, np.nan)
+                radial_toward = (f_vx * (ocx - fcx) + f_vy * (ocy - fcy)) / safe_dcc
 
             cc_list.append(dcc)
             feats_by_other.append({
@@ -1018,6 +1042,8 @@ class PoseProcessingService:
                 "other_facing_focal": other_facing,
                 "approach_velocity": approach,
                 "bbox_overlap": iou,
+                "heading_alignment": heading_alignment,
+                "radial_velocity_toward": radial_toward,
             })
 
         cc = np.stack(cc_list, axis=0)               # (n_others, n)
@@ -1038,7 +1064,41 @@ class PoseProcessingService:
                 out[f"social_{base}_nearest_norm"] = near_v / safe_bl
                 out[f"social_{base}_mean_norm"] = mean_v / safe_bl
 
+        # ── Contact state & duration ─────────────────────────────────────────
+        # "In contact" when the closest keypoint pair to the *nearest* other
+        # animal is within a fraction of the focal body length.  The duration
+        # column reports how long the current uninterrupted contact bout has
+        # lasted (seconds), resetting to 0 the moment contact breaks — a stateful
+        # descriptor of sustained interactions (huddling, mounting, fighting).
+        near_min_kp = out["social_min_keypoint_dist_nearest"]
+        contact_thresh = self._SOCIAL_CONTACT_BODY_FRAC * safe_bl
+        with np.errstate(invalid="ignore"):
+            contact = np.isfinite(near_min_kp) & np.isfinite(contact_thresh) & (
+                near_min_kp <= contact_thresh
+            )
+        out["social_in_contact"] = contact.astype(float)
+        out["social_in_contact_duration_s"] = self._run_length_seconds(contact, fps)
+
         return pd.DataFrame(out, index=range(n))
+
+    @staticmethod
+    def _run_length_seconds(mask: np.ndarray, fps: float) -> np.ndarray:
+        """Per-frame duration (s) of the current uninterrupted ``True`` run.
+
+        Vectorized: each True frame reports frames-since-the-last-False, scaled
+        by the frame period; False frames report 0.
+        """
+        mask = np.asarray(mask, dtype=bool)
+        n = mask.size
+        if n == 0:
+            return np.zeros(0, dtype=float)
+        idx = np.arange(n)
+        # Index of the most recent non-True frame (0 before any reset).
+        reset = np.where(~mask, idx, 0)
+        run_start = np.maximum.accumulate(reset)
+        run_len = np.where(mask, idx - run_start, 0).astype(float)
+        period = (1.0 / fps) if fps and fps > 0 else 0.0
+        return run_len * period
 
     @staticmethod
     def detect_identity_swaps(

@@ -434,12 +434,22 @@ class _FacetControls(QWidget):
                 "QComboBox{background:#0A1929;border:1px solid #1E3A5F;"
                 "border-radius:3px;color:#cfd8dc;font-size:10px;padding:1px 3px;}"
             )
+            # Keep the box a modest, fixed width instead of stretching to fill
+            # the whole control panel (which pushed the right edge under the plot
+            # area and got clipped). The popup list still expands to show the full
+            # level names, so long labels stay readable.
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(8)
+            combo.setMaximumWidth(190)
             want = prev.get(factor, FACET_COMBINE)
             idx = combo.findData(want)
             combo.setCurrentIndex(idx if idx >= 0 else 0)
             combo.currentIndexChanged.connect(lambda _i: self.changed.emit())
             row.addWidget(lbl)
-            row.addWidget(combo, 1)
+            row.addWidget(combo)
+            row.addStretch(1)
             self._combos[factor] = combo
             self._vbox.addLayout(row)
 
@@ -826,6 +836,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._relationships_tab = _BehaviorMotifWidget(self)
         self._sections_tab = _SessionSectionsWidget(self)
         self._velocity_tab = _VelocityWidget(self)
+        self._social_tab = _SocialInteractionWidget(self)
         self._tabs.addTab(self._summary_tab, "Summary && Statistics")
         self._tabs.addTab(self._graphs_tab, "Graphs")
         self._tabs.addTab(self._heatmap_tab, "Spatial Heatmap")
@@ -833,6 +844,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._tabs.addTab(self._relationships_tab, "Behavior Relationships")
         self._tabs.addTab(self._sections_tab, "Session Sections")
         self._tabs.addTab(self._velocity_tab, "Velocity")
+        self._tabs.addTab(self._social_tab, "Social Interaction")
 
         root = QVBoxLayout(self)
         root.setSpacing(2)
@@ -892,6 +904,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._heatmap_tab._refresh_lists()
         self._density_tab.refresh_selectors()
         self._relationships_tab.set_project(self._project_root)
+        self._social_tab.on_project_reloaded()
         # Restore any previously merged projects for this project folder
         self._merge_service.load(self._project_root)
         self._rebuild_merge_list_widget()
@@ -2520,11 +2533,8 @@ class BehaviorAnalyticsTab(QWidget):
         """
         if pose is None or not roi:
             return None
-        x = int(roi.get("x", 0) or 0)
-        y = int(roi.get("y", 0) or 0)
-        w = int(roi.get("w", 0) or 0)
-        h = int(roi.get("h", 0) or 0)
-        if w <= 0 or h <= 0:
+        from abel.utils import roi_geometry
+        if not roi_geometry.roi_has_area(roi):
             return None
 
         start_idx = self._analysis_prechop_for_session(session_id)
@@ -2533,11 +2543,9 @@ class BehaviorAnalyticsTab(QWidget):
         if cx.size == 0:
             return None
 
-        inside = (
-            np.isfinite(cx) & np.isfinite(cy)
-            & (cx >= x) & (cx <= x + w)
-            & (cy >= y) & (cy <= y + h)
-        )
+        # "Inside" respects the ROI's true shape (rect/circle/polygon), so
+        # occupancy for a circular or freehand zone matches what was drawn.
+        inside = roi_geometry.roi_contains(roi, cx, cy)
         # Debounce ~0.2 s of boundary flicker so a jittery frame isn't an entry.
         min_run = max(1, int(round(0.2 * fps))) if fps > 0 else 1
         inside = _debounce_bool(inside, min_run)
@@ -5498,6 +5506,13 @@ class _GraphsWidget(QWidget):
                         int(gs_ff.get("max_w", 700)), int(gs_ff.get("max_h", 420)),
                         int(gs_ff.get("dpi", 100)),
                     )
+                    # Tight-fitting caps the canvas at max_w×max_h, which leaves
+                    # the plot small in a wide window. Expand it to fill the
+                    # available viewport width (preserving the just-computed
+                    # aspect) so the initial render uses the full plot area —
+                    # matching what a manual splitter drag produces. Without this
+                    # the plot stayed capped until a resize event happened to fire.
+                    self._sync_canvas_to_viewport()
                 # Draw first so get_tightbbox measures the realised figure — on
                 # the first render the renderer isn't ready yet, so an inline-only
                 # fit collapses to the minimum size (canvas appears miniaturised
@@ -16365,6 +16380,262 @@ class _SessionSectionsWidget(QWidget):
 
 # Number of normalised time-points used for the Profile chart.
 _N_NORM_POINTS: int = 50
+
+
+class _SocialInteractionWidget(QWidget):
+    """Social-interaction analytics sub-tab (multi-animal projects).
+
+    Two views over the per-frame ``social_*`` features:
+
+    * **Summary** — per (subject, session) dyadic metrics: mean inter-animal
+      distance, time in contact, contact bouts, net approach, advance/yield
+      balance, and orientation.
+    * **Dominance (HMM)** — a Gaussian HMM fit over continuous social + movement
+      features (pooled across the cohort so states are comparable), from which a
+      spatial-displacement dominance score is derived per subject: the animal
+      that advances into the other's space while the other yields ranks as more
+      dominant.  Subjects are ranked within each session.
+
+    All computation is on-demand via the buttons; nothing runs until the user
+    asks, so opening the tab is cheap.
+    """
+
+    _SUMMARY_COLS = [
+        ("Subject", "animal_id"),
+        ("Session", "session_id"),
+        ("Group", "group"),
+        ("Frames", "n_frames"),
+        ("Mean dist (norm)", "mean_distance_norm"),
+        ("Contact %", "contact_fraction"),
+        ("Contact bouts", "n_contact_bouts"),
+        ("Mean bout (s)", "mean_contact_bout_s"),
+        ("Mean approach", "mean_approach_velocity"),
+        ("Advance %", "advance_fraction"),
+        ("Heading align", "mean_heading_alignment"),
+    ]
+
+    _DOM_COLS = [
+        ("Session", "session_id"),
+        ("Subject", "animal_id"),
+        ("Group", "group"),
+        ("Rank", "dominance_rank"),
+        ("Dominance score", "dominance_score"),
+        ("Mean advance", "mean_advance"),
+        ("Yield %", "yield_fraction"),
+        ("Interaction (s)", "interaction_time_s"),
+        ("Dominant?", "is_dominant"),
+    ]
+
+    def __init__(self, host: "BehaviorAnalyticsTab") -> None:
+        super().__init__()
+        self._host = host
+        self._frames_cache = None  # cached per-frame social DataFrame
+
+        from abel.services.social_analysis_service import SocialAnalysisService
+        self._svc = SocialAnalysisService()
+
+        # ── Controls ──────────────────────────────────────────────────────
+        self._status = QLabel("Open a multi-animal project, then click Compute.")
+        self._status.setWordWrap(True)
+        self._status.setStyleSheet("color:#90a4ae;font-size:11px;")
+
+        self._compute_btn = QPushButton("Compute Social Metrics")
+        self._compute_btn.setToolTip(
+            "Load the per-frame social features and summarize the dyadic "
+            "relationship for every subject / session."
+        )
+        self._compute_btn.clicked.connect(self._compute_summary)
+
+        self._n_states_spin = QSpinBox()
+        self._n_states_spin.setRange(2, 8)
+        self._n_states_spin.setValue(4)
+        self._n_states_spin.setToolTip("Number of latent interaction states for the dominance HMM.")
+
+        self._hmm_btn = QPushButton("Run Dominance HMM")
+        self._hmm_btn.setToolTip(
+            "Fit a Gaussian HMM over social + movement features (pooled across "
+            "the cohort) and rank subjects by spatial-displacement dominance."
+        )
+        self._hmm_btn.clicked.connect(self._run_dominance_hmm)
+
+        ctrl = QHBoxLayout()
+        ctrl.addWidget(self._compute_btn)
+        ctrl.addSpacing(12)
+        ctrl.addWidget(QLabel("States:"))
+        ctrl.addWidget(self._n_states_spin)
+        ctrl.addWidget(self._hmm_btn)
+        ctrl.addStretch(1)
+
+        # ── Summary table ─────────────────────────────────────────────────
+        self._summary_table = self._make_table([c[0] for c in self._SUMMARY_COLS])
+
+        # ── Dominance table + state-profile text ──────────────────────────
+        self._dom_table = self._make_table([c[0] for c in self._DOM_COLS])
+        self._profile_text = QTextEdit()
+        self._profile_text.setReadOnly(True)
+        self._profile_text.setPlaceholderText(
+            "Run the dominance HMM to see latent-state feature profiles, which "
+            "states count as interaction, and the dominance ranking rationale."
+        )
+
+        dom_split = QSplitter(Qt.Orientation.Horizontal)
+        dom_split.addWidget(self._dom_table)
+        dom_split.addWidget(self._profile_text)
+        dom_split.setStretchFactor(0, 3)
+        dom_split.setStretchFactor(1, 2)
+
+        inner = QTabWidget()
+        inner.addTab(self._summary_table, "Summary")
+        _dom_holder = QWidget()
+        _dom_v = QVBoxLayout(_dom_holder)
+        _dom_v.setContentsMargins(0, 0, 0, 0)
+        _dom_v.addWidget(dom_split, 1)
+        inner.addTab(_dom_holder, "Dominance (HMM)")
+
+        root = QVBoxLayout(self)
+        root.setSpacing(4)
+        root.addLayout(ctrl)
+        root.addWidget(self._status)
+        root.addWidget(inner, 1)
+
+    # ── Helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_table(headers: list[str]) -> QTableWidget:
+        t = QTableWidget(0, len(headers))
+        t.setHorizontalHeaderLabels(headers)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.verticalHeader().setVisible(False)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.horizontalHeader().setStretchLastSection(True)
+        return t
+
+    def _group_map(self) -> dict[str, str]:
+        # Best-effort session_id → group label; missing keys fall back to "".
+        try:
+            return dict(getattr(self._host, "_session_groups", {}) or {})
+        except Exception:
+            return {}
+
+    def on_project_reloaded(self) -> None:
+        """Clear cached results when the host switches projects."""
+        self._frames_cache = None
+        self._summary_table.setRowCount(0)
+        self._dom_table.setRowCount(0)
+        self._profile_text.clear()
+        self._status.setText("Open a multi-animal project, then click Compute.")
+
+    def _load_frames(self):
+        if self._frames_cache is not None:
+            return self._frames_cache
+        root = getattr(self._host, "_project_root", None)
+        if root is None:
+            return None
+        df = self._svc.load_social_frames(root)
+        self._frames_cache = df
+        return df
+
+    @staticmethod
+    def _fmt(value: object) -> str:
+        if isinstance(value, bool):
+            return "yes" if value else ""
+        if isinstance(value, float):
+            if not np.isfinite(value):
+                return "—"
+            return f"{value:.3f}"
+        return str(value)
+
+    def _fill_table(self, table: QTableWidget, cols, rows: list[dict]) -> None:
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, (_label, key) in enumerate(cols):
+                val = row.get(key, "")
+                # Percent-style columns stored as fractions.
+                if key in ("contact_fraction", "advance_fraction", "yield_fraction") and isinstance(val, (int, float)) and np.isfinite(val):
+                    text = f"{val * 100:.1f}%"
+                else:
+                    text = self._fmt(val)
+                item = QTableWidgetItem(text)
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    item.setData(Qt.ItemDataRole.UserRole, float(val) if np.isfinite(val) else float("nan"))
+                table.setItem(r, c, item)
+        table.resizeColumnsToContents()
+
+    # ── Actions ─────────────────────────────────────────────────────────────
+
+    def _compute_summary(self) -> None:
+        df = self._load_frames()
+        if df is None:
+            self._status.setText(
+                "No social features found. This tab needs a multi-animal project "
+                "with 'Interaction features' extracted in the Pose Features tab."
+            )
+            return
+        fps = self._host._project_fps()
+        rows = self._svc.compute_social_summary(df, fps, self._group_map())
+        self._fill_table(self._summary_table, self._SUMMARY_COLS, rows)
+        n_subj = len({(r["animal_id"], r["session_id"]) for r in rows})
+        self._status.setText(
+            f"Summarized {n_subj} subject/session record(s) from "
+            f"{len(df):,} frames. Run the dominance HMM for latent-state ranking."
+        )
+
+    def _run_dominance_hmm(self) -> None:
+        df = self._load_frames()
+        if df is None:
+            self._status.setText(
+                "No social features found. Extract 'Interaction features' first."
+            )
+            return
+        fps = self._host._project_fps()
+        self._hmm_btn.setEnabled(False)
+        self._hmm_btn.setText("Fitting…")
+        self._status.setText("Fitting dominance HMM… (this may take a moment)")
+        QGuiApplication.processEvents()
+        try:
+            res = self._svc.fit_dominance_hmm(
+                df, fps=fps, n_states=int(self._n_states_spin.value()),
+                group_map=self._group_map(),
+            )
+        finally:
+            self._hmm_btn.setEnabled(True)
+            self._hmm_btn.setText("Run Dominance HMM")
+
+        if res.get("error"):
+            self._status.setText(res["error"])
+            return
+
+        self._fill_table(self._dom_table, self._DOM_COLS, res.get("dominance", []))
+        self._profile_text.setPlainText(self._format_profiles(res))
+        n_dom = sum(1 for r in res.get("dominance", []) if r.get("is_dominant"))
+        self._status.setText(
+            f"Fit {res['n_states']}-state HMM over {len(res['feature_cols'])} features; "
+            f"identified dominant subject in {n_dom} session(s). "
+            f"log-likelihood {res.get('log_likelihood', float('nan')):.0f}."
+        )
+
+    @staticmethod
+    def _format_profiles(res: dict) -> str:
+        lines: list[str] = []
+        inter = set(res.get("interaction_states", []))
+        lines.append("Latent-state feature profiles (raw means):")
+        lines.append(f"Interaction states (close proximity): {sorted(inter) or '—'}")
+        lines.append("")
+        feats = res.get("feature_cols", [])
+        for state, prof in sorted(res.get("state_profiles", {}).items()):
+            tag = "  [interaction]" if state in inter else ""
+            lines.append(f"State {state}{tag}:")
+            for f in feats:
+                v = prof.get(f, float("nan"))
+                vs = f"{v:.3f}" if isinstance(v, float) and np.isfinite(v) else "—"
+                lines.append(f"    {f}: {vs}")
+            lines.append("")
+        lines.append(
+            "Dominance = mean radial velocity toward the other during interaction "
+            "states minus the fraction of those frames spent yielding. Higher = the "
+            "subject advances into contested space while the other gives ground."
+        )
+        return "\n".join(lines)
 
 
 class _VelocityWidget(QWidget):

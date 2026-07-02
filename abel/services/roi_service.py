@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from abel.storage.file_store import read_yaml, write_yaml
+from abel.utils.roi_geometry import normalize_roi as _normalize_roi_geom
 
 # Per-ROI overlay colours (index 0 = ROI 1, index 1 = ROI 2, …).
 # Eight slots covers reasonable multi-zone experiments.
@@ -54,14 +55,14 @@ class ROIService:
         }
 
     @staticmethod
-    def _normalize_roi(raw: Any) -> dict[str, int]:
-        src = raw if isinstance(raw, dict) else {}
-        return {
-            "x": int(src.get("x", 0) or 0),
-            "y": int(src.get("y", 0) or 0),
-            "w": max(0, int(src.get("w", 0) or 0)),
-            "h": max(0, int(src.get("h", 0) or 0)),
-        }
+    def _normalize_roi(raw: Any) -> dict[str, Any]:
+        """Canonicalize an ROI dict, preserving shape (rect/circle/polygon).
+
+        Delegates to :func:`abel.utils.roi_geometry.normalize_roi`, which keeps
+        shape parameters and always (re)derives the ``x/y/w/h`` bounding box so
+        rectangle-only consumers keep working unchanged.
+        """
+        return _normalize_roi_geom(raw)
 
     @classmethod
     def _extract_target_zones(cls, roi_block: dict, legacy_fallback: Any = None) -> list[dict[str, int]]:

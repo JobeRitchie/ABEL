@@ -435,6 +435,10 @@ class ReviewTab(QWidget):
         self._display_behavior_name_map: dict[str, str] = {}
         self._display_occurrence: dict[str, int] = {}
         self._behavior_shortcuts: list[QShortcut] = []
+        self._soundboard = None  # lazily-created BehaviorSoundboard window
+        # Structured multi-animal labels captured via the soundboard, keyed by
+        # window_id. In-memory for now (Phase 2b: persist to reviewer_labels).
+        self._structured_labels: dict[str, list[dict]] = {}
         self._pool = QThreadPool.globalInstance()
         self._dissimilarity_scores: dict[str, float] = {}
         self._al_fp_ids: set[str] = set()
@@ -505,6 +509,14 @@ class ReviewTab(QWidget):
         )
         self._reviewed_with_clips_btn.toggled.connect(self._apply_filter)
         panel_layout.addWidget(self._reviewed_with_clips_btn)
+
+        self._soundboard_btn = QPushButton("🎹 Behavior Soundboard")
+        self._soundboard_btn.setToolTip(
+            "Open a pop-out window with one button per behavior for labeling the "
+            "current clip. Arrow keys / Space / Enter still work while it's focused."
+        )
+        self._soundboard_btn.clicked.connect(self._open_soundboard)
+        panel_layout.addWidget(self._soundboard_btn)
 
         self._show_missing_clips_chk = QCheckBox("Show candidates with missing clips")
         self._show_missing_clips_chk.setChecked(False)
@@ -931,6 +943,201 @@ class ReviewTab(QWidget):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.activated.connect(lambda bid=behavior_id: self._accept_with_behavior_shortcut(bid))
             self._behavior_shortcuts.append(shortcut)
+
+    def _open_soundboard(self) -> None:
+        """Open (or refresh) the pop-out behavior soundboard window."""
+        from abel.ui.behavior_soundboard import BehaviorSoundboard
+
+        if self._soundboard is None:
+            self._soundboard = BehaviorSoundboard(self)
+
+        behaviors: list[tuple] = []
+        seen: set[str] = set()
+        for behavior in self._behavior_service.behaviors:
+            bid = self._normalize_behavior_id(str(behavior.behavior_id or ""))
+            if not bid or bid in seen:
+                continue
+            seen.add(bid)
+            behaviors.append((
+                bid,
+                str(behavior.name or bid),
+                str(behavior.keyboard_shortcut or "").strip(),
+                bool(getattr(behavior, "is_social", False)),
+                str(getattr(behavior, "directionality", "none") or "none"),
+            ))
+
+        nav = {
+            "next": self._load_next,
+            "prev": self._load_previous,
+            "play": self._player.toggle_play,
+            "save": self._save_decision,
+            "frame_back": lambda: self._player.seek(self._player.current_frame - 1),
+            "frame_fwd": lambda: self._player.seek(self._player.current_frame + 1),
+            "accept_all": lambda: self._apply_batch_decision(ReviewDecisionType.ACCEPT),
+            "reject_all": lambda: self._apply_batch_decision(ReviewDecisionType.REJECT),
+        }
+        self._soundboard.configure(
+            behaviors, self._accept_with_behavior_shortcut, nav,
+            on_structured=self._on_structured_label,
+            on_commit=self._commit_structured_labels,
+        )
+        self._soundboard.set_animals(self._current_clip_animals())
+        self._soundboard.show()
+        self._soundboard.raise_()
+        self._soundboard.activateWindow()
+
+    def _current_window_id(self) -> "str | None":
+        i = self._current_candidate_idx
+        if 0 <= i < len(self._visible_candidates):
+            return self._visible_candidates[i].window_id
+        return None
+
+    def _current_clip_animals(self) -> "list[tuple]":
+        """(animal_id, display_name, (r,g,b)) for the current clip's session.
+
+        The first tuple element MUST be the *resolved* animal id used to key the
+        per-individual segment features — ``individual_subject_map[ind]`` when a
+        subject mapping exists, else ``f"{subject_id or session_id}:{ind}"`` — so
+        that committed soundboard labels (segment id ``seg_{animal_id}_…``) join
+        to the correct segment rows. Using the raw individual key here would make
+        every label miss the training join. Mirrors
+        ``FeaturerepService._process_one`` (feature_prep_service.py).
+        """
+        from abel.utils.individual_colors import color_for
+        i = self._current_candidate_idx
+        if not (self._project_root and 0 <= i < len(self._visible_candidates)):
+            return []
+        cand = self._visible_candidates[i]
+        try:
+            manifest = self._imports.load_manifest(self._project_root)
+        except Exception:
+            manifest = None
+        if manifest is None:
+            return []
+        sess = next((s for s in manifest.linked_sessions if s.session_id == cand.session_id), None)
+        if sess is None or not getattr(sess, "individuals", None):
+            return []
+        imap = dict(getattr(sess, "individual_subject_map", {}) or {})
+        subject_id = getattr(sess, "subject_id", None) or sess.session_id
+        return [
+            (
+                imap.get(ind) or f"{subject_id}:{ind}",   # resolved animal_id (join key)
+                str(imap.get(ind) or ind),                # display name
+                color_for(idx),
+            )
+            for idx, ind in enumerate(sess.individuals)
+        ]
+
+    def _on_structured_label(self, behavior_id: str, focal_animal_id: str, partner_animal_id: "str | None") -> None:
+        """Receive a structured (animal-aware) label from the soundboard."""
+        fields = self._behavior_service.label_animal_fields(behavior_id, focal_animal_id, partner_animal_id)
+        wid = self._current_window_id() or ""
+        rec = {"behavior_id": behavior_id, **fields}
+        self._structured_labels.setdefault(wid, []).append(rec)
+        logger.info("Structured label on window %s: %s", wid, rec)
+
+    def _refresh_soundboard_for_clip(self) -> None:
+        if self._soundboard is not None and self._soundboard.isVisible():
+            self._soundboard.set_animals(self._current_clip_animals())
+
+    def _commit_structured_labels(self, labels: "list[dict]") -> None:
+        """Persist the soundboard's collected structured labels for the current clip.
+
+        ``labels`` is a list of ``{behavior_id, focal_animal_id,
+        partner_animal_id}`` dicts. Labels are keyed to each focal animal's own
+        segment (``seg_{animal}_{session}_{start}_{end}``) so instances pool by
+        identity-agnostic behavior id at training time ("a mouse is a mouse").
+
+        Multiple behaviors on the *same* animal-segment are collapsed into one
+        pipe-joined :class:`ReviewerLabelRecord` (e.g. ``"grooming|rearing"``) —
+        the co-occurring-label convention the trainer expands into per-behavior
+        positives — rather than separate rows that would resolve to
+        ``ambiguous`` and be dropped. Symmetric (mutual) social behaviors are
+        exhibited by both animals, so they label the partner's segment too;
+        directed behaviors label only the actor. Finally the window is marked
+        ACCEPTED so it leaves the review queue on refresh.
+        """
+        if not labels:
+            return
+        if not (self._project_root and 0 <= self._current_candidate_idx < len(self._visible_candidates)):
+            QMessageBox.warning(self, "No Candidate", "No candidate selected to commit labels for.")
+            return
+        cand = self._visible_candidates[self._current_candidate_idx]
+        reviewer = (self._reviewer_input.text() or "reviewer").strip()
+        start = int(cand.start_frame)
+        end = int(cand.end_frame)
+
+        # Normalize behavior ids, then let the behavior service fan the labels out
+        # to per-animal segments (solo/directed/mutual + co-occurring merge).
+        normalized = [
+            {
+                "behavior_id": self._normalize_behavior_id(str(lab.get("behavior_id") or "")),
+                "focal_animal_id": lab.get("focal_animal_id"),
+                "partner_animal_id": lab.get("partner_animal_id"),
+            }
+            for lab in labels
+        ]
+        records = self._behavior_service.aggregate_clip_labels(
+            normalized, str(cand.session_id), start, end,
+        )
+
+        committed = 0
+        multi_label_segments = 0
+        for rec_spec in records:
+            if "|" in rec_spec["review_label"]:
+                multi_label_segments += 1
+            self._review_service.append_segment_label(
+                ReviewerLabelRecord(
+                    segment_id=rec_spec["segment_id"],
+                    review_label=rec_spec["review_label"],
+                    reviewer_id=reviewer,
+                    notes="soundboard",
+                    **rec_spec["fields"],
+                )
+            )
+            committed += 1
+
+        if committed == 0:
+            return
+
+        # Mark the whole window reviewed so it leaves the queue on refresh.
+        rec = self._review_service.upsert_decision(
+            clip_id=cand.window_id,
+            reviewer=reviewer,
+            decision=ReviewDecisionType.ACCEPT,
+            behavior_label=self._normalize_behavior_id(str(labels[0].get("behavior_id") or "")),
+            notes="soundboard",
+            adjusted_start_frame=start,
+            adjusted_end_frame=end,
+        )
+        self._decision_by_clip_id[cand.window_id] = rec
+        self._structured_labels.pop(cand.window_id, None)
+        self._update_decision_cell(self._current_candidate_idx, rec)
+        self._update_summary()
+        logger.info("Committed %d structured label(s) for window %s", committed, cand.window_id)
+
+        # Co-occurring (pipe-joined) labels are only expanded into per-behavior
+        # positives when the project enables co-occurring behaviors; otherwise
+        # the trainer treats "a|b" as one junk class. Warn once per commit.
+        if multi_label_segments and not getattr(self, "_co_occurring_enabled", False):
+            logger.warning(
+                "Committed %d segment(s) with multiple behaviors on one animal, but "
+                "'allow co-occurring behaviors' is OFF — these will not split into "
+                "per-behavior training instances. Enable it in the Behavior tab.",
+                multi_label_segments,
+            )
+            QMessageBox.information(
+                self, "Co-occurring behaviors disabled",
+                f"{multi_label_segments} animal(s) in this clip were labeled with more "
+                "than one behavior. For those to train correctly, enable “Allow "
+                "co-occurring behaviors” in the Behavior tab; otherwise only "
+                "single-behavior labels are used.",
+            )
+
+        # Advance to the next clip and refresh the soundboard's animal roster.
+        if self._autoplay_chk.isChecked():
+            self._load_next()
+        self._refresh_soundboard_for_clip()
 
     def _accept_with_behavior_shortcut(self, behavior_id: str) -> None:
         if self._co_occurring_enabled:
@@ -1416,13 +1623,14 @@ class ReviewTab(QWidget):
             # Bout-review clips always stay visible when the temporal bout review
             # filter is on so the user can see what was sent over and what decision
             # has been recorded for each clip.
+            # Reviewed clips (including UMAP-selected ones) disappear here so the
+            # queue only shows unreviewed work; use "Show reviewed" to see them.
             rows = [
                 c
                 for c in rows
                 if c.window_id not in self._decision_by_clip_id
                 or (show_al_fp_fn and c.window_id in al_all_ids)
                 or (show_fp_fn and c.window_id in bout_review_ids)
-                or c.window_id in umap_selection_ids
             ]
         if (not reviewed_with_clips_only) and (not show_missing_clips):
             if show_reviewed or show_fp_fn or show_al_fp_fn:
@@ -2095,6 +2303,8 @@ class ReviewTab(QWidget):
                 self._player.toggle_play()
         else:
             self._player.close_clip()
+
+        self._refresh_soundboard_for_clip()
 
         decision = self._decision_by_clip_id.get(candidate.window_id)
         start_value = int(candidate.start_frame)

@@ -35,14 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-_PALETTE = [
-    (255, 80, 80), (80, 160, 255), (80, 220, 120),
-    (240, 200, 60), (210, 110, 240), (90, 230, 230),
-]
-
-
-def _color_for(idx: int) -> tuple[int, int, int]:
-    return _PALETTE[idx % len(_PALETTE)]
+from abel.utils.individual_colors import color_for as _color_for  # shared palette
 
 
 class _ClickableFrame(QLabel):
