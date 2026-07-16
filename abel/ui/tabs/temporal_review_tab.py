@@ -51,6 +51,7 @@ from abel.temporal_refinement.bout_postprocess import (
 from abel.temporal_refinement.temporal_refinement_service import TemporalRefinementConfig
 from abel.ui.tabs.review_tab import CandidateVideoPlayer
 from abel.workers.task_worker import TaskWorker
+from abel.utils.error_text import format_task_error
 
 
 class TemporalReviewTab(QWidget):
@@ -820,7 +821,6 @@ class TemporalReviewTab(QWidget):
         onset = float(cfg["onset_threshold"])
         return TemporalRefinementConfig(
             onset_threshold=onset,
-            offset_threshold=onset,
             min_bout_duration_frames=int(cfg["min_bout_duration_frames"]),
             merge_gap_frames=int(cfg["merge_gap_frames"]),
         )
@@ -985,7 +985,7 @@ class TemporalReviewTab(QWidget):
     def _on_refresh_failed(self, traceback_text: str) -> None:
         self._set_refresh_busy(False)
         self._status.setText("Failed to refresh temporal review outputs.")
-        QMessageBox.warning(self, "Temporal Review", traceback_text[:1200])
+        QMessageBox.warning(self, "Temporal Review", format_task_error(traceback_text))
 
     def _refresh(self) -> None:
         self._metrics_table.setRowCount(0)
@@ -1587,7 +1587,7 @@ class TemporalReviewTab(QWidget):
                     trace_df[prob_col], errors="coerce"
                 ).fillna(0.0).to_numpy(dtype=float)
                 smoothed = smooth_probabilities(prob_arr)
-                binary = threshold_probabilities(smoothed, onset, onset)
+                binary = threshold_probabilities(smoothed, onset_thresh=onset)
                 binary = merge_close_bouts(binary, merge_gap)
                 binary = remove_short_bouts(binary, min_bout)
                 intervals = binary_trace_to_intervals(binary)
@@ -1784,7 +1784,7 @@ class TemporalReviewTab(QWidget):
                     mean_bout_dur = float(np.mean(durs)) if n_bouts > 0 else float("nan")
                 else:
                     smoothed = smooth_probabilities(prob_arr)
-                    binary = threshold_probabilities(smoothed, onset, onset)
+                    binary = threshold_probabilities(smoothed, onset_thresh=onset)
                     binary = merge_close_bouts(binary, merge_gap)
                     binary = remove_short_bouts(binary, min_bout)
                     intervals = binary_trace_to_intervals(binary)
@@ -2443,19 +2443,22 @@ class TemporalReviewTab(QWidget):
             )
             return
 
-        # Determine the current behavior filter.
-        trace_bid = str(self._trace_behavior.currentData() or "__all__").strip()
+        # Determine the current behavior filter.  The dropdown stores probability
+        # column names ('prob_<behavior_id>'), so translate back to a behavior ID.
+        trace_col = str(self._trace_behavior.currentData() or "__all__").strip()
         behavior_filter: set[str] | None = None
         behavior_label = "all behaviors"
-        if trace_bid and trace_bid != "__all__":
+        if trace_col and trace_col != "__all__":
+            trace_bid = self._behavior_id_from_col(trace_col)
+            if not trace_bid:
+                QMessageBox.information(
+                    self, "Temporal Review",
+                    f"Could not match the selected trace '{self._trace_behavior.currentText()}' "
+                    "to a behavior in this project.",
+                )
+                return
             behavior_filter = {trace_bid}
-            # Find display name for status message.
-            for beh in self._behaviors.behaviors:
-                if str(beh.behavior_id or "").strip() == trace_bid:
-                    behavior_label = str(beh.name or trace_bid).strip() or trace_bid
-                    break
-            else:
-                behavior_label = trace_bid
+            behavior_label = self._behavior_label_from_col(trace_col)
 
         # Determine the current subject and all sessions belonging to it.
         current_sid = str(self._session.currentData() or "").strip()
@@ -2977,7 +2980,6 @@ class TemporalReviewTab(QWidget):
             onset = float(cfg_vals.get("onset_threshold", 0.65))
             cfg = TemporalRefinementConfig(
                 onset_threshold=onset,
-                offset_threshold=onset,
                 min_bout_duration_frames=int(cfg_vals.get("min_bout_duration_frames", 8)),
                 merge_gap_frames=int(cfg_vals.get("merge_gap_frames", 4)),
             )
@@ -3148,7 +3150,7 @@ class TemporalReviewTab(QWidget):
             # was the source of sub-threshold bouts being highlighted as positive.
             bouts = pd.DataFrame()
             frame_arr = trace_df["frame"].to_numpy(dtype=int)
-            binary = threshold_probabilities(smoothed_full, onset_thresh=onset, offset_thresh=onset)
+            binary = threshold_probabilities(smoothed_full, onset_thresh=onset)
             binary = merge_close_bouts(binary, max_gap_frames=int(cfg.merge_gap_frames))
             binary = remove_short_bouts(binary, min_duration_frames=int(cfg.min_bout_duration_frames))
             intervals = binary_trace_to_intervals(binary)
@@ -3308,6 +3310,33 @@ class TemporalReviewTab(QWidget):
             if token == bid or token == safe:
                 return name
         return token
+
+    def _behavior_id_from_col(self, col: str) -> str | None:
+        """Resolve the behavior_id behind a trace column ('prob_<token>' / 'probability').
+
+        The trace-behavior dropdown stores probability *column names*, while bout
+        collection filters on behavior IDs; the two must be translated here.
+        """
+        raw = str(col or "").strip()
+        if not raw or raw == "__all__":
+            return None
+        token = raw.removeprefix("prob_") if raw.startswith("prob_") else raw
+        if not token or token == "probability":
+            # Single-behavior inference: 'probability' belongs to the selected concept.
+            return self._concept_id() or None
+        if self._is_no_behavior_token(token):
+            return None
+        for behavior in self._behaviors.behaviors:
+            bid = str(behavior.behavior_id or "").strip()
+            if not bid:
+                continue
+            name = str(behavior.name or "").strip()
+            candidates = {bid, self._safe_name(bid)}
+            if name:
+                candidates.update({name, self._safe_name(name)})
+            if token in candidates:
+                return bid
+        return None
 
     def _refresh_trace_behavior_options(self, trace_df: pd.DataFrame) -> None:
         multi_cols = [c for c in trace_df.columns if str(c).startswith("prob_")]

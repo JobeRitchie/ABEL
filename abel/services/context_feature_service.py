@@ -76,6 +76,13 @@ class ContextFeatureConfig:
     # patch extraction is unchanged.  flow_compute_downsample=1 disables this.
     flow_compute_downsample: int = 2  # extra spatial downsample applied to flow only (1 = off)
     flow_iterations: int = 2  # LK warp-and-solve iterations on the GPU flow path (was 3)
+    advanced_roi_features: bool = True
+    """Emit shape-aware ROI features (inside flag, signed edge distance, nearest
+    corner, normalized axial/lateral position) for every configured ROI.
+
+    The plain distance-to-centre features collapse each zone to a single point,
+    which throws away everything about *where inside* a large or elongated zone
+    the animal is.  Disable only to reproduce pre-0.8 feature sets exactly."""
 
 
 class ContextFeatureService:
@@ -255,6 +262,62 @@ class ContextFeatureService:
         if inv >= 1.0:
             return roi
         return roi_geometry.scale_roi(roi, inv)
+
+    # Body points the advanced ROI features are computed for.  Mirrors the
+    # points already used by the distance-to-centre features.
+    _ROI_POINTS = ("nose", "forepaw_centroid", "body_centroid")
+
+    @classmethod
+    def advanced_roi_columns(
+        cls,
+        roi: dict[str, Any],
+        roi_idx: int,
+        points: dict[str, tuple[np.ndarray, np.ndarray]],
+        dist_scale: float,
+        n: int,
+    ) -> dict[str, np.ndarray]:
+        """Shape-aware ROI features for a single ROI, for every body point.
+
+        Emitted for *every* configured ROI (roi_1 … roi_N) so that projects with
+        several zones get the same treatment for each.  When the ROI is absent
+        or degenerate the columns are still emitted, all-NaN (except the inside
+        flag, which is 0.0), so the merged feature matrix keeps a constant
+        column set across sessions — the same contract the ``roi_N_present``
+        indicator already relies on.
+
+        Distances are scaled to mm by *dist_scale*; axial/lateral positions are
+        normalized to the ROI's own extent and so are already unitless.
+        """
+        valid = roi_geometry.roi_has_area(roi)
+        out: dict[str, np.ndarray] = {}
+        for name, (xs, ys) in points.items():
+            px, py = xs[:n], ys[:n]
+            pfx = f"{name}_to_roi_{roi_idx}"
+            if not valid:
+                out[f"in_roi_{roi_idx}_{name}"] = np.zeros(n)
+                for suffix in (
+                    f"{pfx}_signed_dist", f"{pfx}_edge_dist", f"{pfx}_corner_dist",
+                    f"{name}_roi_{roi_idx}_axial", f"{name}_roi_{roi_idx}_axial_abs",
+                    f"{name}_roi_{roi_idx}_lateral", f"{name}_roi_{roi_idx}_lateral_abs",
+                ):
+                    out[suffix] = np.full(n, np.nan)
+                continue
+
+            signed = roi_geometry.roi_signed_distance(roi, px, py)
+            axial, lateral = roi_geometry.roi_axial_lateral(roi, px, py)
+            out[f"in_roi_{roi_idx}_{name}"] = roi_geometry.roi_contains(
+                roi, px, py
+            ).astype(float)
+            out[f"{pfx}_signed_dist"] = signed * dist_scale
+            out[f"{pfx}_edge_dist"] = np.abs(signed) * dist_scale
+            out[f"{pfx}_corner_dist"] = (
+                roi_geometry.roi_corner_distance(roi, px, py) * dist_scale
+            )
+            out[f"{name}_roi_{roi_idx}_axial"] = axial
+            out[f"{name}_roi_{roi_idx}_axial_abs"] = np.abs(axial)
+            out[f"{name}_roi_{roi_idx}_lateral"] = lateral
+            out[f"{name}_roi_{roi_idx}_lateral_abs"] = np.abs(lateral)
+        return out
 
     @staticmethod
     def _entropy(values: np.ndarray, bins: int = 16) -> float:
@@ -1152,6 +1215,11 @@ class ContextFeatureService:
             pose = self._pose.load_and_clean(pose_path, keypoint_aliases=keypoint_aliases)
         _roi_key = f"{roi_subject_id or animal_id}::{session_id}"
         target_rois = self._rois.resolve_target_rois(project_root, _roi_key)
+        # How many ROI slots this project defines.  Captured *before* the
+        # day-label exclusion below empties the list, so that excluded sessions
+        # still emit the same ROI columns (all-NaN) as every other session —
+        # the merged feature matrix must have a constant column set.
+        roi_slots = len(target_rois)
         # Apply day-label ROI exclusions (e.g. Acclimation sessions have no object present)
         excluded_days = self._rois.get_roi_excluded_days(project_root)
         if excluded_days:
@@ -1474,6 +1542,25 @@ class ContextFeatureService:
             df[f"body_angle_to{_sfx}"] = self._angle_to_target(
                 body_x[:n], body_y[:n], _rx, _ry
             )
+
+        # ── Advanced (shape-aware) ROI features, for every configured ROI ────
+        # Distance-to-centre alone collapses each zone to a point; these add
+        # where *inside* the zone the animal is (inside flag, signed distance to
+        # the boundary, nearest corner, normalized position along the zone's
+        # long/short axes).  Driven off `target_rois` so any number of ROIs is
+        # covered, not just the first.
+        if config.advanced_roi_features:
+            _roi_points = {
+                "nose": (nose_x, nose_y),
+                "forepaw_centroid": (paw_centroid_x, paw_centroid_y),
+                "body_centroid": (body_x, body_y),
+            }
+            for _roi_idx in range(1, roi_slots + 1):
+                _roi = target_rois[_roi_idx - 1] if _roi_idx <= len(target_rois) else {}
+                for _col, _vals in self.advanced_roi_columns(
+                    _roi, _roi_idx, _roi_points, dist_scale, n
+                ).items():
+                    df[_col] = _vals
 
         if not save:
             # Caller (compute_frame_context_multi) will combine individuals and

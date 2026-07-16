@@ -18,7 +18,6 @@ import ctypes
 import logging
 import os
 import pickle
-import re
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
@@ -33,7 +32,9 @@ from abel.core.constants import APP_SCHEMA_VERSION
 from abel.services.behavior_service import BehaviorService
 from abel.services.behavior_representation_service import (
     BehaviorRepresentationService,
-    canonical_distance_name,
+    align_model_feature_columns,
+    is_no_behavior_label,
+    resolve_target_class_index,
 )
 from abel.services.import_service import ImportService
 from abel.services.provenance_service import ProvenanceService
@@ -50,68 +51,9 @@ from abel.temporal_refinement.temporal_metrics import (
     frame_level_metrics,
     probability_histogram,
 )
-
-try:
-    import xgboost as xgb
-    _HAS_XGB = True
-except ImportError:
-    xgb = None  # type: ignore[assignment]
-    _HAS_XGB = False
+from abel.utils import xgb_predict
 
 logger = logging.getLogger("abel")
-
-
-def _predict_via_dmatrix(model: Any, x: np.ndarray) -> np.ndarray:
-    """Predict with a (possibly wrapped) XGBoost model using the DMatrix code path.
-
-    Bypasses ``inplace_predict`` — the sklearn-wrapper path that triggers the
-    "mismatched devices" warning and crashes on Windows when the booster lives on
-    cuda:0 but the input array is a CPU numpy array.
-
-    Supports:
-    * Bare ``XGBClassifier`` (direct booster call).
-    * ``CalibratedClassifierCV(cv='prefit', method='sigmoid'|'isotonic')``
-      wrapping an ``XGBClassifier``.
-    Falls back to ``model.predict_proba(x)`` for anything else.
-    """
-    cc_list = getattr(model, "calibrated_classifiers_", None)
-    if cc_list is None:
-        # Bare XGBClassifier
-        booster = model.get_booster()
-        dmat = xgb.DMatrix(x)  # type: ignore[union-attr]
-        raw = booster.predict(dmat, output_margin=False)
-        if raw.ndim == 1:
-            raw = np.column_stack([1.0 - raw, raw])
-        return raw
-
-    # CalibratedClassifierCV — exactly 1 fold with cv='prefit'
-    cc = cc_list[0]
-    booster = cc.estimator.get_booster()
-    dmat = xgb.DMatrix(x)  # type: ignore[union-attr]
-    # DMatrix-based predict runs the GPU booster without inplace_predict;
-    # avoids the device-mismatch fallback that crashes on Windows.
-    raw_proba = booster.predict(dmat, output_margin=False)
-    if raw_proba.ndim == 1:
-        raw_proba = np.column_stack([1.0 - raw_proba, raw_proba])
-
-    n_classes = raw_proba.shape[1]
-    calibrated = np.zeros_like(raw_proba)
-
-    if n_classes == 2 and len(cc.calibrators) == 1:
-        # Binary classification: sklearn stores a single calibrator that maps
-        # the positive-class (column 1) raw probability to a calibrated value;
-        # the negative class (column 0) is the complement.
-        calibrated[:, 1] = cc.calibrators[0].predict(raw_proba[:, 1])
-        calibrated[:, 0] = 1.0 - calibrated[:, 1]
-    else:
-        for j, calibrator in enumerate(cc.calibrators):
-            if j < n_classes:
-                calibrated[:, j] = calibrator.predict(raw_proba[:, j])
-        total = calibrated.sum(axis=1, keepdims=True)
-        total = np.where(total == 0.0, 1.0, total)
-        calibrated = calibrated / total
-
-    return calibrated
 
 
 def _contains_xgboost(estimator: Any) -> bool:
@@ -174,7 +116,6 @@ class TemporalRefinementConfig:
     smoothing_method: str = "moving_average"
     smoothing_window: int = 5
     onset_threshold: float = 0.50
-    offset_threshold: float | None = None
     min_bout_duration_frames: int = 6
     merge_gap_frames: int = 3
 
@@ -216,10 +157,9 @@ class TemporalRefinementService:
 
     @staticmethod
     def _is_no_behavior_label(label: str) -> bool:
-        token = re.sub(r"[^a-z0-9]+", "_", str(label or "").strip().lower()).strip("_")
-        return token in {
-            "no_behavior", "no_behaviour", "nobehavior", "nobehaviour",
-        }
+        # Delegates to the shared implementation so the no-behaviour token set
+        # stays in lockstep with target-class resolution.
+        return is_no_behavior_label(label)
 
     @staticmethod
     def _emit(cb: Callable[[str], None] | None, msg: str) -> None:
@@ -900,6 +840,22 @@ class TemporalRefinementService:
             progress_cb=progress_cb,
         )
 
+        # The representation frame cache can retain sessions that have since been
+        # removed from the project (it is a large content-keyed store that is not
+        # rebuilt on session removal). Never infer over sessions that are no
+        # longer in the manifest — restrict to the current project membership so
+        # a stale cache cannot resurrect deleted sessions.
+        if manifest_sids and frame_by_session:
+            _stale = [sid for sid in frame_by_session if sid not in manifest_sids]
+            if _stale:
+                for sid in _stale:
+                    frame_by_session.pop(sid, None)
+                self._emit(
+                    progress_cb,
+                    f"Ignoring {len(_stale)} cached session(s) not in the current "
+                    f"project manifest ({len(frame_by_session)} remain).",
+                )
+
         if not sessions:
             target_sessions = sorted(frame_by_session.keys())
             missing_context: list[str] = []
@@ -973,6 +929,9 @@ class TemporalRefinementService:
                     payload["_is_xgb"] = is_xgb_model
                     if is_xgb_model:
                         gpu_or_xgb = True
+                        # A GPU-trained booster would copy every window matrix
+                        # host→device on each call; scoring on the CPU is ~8x faster.
+                        xgb_predict.ensure_cpu_prediction(model_obj)
 
         # FP feedback suppression
         fp_by_session: dict[str, list[tuple[int, int]]] = {}
@@ -1061,47 +1020,54 @@ class TemporalRefinementService:
                 # canonicalisation (v0.5.2) stored ``dist_b_to_a`` while freshly
                 # extracted features now use the sorted ``dist_a_to_b``; without this
                 # remap every such column reindexes to a missing name and is silently
-                # zero-filled, which is what broke Direct Use for older models.  The
-                # map is 1:1 (a training set can't hold both spellings), so feature
-                # order is preserved.
-                aligned_cols = [canonical_distance_name(c) for c in model_cols]
-                x_by_bid[bid] = dense_segs.reindex(
-                    columns=aligned_cols, fill_value=0.0
-                ).to_numpy(dtype=np.float32)
+                # zero-filled, which is what broke Direct Use for older models.
+                #
+                # A training set CAN hold both spellings (one is assembled whenever
+                # examples are imported across two extractor eras). The aligner
+                # handles that: the surplus slot is NaN-filled, matching how it was
+                # trained, rather than duplicating the value into both.
+                data_cols = set(dense_segs.columns)
+                aligned_cols, nan_fill = align_model_feature_columns(model_cols, data_cols)
+                x_df = dense_segs.reindex(columns=aligned_cols)  # absent -> NaN
+                zero_cols = [
+                    c for c, is_nan in zip(aligned_cols, nan_fill)
+                    if not is_nan and c not in data_cols
+                ]
+                if zero_cols:
+                    x_df[zero_cols] = x_df[zero_cols].fillna(0.0)
+                x_by_bid[bid] = x_df.to_numpy(dtype=np.float32)
                 active_bids.append(bid)
 
             def _predict_bid(bid: str) -> tuple[str, np.ndarray]:
-                """Score one behavior model using GPU-native DMatrix prediction."""
+                """Score one behavior model on the CPU (see abel.utils.xgb_predict)."""
                 payload = model_payloads[bid]
                 model = payload["model"]
                 x = x_by_bid[bid]
-                is_xgb = payload.get("_is_xgb", False)
 
-                if is_xgb and _HAS_XGB:
-                    # Use DMatrix-based booster.predict — avoids inplace_predict
-                    # device-mismatch crash on Windows + CUDA.
-                    try:
-                        probs_raw = _predict_via_dmatrix(model, x)
-                    except Exception:
-                        probs_raw = model.predict_proba(x)
-                else:
-                    probs_raw = model.predict_proba(x)
+                probs_raw = xgb_predict.predict_proba(model, x)
 
                 label_map = payload.get("label_map", {})
-                class_idx: int | None = None
-                if isinstance(label_map, dict):
-                    for k, v in label_map.items():
-                        if str(v) == str(bid):
-                            try:
-                                class_idx = int(k)
-                            except Exception:
-                                pass
-                            break
                 probs_arr = np.asarray(probs_raw, dtype=float)
+                # Shared resolver: matches by behaviour id, and for a binary
+                # behaviour-vs-no_behavior model falls back to the single positive
+                # class even when the stored id is the *source* project's UUID
+                # (imported models). This is what keeps the dense trace scoring the
+                # same class active-learning does — not np.max, which returns the
+                # winning-class confidence and produced a meaningless flat-high trace.
+                class_idx = resolve_target_class_index(label_map, bid)
                 if class_idx is not None and probs_arr.ndim == 2 and 0 <= class_idx < probs_arr.shape[1]:
                     pred_prob = np.clip(probs_arr[:, class_idx], 0.0, 1.0)
                 else:
-                    pred_prob = np.clip(np.max(probs_arr, axis=1), 0.0, 1.0)
+                    logger.warning(
+                        "Temporal refinement could not resolve the target class for "
+                        "'%s' from label_map %s; the probability trace may be "
+                        "unreliable.", bid, label_map,
+                    )
+                    if probs_arr.ndim == 2 and probs_arr.shape[1] == 2:
+                        # Binary convention: positive class is column 1.
+                        pred_prob = np.clip(probs_arr[:, 1], 0.0, 1.0)
+                    else:
+                        pred_prob = np.clip(np.max(probs_arr, axis=1), 0.0, 1.0)
                 return bid, pred_prob
 
             # Run predictions sequentially — XGBoost CUDA is not thread-safe
@@ -1392,7 +1358,7 @@ class TemporalRefinementService:
             if smooth.size == 0:
                 continue
 
-            binary = threshold_probabilities(smooth, onset_thresh=float(cfg.onset_threshold), offset_thresh=cfg.offset_threshold)
+            binary = threshold_probabilities(smooth, onset_thresh=float(cfg.onset_threshold))
             binary = merge_close_bouts(binary, cfg.merge_gap_frames)
             binary = remove_short_bouts(binary, cfg.min_bout_duration_frames)
             intervals = binary_trace_to_intervals(binary)
@@ -1431,7 +1397,6 @@ class TemporalRefinementService:
                 "smoothing_method": cfg.smoothing_method,
                 "smoothing_window": cfg.smoothing_window,
                 "onset_threshold": float(cfg.onset_threshold),
-                "offset_threshold": float(cfg.offset_threshold if cfg.offset_threshold is not None else cfg.onset_threshold),
                 "min_bout_duration_frames": cfg.min_bout_duration_frames,
                 "merge_gap_frames": cfg.merge_gap_frames,
             },

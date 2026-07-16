@@ -103,6 +103,8 @@ from PySide6.QtWidgets import (
 
     QSizePolicy,
 
+    QSplitter,
+
 )
 
 
@@ -116,6 +118,8 @@ from abel.services.import_service import ImportService
 from abel.temporal_refinement.temporal_refinement_service import TemporalRefinementConfig
 
 from abel.ui.suppression_helper_dialog import SuppressionHelperDialog
+
+from abel.ui.widgets.session_selection_dialog import SessionOption, choose_sessions
 
 from abel.workers.task_worker import TaskWorker
 
@@ -160,7 +164,7 @@ class TemporalRefinementTab(QWidget):
         self._viz_worker: TaskWorker | None = None  # keep graph-gen worker alive
 
         # ── Graph size settings ───────────────────────────────────
-        self._tr_graph_settings: dict[str, Any] = {"max_w": 900, "max_h": 400}
+        self._tr_graph_settings: dict[str, Any] = {"max_w": 500, "max_h": 500}
 
 
 
@@ -422,9 +426,7 @@ class TemporalRefinementTab(QWidget):
 
         self._log.setReadOnly(True)
 
-        self._log.setMinimumHeight(70)
-
-        self._log.setMaximumHeight(100)
+        self._log.setMinimumHeight(80)
 
 
 
@@ -432,7 +434,7 @@ class TemporalRefinementTab(QWidget):
 
         self._artifact_summary.setReadOnly(True)
 
-        self._artifact_summary.setMaximumHeight(100)
+        self._artifact_summary.setMinimumHeight(60)
 
 
 
@@ -475,8 +477,13 @@ class TemporalRefinementTab(QWidget):
 
         self._viz_preview.setMinimumHeight(220)
 
-        self._viz_preview.setMaximumWidth(
-            int(self._tr_graph_settings.get("max_w", 900)),
+        self._viz_preview.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+
+        self._viz_preview.setMaximumSize(
+            int(self._tr_graph_settings.get("max_w", 500)),
+            int(self._tr_graph_settings.get("max_h", 500)),
         )
 
         self._viz_preview.setStyleSheet(
@@ -495,17 +502,23 @@ class TemporalRefinementTab(QWidget):
 
         if _ensure_matplotlib_tr() and Figure is not None and FigureCanvas is not None and NavigationToolbar is not None:
 
-            self._viz_figure = Figure(figsize=(10.5, 4.0), tight_layout=True)
+            self._viz_figure = Figure(
+                figsize=(
+                    self._tr_graph_settings.get("max_w", 500) / 100,
+                    self._tr_graph_settings.get("max_h", 500) / 100,
+                ),
+                tight_layout=True,
+            )
 
             self._viz_canvas = FigureCanvas(self._viz_figure)
 
             self._viz_canvas.setSizePolicy(
-                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
 
-            self._viz_canvas.setFixedSize(
-                int(self._tr_graph_settings.get("max_w", 900)),
-                int(self._tr_graph_settings.get("max_h", 400)),
+            self._viz_canvas.setMaximumSize(
+                int(self._tr_graph_settings.get("max_w", 500)),
+                int(self._tr_graph_settings.get("max_h", 500)),
             )
 
             self._viz_toolbar = NavigationToolbar(self._viz_canvas, self)
@@ -654,50 +667,76 @@ class TemporalRefinementTab(QWidget):
 
 
 
-        root = QVBoxLayout(self)
+        # Top pane (stretch 0): configuration + action buttons + status line.
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        controls_layout.addWidget(config_group)
+        controls_layout.addLayout(btn_row)
+        controls_layout.addWidget(self._status)
 
-        root.addWidget(config_group)
-
-        root.addLayout(btn_row)
-
-        root.addWidget(self._status)
-
-        root.addWidget(QLabel("Status / artifacts"))
-
-        root.addWidget(self._log, 1)
-
-        root.addWidget(self._artifact_summary)
+        # Bottom pane (stretch 1): visualization (left) + log block (right), 50/50.
+        # Left: the graph header, toolbar, canvas, and PNG fallback.
+        viz_widget = QWidget()
+        viz_layout = QVBoxLayout(viz_widget)
+        viz_layout.setContentsMargins(0, 0, 0, 0)
+        viz_layout.setSpacing(6)
 
         viz_head = QHBoxLayout()
-
         viz_head.addWidget(self._viz_title)
-
         viz_head.addStretch(1)
-
         viz_head.addWidget(QLabel("Session:"))
-
         viz_head.addWidget(self._viz_session_selector)
-
         viz_head.addWidget(QLabel("Graph:"))
-
         viz_head.addWidget(self._viz_selector)
 
         _tr_graph_size_btn = QPushButton("Graph Size\u2026")
         _tr_graph_size_btn.setToolTip("Set maximum display width and height for the temporal refinement graph.")
         _tr_graph_size_btn.clicked.connect(self._open_tr_graph_size_dialog)
         viz_head.addWidget(_tr_graph_size_btn)
-
-        root.addLayout(viz_head)
+        viz_layout.addLayout(viz_head)
 
         if self._viz_toolbar is not None:
-
-            root.addWidget(self._viz_toolbar)
-
+            viz_layout.addWidget(self._viz_toolbar)
         if self._viz_canvas is not None:
+            viz_layout.addWidget(self._viz_canvas, 1)
+        viz_layout.addWidget(self._viz_preview, 1)
 
-            root.addWidget(self._viz_canvas)
+        # Right: status/artifacts log + artifact summary.
+        log_widget = QWidget()
+        log_layout = QVBoxLayout(log_widget)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(6)
+        log_layout.addWidget(QLabel("Status / artifacts"))
+        log_layout.addWidget(self._log, 1)
+        log_layout.addWidget(self._artifact_summary)
 
-        root.addWidget(self._viz_preview)
+        bottom_split = QSplitter(Qt.Orientation.Horizontal)
+        bottom_split.setChildrenCollapsible(True)
+        bottom_split.setHandleWidth(8)
+        bottom_split.addWidget(viz_widget)
+        bottom_split.addWidget(log_widget)
+        bottom_split.setStretchFactor(0, 1)
+        bottom_split.setStretchFactor(1, 1)
+        bottom_split.setSizes([700, 700])
+        self._bottom_split = bottom_split
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.setChildrenCollapsible(True)
+        splitter.setHandleWidth(8)
+        splitter.addWidget(controls_widget)
+        splitter.addWidget(bottom_split)
+        # Only the bottom (graph + log) pane should absorb extra vertical space.
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 640])
+        self._main_splitter = splitter
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+        root.addWidget(splitter, 1)
 
 
 
@@ -738,14 +777,14 @@ class TemporalRefinementTab(QWidget):
         max_w_spin.setSingleStep(50)
         max_w_spin.setSuffix(" px")
         max_w_spin.setToolTip("Maximum display width of the graph/preview area in pixels.")
-        max_w_spin.setValue(int(gs.get("max_w", 900)))
+        max_w_spin.setValue(int(gs.get("max_w", 500)))
 
         max_h_spin = QSpinBox(dlg)
         max_h_spin.setRange(150, 2160)
         max_h_spin.setSingleStep(50)
         max_h_spin.setSuffix(" px")
         max_h_spin.setToolTip("Maximum display height of the graph/preview area in pixels.")
-        max_h_spin.setValue(int(gs.get("max_h", 400)))
+        max_h_spin.setValue(int(gs.get("max_h", 500)))
 
         form.addRow("Max width:", max_w_spin)
         form.addRow("Max height:", max_h_spin)
@@ -764,12 +803,12 @@ class TemporalRefinementTab(QWidget):
         gs["max_w"] = max_w_spin.value()
         gs["max_h"] = max_h_spin.value()
         if self._viz_canvas is not None:
-            self._viz_canvas.setFixedSize(gs["max_w"], gs["max_h"])
+            self._viz_canvas.setMaximumSize(gs["max_w"], gs["max_h"])
             if self._viz_figure is not None:
                 self._viz_figure.set_size_inches(gs["max_w"] / 100, gs["max_h"] / 100)
                 self._viz_canvas.draw_idle()
         if self._viz_preview is not None:
-            self._viz_preview.setMaximumWidth(gs["max_w"])
+            self._viz_preview.setMaximumSize(gs["max_w"], gs["max_h"])
 
     def _deferred_project_init(self) -> None:
         if self._project_root is None:
@@ -874,7 +913,7 @@ class TemporalRefinementTab(QWidget):
 
 
 
-    def _session_options_from_manifest(self) -> list[tuple[str, str, str]]:
+    def _session_options_from_manifest(self) -> list[SessionOption]:
 
         if self._project_root is None:
 
@@ -886,23 +925,19 @@ class TemporalRefinementTab(QWidget):
 
             return []
 
-        rows: list[tuple[str, str, str]] = []
+        rows: list[SessionOption] = []
 
         for linked in manifest.linked_sessions:
 
-            sid = str(linked.session_id)
+            rows.append(
+                SessionOption(
+                    session_id=str(linked.session_id),
+                    subject=str(linked.subject_id or ""),
+                    session_type=self._imports.effective_session_type(manifest, linked),
+                )
+            )
 
-            subject = str(linked.subject_id or "")
-
-            label = f"{sid}"
-
-            if subject:
-
-                label += f"  |  subject: {subject}"
-
-            rows.append((sid, subject, label))
-
-        rows.sort(key=lambda x: (x[1], x[0]))
+        rows.sort(key=lambda o: (o.session_type, o.subject, o.session_id))
 
         return rows
 
@@ -924,7 +959,7 @@ class TemporalRefinementTab(QWidget):
 
         self._select_sessions_btn.setEnabled(True)
 
-        all_ids = {sid for sid, _subj, _label in options}
+        all_ids = {o.session_id for o in options}
 
         if not self._selected_session_ids:
 
@@ -992,7 +1027,7 @@ class TemporalRefinementTab(QWidget):
 
             return
 
-        all_ids = {sid for sid, _subj, _label in options}
+        all_ids = {o.session_id for o in options}
 
         current = (
 
@@ -1004,113 +1039,23 @@ class TemporalRefinementTab(QWidget):
 
         )
 
+        selected_ids = choose_sessions(
 
+            self,
 
-        dlg = QDialog(self)
+            title="Select Sessions For Temporal Refinement",
 
-        dlg.setWindowTitle("Select Sessions For Temporal Refinement")
+            info="Only selected sessions will be processed during inference and postprocessing.",
 
-        dlg.resize(560, 640)
+            options=options,
 
-        info = QLabel(
-
-            "Only selected sessions will be processed during inference and postprocessing.",
-
-            dlg,
+            current_selected=current,
 
         )
 
-        info.setWordWrap(True)
-
-        list_widget = QListWidget(dlg)
-
-        for sid, _subject, label in options:
-
-            item = QListWidgetItem(label)
-
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-
-            item.setData(Qt.ItemDataRole.UserRole, sid)
-
-            item.setCheckState(
-
-                Qt.CheckState.Checked if sid in current else Qt.CheckState.Unchecked
-
-            )
-
-            list_widget.addItem(item)
-
-
-
-        select_all_btn = QPushButton("Select All", dlg)
-
-        deselect_all_btn = QPushButton("Deselect All", dlg)
-
-
-
-        def _set_all(state: Qt.CheckState) -> None:
-
-            for i in range(list_widget.count()):
-
-                list_widget.item(i).setCheckState(state)
-
-
-
-        select_all_btn.clicked.connect(lambda: _set_all(Qt.CheckState.Checked))
-
-        deselect_all_btn.clicked.connect(lambda: _set_all(Qt.CheckState.Unchecked))
-
-        buttons = QDialogButtonBox(
-
-            QDialogButtonBox.StandardButton.Ok
-
-            | QDialogButtonBox.StandardButton.Cancel,
-
-            parent=dlg,
-
-        )
-
-        buttons.accepted.connect(dlg.accept)
-
-        buttons.rejected.connect(dlg.reject)
-
-        top_btn_row = QHBoxLayout()
-
-        top_btn_row.addWidget(select_all_btn)
-
-        top_btn_row.addWidget(deselect_all_btn)
-
-        top_btn_row.addStretch(1)
-
-        layout = QVBoxLayout(dlg)
-
-        layout.addWidget(info)
-
-        layout.addLayout(top_btn_row)
-
-        layout.addWidget(list_widget, 1)
-
-        layout.addWidget(buttons)
-
-
-
-        if dlg.exec() != int(QDialog.DialogCode.Accepted):
+        if selected_ids is None:
 
             return
-
-        selected_ids: list[str] = []
-
-        for i in range(list_widget.count()):
-
-            item = list_widget.item(i)
-
-            if item.checkState() == Qt.CheckState.Checked:
-
-                sid = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
-
-                if sid:
-
-                    selected_ids.append(sid)
 
         if not selected_ids:
 

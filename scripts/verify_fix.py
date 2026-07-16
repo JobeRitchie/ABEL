@@ -132,7 +132,7 @@ for sid, label in target_sessions.items():
         min_bout = int(params["min_bout_duration_frames"])
         merge_gap = int(params["merge_gap_frames"])
 
-        binary = threshold_probabilities(smoothed, onset_thresh=onset, offset_thresh=onset)
+        binary = threshold_probabilities(smoothed, onset_thresh=onset)
         binary = merge_close_bouts(binary, max_gap_frames=merge_gap)
         binary = remove_short_bouts(binary, min_duration_frames=min_bout)
         intervals = binary_trace_to_intervals(binary)

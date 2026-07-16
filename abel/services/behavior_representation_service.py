@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
 
 from abel.services.provenance_service import ProvenanceService
-from abel.storage.file_store import write_json
+from abel.storage.file_store import atomic_write_parquet, write_json
+
+
+# Statistic suffixes the segment builder appends to each frame-level series.
+# Frame-level columns carry none of these; segment-level ones always do.
+_STAT_SUFFIXES = (
+    "mean", "std", "median", "min", "max", "p10", "p90",
+    "energy", "periodicity", "trend", "delta",
+)
 
 
 def canonical_distance_name(col: str) -> str:
@@ -24,16 +33,149 @@ def canonical_distance_name(col: str) -> str:
     keypoint pair — are returned unchanged.  Centralised here so feature extraction,
     representation building, and model-vs-data alignment at inference all agree on
     one spelling.
+
+    Handles both frame-level names (``dist_a_to_b``, ``dist_a_to_b_norm``) and
+    segment-level ones, which append a statistic (``dist_a_to_b_norm_mean``).
+    The statistic must be split off before sorting the endpoints, or it is
+    swept into the second endpoint and sorted with it — turning
+    ``dist_nose_to_left_ear_mean`` into ``dist_left_ear_mean_to_nose``, a name
+    no table has, which then silently reindexes to a fill value.
     """
+    stat = ""
+    for suffix in _STAT_SUFFIXES:
+        if col.endswith(f"_{suffix}"):
+            col, stat = col[: -(len(suffix) + 1)], f"_{suffix}"
+            break
     norm = col.endswith("_norm")
     core = col[: -len("_norm")] if norm else col
     if not core.startswith("dist_"):
-        return col
+        return col + ("_norm" if norm else "") + stat
     parts = core[len("dist_") :].split("_to_")
     if len(parts) != 2:
-        return col
+        return col + ("_norm" if norm else "") + stat
     a, b = parts
-    return "dist_" + "_to_".join(sorted((a, b))) + ("_norm" if norm else "")
+    return "dist_" + "_to_".join(sorted((a, b))) + ("_norm" if norm else "") + stat
+
+
+def align_model_feature_columns(
+    model_cols: list[str], data_cols: set[str],
+) -> tuple[list[str], list[bool]]:
+    """Map a model's feature columns onto the data columns that supply them.
+
+    Returns ``(source_cols, nan_fill)``, both aligned 1:1 with ``model_cols``.
+    ``source_cols[i]`` is the data column to read for ``model_cols[i]``; when it
+    is absent from the data, the slot is filled with NaN if ``nan_fill[i]`` and
+    0.0 otherwise.
+
+    Three cases, in order:
+
+    * **Present.** The data has the column under the model's own name.
+    * **Spelled the other way round.** The data has this symmetric distance
+      under the opposite endpoint ordering.  If the model expects *only* the one
+      spelling, it reads the data's column — the same measurement, renamed.  If
+      the model expects *both* spellings, the pair is double-named: in training
+      exactly one of the two held the value and the other was NaN (the training
+      set was assembled across two extractor eras with opposite conventions), so
+      the surplus slot is NaN-filled to reproduce that.  Copying the value into
+      both would present a combination the model never saw.
+    * **Genuinely absent.** Filled with 0.0, as before.
+
+    Never NaN-fill by assuming 0.0 is harmless here: these features are z-scored,
+    so 0.0 asserts an *average* value rather than an absent measurement.
+    """
+    data = set(data_cols)
+    model_set = set(model_cols)
+    source: list[str] = []
+    nan_fill: list[bool] = []
+    for col in model_cols:
+        if col in data:
+            source.append(col)
+            nan_fill.append(False)
+            continue
+        canon = canonical_distance_name(col)
+        if canon != col and canon in data:
+            if canon in model_set:
+                # Double-named pair — the model already reads the value under
+                # the canonical name, so this slot was the NaN one in training.
+                source.append(col)
+                nan_fill.append(True)
+            else:
+                source.append(canon)
+                nan_fill.append(False)
+            continue
+        source.append(col)
+        nan_fill.append(False)
+    return source, nan_fill
+
+
+# Label tokens that denote the negative / "not this behaviour" class.  A model's
+# label_map pairs the target behaviour's id with one of these.
+_NO_BEHAVIOR_TOKENS = frozenset({
+    "no_behavior", "no_behaviour", "nobehavior", "nobehaviour",
+})
+
+
+def normalize_label_token(label: Any) -> str:
+    """Lower-case, punctuation-collapsed form of a label for tolerant matching."""
+    return re.sub(r"[^a-z0-9]+", "_", str(label or "").strip().lower()).strip("_")
+
+
+def is_no_behavior_label(label: Any) -> bool:
+    """True if *label* denotes the negative / no-behaviour class."""
+    return normalize_label_token(label) in _NO_BEHAVIOR_TOKENS
+
+
+def resolve_target_class_index(
+    label_map: dict[Any, Any] | None, target_behavior: str,
+) -> int | None:
+    """Column index into ``predict_proba`` for *target_behavior*'s positive class.
+
+    ``label_map`` maps a class index to its stored label (a behaviour id/name, or
+    a ``no_behavior`` sentinel).  Resolution order:
+
+    1. **Exact match** — the target behaviour's id (or name) is stored under some
+       class index.  Tolerant of punctuation/case via :func:`normalize_label_token`.
+    2. **Binary positive-class fallback** — the map has exactly one class that is
+       not a ``no_behavior`` label.  That class *is* the behaviour's positive
+       class even when its stored id differs from ``target_behavior``.  This is
+       precisely the imported-model case: a model copied from another project
+       keeps the *source* project's behaviour UUID in its ``label_map``, so an id
+       match fails, yet the single non-``no_behavior`` class is unambiguously the
+       target.  Selecting it here is what keeps active-learning inference and
+       dense temporal refinement scoring the *same*, correct class.
+
+    Returns ``None`` when neither rule applies (a genuinely multi-class map with
+    no id match), leaving the caller to choose a last resort.
+
+    This is the single source of truth for target-class selection; every scorer
+    (active-learning run-models, dense temporal refinement) must go through it so
+    they can never again disagree on which class column is "the behaviour".
+    """
+    if not isinstance(label_map, dict) or not label_map:
+        return None
+    items: list[tuple[int, str]] = []
+    for k, v in label_map.items():
+        try:
+            items.append((int(k), str(v)))
+        except (TypeError, ValueError):
+            continue
+    if not items:
+        return None
+
+    target = str(target_behavior)
+    for idx, label in items:
+        if label == target:
+            return idx
+    ntarget = normalize_label_token(target)
+    if ntarget:
+        for idx, label in items:
+            if normalize_label_token(label) == ntarget:
+                return idx
+
+    positives = [idx for idx, label in items if not is_no_behavior_label(label)]
+    if len(positives) == 1:
+        return positives[0]
+    return None
 
 
 @dataclass
@@ -607,14 +749,19 @@ class BehaviorRepresentationService:
             out_dir.mkdir(parents=True, exist_ok=True)
             frame_out = out_dir / "frame_features.parquet"
             seg_out = out_dir / "segment_features.parquet"
-            frame_df.to_parquet(frame_out, index=False)
-            segment_df.to_parquet(seg_out, index=False)
+            # Atomic writes: a run interrupted mid-write (e.g. app closed) must
+            # never leave a truncated, footerless parquet at the canonical path,
+            # which would break every downstream reader.
+            atomic_write_parquet(frame_df, frame_out, index=False)
+            atomic_write_parquet(segment_df, seg_out, index=False)
             # Persist the per-(animal_id, session_id) z-score statistics so that
             # downstream consumers (Direct-Use inference, refinement) can reuse
             # the exact training-time baseline instead of recomputing it.
             try:
                 if zscore_stats is not None and not zscore_stats.empty:
-                    zscore_stats.to_parquet(out_dir / self.ZSCORE_STATS_FILENAME, index=False)
+                    atomic_write_parquet(
+                        zscore_stats, out_dir / self.ZSCORE_STATS_FILENAME, index=False,
+                    )
             except Exception:
                 pass
 

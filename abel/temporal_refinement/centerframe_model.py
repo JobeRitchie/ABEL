@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pickle
 import platform
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +13,8 @@ from typing import cast
 import numpy as np
 from sklearn.metrics import f1_score, precision_score, recall_score
 from sklearn.neural_network import MLPClassifier
+
+from abel.utils import xgb_predict
 
 
 @dataclass
@@ -196,13 +197,10 @@ class CenterFrameModel:
         if self._clf is None:
             raise RuntimeError("Model is not fitted")
         X_flat = self._flatten(batch)
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=".*Falling back to prediction using DMatrix due to mismatched devices.*",
-                category=UserWarning,
-            )
-            probs = cast(np.ndarray, self._clf.predict_proba(X_flat))
+        # Scores on the CPU: a GPU-trained booster would copy X_flat host→device on
+        # every call, which is what used to raise the device-mismatch warning this
+        # method suppressed.  See abel.utils.xgb_predict.
+        probs = cast(np.ndarray, xgb_predict.predict_proba(self._clf, X_flat))
         if probs.shape[1] == 1:
             return np.asarray(probs[:, 0], dtype=np.float32)
         return np.asarray(probs[:, 1], dtype=np.float32)

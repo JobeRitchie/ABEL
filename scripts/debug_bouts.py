@@ -128,7 +128,7 @@ for name, sid in [("TMT11", "session_741f3824"), ("TMT16", "session_c3f4e39f")]:
         if dig_col:
             raw = tdf[dig_col].to_numpy(dtype=np.float32)
             smoothed = smooth_probabilities(raw, "moving_average", 5)
-            binary = threshold_probabilities(smoothed, onset_thresh=0.30, offset_thresh=0.30)
+            binary = threshold_probabilities(smoothed, onset_thresh=0.30)
             binary = merge_close_bouts(binary, max_gap_frames=45)
             binary = remove_short_bouts(binary, min_duration_frames=45)
             intervals = binary_trace_to_intervals(binary)

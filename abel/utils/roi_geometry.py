@@ -194,6 +194,164 @@ def _point_in_polygon(xs: np.ndarray, ys: np.ndarray, poly: np.ndarray) -> np.nd
     return inside
 
 
+# ── Advanced ROI geometry (edge / corner / axial position) ───────────────────
+#
+# The distance-to-centre features collapse an ROI to a single point, which
+# destroys the internal structure of any large or elongated zone: an EPM open
+# arm drawn as one ROI has its centre at the maze hub, so "far from centre"
+# cannot distinguish the arm tip from the opposite closed arm.  The helpers
+# below expose where inside the zone the animal actually is.
+
+
+def roi_vertices(roi: Any) -> np.ndarray | None:
+    """Return the ROI outline's vertices as an ``(m, 2)`` array.
+
+    ``None`` for circles, which have no corners.
+    """
+    shape = roi_shape(roi)
+    if shape == "circle":
+        return None
+    if shape == "polygon":
+        pts = _polygon_points(roi)
+        return np.asarray(pts, dtype=float) if len(pts) >= 3 else None
+    x, y, w, h = roi_bbox(roi)
+    if w <= 0 or h <= 0:
+        return None
+    return np.asarray(
+        [[x, y], [x + w, y], [x + w, y + h], [x, y + h]], dtype=float
+    )
+
+
+def _segment_distance(xs: np.ndarray, ys: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Distance from each point to the segment ``a``–``b``."""
+    abx, aby = b[0] - a[0], b[1] - a[1]
+    len2 = abx * abx + aby * aby
+    if len2 < 1e-12:
+        return np.hypot(xs - a[0], ys - a[1])
+    t = ((xs - a[0]) * abx + (ys - a[1]) * aby) / len2
+    t = np.clip(t, 0.0, 1.0)
+    return np.hypot(xs - (a[0] + t * abx), ys - (a[1] + t * aby))
+
+
+def roi_signed_distance(roi: Any, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """Signed distance to the ROI boundary, in pixels.
+
+    Positive inside (distance to the nearest edge — "how deep in the zone"),
+    negative outside (distance to the shape).  Zero exactly on the boundary.
+    This is the feature that says "the animal is right at the lip of the open
+    arm", which is where head-dipping happens.
+    """
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    shape = roi_shape(roi)
+
+    if shape == "circle":
+        r = max(0.0, float(roi.get("r", 0) or 0))
+        cx = float(roi.get("cx", 0) or 0)
+        cy = float(roi.get("cy", 0) or 0)
+        out = r - np.hypot(xs - cx, ys - cy)
+        return np.where(finite, out, np.nan)
+
+    if shape == "rect":
+        x, y, w, h = roi_bbox(roi)
+        x1, y1 = x + w, y + h
+        # Outside: Euclidean distance to the box. Inside: distance to nearest edge.
+        ox = np.maximum(np.maximum(x - xs, xs - x1), 0.0)
+        oy = np.maximum(np.maximum(y - ys, ys - y1), 0.0)
+        outside_d = np.hypot(ox, oy)
+        inside_d = np.minimum(
+            np.minimum(xs - x, x1 - xs), np.minimum(ys - y, y1 - ys)
+        )
+        inside = (xs >= x) & (xs <= x1) & (ys >= y) & (ys <= y1)
+        out = np.where(inside, np.maximum(inside_d, 0.0), -outside_d)
+        return np.where(finite, out, np.nan)
+
+    # Polygon: distance to the nearest edge, signed by the containment test.
+    verts = roi_vertices(roi)
+    if verts is None:
+        return np.full(np.broadcast(xs, ys).shape, np.nan)
+    d = np.full(np.broadcast(xs, ys).shape, np.inf, dtype=float)
+    m = len(verts)
+    for i in range(m):
+        d = np.minimum(d, _segment_distance(xs, ys, verts[i], verts[(i + 1) % m]))
+    sign = np.where(roi_contains(roi, xs, ys), 1.0, -1.0)
+    return np.where(finite, sign * d, np.nan)
+
+
+def roi_corner_distance(roi: Any, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    """Distance to the nearest ROI corner, in pixels.  NaN for circles."""
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    verts = roi_vertices(roi)
+    if verts is None:
+        return np.full(np.broadcast(xs, ys).shape, np.nan)
+    d = np.full(np.broadcast(xs, ys).shape, np.inf, dtype=float)
+    for vx, vy in verts:
+        d = np.minimum(d, np.hypot(xs - vx, ys - vy))
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    return np.where(finite, d, np.nan)
+
+
+def roi_axes(roi: Any) -> tuple[tuple[float, float], np.ndarray, np.ndarray, float, float]:
+    """Return ``(centre, long_axis, short_axis, half_long, half_short)``.
+
+    The axes are unit vectors.  For a rectangle/circle they are the axis-aligned
+    bbox axes (long = whichever of w/h is larger); for a polygon they come from
+    a PCA of the vertices, so a diagonally-drawn arm still gets a true
+    along-the-arm axis rather than an axis-aligned approximation.
+    """
+    cx, cy = roi_center(roi)
+    shape = roi_shape(roi)
+
+    if shape == "polygon":
+        verts = roi_vertices(roi)
+        if verts is not None and len(verts) >= 3:
+            centred = verts - np.asarray([cx, cy], dtype=float)
+            # PCA via SVD on the vertex cloud.
+            try:
+                _u, _s, vt = np.linalg.svd(centred, full_matrices=False)
+                long_ax = vt[0] / (np.linalg.norm(vt[0]) or 1.0)
+                short_ax = np.asarray([-long_ax[1], long_ax[0]], dtype=float)
+                proj_l = centred @ long_ax
+                proj_s = centred @ short_ax
+                half_l = float(np.max(np.abs(proj_l))) or 1.0
+                half_s = float(np.max(np.abs(proj_s))) or 1.0
+                return (cx, cy), long_ax, short_ax, half_l, half_s
+            except np.linalg.LinAlgError:
+                pass
+
+    _x, _y, w, h = roi_bbox(roi)
+    if h >= w:
+        long_ax = np.asarray([0.0, 1.0])
+        short_ax = np.asarray([1.0, 0.0])
+        half_l, half_s = max(h / 2.0, 1e-6), max(w / 2.0, 1e-6)
+    else:
+        long_ax = np.asarray([1.0, 0.0])
+        short_ax = np.asarray([0.0, 1.0])
+        half_l, half_s = max(w / 2.0, 1e-6), max(h / 2.0, 1e-6)
+    return (cx, cy), long_ax, short_ax, half_l, half_s
+
+
+def roi_axial_lateral(
+    roi: Any, xs: np.ndarray, ys: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Normalized signed position along the ROI's long and short axes.
+
+    ``+/-1`` are the ROI's ends, ``0`` its centre.  For an EPM open arm the
+    axial coordinate is "how far out along the arm", and its absolute value
+    separates the two arm tips from the hub — information the centre-distance
+    feature cannot represent.
+    """
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    (cx, cy), long_ax, short_ax, half_l, half_s = roi_axes(roi)
+    dx, dy = xs - cx, ys - cy
+    axial = (dx * long_ax[0] + dy * long_ax[1]) / half_l
+    lateral = (dx * short_ax[0] + dy * short_ax[1]) / half_s
+    return axial, lateral
+
+
 def roi_mask(roi: Any, x0: int, y0: int, height: int, width: int) -> np.ndarray:
     """Return a boolean ``(height, width)`` mask for a crop whose top-left pixel
     is ``(x0, y0)`` in ROI/frame coordinates.

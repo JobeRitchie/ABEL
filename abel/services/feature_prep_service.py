@@ -60,6 +60,10 @@ class PrepCancelledError(RuntimeError):
     """Raised when a caller's cancel flag is set mid-prep."""
 
 
+class PrepInputError(RuntimeError):
+    """Raised up front when session inputs (pose/video files) are unreadable."""
+
+
 class PrepObserver(Protocol):
     """Sink for structured progress.  All methods are optional no-ops."""
 
@@ -102,6 +106,7 @@ class PrepConfig:
     segment_stride_frames: int = 15
     excluded_feature_cols: frozenset[str] = frozenset()
     reuse_cached: bool = True
+    advanced_roi_features: bool = True
 
 
 @dataclass
@@ -255,6 +260,10 @@ class FeaturePrepService:
             "aliases": aliases or {},
             "roi": roi_blob,
             "flow_temporal_stride": int(getattr(config, "flow_temporal_stride", 0) or 0),
+            # Toggling advanced ROI features changes the context column set, so
+            # it must invalidate the cache — otherwise enabling it would leave
+            # the new columns missing until an unrelated ROI edit forced a rebuild.
+            "advanced_roi": bool(getattr(config, "advanced_roi_features", True)),
         })
 
     @staticmethod
@@ -431,6 +440,38 @@ class FeaturePrepService:
         d = project_root / "derived" / "context_features" / "sessions"
         return {f.stem for f in d.glob("*.parquet")} if d.exists() else set()
 
+    @staticmethod
+    def _preflight_inputs(jobs: list[SessionJob], config: PrepConfig) -> None:
+        """Fail fast when a session's source files are gone.
+
+        Extraction opens each pose/video file deep inside a worker thread, so a
+        single missing file used to surface as an opaque mid-run crash after the
+        other sessions had already been processed.  Videos in particular are the
+        common casualty: projects registered against an external drive keep
+        working until the cache is cleared, because pose features only ever read
+        the (project-local) pose file.  Check everything before doing any work
+        and report the whole list at once.
+        """
+        missing: list[str] = []
+        for job in jobs:
+            label = f"{job.subject_id or '?'} ({job.session_id})"
+            if not job.pose_path or not Path(job.pose_path).exists():
+                missing.append(f"  {label}: pose file not found — {job.pose_path}")
+            if config.use_video_features:
+                if not job.video_path:
+                    missing.append(f"  {label}: no video linked (video context is ON)")
+                elif not Path(job.video_path).exists():
+                    missing.append(f"  {label}: video not found — {job.video_path}")
+        if not missing:
+            return
+        raise PrepInputError(
+            f"{len(missing)} session input file(s) are missing, so feature "
+            f"preparation cannot run:\n" + "\n".join(missing) +
+            "\n\nRe-link or restore these files (Data Import → session list), or "
+            "deselect the affected sessions. If the videos live on an external "
+            "drive, make sure it is connected."
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -494,6 +535,7 @@ class FeaturePrepService:
         # ── Stage 1: per-session pose (+ context) extraction ─────────────
         feat_label = "pose + context features" if config.use_video_features else "pose features"
         if pending:
+            self._preflight_inputs(pending, config)
             obs.stage_start(STAGE_PREPROCESS, f"Extract {feat_label}", len(pending))
             t0 = time.monotonic()
             self._extract_sessions(
@@ -666,7 +708,8 @@ class FeaturePrepService:
                 and sid not in cached_ctx
             ):
                 ctx_cfg = ContextFeatureConfig(
-                    flow_temporal_stride=int(config.flow_temporal_stride)
+                    flow_temporal_stride=int(config.flow_temporal_stride),
+                    advanced_roi_features=bool(config.advanced_roi_features),
                 )
                 if job.individuals:
                     # Per-individual context so animal_id matches the pose table.

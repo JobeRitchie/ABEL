@@ -247,8 +247,39 @@ class ValidationService:
                 "overlap_fraction": (overlap.get(bid) or {}).get("overlap_fraction"),
             }
             row["quality"] = self._quality_badge(row.get("frame_f1"))
+            # Post-temporal-refinement metrics on the held-out set (None until the
+            # model is retrained with the held-out probability column).
+            refined = self._refined_metrics(bid, name, model_dir)
+            if refined is not None:
+                row["refined_f1"] = refined.get("refined_f1")
+                row["refined_precision"] = refined.get("refined_precision")
+                row["refined_recall"] = refined.get("refined_recall")
+                # Held-out positive-class (target) counts: window-level raw vs
+                # refined, plus event-level bout-matched counts.
+                for k in (
+                    "raw_tp", "raw_fp", "raw_fn",
+                    "refined_tp", "refined_fp", "refined_fn",
+                    "bout_tp", "bout_fp", "bout_fn",
+                ):
+                    row[k] = refined.get(k)
             rows.append(row)
         return rows
+
+    def _refined_metrics(
+        self, bid: str, name: str, model_dir: Path | None
+    ) -> dict[str, Any] | None:
+        """Raw-vs-refined held-out metrics for one behavior; None if unavailable."""
+        if model_dir is None:
+            return None
+        try:
+            from abel.temporal_refinement.refined_eval import refined_holdout_metrics  # noqa: PLC0415
+
+            return refined_holdout_metrics(
+                model_dir, self._root(), name, target_behavior_id=bid
+            )
+        except Exception:
+            logger.debug("Refined metrics failed for %s", name, exc_info=True)
+            return None
 
     @staticmethod
     def _quality_badge(f1: float | None) -> str:
@@ -1035,24 +1066,33 @@ class ValidationService:
         behavior_id: str,
         n_cells: int = 25,
         top_fraction: float = 0.4,
+        layout: str = "strongest",
+        rows: int = 5,
+        cols: int = 5,
     ) -> list[GridCellSpec]:
-        """Pick up to ``n_cells`` strong positive bouts spread across subjects.
+        """Pick positive bouts to fill a ``rows``×``cols`` behavior-grid montage.
 
-        Bouts are detected per session and split into a *preferred* pool (the top
-        ``top_fraction`` by mean probability — the confident detections) and a
-        *backfill* pool (the rest).  Both pools are filled round-robin so distinct
-        *subjects* are preferred — every subject contributes one bout before any
-        subject contributes a second — and the strongest bout from each session is
-        chosen first.  The preferred pool is exhausted before the backfill pool is
-        touched, so the grid is filled with the most confident detections first and
-        only drops to weaker bouts when needed to fill the remaining cells (rather
-        than leaving them blank).  Bouts that frame-overlap an already-chosen bout
-        from the same session are skipped so no bout is duplicated.  Sessions whose
+        With ``layout="strongest"`` (the default) bouts are detected per session
+        and split into a *preferred* pool (the top ``top_fraction`` by mean
+        probability — the confident detections) and a *backfill* pool (the rest).
+        Both are filled round-robin so distinct *subjects* are preferred — every
+        subject contributes one bout before any subject contributes a second — and
+        the strongest bout from each session is chosen first.  The preferred pool
+        is exhausted before the backfill pool is touched, so the grid is filled
+        with the most confident detections first and only drops to weaker bouts
+        when needed to fill the remaining cells (rather than leaving them blank).
+
+        With ``layout="bands"`` each *row* is a distinct probability band: all
+        positive bouts are split into ``rows`` equal-frequency probability bands
+        and each grid row is filled from one band — the top row from the
+        highest-probability band down to the bottom row from the lowest accepted
+        band — so the reviewer can see the full range of what counts as positive.
+
+        In both layouts, bouts that frame-overlap an already-chosen bout from the
+        same session are skipped so no bout is duplicated, and sessions whose
         subject is unknown (no manifest mapping) are each treated as their own
         subject.
         """
-        import random  # noqa: PLC0415
-
         bid = str(behavior_id or "").strip()
         if not bid:
             return []
@@ -1065,6 +1105,12 @@ class ValidationService:
                 all_probs.extend(mp for _s, _e, mp in bouts)
         if not all_probs:
             return []
+
+        subject_of = self._session_subject_map()  # session → subject; missing = itself
+        if str(layout).strip().lower() == "bands":
+            return self._select_grid_bouts_banded(
+                by_session, all_probs, subject_of, rows, cols
+            )
 
         frac = min(1.0, max(0.0, float(top_fraction)))
         cutoff = float(np.quantile(all_probs, 1.0 - frac)) if frac < 1.0 else -np.inf
@@ -1084,48 +1130,116 @@ class ValidationService:
         if not preferred and not backfill:
             return []
 
-        # Sessions with no known subject fall back to being their own subject.
-        subject_of = self._session_subject_map()
         chosen: list[GridCellSpec] = []
         used: dict[str, list[tuple[int, int]]] = defaultdict(list)
 
-        def _fill_from(pools: dict[str, list[tuple[int, int, float]]]) -> None:
-            """Round-robin across subjects, draining *pools* into ``chosen``."""
-            if not pools:
-                return
-            subjects: dict[str, list[str]] = defaultdict(list)
-            for sid in pools:
-                subjects[subject_of.get(sid, sid)].append(sid)
-            subject_keys = list(subjects.keys())
-            # Pass 1 gives one bout per subject; later passes reuse subjects that
-            # have additional (non-overlapping) bouts.
-            while len(chosen) < n_cells and any(pools.values()):
-                random.shuffle(subject_keys)
-                for subj in subject_keys:
-                    if len(chosen) >= n_cells:
-                        break
-                    sids = [s for s in subjects[subj] if pools.get(s)]
-                    random.shuffle(sids)
-                    for sid in sids:
-                        pool = pools[sid]
-                        picked = False
-                        while pool:
-                            s, e, mp = pool.pop()
-                            if any(not (e < us or s > ue) for us, ue in used[sid]):
-                                continue  # overlaps an already-chosen bout here
-                            used[sid].append((s, e))
-                            chosen.append(GridCellSpec(sid, int(s), int(e), float(mp)))
-                            picked = True
-                            break
-                        if picked:
-                            break  # one bout per subject per pass
-
         # Confident detections first, then backfill the remaining cells with the
         # next-strongest bouts so the grid is as full as the data allows.
-        _fill_from(preferred)
+        chosen.extend(self._round_robin_pick(preferred, subject_of, n_cells, used))
         if len(chosen) < n_cells:
-            _fill_from(backfill)
+            chosen.extend(
+                self._round_robin_pick(backfill, subject_of, n_cells - len(chosen), used)
+            )
         return chosen[:n_cells]
+
+    def _round_robin_pick(
+        self,
+        pools: dict[str, list[tuple[int, int, float]]],
+        subject_of: dict[str, str],
+        limit: int,
+        used: dict[str, list[tuple[int, int]]],
+    ) -> list[GridCellSpec]:
+        """Drain *pools* round-robin across subjects, returning up to *limit* specs.
+
+        *pools* maps session_id → bouts sorted ascending by mean probability (so
+        ``pool.pop()`` yields the strongest remaining bout).  Every subject
+        contributes one bout before any subject contributes a second.  Bouts that
+        frame-overlap an entry already in *used* (mutated here) are skipped, so a
+        shared *used* dict deduplicates across successive calls.
+        """
+        import random  # noqa: PLC0415
+
+        chosen: list[GridCellSpec] = []
+        if not pools or limit <= 0:
+            return chosen
+        subjects: dict[str, list[str]] = defaultdict(list)
+        for sid in pools:
+            subjects[subject_of.get(sid, sid)].append(sid)
+        subject_keys = list(subjects.keys())
+        while len(chosen) < limit and any(pools.values()):
+            random.shuffle(subject_keys)
+            for subj in subject_keys:
+                if len(chosen) >= limit:
+                    break
+                sids = [s for s in subjects[subj] if pools.get(s)]
+                random.shuffle(sids)
+                for sid in sids:
+                    pool = pools[sid]
+                    picked = False
+                    while pool:
+                        s, e, mp = pool.pop()
+                        if any(not (e < us or s > ue) for us, ue in used[sid]):
+                            continue  # overlaps an already-chosen bout here
+                        used[sid].append((s, e))
+                        chosen.append(GridCellSpec(sid, int(s), int(e), float(mp)))
+                        picked = True
+                        break
+                    if picked:
+                        break  # one bout per subject per pass
+        return chosen
+
+    def _select_grid_bouts_banded(
+        self,
+        by_session: dict[str, list[tuple[int, int, float]]],
+        all_probs: list[float],
+        subject_of: dict[str, str],
+        rows: int,
+        cols: int,
+    ) -> list[GridCellSpec]:
+        """Fill each grid *row* from a distinct probability band (top = highest).
+
+        Bouts are partitioned into ``rows`` equal-frequency probability bands via
+        quantile edges; row 0 (rendered top) draws from the highest band down to
+        the last row from the lowest.  A row short of ``cols`` bouts is backfilled
+        from the remaining bouts across all bands (strongest first) so the grid
+        stays full and each complete row keeps its ``cols`` positional cells.
+        """
+        edges = np.quantile(all_probs, np.linspace(0.0, 1.0, rows + 1))
+        inner = edges[1:-1]  # rows-1 interior edges → band index via searchsorted
+
+        # Assign every bout to exactly one band (0 = lowest prob … rows-1 highest).
+        band_pools: list[dict[str, list[tuple[int, int, float]]]] = [
+            defaultdict(list) for _ in range(rows)
+        ]
+        for sid, bouts in by_session.items():
+            for b in bouts:
+                bi = int(np.searchsorted(inner, b[2], side="right"))
+                bi = min(rows - 1, max(0, bi))
+                band_pools[bi][sid].append(b)
+        for band in band_pools:
+            for sid in band:
+                band[sid].sort(key=lambda bb: bb[2])  # ascending → pop() strongest
+
+        used: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        chosen: list[GridCellSpec] = []
+        for k in range(rows):  # k=0 is the top row → highest-probability band
+            band_idx = rows - 1 - k
+            pools = {sid: list(v) for sid, v in band_pools[band_idx].items() if v}
+            row_specs = self._round_robin_pick(pools, subject_of, cols, used)
+            if len(row_specs) < cols:
+                # Backfill this row's empty cells from all remaining bouts so the
+                # grid isn't ragged; `used` prevents reusing an already-shown bout.
+                backfill = {
+                    sid: sorted(bouts, key=lambda bb: bb[2])
+                    for sid, bouts in by_session.items()
+                }
+                row_specs.extend(
+                    self._round_robin_pick(
+                        backfill, subject_of, cols - len(row_specs), used
+                    )
+                )
+            chosen.extend(row_specs[:cols])
+        return chosen
 
     def render_behavior_grid(
         self,
@@ -1138,23 +1252,31 @@ class ValidationService:
         progress_callback: Any = None,
         crop_scale: float = 1.0,
         keypoint_scale: float = 1.0,
+        keypoint_border_scale: float = 1.0,
+        layout: str = "strongest",
     ) -> Path:
-        """Render a 5×5 looping montage of strong positive bouts to *out_path*.
+        """Render a 5×5 looping montage of positive bouts to *out_path*.
 
         Each cell is a subject-centred crop of one bout (padded by ``pre_seconds``
         / ``post_seconds``) with optional pose-keypoint overlay.  ``crop_scale`` is
         a linear multiplier on each cell's crop half-width (>1 zooms out to show
         more surroundings, <1 tightens onto the subject).  ``keypoint_scale``
-        multiplies the overlaid keypoint-dot size (>1 larger, <1 smaller).  Raises
-        ``RuntimeError`` when there is nothing to render or video decoding is
-        unavailable.
+        multiplies the overlaid keypoint-dot size (>1 larger, <1 smaller) and
+        ``keypoint_border_scale`` the dot outline thickness (0 removes it).
+
+        ``layout`` controls which bouts fill the grid: ``"strongest"`` fills every
+        cell with the most-confident bouts; ``"bands"`` makes each row a distinct
+        probability band (top row = highest-probability bouts, bottom = lowest
+        accepted) so the reviewer sees the full range of what counts as positive.
+        Raises ``RuntimeError`` when there is nothing to render or video decoding
+        is unavailable.
         """
         from abel.services import behavior_grid_render as render  # noqa: PLC0415
 
         if not ClipExtractionService.can_decode_video():
             raise RuntimeError("OpenCV video decoding is not available in this environment.")
 
-        specs = self.select_grid_bouts(behavior_id)
+        specs = self.select_grid_bouts(behavior_id, layout=layout)
         if not specs:
             raise RuntimeError(
                 "No positive bouts found for this behavior. Run temporal inference first, "
@@ -1223,6 +1345,7 @@ class ValidationService:
                     out_path=cell_out,
                     crop_scale=float(crop_scale),
                     keypoint_scale=float(keypoint_scale),
+                    keypoint_border_scale=float(keypoint_border_scale),
                 )
                 if ok:
                     cell_paths_entry = cell_out

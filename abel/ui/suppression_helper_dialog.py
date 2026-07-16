@@ -205,7 +205,7 @@ class SuppressionHelperDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Suppression Helper — Behavior Inhibition Matrix")
-        self.resize(960, 720)
+        self.resize(1040, 900)
 
         self._names = list(behavior_names)
         self._ids = list(behavior_ids)
@@ -323,12 +323,15 @@ class SuppressionHelperDialog(QDialog):
         preview_layout = QVBoxLayout(preview_group)
 
         if _ensure_mpl():
-            self._fig = Figure(figsize=(9.0, 5.0), tight_layout=True)
+            self._fig = Figure(figsize=(9.0, 6.4), tight_layout=True)
             self._canvas = FigureCanvas(self._fig)
             self._toolbar = NavigationToolbar(self._canvas, self)
             self._canvas.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
+            # Floor the canvas height so the two stacked subplots always have
+            # room to breathe instead of being crushed by the matrix table.
+            self._canvas.setMinimumHeight(360)
             preview_layout.addWidget(self._toolbar)
             preview_layout.addWidget(self._canvas, 1)
             self._has_plot = True
@@ -348,11 +351,29 @@ class SuppressionHelperDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         # ── Main layout ──────────────────────────────────────────
+        # The matrix table + temperature controls share a vertical splitter
+        # with the preview so the user can hand space to whichever matters, and
+        # the graph never gets squished to a sliver when there are many
+        # behaviors (which makes the matrix table tall).
+        from PySide6.QtWidgets import QSplitter  # noqa: PLC0415
+
+        controls_widget = QWidget()
+        controls_v = QVBoxLayout(controls_widget)
+        controls_v.setContentsMargins(0, 0, 0, 0)
+        controls_v.addWidget(matrix_group)
+        controls_v.addWidget(temp_group)
+
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.setChildrenCollapsible(False)
+        split.addWidget(controls_widget)
+        split.addWidget(preview_group)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setSizes([320, 560])
+
         layout = QVBoxLayout(self)
         layout.addWidget(explanation)
-        layout.addWidget(matrix_group)
-        layout.addWidget(temp_group)
-        layout.addWidget(preview_group, 1)
+        layout.addWidget(split, 1)
         layout.addWidget(buttons)
 
         # Generate synthetic data once and keep it fixed.

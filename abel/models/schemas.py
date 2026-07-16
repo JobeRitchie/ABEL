@@ -167,6 +167,12 @@ class BehaviorModelConfig(BaseModel):
     When False, only pose-derived features are used — faster, but blind to local
     micro-motion (e.g. grooming paw movement over the face), which makes spatially
     stationary behaviors like freezing and grooming hard to tell apart."""
+    advanced_roi_features: bool = True
+    """When True, every ROI contributes shape-aware features (inside flag, signed
+    distance to the boundary, nearest-corner distance, normalized axial/lateral
+    position within the zone) in addition to distance/angle to its centre.
+    Centre-only features cannot express *where inside* a large or elongated zone
+    the animal is — for a whole EPM open arm the centre sits at the maze hub."""
     segment_window_frames: int = 60
     segment_stride_frames: int = 15
     hard_negative_sampling_ratio: float = 0.3
@@ -298,6 +304,11 @@ class LinkedSession(BaseModel):
     video_asset_id: str
     pose_asset_id: str
     subject_id: str | None = None
+    session_type: str | None = None
+    """Explicit session-type label (e.g. ``TestingDay2``, ``Validation``).  When
+    set, this overrides the regex-derived type and is protected from regex
+    reapply, mirroring ``subject_locked``.  When ``None`` the effective type is
+    derived from the video filename via the import ``session_regex``."""
     pixels_per_mm: float | None = None
     subject_locked: bool = False  # True when subject was set by hand; protected from regex reapply
     pairing_score: float = 0.0
@@ -643,6 +654,14 @@ class ValidationSettings(BaseModel):
     # Behavior Grid panel: keypoint-dot size multiplier (1.0 = the default size
     # that scales with frame height). Persisted alongside the crop scale.
     behavior_grid_keypoint_scale: float = 1.0
+    # Behavior Grid panel: keypoint-dot border (outline) thickness multiplier
+    # (1.0 = the default outline; 0 removes the outline entirely).
+    behavior_grid_keypoint_border_scale: float = 1.0
+    # Behavior Grid panel: how the 5×5 grid is populated. "strongest" fills every
+    # cell with the most-confident bouts; "bands" makes each row a distinct
+    # probability band (top row = highest-probability bouts, bottom = lowest
+    # accepted) so the reviewer sees the full range of what counts as positive.
+    behavior_grid_layout: str = "strongest"
 
 
 class ValidationClipRecord(BaseModel):

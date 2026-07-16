@@ -207,6 +207,36 @@ class BehaviorSoundboard(QWidget):
         self._clip_labels = list(labels or [])
         self._refresh_labels_list()
 
+    def load_labels(self, payload: "list[dict]") -> None:
+        """Repopulate the chip list from a stored commit payload for editing.
+
+        ``payload`` is a list of ``{behavior_id, focal_animal_id,
+        partner_animal_id}`` (as persisted by the review tab). Display strings
+        are rebuilt from the current behavior/animal tables; nothing is
+        re-emitted (this is a load, not a new label). Call *after* set_animals.
+        """
+        rebuilt: list[dict] = []
+        for lab in payload or []:
+            bid = lab.get("behavior_id")
+            focal = lab.get("focal_animal_id")
+            partner = lab.get("partner_animal_id")
+            if not bid or not focal:
+                continue
+            b = self._behavior(bid)
+            social = bool(b and b[3])
+            direction = (b[4] if b else "none")
+            if social and partner is not None:
+                arrow = "→" if direction == "directed" else "⇄"
+                display = f"{b[1]}: {self._animal_name(focal)} {arrow} {self._animal_name(partner)}"
+            else:
+                display = f"{(b[1] if b else bid)}: {self._animal_name(focal)}"
+            rebuilt.append({
+                "behavior_id": bid, "focal_animal_id": focal,
+                "partner_animal_id": partner, "display": display,
+            })
+        self._clip_labels = rebuilt
+        self._refresh_labels_list()
+
     # ------------------------------------------------------------------
     # Building UI
     # ------------------------------------------------------------------
@@ -362,9 +392,12 @@ class BehaviorSoundboard(QWidget):
             for lab in self._clip_labels
         ]
         n = len(payload)
-        self._on_commit(payload)
+        # Clear the current clip's chips *before* invoking the callback: the
+        # commit handler may auto-advance and repopulate this soundboard with the
+        # next clip's committed labels, and clearing afterwards would wipe them.
         self.set_clip_labels([])
         self._reset_designation()
+        self._on_commit(payload)
         self._status.setText(f"Committed {n} label{'s' if n != 1 else ''}.")
 
     def _refresh_labels_list(self) -> None:

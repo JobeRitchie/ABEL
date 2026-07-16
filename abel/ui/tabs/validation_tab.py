@@ -20,6 +20,7 @@ from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -65,6 +66,140 @@ def _fmt(value: object, pct: bool = False) -> str:
     return f"{v:.0%}" if pct else f"{v:.3f}"
 
 
+def _tpfpfn(tp: object, fp: object, fn: object) -> str:
+    """Compact 'TP/FP/FN' cell; '—' when counts are unavailable (not retrained)."""
+    if tp is None or fp is None or fn is None:
+        return "—"
+    try:
+        return f"{int(tp)}/{int(fp)}/{int(fn)}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+# ===========================================================================
+# Leave-one-mouse-out results dialog
+# ===========================================================================
+class LosoResultsDialog(QDialog):
+    """Shows the LOSO CV bar chart (PR-AUC & F1, mean ± SEM) plus a summary table,
+    with PNG / vector / CSV export for publication."""
+
+    def __init__(self, results: list, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._results = results or []
+        self.setWindowTitle("Leave-one-mouse-out CV")
+        self.resize(760, 720)
+
+        layout = QVBoxLayout(self)
+
+        # --- Embedded figure (lazy matplotlib-Qt import, mirrors analytics tab) ---
+        self._canvas = None
+        try:
+            from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg  # noqa: PLC0415
+
+            from abel.validation.loso_plot import loso_bar_chart  # noqa: PLC0415
+
+            fig = loso_bar_chart(self._results)
+            if fig is not None:
+                self._canvas = FigureCanvasQTAgg(fig)
+                self._canvas.setMinimumHeight(320)
+                layout.addWidget(self._canvas)
+        except Exception:  # pragma: no cover - matplotlib backend issues
+            logger.exception("LOSO figure could not be rendered")
+        if self._canvas is None:
+            note = QLabel("No scorable behaviors to chart (see details below).")
+            note.setStyleSheet("color: #90A4AE; padding: 8px;")
+            layout.addWidget(note)
+
+        # --- Summary table (HTML) ---
+        view = QTextBrowser()
+        view.setOpenExternalLinks(False)
+        view.setHtml(self._summary_html())
+        view.setMaximumHeight(240)
+        layout.addWidget(view)
+
+        # --- Export buttons ---
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._png_btn = QPushButton("Export PNG…")
+        self._png_btn.clicked.connect(lambda: self._export_figure("png"))
+        self._vec_btn = QPushButton("Export Vector (SVG/PDF)…")
+        self._vec_btn.clicked.connect(lambda: self._export_figure("vector"))
+        self._csv_btn = QPushButton("Export CSV…")
+        self._csv_btn.clicked.connect(self._export_csv)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        for b in (self._png_btn, self._vec_btn, self._csv_btn, close_btn):
+            btn_row.addWidget(b)
+        has_fig = self._canvas is not None
+        self._png_btn.setEnabled(has_fig)
+        self._vec_btn.setEnabled(has_fig)
+        layout.addLayout(btn_row)
+
+    def _summary_html(self) -> str:
+        rows = []
+        for r in self._results:
+            name = r.get("behavior_name", r.get("behavior_id", "?"))
+            if r.get("error"):
+                rows.append(
+                    f"<tr><td>{name}</td><td colspan='4' style='color:#EF9A9A;'>"
+                    f"{r['error']}</td></tr>"
+                )
+                continue
+            rows.append(
+                "<tr>"
+                f"<td style='color:#ECEFF1;'>{name}</td>"
+                f"<td align='center'>{_fmt(r.get('fold_prauc_mean'))} ± {_fmt(r.get('fold_prauc_sem'))}</td>"
+                f"<td align='center'>{_fmt(r.get('fold_f1_mean'))} ± {_fmt(r.get('fold_f1_sem'))}</td>"
+                f"<td align='center'>{_fmt(r.get('refined_f1'))}</td>"
+                f"<td align='center'>{_tpfpfn(r.get('bout_tp'), r.get('bout_fp'), r.get('bout_fn'))}</td>"
+                f"<td align='center'>{r.get('n_subjects', 0)}</td>"
+                "</tr>"
+            )
+        return (
+            "<h3>Leave-one-mouse-out CV</h3>"
+            "<p style='color:#90A4AE;'>Each mouse is held out once (Leave-One-Group-Out "
+            "cross-validation). Bars above show per-fold mean ± SEM across held-out "
+            "subjects; refinement-only labels (temporal feedback / imported) are excluded "
+            "from evaluation.</p>"
+            "<table cellpadding='5' cellspacing='0'>"
+            "<tr style='color:#B0BEC5;'><th align='left'>Behavior</th>"
+            "<th>PR-AUC (mean±SEM)</th><th>F1 (mean±SEM)</th>"
+            "<th>pooled ref F1</th><th>TP/FP/FN (bouts)</th><th>n</th></tr>"
+            + "".join(rows)
+            + "</table>"
+        )
+
+    def _export_figure(self, kind: str) -> None:
+        if self._canvas is None:
+            return
+        if kind == "png":
+            filt = "PNG image (*.png)"
+            default = "loso_cv.png"
+        else:
+            filt = "Vector (*.svg *.pdf)"
+            default = "loso_cv.svg"
+        path, _ = QFileDialog.getSaveFileName(self, "Export figure", default, filt)
+        if not path:
+            return
+        try:
+            self._canvas.figure.savefig(path, dpi=200, bbox_inches="tight")
+        except Exception as exc:  # pragma: no cover - filesystem/backend errors
+            QMessageBox.critical(self, "Export failed", f"Could not save figure:\n{exc}")
+
+    def _export_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export raw per-fold data", "loso_cv.csv", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        try:
+            from abel.validation.loso_plot import loso_results_to_csv  # noqa: PLC0415
+
+            loso_results_to_csv(self._results, path)
+        except Exception as exc:  # pragma: no cover
+            QMessageBox.critical(self, "Export failed", f"Could not save CSV:\n{exc}")
+
+
 # ===========================================================================
 # Overview panel
 # ===========================================================================
@@ -73,12 +208,14 @@ class ValidationOverviewPanel(QWidget):
 
     _COLUMNS = [
         "Behavior", "Model", "Quality", "F1", "Precision", "Recall",
+        "F1 (ref)", "Prec (ref)", "Rec (ref)", "TP/FP/FN (win)", "TP/FP/FN (bouts)",
         "PR-AUC", "Train", "Val", "Pos labels", "Neg labels", "Bouts", "Overlap",
     ]
 
     def __init__(self, service: ValidationService, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._service = service
+        self._pool = QThreadPool.globalInstance()
 
         header = QLabel("Model Overview")
         header.setStyleSheet("font-size: 16px; font-weight: 700; color: #ECEFF1;")
@@ -90,6 +227,16 @@ class ValidationOverviewPanel(QWidget):
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(self.refresh)
 
+        self._loso_btn = QPushButton("Leave-one-mouse-out CV")
+        self._loso_btn.setToolTip(
+            "Train one model per subject (each mouse held out once), pool every "
+            "subject's held-out predictions, and report ONE stable generalization "
+            "score per behavior — raw and after temporal refinement — instead of a "
+            "single random holdout that's hostage to which mice land in validation.\n\n"
+            "Compute-heavy: trains one model per subject per behavior."
+        )
+        self._loso_btn.clicked.connect(self._run_loso)
+
         top = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
@@ -97,6 +244,7 @@ class ValidationOverviewPanel(QWidget):
         title_box.addWidget(subtitle)
         top.addLayout(title_box)
         top.addStretch()
+        top.addWidget(self._loso_btn)
         top.addWidget(self._refresh_btn)
 
         self._table = QTableWidget(0, len(self._COLUMNS))
@@ -107,6 +255,39 @@ class ValidationOverviewPanel(QWidget):
                 "Fraction of this behavior's flagged frames where another behavior is also flagged. "
                 "High overlap suggests thresholds are too lax or behavior inhibition is too weak."
             )
+        _ref_tip = (
+            "Held-out metrics AFTER temporal refinement (smoothing + per-behavior onset "
+            "threshold + merge-gap + min-bout duration from Temporal Review settings), vs. the "
+            "raw F1/Precision/Recall which grade the model's un-refined per-window output.\n\n"
+            "Shows “—” for models trained before held-out probabilities were saved — retrain the "
+            "model to populate these."
+        )
+        for _ref_col in ("F1 (ref)", "Prec (ref)", "Rec (ref)"):
+            _h = self._table.horizontalHeaderItem(self._COLUMNS.index(_ref_col))
+            if _h is not None:
+                _h.setToolTip(_ref_tip)
+        _win_tip = (
+            "Held-out target-class counts — True Positives / False Positives / False "
+            "Negatives — counted per segment window, AFTER temporal refinement (the "
+            "onset threshold + merge-gap + min-bout the product actually ships, not a "
+            "raw 0.5 cut).\n\n"
+            "One real bout spans many windows, so a single loose boundary window still "
+            "shows here — see the bout column for the granularity you review.\n\n"
+            "Shows “—” for models trained before held-out probabilities were saved — "
+            "retrain to populate."
+        )
+        _bout_tip = (
+            "Event-level counts: whole refined bouts matched against labeled bouts by "
+            "temporal overlap (IoU ≥ 0.2), the same granularity you judge in the "
+            "Temporal Review tab. Boundary slop inside an otherwise-correct bout no "
+            "longer counts as both a false positive and a false negative.\n\n"
+            "Shows “—” for models trained before held-out probabilities were saved — "
+            "retrain to populate."
+        )
+        for _tp_col, _tip in (("TP/FP/FN (win)", _win_tip), ("TP/FP/FN (bouts)", _bout_tip)):
+            _h = self._table.horizontalHeaderItem(self._COLUMNS.index(_tp_col))
+            if _h is not None:
+                _h.setToolTip(_tip)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -150,6 +331,11 @@ class ValidationOverviewPanel(QWidget):
                 _fmt(data.get("frame_f1")),
                 _fmt(data.get("frame_precision")),
                 _fmt(data.get("frame_recall")),
+                _fmt(data.get("refined_f1")),
+                _fmt(data.get("refined_precision")),
+                _fmt(data.get("refined_recall")),
+                _tpfpfn(data.get("refined_tp"), data.get("refined_fp"), data.get("refined_fn")),
+                _tpfpfn(data.get("bout_tp"), data.get("bout_fp"), data.get("bout_fn")),
                 _fmt(data.get("pr_auc")),
                 str(data.get("n_train") if data.get("n_train") is not None else "—"),
                 str(data.get("n_val") if data.get("n_val") is not None else "—"),
@@ -173,6 +359,50 @@ class ValidationOverviewPanel(QWidget):
                     elif overlap >= 0.05:
                         item.setForeground(QColor("#FFCC80"))
                 self._table.setItem(r, c, item)
+
+    # ------------------------------------------------------------------
+    # Leave-one-mouse-out cross-validation
+    # ------------------------------------------------------------------
+    def _run_loso(self) -> None:
+        root = getattr(self._service, "_project_root", None)
+        if root is None:
+            QMessageBox.warning(self, "No project", "Open a project first.")
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Leave-one-mouse-out CV",
+                "This trains one model per subject for every behavior and can take "
+                "several minutes. Run now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self._loso_btn.setEnabled(False)
+        self._loso_btn.setText("Running LOSO…")
+
+        def _task() -> list:
+            from abel.validation.datamodel import ProjectRef  # noqa: PLC0415
+            from abel.validation.loso import leave_one_subject_out_all  # noqa: PLC0415
+
+            return leave_one_subject_out_all(ProjectRef.load(root))
+
+        worker = TaskWorker(_task)
+        worker.signals.finished.connect(self._on_loso_done)
+        worker.signals.failed.connect(self._on_loso_failed)
+        self._pool.start(worker)
+
+    def _on_loso_failed(self, msg: str) -> None:
+        self._loso_btn.setEnabled(True)
+        self._loso_btn.setText("Leave-one-mouse-out CV")
+        logger.error("LOSO CV failed: %s", msg)
+        QMessageBox.critical(self, "Leave-one-mouse-out CV", f"LOSO CV failed:\n{msg}")
+
+    def _on_loso_done(self, results: list) -> None:
+        self._loso_btn.setEnabled(True)
+        self._loso_btn.setText("Leave-one-mouse-out CV")
+        LosoResultsDialog(results, self).exec()
 
 
 # ===========================================================================
@@ -1292,8 +1522,10 @@ class BehaviorGridPanel(QWidget):
         header = QLabel("Behavior Grid")
         header.setStyleSheet("font-size: 16px; font-weight: 700; color: #ECEFF1;")
         subtitle = QLabel(
-            "A 5×5 montage of strong positive bouts of one behavior, sampled across "
-            "sessions, with pose keypoints overlaid. Generate, preview, and export."
+            "A 5×5 montage of positive bouts of one behavior, sampled across "
+            "sessions, with pose keypoints overlaid. Choose “Strongest bouts” for the "
+            "most-confident detections, or “Probability bands” to make each row a "
+            "different probability range. Generate, preview, and export."
         )
         subtitle.setStyleSheet("color: #90A4AE; font-size: 12px;")
         subtitle.setWordWrap(True)
@@ -1338,6 +1570,31 @@ class BehaviorGridPanel(QWidget):
         )
         self._spin_kp_size.valueChanged.connect(self._on_kp_size_changed)
 
+        self._spin_kp_border = QDoubleSpinBox()
+        self._spin_kp_border.setRange(0.0, 4.0)
+        self._spin_kp_border.setSingleStep(0.1)
+        self._spin_kp_border.setDecimals(1)
+        self._spin_kp_border.setValue(1.0)
+        self._spin_kp_border.setSuffix("×")
+        self._spin_kp_border.setFixedWidth(80)
+        self._spin_kp_border.setToolTip(
+            "Thickness of the black outline around each pose dot. Above 1× draws a "
+            "thicker border, below 1× thinner; 0 removes the outline entirely."
+        )
+        self._spin_kp_border.valueChanged.connect(self._on_kp_border_changed)
+
+        self._layout_combo = QComboBox()
+        self._layout_combo.addItem("Strongest bouts", userData="strongest")
+        self._layout_combo.addItem("Probability bands (per row)", userData="bands")
+        self._layout_combo.setToolTip(
+            "How the 5×5 grid is filled.\n\n"
+            "• Strongest bouts — every cell shows the most-confident detections.\n"
+            "• Probability bands — each row is a different probability range (top "
+            "row = highest-probability bouts, bottom = lowest accepted), so you can "
+            "see the full range of what is accepted as positive for this behavior."
+        )
+        self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+
         self._res_combo = QComboBox()
         for label, _px in _GRID_RESOLUTIONS:
             self._res_combo.addItem(label)
@@ -1347,6 +1604,7 @@ class BehaviorGridPanel(QWidget):
         self._keypoints_chk = QCheckBox("Show keypoints")
         self._keypoints_chk.setChecked(True)
         self._keypoints_chk.toggled.connect(self._spin_kp_size.setEnabled)
+        self._keypoints_chk.toggled.connect(self._spin_kp_border.setEnabled)
 
         self._generate_btn = QPushButton("Generate Grid")
         self._generate_btn.setToolTip("Build a fresh random montage with the current settings.")
@@ -1372,9 +1630,14 @@ class BehaviorGridPanel(QWidget):
         controls.addWidget(QLabel("Resolution:"))
         controls.addWidget(self._res_combo)
         controls.addSpacing(10)
+        controls.addWidget(QLabel("Layout:"))
+        controls.addWidget(self._layout_combo)
+        controls.addSpacing(10)
         controls.addWidget(self._keypoints_chk)
         controls.addWidget(QLabel("Dot size:"))
         controls.addWidget(self._spin_kp_size)
+        controls.addWidget(QLabel("Border:"))
+        controls.addWidget(self._spin_kp_border)
         controls.addStretch()
         controls.addWidget(self._generate_btn)
         controls.addWidget(self._export_btn)
@@ -1403,8 +1666,12 @@ class BehaviorGridPanel(QWidget):
         layout.addLayout(title_box)
         layout.addLayout(controls)
         layout.addWidget(self._progress_bar)
+        # Both the player and the empty-state placeholder take the stretch so the
+        # controls row stays pinned to the top whether or not a grid exists —
+        # without this the empty state has no stretch and Qt spreads the controls
+        # vertically until the first grid (with a stretched player) is generated.
         layout.addWidget(self._player, 1)
-        layout.addWidget(self._empty)
+        layout.addWidget(self._empty, 1)
         self._player.hide()
 
     # ---------------------------------------------------------------- project
@@ -1419,20 +1686,30 @@ class BehaviorGridPanel(QWidget):
         self._reload_behaviors()
 
     def _restore_crop_scale(self) -> None:
-        """Load persisted Crop × and Dot-size × values for this project."""
+        """Load persisted Crop ×, Dot-size ×, Border ×, and Layout for this project."""
         try:
             settings = self._service.load_settings()
             crop = float(settings.behavior_grid_crop_scale)
             kp = float(getattr(settings, "behavior_grid_keypoint_scale", 1.0))
+            border = float(getattr(settings, "behavior_grid_keypoint_border_scale", 1.0))
+            layout = str(getattr(settings, "behavior_grid_layout", "strongest"))
         except Exception:
-            crop, kp = 1.0, 1.0
+            crop, kp, border, layout = 1.0, 1.0, 1.0, "strongest"
         self._spin_crop.blockSignals(True)
         self._spin_crop.setValue(crop)
         self._spin_crop.blockSignals(False)
         self._spin_kp_size.blockSignals(True)
         self._spin_kp_size.setValue(kp)
         self._spin_kp_size.blockSignals(False)
+        self._spin_kp_border.blockSignals(True)
+        self._spin_kp_border.setValue(border)
+        self._spin_kp_border.blockSignals(False)
+        self._layout_combo.blockSignals(True)
+        idx = self._layout_combo.findData(layout)
+        self._layout_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._layout_combo.blockSignals(False)
         self._spin_kp_size.setEnabled(self._keypoints_chk.isChecked())
+        self._spin_kp_border.setEnabled(self._keypoints_chk.isChecked())
 
     def _on_crop_changed(self, value: float) -> None:
         """Persist the Crop × value so it survives project reloads / new grids."""
@@ -1455,6 +1732,28 @@ class BehaviorGridPanel(QWidget):
             self._service.save_settings(settings)
         except Exception:
             logger.exception("Behavior grid: failed to persist keypoint scale")
+
+    def _on_kp_border_changed(self, value: float) -> None:
+        """Persist the keypoint-dot border thickness multiplier across reloads."""
+        if self._project_root is None:
+            return
+        try:
+            settings = self._service.load_settings()
+            settings.behavior_grid_keypoint_border_scale = float(value)
+            self._service.save_settings(settings)
+        except Exception:
+            logger.exception("Behavior grid: failed to persist keypoint border scale")
+
+    def _on_layout_changed(self, _index: int) -> None:
+        """Persist the grid layout mode (strongest bouts vs. probability bands)."""
+        if self._project_root is None:
+            return
+        try:
+            settings = self._service.load_settings()
+            settings.behavior_grid_layout = str(self._layout_combo.currentData() or "strongest")
+            self._service.save_settings(settings)
+        except Exception:
+            logger.exception("Behavior grid: failed to persist grid layout")
 
     def _reload_behaviors(self) -> None:
         self._behavior_combo.blockSignals(True)
@@ -1495,6 +1794,8 @@ class BehaviorGridPanel(QWidget):
             Path(out_path),
             crop_scale=float(self._spin_crop.value()),
             keypoint_scale=float(self._spin_kp_size.value()),
+            keypoint_border_scale=float(self._spin_kp_border.value()),
+            layout=str(self._layout_combo.currentData() or "strongest"),
         )
         worker.signals.finished.connect(self._on_generated)
         worker.signals.failed.connect(self._on_generate_failed)

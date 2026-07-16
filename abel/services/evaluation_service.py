@@ -12,6 +12,7 @@ import pandas as pd
 
 from abel.services.provenance_service import ProvenanceService
 from abel.storage.file_store import read_json, write_json
+from abel.utils import xgb_predict
 
 
 logger = logging.getLogger("abel")
@@ -695,17 +696,26 @@ class EvaluationService:
                     # the data's sorted spelling so models trained before distance
                     # canonicalisation (v0.5.2) don't reindex every distance column to
                     # a missing name (silently zero-filled).  See
-                    # behavior_representation_service.canonical_distance_name.
+                    # behavior_representation_service.align_model_feature_columns.
                     from abel.services.behavior_representation_service import (
-                        canonical_distance_name,
+                        align_model_feature_columns,
                     )
-                    fcols = [canonical_distance_name(str(c)) for c in payload["feature_cols"]]
-                    feats = imported_df.reindex(columns=fcols, fill_value=0.0)
-                    x = np.nan_to_num(
-                        feats.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float),
-                        nan=0.0, posinf=0.0, neginf=0.0,
+                    model_cols = [str(c) for c in payload["feature_cols"]]
+                    data_cols = set(imported_df.columns)
+                    fcols, nan_fill = align_model_feature_columns(model_cols, data_cols)
+                    feats = imported_df.reindex(columns=fcols)
+                    x = feats.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+                    # A double-named distance pair keeps its NaN slot — that is what
+                    # the model was trained on. Everything else is scrubbed as before.
+                    keep_nan = np.array(nan_fill, dtype=bool)
+                    scrub = ~keep_nan
+                    x[:, scrub] = np.nan_to_num(
+                        x[:, scrub], nan=0.0, posinf=0.0, neginf=0.0,
                     )
-                    proba = clf.predict_proba(x)
+                    x[:, keep_nan] = np.nan_to_num(
+                        x[:, keep_nan], nan=np.nan, posinf=0.0, neginf=0.0,
+                    )
+                    proba = xgb_predict.predict_proba(clf, x)
                     probs = (
                         proba[:, 1] if getattr(proba, "ndim", 1) == 2 and proba.shape[1] >= 2
                         else np.ravel(proba)
@@ -728,6 +738,7 @@ class EvaluationService:
         n_neighbors: int = 15,
         predicted_to_labeled_ratio: float = 5.0,
         target_behavior_label: str | None = None,
+        refined: bool = False,
     ) -> dict[str, Any]:
         """Generate a single UMAP embedding coloured by dominant behaviour.
 
@@ -785,25 +796,59 @@ class EvaluationService:
                 logger.debug("Failed loading enriched_segments.parquet", exc_info=True)
 
         # --- Discover model directories ------------------------------------------
+        # Key each model by its *target behaviour id* (not the directory name) so
+        # the embedding's class labels resolve to the current behaviour name via
+        # ``behavior_names``.  Keying by directory name leaks stale names into the
+        # plot: a renamed behaviour (e.g. "Protected_Dip" → short "Guard") or an
+        # old pre-rename retrain would each show its directory label instead of
+        # the live short name, so one behaviour appears as several classes.
         latest_by_behavior: dict[str, Path] = {}
+        _latest_mtime: dict[str, float] = {}
         _nb_keys = {"no_behavior", "no_behaviour", "nobehavior", "nobehaviour"}
         if models_root.exists():
             for p in sorted(models_root.iterdir()):
                 if not (p.is_dir() and (p / "model_state.pkl").exists() and p.name.startswith("behavior_model_")):
                     continue
-                # Use directory name as canonical key — run_settings target_behavior
-                # can be wrong (e.g. No_Behavior saved with another behaviour's ID).
+                settings = read_json(p / "run_settings.json", {})
                 dir_key = p.name.removeprefix("behavior_model_").strip()
-                if not dir_key:
-                    settings = read_json(p / "run_settings.json", {})
-                    dir_key = str(settings.get("target_behavior") or settings.get("target_behavior_id") or "").strip()
-                if dir_key:
-                    # Skip no_behavior models — they are trained with 0
-                    # positives and produce degenerate predictions that
-                    # corrupt the embedding via fillna(0.0).
-                    if dir_key.lower().replace("_", "").replace(" ", "") in _nb_keys:
+                tb_id = str(settings.get("target_behavior") or settings.get("target_behavior_id") or "").strip()
+
+                # Skip no_behavior models — they are trained with 0 positives and
+                # produce degenerate predictions that corrupt the embedding via
+                # fillna(0.0). Match on both the directory name and the target id.
+                _norm = (dir_key or tb_id).lower().replace("_", "").replace(" ", "")
+                if _norm in _nb_keys or tb_id.lower() in _nb_keys:
+                    continue
+
+                # Resolve the model to a *currently defined* behaviour. When
+                # behavior_names is supplied it is the authoritative set of active
+                # behaviour ids, so a model whose target id is missing (legacy
+                # pre-UUID models saved target=None) or no longer present (the
+                # behaviour was deleted) is an orphan and must not inject a stale
+                # class into the embedding.
+                if behavior_names:
+                    if not tb_id or tb_id not in behavior_names:
+                        logger.info(
+                            "Skipping orphaned/legacy model %s: target behaviour %r is not a current behaviour.",
+                            p.name, tb_id or None,
+                        )
                         continue
-                    latest_by_behavior[dir_key] = p
+                    key = tb_id
+                else:
+                    # No name map available (e.g. headless call): fall back to the
+                    # directory name and preserve prior behaviour.
+                    key = dir_key or tb_id
+                if not key:
+                    continue
+
+                # Multiple model directories can target the same behaviour (each
+                # retrain/rename leaves its own folder). Keep only the most
+                # recently modified so one behaviour maps to exactly one class.
+                mtime = p.stat().st_mtime
+                if key in _latest_mtime and _latest_mtime[key] >= mtime:
+                    continue
+                _latest_mtime[key] = mtime
+                latest_by_behavior[key] = p
 
         if not latest_by_behavior:
             return {"error": "No behaviour models found."}
@@ -965,6 +1010,44 @@ class EvaluationService:
 
         # Assign dominant behaviour label using all models.
         prob_arr = merged[prob_cols].to_numpy(dtype=float)
+
+        # Optional: colour by the POST-temporal-refinement label instead of raw
+        # argmax. Apply each behaviour's refinement (smoothing + onset threshold +
+        # merge-gap + min-bout) to its probability trace per session and zero out
+        # probabilities outside a refined bout. Segments that the deployed pipeline
+        # would not call any behaviour then fall through to "Unclassified", so the
+        # coloured clusters lose the speckle of raw per-window misclassifications.
+        if refined and {"session_id", "start_frame", "end_frame"}.issubset(merged.columns):
+            try:
+                from abel.temporal_refinement.refined_eval import (  # noqa: PLC0415
+                    apply_temporal_refinement,
+                    load_temporal_settings,
+                )
+
+                _sess = merged["session_id"].astype(str).to_numpy()
+                _sf = merged["start_frame"].to_numpy(dtype=float)
+                _ef = merged["end_frame"].to_numpy(dtype=float)
+                _valid_fr = np.isfinite(_sf) & np.isfinite(_ef) & (_sf >= 0)
+                refined_arr = prob_arr.copy()
+                for _ci, _bid in enumerate(bid_list):
+                    _s = load_temporal_settings(project_root, _bid)
+                    _p = prob_arr[:, _ci]
+                    _pred = apply_temporal_refinement(
+                        np.column_stack([1.0 - _p, _p]),
+                        1,
+                        _sess,
+                        np.where(_valid_fr, _sf, 0).astype(np.int64),
+                        np.where(_valid_fr, _ef, 0).astype(np.int64),
+                        float(_s["onset_threshold"]),
+                        int(_s["min_bout_duration_frames"]),
+                        int(_s["merge_gap_frames"]),
+                    )
+                    refined_arr[:, _ci] = np.where((_pred == 1) & _valid_fr, _p, 0.0)
+                prob_arr = refined_arr
+                logger.info("Unified UMAP: coloured by refined (post-temporal-refinement) labels.")
+            except Exception:
+                logger.debug("Refined UMAP colouring failed; using raw labels.", exc_info=True)
+
         dominant_idx = np.argmax(prob_arr, axis=1)
         dominant_prob = np.max(prob_arr, axis=1)
 

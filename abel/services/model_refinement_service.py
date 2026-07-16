@@ -73,6 +73,10 @@ import pandas as pd
 from abel.models.schemas import CandidateWindow, ReviewDecision, ReviewDecisionType
 from abel.services import keypoint_mapping
 from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
+from abel.services.behavior_representation_service import (
+    canonical_distance_name,
+    is_no_behavior_label,
+)
 from abel.services.candidate_service import CandidateGenerationService
 from abel.services.review_service import ReviewService
 from abel.storage.file_store import read_json, write_json
@@ -244,7 +248,13 @@ class ModelImportItem:
     compatible: bool = False        # host covers (nearly) all required features
     # Model feature columns (host-aligned) the host doesn't have — the concrete
     # gap behind a sub-threshold coverage.  Used by the coverage diagnosis.
+    # Excludes legacy pair-order columns, which are not a real gap.
     missing_columns: list[str] = field(default_factory=list)
+    # Distance columns the model names under the opposite keypoint ordering to
+    # the one this host emits (dist_A_to_B vs dist_B_to_A — the same symmetric
+    # measurement).  Not missing data; NaN-filled at score time, and excluded
+    # from coverage.  See ModelRefinementService._legacy_pair_order_cols.
+    legacy_pair_columns: list[str] = field(default_factory=list)
 
     @property
     def behavior_matched(self) -> bool:
@@ -1276,6 +1286,38 @@ class ModelRefinementService:
         cols = self._parquet_columns(self._source_feature_path(source_root))
         return self._feature_cols(cols) if cols is not None else None
 
+    @staticmethod
+    def _legacy_pair_order_cols(
+        model_cols: list[str], host_features: set[str],
+    ) -> dict[str, str]:
+        """Model distance columns this host emits under the opposite pair ordering.
+
+        Returns ``{model_col: equivalent_host_col}``.  Distance is symmetric, so
+        ``dist_nose_to_left_ear`` and ``dist_left_ear_to_nose`` measure the same
+        thing; only the naming convention changed when the extractor began
+        canonicalising pair order.  The host is therefore *not* missing this
+        measurement — it is simply spelled the other way round — so these must
+        not count against feature coverage.
+
+        They are still filled with **NaN**, never 0.0, at score time.  In the
+        training data the two orderings are complementary: whichever era a row
+        came from, one ordering holds the value and the other is NaN, never both.
+        A host row that populates the canonical ordering therefore reproduces
+        that pattern exactly by leaving the legacy ordering NaN (XGBoost handles
+        NaN natively).  Copying the value into *both* orderings would present a
+        combination the model never saw, and filling 0.0 is worse still: these
+        features are z-scored, so 0.0 is a confident assertion of *average
+        distance* rather than an absent measurement.
+        """
+        out: dict[str, str] = {}
+        for col in model_cols:
+            if col in host_features:
+                continue
+            canon = canonical_distance_name(col)
+            if canon != col and canon in host_features:
+                out[col] = canon
+        return out
+
     def _load_labels(self, source_root: Path) -> pd.DataFrame | None:
         """One labeled row per segment as ``[segment_id, review_label, confidence]``.
 
@@ -1632,21 +1674,30 @@ class ModelRefinementService:
         for m in models:
             col_rename = self._rename_cols(m.feature_columns, kp_rename) if kp_rename else {}
             renamed = [col_rename.get(c, c) for c in m.feature_columns]
-            total = max(len(renamed), 1)
-            missing_cols = [c for c in renamed if c not in host_features]
+            # A distance the host emits under the opposite pair ordering is a
+            # naming difference, not a missing measurement — keep it out of the
+            # coverage ratio so an extractor-era convention change cannot block
+            # an otherwise-compatible model.
+            legacy_pairs = self._legacy_pair_order_cols(renamed, host_features)
+            missing_cols = [
+                c for c in renamed if c not in host_features and c not in legacy_pairs
+            ]
+            total = max(len(renamed) - len(legacy_pairs), 1)
             present = total - len(missing_cols)
+            coverage = present / total
             host_bid, host_name, via_alias = self._resolve_host_behavior(
                 m.behavior_id, source_behaviors, host_name_to_id, name_overrides,
             )
             pv.items.append(ModelImportItem(
                 model=m,
-                coverage=present / total,
+                coverage=coverage,
                 missing_features=len(missing_cols),
                 host_behavior_id=host_bid,
                 host_behavior_name=host_name,
                 matched_by_alias=via_alias,
-                compatible=(present / total) >= self.MODEL_COMPAT_THRESHOLD,
+                compatible=coverage >= self.MODEL_COMPAT_THRESHOLD,
                 missing_columns=missing_cols,
+                legacy_pair_columns=sorted(legacy_pairs),
             ))
 
         if compute_diagnostics and host_features and all_model_cols:
@@ -1837,6 +1888,7 @@ class ModelRefinementService:
                 continue
             new_dir = self._copy_and_rewrite_model(
                 host_root, source_root, m, host_bid, pv.tag, pv.keypoint_renames,
+                item.legacy_pair_columns,
             )
             imported.append({
                 "model_dir": new_dir,
@@ -1910,10 +1962,21 @@ class ModelRefinementService:
     def _copy_and_rewrite_model(
         self, host_root: Path, source_root: Path, model: SourceModel,
         host_behavior_id: str, tag: str, kp_rename: dict[str, str],
+        legacy_pair_cols: list[str] | None = None,
     ) -> str:
-        """Copy one model dir into the host and realign it to this project."""
+        """Copy one model dir into the host and realign it to this project.
+
+        ``legacy_pair_cols`` are distance columns the model names under the
+        opposite keypoint ordering to the one this project emits.  They are
+        recorded on the model card purely as provenance — so it is legible *why*
+        a model with differently-spelled features imported cleanly.  Scoring does
+        not read them back: ``align_model_feature_columns`` re-derives the
+        mapping from the model's feature names against the data's columns.
+        """
         import pickle  # noqa: PLC0415
         import yaml  # noqa: PLC0415
+
+        legacy_pairs = sorted(set(legacy_pair_cols or ()))
 
         src = self._models_dir(source_root) / model.model_dir
         new_name = self._namespaced_model_dir(model.behavior_name, tag)
@@ -1947,27 +2010,51 @@ class ModelRefinementService:
                         col_rename.get(str(c), str(c)) for c in card["feature_columns"]
                     ]
                 card["imported_from"] = str(source_root)
+                if legacy_pairs:
+                    card["legacy_pair_order_columns"] = list(legacy_pairs)
                 card_path.write_text(yaml.safe_dump(card, sort_keys=False), encoding="utf-8")
             except Exception:
                 logger.debug("Failed rewriting model_card for %s", new_name, exc_info=True)
 
-        # Only the keypoint-differing case needs the pickle rewritten (which
-        # requires unpickling); identical schemes copy verbatim and run as-is.
-        if col_rename:
-            try:
-                with open(dst / "model_state.pkl", "rb") as f:
-                    payload = pickle.load(f)
-                if isinstance(payload, dict) and "feature_cols" in payload:
+        # Rewrite the model pickle so it is self-consistent with THIS project:
+        #   * label_map — remap the source behaviour id to the host behaviour id.
+        #     Scorers resolve which probability column is "the behaviour" from
+        #     label_map (see resolve_target_class_index); leaving the *source*
+        #     project's id here means an id match fails at score time and the
+        #     wrong class can be selected. run_settings/model_card are already
+        #     remapped above — the pickle must agree with them.
+        #   * feature_cols — apply keypoint renames when the schemes differ
+        #     (distance pair-order differences are handled by the score-time
+        #     aligner and need nothing here).
+        # Always unpickle: the label_map remap is needed for every import, not
+        # only the keypoint-differing case.
+        try:
+            with open(dst / "model_state.pkl", "rb") as f:
+                payload = pickle.load(f)
+            changed = False
+            if isinstance(payload, dict):
+                label_map = payload.get("label_map")
+                if isinstance(label_map, dict):
+                    remapped = {
+                        k: (host_behavior_id if str(v) == str(model.behavior_id) else v)
+                        for k, v in label_map.items()
+                    }
+                    if remapped != label_map:
+                        payload["label_map"] = remapped
+                        changed = True
+                if col_rename and isinstance(payload.get("feature_cols"), list):
                     payload["feature_cols"] = [
                         col_rename.get(str(c), str(c)) for c in payload["feature_cols"]
                     ]
-                    with open(dst / "model_state.pkl", "wb") as f:
-                        pickle.dump(payload, f)
-            except Exception:
-                logger.exception(
-                    "Could not realign feature names for imported model %s; it may "
-                    "not score correctly against this project.", new_name,
-                )
+                    changed = True
+            if changed:
+                with open(dst / "model_state.pkl", "wb") as f:
+                    pickle.dump(payload, f)
+        except Exception:
+            logger.exception(
+                "Could not rewrite imported model state for %s; it may not score "
+                "correctly against this project.", new_name,
+            )
 
         # Drop predictions scored on the *source* project's segments — they are
         # meaningless here and would otherwise masquerade as host results until
@@ -2011,6 +2098,64 @@ class ModelRefinementService:
             self._model_imports_manifest_path(host_root),
             {"imports": [r for r in records.values() if r]},
         )
+
+    def repair_imported_label_maps(self, host_root: Path) -> dict[str, Any]:
+        """Backfill the host behaviour id into already-imported models' label_maps.
+
+        Models imported before the label_map remap fix kept the *source* project's
+        behaviour id as their positive class.  Because scorers resolve the target
+        class from label_map, that id mismatch made both active-learning inference
+        and dense temporal refinement select the wrong probability column.  This
+        rewrites each imported model's ``label_map`` (and ``feature_cols`` labels
+        are left untouched) so the single non-``no_behavior`` class carries the
+        host behaviour id recorded in ``model_imports.json``.  Idempotent.
+        """
+        import pickle  # noqa: PLC0415
+
+        repaired: list[str] = []
+        skipped: list[str] = []
+        for record in self.list_model_imports(host_root):
+            for m in record.get("models", []) or []:
+                model_dir = str(m.get("model_dir", "")).strip()
+                host_bid = str(m.get("behavior_id", "")).strip()
+                if not model_dir or not host_bid:
+                    continue
+                state_path = self._models_dir(host_root) / model_dir / "model_state.pkl"
+                if not state_path.exists():
+                    skipped.append(model_dir)
+                    continue
+                try:
+                    with open(state_path, "rb") as f:
+                        payload = pickle.load(f)
+                    label_map = payload.get("label_map") if isinstance(payload, dict) else None
+                    if not isinstance(label_map, dict) or not label_map:
+                        skipped.append(model_dir)
+                        continue
+                    positives = [
+                        k for k, v in label_map.items() if not is_no_behavior_label(v)
+                    ]
+                    # Only auto-repair the unambiguous binary case: exactly one
+                    # positive class, and it is not already the host id.
+                    if len(positives) != 1:
+                        skipped.append(model_dir)
+                        continue
+                    key = positives[0]
+                    if str(label_map[key]) == host_bid:
+                        skipped.append(model_dir)
+                        continue
+                    label_map[key] = host_bid
+                    payload["label_map"] = label_map
+                    with open(state_path, "wb") as f:
+                        pickle.dump(payload, f)
+                    repaired.append(model_dir)
+                except Exception:
+                    logger.exception("Could not repair label_map for %s", model_dir)
+                    skipped.append(model_dir)
+        logger.info(
+            "Repaired label_maps for %d imported model(s) in %s (%d skipped).",
+            len(repaired), host_root.name, len(skipped),
+        )
+        return {"status": "success", "repaired": repaired, "skipped": skipped}
 
     def remove_model_import(self, host_root: Path, tag: str) -> dict[str, Any]:
         """Delete a source's imported model directories and forget them.

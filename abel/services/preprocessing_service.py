@@ -1214,6 +1214,221 @@ class ClipExtractionService:
 
 
 # ---------------------------------------------------------------------------
+# Clip regeneration for candidates whose extracted files went missing
+# ---------------------------------------------------------------------------
+
+
+def regenerate_clips_for_windows(
+    project_root: Path,
+    windows: "list[CandidateWindow]",
+    progress_callback: Callable[[int, int], None] | None = None,
+    cancel_flag: list[bool] | None = None,
+) -> dict:
+    """Re-extract clip files for an arbitrary set of candidate windows.
+
+    Used by the Review tab to rebuild clips for candidates that no longer have
+    a clip file on disk (for example after "Clear Unreviewed Clips", a session
+    removal cascade, or the clip queue growing past what was ever extracted).
+
+    The extraction settings (preset, crop area, before/after padding) are read
+    from ``project.yaml`` so regenerated clips match whatever the user last used
+    in the Clip Extraction tab.  Newly written clips are merged into the
+    existing ``clip_manifest.json`` rather than replacing it.
+
+    Returns a summary ``dict`` with ``extracted``, ``requested``,
+    ``session_ids`` and ``warnings`` keys.
+    """
+    from abel.services.import_service import ImportService
+    from abel.services.pose_processing_service import PoseProcessingService
+
+    summary: dict = {"extracted": 0, "requested": len(windows), "session_ids": [], "warnings": []}
+    if not windows:
+        summary["warnings"].append("No candidate windows provided.")
+        return summary
+
+    imports = ImportService()
+    pose_processing = PoseProcessingService()
+    clip_svc = ClipExtractionService()
+    clip_svc.set_project(project_root)
+
+    manifest = imports.load_manifest(project_root)
+    if manifest is None:
+        summary["warnings"].append("Import manifest not found — run Data Import first.")
+        return summary
+
+    # Extraction settings mirror the Clip Extraction tab so regenerated clips
+    # match the crop/padding of the originals.
+    project_cfg = read_yaml(project_root / "project.yaml", {})
+    ui = dict(project_cfg.get("clip_extraction_ui") or {})
+    try:
+        source_fps = float(project_cfg.get("default_fps", 30.0))
+    except Exception:
+        source_fps = 30.0
+    before_sec = float(ui.get("before_sec", 0.0) or 0.0)
+    after_sec = float(ui.get("after_sec", 0.0) or 0.0)
+    before_frames = int(round(max(0.0, before_sec) * max(source_fps, 1.0)))
+    after_frames = int(round(max(0.0, after_sec) * max(source_fps, 1.0)))
+
+    presets = clip_svc.load_project_presets()
+    preset_id = str(ui.get("preset_id") or "").strip()
+    preset = next((p for p in presets if p.preset_id == preset_id), None)
+    if preset is None:
+        preset = presets[0]
+    crop_area_percent = float(ui.get("crop_area_percent", 0.0) or 0.0)
+    if crop_area_percent > 0:
+        crop_area_scale = max(0.5, min(10.0, crop_area_percent / 100.0))
+        preset = PreprocessingPreset.model_validate(
+            preset.model_dump(mode="python") | {"crop_area_scale": crop_area_scale}
+        )
+
+    # Group requested windows by canonical session id, applying before/after
+    # padding so regenerated clips carry the same context as the originals.
+    # Windows may arrive as CandidateWindow (pydantic) or plain row objects, so
+    # rebuild a fresh CandidateWindow from duck-typed attributes rather than
+    # relying on ``.model_copy``.
+    current_ids = {s.session_id for s in manifest.linked_sessions}
+    session_plan: dict[str, list[CandidateWindow]] = {}
+    for win in windows:
+        sid = str(getattr(win, "session_id", "")).strip()
+        wid = str(getattr(win, "window_id", "")).strip()
+        if not sid or not wid:
+            continue
+        if sid not in current_ids:
+            sid = imports.resolve_session_id(project_root, sid, manifest)
+        try:
+            raw_start = int(getattr(win, "start_frame", 0))
+        except Exception:
+            raw_start = 0
+        try:
+            raw_end = int(getattr(win, "end_frame", raw_start))
+        except Exception:
+            raw_end = raw_start
+        start = max(0, raw_start - before_frames)
+        end = max(start, raw_end + after_frames)
+        behavior_id = getattr(win, "behavior_id", None)
+        padded = CandidateWindow(
+            window_id=wid,
+            session_id=sid,
+            start_frame=int(start),
+            end_frame=int(end),
+            behavior_id=str(behavior_id) if behavior_id else None,
+        )
+        session_plan.setdefault(sid, []).append(padded)
+
+    total = sum(len(v) for v in session_plan.values())
+    if total <= 0:
+        summary["warnings"].append("No windows resolved to a known session.")
+        return summary
+
+    done = 0
+
+    def _emit(delta: int) -> None:
+        nonlocal done
+        if delta > 0:
+            done += delta
+        if progress_callback:
+            progress_callback(min(done, total), total)
+
+    all_clips: list[ClipAsset] = []
+    extracted_sessions: list[str] = []
+
+    for sid, sess_windows in session_plan.items():
+        if cancel_flag and cancel_flag[0]:
+            summary["warnings"].append("Cancelled by user.")
+            break
+
+        video_path = imports.video_path_for_session(manifest, sid)
+        if not video_path or not video_path.exists():
+            summary["warnings"].append(f"{sid}: missing source video, skipped {len(sess_windows)} clip(s).")
+            _emit(len(sess_windows))
+            continue
+
+        pose_cx = None
+        pose_cy = None
+        pose_path = imports.pose_path_for_session(manifest, sid)
+        if pose_path and pose_path.exists():
+            try:
+                pose = pose_processing.load(pose_path)
+                pose = pose_processing.clean_pose(
+                    pose,
+                    likelihood_threshold=0.2,
+                    interpolate=True,
+                    smoothing_window=5,
+                )
+                pose_cx = pose.centroid_x
+                pose_cy = pose.centroid_y
+            except Exception as exc:
+                summary["warnings"].append(f"{sid}: could not load pose centroids ({exc}); using static center crop.")
+
+        individual_overlays = None
+        if pose_path and pose_path.exists():
+            _sess = next((s for s in manifest.linked_sessions if s.session_id == sid), None)
+            _imap = dict(getattr(_sess, "individual_subject_map", {}) or {}) if _sess else {}
+            individual_overlays = ClipExtractionService.build_individual_overlays(
+                pose_processing, pose_path,
+                getattr(manifest, "smoothing_settings", None), _imap,
+            )
+
+        cfg = ClipExtractionConfig(
+            video_path=video_path,
+            session_id=sid,
+            preset=preset,
+            output_dir=project_root / "derived" / "clips" / sid,
+            pose_centroid_x=pose_cx,
+            pose_centroid_y=pose_cy,
+            pixels_per_mm=imports.pixels_per_mm_for_session(manifest, sid),
+            individual_overlays=individual_overlays,
+        )
+
+        local_done = 0
+
+        def _local_progress(d: int, _t: int) -> None:
+            nonlocal local_done
+            delta = int(d) - int(local_done)
+            if delta > 0:
+                local_done = int(d)
+                _emit(delta)
+
+        result = clip_svc.extract_selected_clips(
+            sess_windows, cfg, progress_callback=_local_progress, cancel_flag=cancel_flag,
+        )
+        if local_done < len(sess_windows):
+            _emit(len(sess_windows) - local_done)
+
+        if result.clips:
+            extracted_sessions.append(sid)
+            all_clips.extend(result.clips)
+        for warning in result.warnings:
+            summary["warnings"].append(f"{sid}: {warning}")
+
+    # Merge newly written clips into the existing manifest (never overwrite).
+    if all_clips:
+        existing = clip_svc.load_manifest()
+        by_id: dict[str, ClipAsset] = {}
+        session_ids: list[str] = []
+        if existing is not None:
+            for c in existing.clips:
+                by_id[str(c.clip_id)] = c
+            session_ids = list(existing.session_ids)
+        for c in all_clips:
+            by_id[str(c.clip_id)] = c
+        session_ids = list(dict.fromkeys(session_ids + extracted_sessions))
+        merged = ClipManifest(
+            session_ids=session_ids,
+            preset_name=(existing.preset_name if existing is not None else preset.name),
+            clips=list(by_id.values()),
+            total_windows=len(by_id),
+            opencv_available=_has_cv2(),
+            warnings=list(summary["warnings"]),
+        )
+        clip_svc.save_manifest(merged)
+
+    summary["extracted"] = len(all_clips)
+    summary["session_ids"] = extracted_sessions
+    return summary
+
+
+# ---------------------------------------------------------------------------
 
 # Backwards-compatibility alias â€” remove once Phase 3 tabs are wired
 

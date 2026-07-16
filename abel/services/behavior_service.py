@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from abel.models.schemas import BehaviorDefinition
-from abel.storage.file_store import read_yaml, write_yaml
+from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 
+
+logger = logging.getLogger(__name__)
 
 NO_BEHAVIOR_ID = "no_behavior"
 
@@ -346,8 +350,172 @@ class BehaviorService:
         self._behaviors = [b for b in self._behaviors if b.behavior_id != behavior_id]
         if len(self._behaviors) < before:
             self.save()
+            self._purge_trained_models(behavior_id)
+            self._purge_behavior_references(behavior_id)
             return True
         return False
+
+    def _purge_trained_models(self, behavior_id: str) -> list[str]:
+        """Remove trained-model directories bound to a deleted behavior.
+
+        Downstream tools (unified UMAP, behavior analytics, apply-models)
+        discover behaviours by scanning ``derived/models`` for
+        ``behavior_model_*`` directories. A leftover directory keeps a removed
+        behaviour visible everywhere, so we delete every model whose
+        ``run_settings.json`` target behaviour matches the id being removed.
+        Directory names are unreliable (custom names vs. behaviour ids), so we
+        match on the recorded target behaviour id rather than the folder name.
+
+        Returns the list of removed directory names.
+        """
+        removed: list[str] = []
+        if self._project_root is None:
+            return removed
+        models_root = self._project_root / "derived" / "models"
+        if not models_root.exists():
+            return removed
+        bid = str(behavior_id).strip()
+        if not bid:
+            return removed
+        for p in sorted(models_root.iterdir()):
+            if not (p.is_dir() and p.name.startswith("behavior_model_")):
+                continue
+            settings = read_json(p / "run_settings.json", {})
+            tb = str(
+                settings.get("target_behavior")
+                or settings.get("target_behavior_id")
+                or ""
+            ).strip()
+            if tb and tb == bid:
+                try:
+                    shutil.rmtree(p)
+                    removed.append(p.name)
+                    logger.info("Removed orphaned model directory %s for deleted behaviour %s", p.name, bid)
+                except OSError:
+                    logger.warning("Failed to remove model directory %s", p, exc_info=True)
+                    continue
+                # Also drop the matching per-model evaluation output, which is
+                # keyed by the model directory name and otherwise lingers in
+                # analytics/evaluation views for the removed behaviour.
+                eval_dir = self._project_root / "derived" / "evaluation" / "by_model" / p.name
+                if eval_dir.exists():
+                    try:
+                        shutil.rmtree(eval_dir)
+                    except OSError:
+                        logger.warning("Failed to remove evaluation directory %s", eval_dir, exc_info=True)
+        return removed
+
+    @staticmethod
+    def _strip_label(raw_label: str, dead_id: str) -> str | None:
+        """Remove *dead_id* from a (possibly pipe-joined) behavior label.
+
+        Returns the remaining label, or ``None`` if nothing survives (the row
+        referenced only the deleted behaviour and should be dropped).
+        """
+        parts = [p.strip() for p in str(raw_label).split("|") if p.strip()]
+        kept = [p for p in parts if p != dead_id]
+        if not kept:
+            return None
+        return "|".join(kept)
+
+    def _purge_behavior_references(self, behavior_id: str) -> dict[str, int]:
+        """Cleanse a deleted behaviour from all review/candidate/label stores.
+
+        A deleted behaviour otherwise lingers in the review-tab filter dropdown
+        and in training data because candidate windows, review decisions, and
+        reviewer labels still carry its id.  This mirrors
+        :meth:`_purge_trained_models`: once a behaviour is gone from the
+        definitions it must be gone everywhere.  Pipe-joined multi-labels have
+        only the deleted constituent stripped; rows that referenced the deleted
+        behaviour exclusively are removed.
+        """
+        counts = {"candidates": 0, "decisions": 0, "labels": 0}
+        if self._project_root is None:
+            return counts
+        dead = str(behavior_id).strip()
+        if not dead:
+            return counts
+        root = self._project_root
+
+        # 1. Candidate queues + clip manifest (behavior_id field).
+        for rel, key in (
+            ("derived/review_tables/external_window_candidates.json", "candidates"),
+            ("derived/review_tables/candidate_segments.json", "candidates"),
+            ("derived/review_tables/candidate_windows.json", "candidates"),
+            ("derived/review_tables/clip_manifest.json", "clips"),
+        ):
+            path = root / rel
+            if not path.exists():
+                continue
+            raw = read_json(path, {})
+            rows = raw.get(key)
+            if not isinstance(rows, list):
+                continue
+            kept = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    kept.append(row)
+                    continue
+                new_label = self._strip_label(row.get("behavior_id", ""), dead)
+                if new_label is None:
+                    counts["candidates"] += 1
+                    continue
+                if new_label != str(row.get("behavior_id", "")):
+                    row = {**row, "behavior_id": new_label}
+                kept.append(row)
+            if len(kept) != len(rows):
+                write_json(path, {**raw, key: kept})
+
+        # 2. Review decisions (behavior_label field).
+        dec_path = root / "derived" / "review_tables" / "review_decisions.json"
+        if dec_path.exists():
+            raw = read_json(dec_path, {})
+            rows = raw.get("decisions")
+            if isinstance(rows, list):
+                kept = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        kept.append(row)
+                        continue
+                    new_label = self._strip_label(row.get("behavior_label", ""), dead)
+                    if new_label is None:
+                        counts["decisions"] += 1
+                        continue
+                    if new_label != str(row.get("behavior_label", "")):
+                        row = {**row, "behavior_label": new_label}
+                    kept.append(row)
+                if len(kept) != len(rows):
+                    write_json(dec_path, {**raw, "decisions": kept})
+
+        # 3. Reviewer labels parquet (review_label column — training source).
+        lbl_path = root / "derived" / "review_labels" / "reviewer_labels.parquet"
+        if lbl_path.exists():
+            try:
+                import pandas as pd
+
+                df = pd.read_parquet(lbl_path)
+                if "review_label" in df.columns and not df.empty:
+                    original = df["review_label"]
+                    stripped = original.map(
+                        lambda v: self._strip_label(v, dead) if v is not None else v
+                    )
+                    drop_mask = stripped.isna() & original.notna()
+                    counts["labels"] = int(drop_mask.sum())
+                    changed = counts["labels"] > 0 or bool(
+                        (stripped.notna() & (stripped != original)).any()
+                    )
+                    if changed:
+                        df = df.assign(review_label=stripped)[~drop_mask].copy()
+                        df.to_parquet(lbl_path, index=False)
+            except Exception:
+                logger.warning("Failed to purge reviewer labels for %s", dead, exc_info=True)
+
+        if any(counts.values()):
+            logger.info(
+                "Purged deleted behaviour %s: %d candidate windows, %d decisions, %d reviewer labels",
+                dead, counts["candidates"], counts["decisions"], counts["labels"],
+            )
+        return counts
 
     def get(self, behavior_id: str) -> BehaviorDefinition | None:
         return next((b for b in self._behaviors if b.behavior_id == behavior_id), None)

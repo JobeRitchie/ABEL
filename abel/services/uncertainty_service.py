@@ -129,7 +129,19 @@ class UncertaintyScoringService:
         ensemble_probs: list[np.ndarray],
         feature_cols: list[str],
         weights: UncertaintyWeights | None = None,
+        feature_matrix: np.ndarray | None = None,
     ) -> pd.DataFrame:
+        """Score segment uncertainty.
+
+        ``feature_matrix`` is the model-aligned feature matrix, when the caller
+        has already built one.  Pass it whenever the model's feature names do not
+        all exist as columns on ``segment_df`` — e.g. a model that spells
+        symmetric distances under the opposite keypoint ordering.  Indexing
+        ``segment_df[feature_cols]`` in that case would raise; materialising the
+        missing columns onto ``segment_df`` to avoid that is worse still, because
+        the caller writes the frame back to segment_features.parquet, which would
+        bake the placeholder values permanently into the feature store.
+        """
         w = weights or UncertaintyWeights()
 
         entropy = self.entropy(class_probs)
@@ -140,7 +152,10 @@ class UncertaintyScoringService:
         # Skip it entirely when its weight is zero, and use a per-instance
         # cache to avoid redundant computation across multi-behaviour passes.
         if w.density_outlier > 0.0:
-            feat_matrix = segment_df[feature_cols].to_numpy(dtype=float)
+            feat_matrix = (
+                feature_matrix if feature_matrix is not None
+                else segment_df[feature_cols].to_numpy(dtype=float)
+            )
             fp = self._feature_fingerprint(feat_matrix)
             if fp not in self._density_cache:
                 self._density_cache[fp] = self.density_outlier_score(feat_matrix)

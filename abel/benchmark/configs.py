@@ -75,10 +75,9 @@ TOGGLE_TEMPORAL_REFINEMENT = AblationToggle(
     key="temporal_refinement",
     label="Temporal Refinement (Bout Post-Processing)",
     description=(
-        "Full bout extraction pipeline: probability smoothing, hysteresis "
-        "thresholding (per-behavior onset/offset), gap merging, and minimum "
-        "bout duration filtering.  Uses the project's established temporal "
-        "review settings."
+        "Full bout extraction pipeline: probability smoothing, per-behavior "
+        "onset thresholding, gap merging, and minimum bout duration "
+        "filtering.  Uses the project's established temporal review settings."
     ),
     overrides=[
         ("temporal_refinement_enabled", True, False),

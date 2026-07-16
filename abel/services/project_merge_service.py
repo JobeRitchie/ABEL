@@ -412,7 +412,7 @@ class ProjectMergeService:
                             .to_numpy(dtype=float)
                         )
                         smoothed = smooth_probabilities(raw, method=sm_method, window=sm_window)
-                        binary   = threshold_probabilities(smoothed, onset_thresh=onset, offset_thresh=onset)
+                        binary   = threshold_probabilities(smoothed, onset_thresh=onset)
                         binary   = merge_close_bouts(binary, max_gap_frames=merge_gap)
                         binary   = remove_short_bouts(binary, min_duration_frames=min_bout)
                         intervals = binary_trace_to_intervals(binary)
@@ -1080,7 +1080,7 @@ class ProjectMergeService:
                 min_bout = int(params.get("min_bout_duration_frames", defaults["min_bout_duration_frames"]))
                 merge_gap = int(params.get("merge_gap_frames", defaults["merge_gap_frames"]))
 
-                binary = threshold_probabilities(smoothed, onset_thresh=onset, offset_thresh=onset)
+                binary = threshold_probabilities(smoothed, onset_thresh=onset)
                 binary = merge_close_bouts(binary, max_gap_frames=merge_gap)
                 binary = remove_short_bouts(binary, min_duration_frames=min_bout)
                 intervals = binary_trace_to_intervals(binary)

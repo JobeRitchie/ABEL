@@ -204,3 +204,95 @@ def test_remove_model_import_deletes_dirs(tmp_path: Path) -> None:
     assert out["removed_models"] == 1
     assert not new_dir.exists()
     assert svc.list_model_imports(host) == []
+
+
+# ---------------------------------------------------------------------------
+# Legacy pairwise-distance ordering
+#
+# Distance is symmetric, so dist_A_to_B and dist_B_to_A are the same
+# measurement. Older extractor builds ordered the pair by keypoint position in
+# the pose file; the current one canonicalises the ordering. A model trained
+# before that change asks for the opposite spelling to the one a new project
+# emits — which is a naming difference, not missing data, and must not block
+# the import.
+# ---------------------------------------------------------------------------
+
+_PAIR_FEATS = [
+    "dist_nose_to_left_ear_mean",       # model spelling (legacy ordering)
+    "dist_nose_to_left_ear_norm_std",
+]
+_HOST_PAIR_FEATS = [
+    "dist_left_ear_to_nose_mean",       # host spelling (canonical ordering)
+    "dist_left_ear_to_nose_norm_std",
+]
+
+
+def test_swapped_distance_pair_is_not_counted_as_missing(tmp_path: Path) -> None:
+    """A model naming a distance the other way round still imports."""
+    host = _make_host(tmp_path, feat_cols=FEATS + _HOST_PAIR_FEATS)
+    src = tmp_path / "src"
+    _write_behaviors(src, [
+        {"behavior_id": "no_behavior", "name": "No Behavior"},
+        {"behavior_id": "src-freeze", "name": "Freeze"},
+    ])
+    _make_model_dir(src, "src-freeze", "Freeze", feat_cols=FEATS + _PAIR_FEATS)
+
+    pv = ModelRefinementService().preview_model_import(host, src)
+    item = next(i for i in pv.items if i.model.behavior_name == "Freeze")
+
+    # The host has the same distances, just spelled the other way round.
+    assert item.missing_features == 0
+    assert item.coverage == 1.0
+    assert item.compatible
+    assert sorted(item.legacy_pair_columns) == sorted(_PAIR_FEATS)
+
+
+def test_import_keeps_feature_cols_intact_and_records_pair_order(tmp_path: Path) -> None:
+    """Import never drops the swapped columns; it records why they were allowed."""
+    host = _make_host(tmp_path, feat_cols=FEATS + _HOST_PAIR_FEATS)
+    src = tmp_path / "src"
+    _write_behaviors(src, [
+        {"behavior_id": "no_behavior", "name": "No Behavior"},
+        {"behavior_id": "src-freeze", "name": "Freeze"},
+    ])
+    _make_model_dir(src, "src-freeze", "Freeze", feat_cols=FEATS + _PAIR_FEATS)
+
+    svc = ModelRefinementService()
+    out = svc.import_models(
+        host, src, ["behavior_model_Freeze"],
+        behavior_decisions={"src-freeze": "host-freeze"},
+    )
+    assert out["status"] == "success"
+
+    md = host / "derived" / "models" / out["imported"][0]["model_dir"]
+    with open(md / "model_state.pkl", "rb") as f:
+        payload = pickle.load(f)
+
+    # The classifier's input width is fixed, so the columns survive verbatim —
+    # scoring re-derives the mapping, it does not need them rewritten.
+    assert set(_PAIR_FEATS).issubset(payload["feature_cols"])
+
+    card = yaml.safe_load((md / "model_card.yaml").read_text(encoding="utf-8"))
+    assert sorted(card["legacy_pair_order_columns"]) == sorted(_PAIR_FEATS)
+
+
+def test_genuinely_absent_features_still_block_import(tmp_path: Path) -> None:
+    """The pair-order allowance must not mask a real feature gap."""
+    host = _make_host(tmp_path, feat_cols=FEATS)
+    src = tmp_path / "src"
+    _write_behaviors(src, [
+        {"behavior_id": "no_behavior", "name": "No Behavior"},
+        {"behavior_id": "src-freeze", "name": "Freeze"},
+    ])
+    # Host has neither ordering of these, and lacks a whole video-feature family.
+    absent = [f"flow_mag_paw_L_{s}" for s in ("mean", "std", "max", "energy")]
+    _make_model_dir(src, "src-freeze", "Freeze", feat_cols=FEATS + _PAIR_FEATS + absent)
+
+    pv = ModelRefinementService().preview_model_import(host, src)
+    item = next(i for i in pv.items if i.model.behavior_name == "Freeze")
+
+    assert not item.compatible
+    assert set(absent).issubset(item.missing_columns)
+    # The swapped pair has no host counterpart either, so it is a real gap too.
+    assert set(_PAIR_FEATS).issubset(item.missing_columns)
+    assert item.legacy_pair_columns == []

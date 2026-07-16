@@ -22,6 +22,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from abel.utils import xgb_predict
+
 logger = logging.getLogger("abel")
 
 
@@ -477,7 +479,7 @@ class BehaviorAwarenessAblationService:
                 classifier_family, {}, 42,
             )
             est_base.fit(x_train_base, y_train)
-            probs_base = est_base.predict_proba(x_val_base)
+            probs_base = xgb_predict.predict_proba(est_base, x_val_base)
             preds_base = np.argmax(probs_base, axis=1)
 
             f1_base = float(f1_score(y_val, preds_base, average="macro", zero_division=0))
@@ -504,7 +506,7 @@ class BehaviorAwarenessAblationService:
                 classifier_family, {}, 42,
             )
             est_aug.fit(x_train_aug, y_train)
-            probs_aug = est_aug.predict_proba(x_val_aug)
+            probs_aug = xgb_predict.predict_proba(est_aug, x_val_aug)
             preds_aug = np.argmax(probs_aug, axis=1)
 
             f1_aug = float(f1_score(y_val, preds_aug, average="macro", zero_division=0))

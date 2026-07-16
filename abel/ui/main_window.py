@@ -45,6 +45,7 @@ from abel.ui.tabs.export_tab import ExportTab
 from abel.ui.tabs.feature_audit_tab import FeatureAuditTab
 from abel.ui.tabs.help_tab import HelpTab
 from abel.ui.tabs.info_tab import InfoTab
+from abel.ui.tabs.methods_tab import MethodsTab
 from abel.ui.tabs.home_tab import HomeTab
 from abel.ui.tabs.logs_tab import LogsTab
 from abel.ui.tabs.pose_features_tab import PoseFeaturesTab
@@ -278,6 +279,7 @@ class MainWindow(QMainWindow):
         self.logs_tab = LogsTab()
         self.settings_tab = SettingsTab(self._settings_service)
         self.help_tab = HelpTab()
+        self.methods_tab = MethodsTab()
         self.info_tab = InfoTab()
 
         self.direct_use_tab = DirectUseTab()
@@ -310,6 +312,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._temporal_group, "Temporal")
         tabs.addTab(self.behavior_analytics_tab, "Analytics")
         tabs.addTab(self.validation_tab, "Validation")
+        tabs.addTab(self.methods_tab, "Methods")
         tabs.addTab(self.export_tab, "Export")
         tabs.addTab(self._direct_use_group, "Direct Use")
         tabs.addTab(self.model_refinement_tab, "Model Refinement")

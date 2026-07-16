@@ -238,7 +238,7 @@ class BehaviorAdaptiveFeatureCacheService:
             backend = "GPU (CUDA)" if gpu_available() else "vectorised CPU"
             if progress_cb is not None:
                 progress_cb(
-                    f"Phase 1 cache: using {backend} for scale {scale_sec:.3f}s "
+                    f"Phase 1 cache: using {backend} for {scale_sec:.3f}s segment window "
                     f"({n_groups} group(s))."
                 )
             dfs: list[pd.DataFrame] = []
@@ -258,7 +258,7 @@ class BehaviorAdaptiveFeatureCacheService:
                 if progress_cb is not None and (idx_group % 5 == 0 or idx_group == n_groups):
                     total_segs = sum(len(d) for d in dfs)
                     progress_cb(
-                        f"Phase 1 cache: scale={scale_sec:.3f}s processed "
+                        f"Phase 1 cache: {scale_sec:.3f}s window processed "
                         f"{idx_group}/{n_groups} sessions (segments={total_segs})."
                     )
             segment_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -309,7 +309,7 @@ class BehaviorAdaptiveFeatureCacheService:
             seg_path = scale_cache_root / f"segment_features_scale_{scale_key}.parquet"
             meta_path = scale_cache_root / f"segment_features_scale_{scale_key}.meta.json"
             if progress_cb is not None:
-                progress_cb(f"Phase 1 cache: preparing scale {scale_sec:.3f}s.")
+                progress_cb(f"Phase 1 cache: preparing {scale_sec:.3f}s segment window.")
 
             should_build = config.regenerate or (not seg_path.exists()) or (not meta_path.exists())
             if should_build:
@@ -318,7 +318,7 @@ class BehaviorAdaptiveFeatureCacheService:
                 if progress_cb is not None:
                     n_sessions_loaded = int(frame_df["session_id"].nunique()) if not frame_df.empty else 0
                     progress_cb(
-                        f"Phase 1 cache: building scale {scale_sec:.3f}s "
+                        f"Phase 1 cache: building {scale_sec:.3f}s segment features "
                         f"from {len(frame_df):,} frame rows ({n_sessions_loaded} session(s))."
                     )
                 segment_df, meta = self._build_scale_segments(
@@ -336,13 +336,13 @@ class BehaviorAdaptiveFeatureCacheService:
                 write_json(meta_path, meta)
                 if progress_cb is not None:
                     progress_cb(
-                        f"Phase 1 cache: wrote scale {scale_sec:.3f}s with {int(meta.get('n_rows', 0))} segments."
+                        f"Phase 1 cache: wrote {int(meta.get('n_rows', 0))} segments ({scale_sec:.3f}s window)."
                     )
             else:
                 meta = read_json(meta_path, {})
                 if progress_cb is not None:
                     progress_cb(
-                        f"Phase 1 cache: reused existing scale {scale_sec:.3f}s cache."
+                        f"Phase 1 cache: reused existing segment-feature cache ({scale_sec:.3f}s window)."
                     )
 
             index.setdefault("scales", {})[scale_key] = {

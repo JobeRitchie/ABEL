@@ -73,7 +73,7 @@ def _ensure_cv2() -> bool:
     return _CV2_OK
 
 from PySide6.QtCore import Qt, QObject, QThreadPool, QTimer, QMimeData, QEvent, Signal
-from PySide6.QtGui import QAction, QDrag, QKeySequence, QGuiApplication
+from PySide6.QtGui import QAction, QDrag, QKeySequence, QGuiApplication, QValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -151,6 +151,52 @@ def is_roi_behavior_id(bid: str) -> bool:
 def is_pseudo_behavior_id(bid: str) -> bool:
     """True for synthetic rows (distance / ROI) that have no raw bout data."""
     return bid == DISTANCE_BEHAVIOR_ID or is_roi_behavior_id(bid)
+
+
+class _AutoDoubleSpinBox(QDoubleSpinBox):
+    """A QDoubleSpinBox whose "auto" state is an *empty* field (== minimum()).
+
+    The obvious way to express an optional numeric override is
+    ``setSpecialValueText("auto")`` at the minimum, but that makes the field
+    practically uneditable: while it displays "auto", the first Backspace turns
+    it into "aut", which Qt's numeric validator rejects, so the keystroke is
+    dropped and the box appears frozen.  The only way to change it is
+    select-all-then-type, which users don't discover.
+
+    Representing "auto" as an empty line edit instead lets the user backspace
+    the field clear and type a fresh value normally.  ``value()`` still returns
+    ``minimum()`` when empty, so existing sentinel checks (``value() ==
+    minimum()`` → auto) keep working unchanged.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.lineEdit().setPlaceholderText("auto")
+
+    def _strip_affixes(self, text: str) -> str:
+        core = text.strip()
+        pre, suf = self.prefix().strip(), self.suffix().strip()
+        if pre and core.startswith(pre):
+            core = core[len(pre):].strip()
+        if suf and core.endswith(suf):
+            core = core[: len(core) - len(suf)].strip()
+        return core
+
+    def validate(self, text: str, pos: int):  # type: ignore[override]
+        if self._strip_affixes(text) == "":
+            return (QValidator.State.Acceptable, text, pos)
+        return super().validate(text, pos)
+
+    def valueFromText(self, text: str) -> float:  # type: ignore[override]
+        if self._strip_affixes(text) == "":
+            return self.minimum()
+        return super().valueFromText(text)
+
+    def textFromValue(self, value: float) -> str:  # type: ignore[override]
+        # Show an empty field (plus the placeholder "auto") at the sentinel.
+        if value <= self.minimum():
+            return ""
+        return super().textFromValue(value)
 
 
 def _debounce_bool(mask: "np.ndarray", min_run: int) -> "np.ndarray":
@@ -497,6 +543,21 @@ class _ViewportResizeFilter(QObject):
             pass
 
 
+# matplotlib named legend sizes → approximate point sizes (default 10pt base font).
+_LEGEND_FS_NAMED = {
+    "xx-small": 6, "x-small": 7, "small": 8,
+    "medium": 10, "large": 12, "x-large": 14, "xx-large": 16,
+}
+
+
+def _legend_fs_to_pt(value: Any, default: int = 8) -> int:
+    """Coerce a matplotlib legend fontsize (numeric or named string) to an int point size."""
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return _LEGEND_FS_NAMED.get(str(value).strip().lower(), default)
+
+
 def _legend_right_margin(labels: list, fig_width_px: int = 700) -> tuple:
     """Compute (rect_right, legend_x) so an external legend fits within figure bounds.
 
@@ -702,6 +763,11 @@ class BehaviorAnalyticsTab(QWidget):
         self._factor_level_order: dict[str, list[str]] = {}  # factor → ordered levels
         self._group_colors: dict[str, str] = {}  # group name → hex color override
         self._raw_bouts: dict[str, pd.DataFrame] = {}
+        # Cross-tab shared backgrounds: the last fully-adjusted RGB plate each
+        # analytics tab rendered, at native video resolution.  Keys: "heatmap",
+        # "density".  Lets one tab reuse the other's exact background so
+        # manuscript figures share a look without re-tuning.
+        self._shared_bg_images: dict[str, np.ndarray] = {}
         self._last_stats_result: dict[str, Any] = {}  # populated by stats dialog
         # Merged external projects
         self._merge_service = ProjectMergeService()
@@ -1684,8 +1750,8 @@ class BehaviorAnalyticsTab(QWidget):
         # --- target_behavior TR: recompute bouts from probability traces ----
         # Use per-behavior thresholds from temporal_review_settings.json so
         # that the graphs tab matches what the temporal review tab shows.
-        # This runs before the behavior_bouts/ fallback so recomputed data
-        # takes priority over stale evaluation-pipeline bouts.
+        # These thresholded traces are genuine temporal-refinement output and
+        # are the only supplement to the per-behavior TR bouts above.
         # Reuse the result cached by _load_from_target_behavior_tr when
         # available — avoids re-reading parquet files and re-running smoothing.
         if self._tr_bouts_cache is not None:
@@ -1712,25 +1778,17 @@ class BehaviorAnalyticsTab(QWidget):
                 else:
                     result[bid] = bout_df.reset_index(drop=True)
 
-        # --- per-behavior parquet files in behavior_bouts/ ----------------
-        # These originate from the evaluation pipeline (window-level
-        # classification) and serve as a fallback when TR bouts are absent.
-        bouts_dir = self._project_root / "derived" / "behavior_bouts"
-        for behavior in behavior_list:
-            bid = str(behavior.behavior_id or "").strip()
-            if not bid or bid in result:
-                continue
-            bout_path = bouts_dir / f"{bid}_bouts.parquet"
-            if bout_path.exists():
-                try:
-                    df = pd.read_parquet(bout_path)
-                    if not df.empty and {"start_frame", "end_frame", "session_id"}.issubset(df.columns):
-                        df = df.copy()
-                        df["behavior_id"] = bid
-                        df["behavior"] = str(behavior.name or bid)
-                        result[bid] = df
-                except Exception:
-                    pass
+        # NOTE: derived/behavior_bouts/<id>_bouts.parquet is intentionally NOT
+        # read here. That file is ambiguous provenance: it is written both by
+        # the evaluation pipeline (raw window-level classification, NOT temporal
+        # refinement — see evaluation_service.evaluate_and_save) and by
+        # direct_run's TR export. Analytics must only ever surface bouts that
+        # passed temporal refinement, so we rely exclusively on the TR
+        # postprocess output above (Source 1) and the target_behavior trace
+        # recompute. Anything direct_run exported to behavior_bouts is also
+        # present in derived/temporal_refinement and is therefore already
+        # covered by Source 1; a behavior with no TR run correctly yields no
+        # bouts here.
 
         return result
 
@@ -2265,42 +2323,16 @@ class BehaviorAnalyticsTab(QWidget):
                     summary_rows.append(_stats(grp, sid_str, bid, bid_name_map.get(bid, bid)))
                     loaded_keys.add((bid, sid_str))
 
-        # ── Source 3: behavior_bouts parquets fallback (parallelised) ──────
-        bouts_dir = project_root / "derived" / "behavior_bouts"
-
-        def _load_bouts_fallback(behavior) -> tuple[list[dict], pd.DataFrame | None, str]:
-            bid = str(behavior.behavior_id or "").strip()
-            bname = str(behavior.name or bid)
-            if not bid or bid in raw_bouts:
-                return [], None, bid
-            bp = bouts_dir / f"{bid}_bouts.parquet"
-            if not bp.exists():
-                return [], None, bid
-            try:
-                df = pd.read_parquet(bp)
-            except Exception:
-                return [], None, bid
-            if df.empty:
-                return [], None, bid
-            out_rows = []
-            for sid, grp in df.groupby("session_id"):
-                if (bid, str(sid)) not in loaded_keys:
-                    out_rows.append(_stats(grp, str(sid), bid, bname))
-            raw_df = df.copy()
-            raw_df["behavior_id"] = bid
-            raw_df["behavior"] = bname
-            return out_rows, raw_df, bid
-
-        if bouts_dir.exists():
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                futures = {pool.submit(_load_bouts_fallback, b): b for b in behavior_list}
-                for fut in as_completed(futures):
-                    s_rows, raw_df, bid = fut.result()
-                    for r in s_rows:
-                        loaded_keys.add((bid, r["session_id"]))
-                    summary_rows.extend(s_rows)
-                    if raw_df is not None and not raw_df.empty and bid not in raw_bouts:
-                        raw_bouts[bid] = raw_df
+        # ── (removed) Source 3: behavior_bouts parquet fallback ────────────
+        # derived/behavior_bouts/<id>_bouts.parquet is deliberately NOT used as
+        # a summary source. It carries ambiguous provenance — the evaluation
+        # pipeline writes raw window-level bouts there (see
+        # evaluation_service.evaluate_and_save), which have NOT passed temporal
+        # refinement. Surfacing those would inflate n_bouts/time with unrefined
+        # detections. TR-exported bouts (direct_run) originate from
+        # derived/temporal_refinement and are already captured by Source 1
+        # above, so nothing genuinely refined is lost. Behaviors without a TR
+        # run fall through to the zero-fill below.
 
         # ── Ensure all known sessions appear (zero rows for absent data) ───
         for sid, subject in subject_by_session.items():
@@ -3152,7 +3184,7 @@ class BehaviorAnalyticsTab(QWidget):
                 min_bout = int(params.get("min_bout_duration_frames", defaults["min_bout_duration_frames"]))
                 merge_gap = int(params.get("merge_gap_frames", defaults["merge_gap_frames"]))
 
-                binary = threshold_probabilities(smoothed, onset_thresh=onset, offset_thresh=onset)
+                binary = threshold_probabilities(smoothed, onset_thresh=onset)
                 binary = merge_close_bouts(binary, max_gap_frames=merge_gap)
                 binary = remove_short_bouts(binary, min_duration_frames=min_bout)
                 intervals = binary_trace_to_intervals(binary)
@@ -4836,57 +4868,53 @@ class _GraphsWidget(QWidget):
             "QPushButton:hover{background:#1976d2;}"
         )
 
-        # Row 5 — axis range overrides
-        self._x_min = QDoubleSpinBox()
+        # Row 5 — axis range overrides (empty field == "auto"; see _AutoDoubleSpinBox)
+        self._x_min = _AutoDoubleSpinBox()
         self._x_min.setRange(-1e6, 1e6)
-        self._x_min.setSpecialValueText("auto")
         self._x_min.setValue(self._x_min.minimum())  # "auto"
         self._x_min.setDecimals(1)
         self._x_min.setMinimumWidth(90)
 
-        self._x_max = QDoubleSpinBox()
+        self._x_max = _AutoDoubleSpinBox()
         self._x_max.setRange(-1e6, 1e6)
-        self._x_max.setSpecialValueText("auto")
         self._x_max.setValue(self._x_max.minimum())
         self._x_max.setDecimals(1)
         self._x_max.setMinimumWidth(90)
 
-        self._y_min = QDoubleSpinBox()
+        self._y_min = _AutoDoubleSpinBox()
         self._y_min.setRange(-1e6, 1e6)
-        self._y_min.setSpecialValueText("auto")
         self._y_min.setValue(self._y_min.minimum())
         self._y_min.setDecimals(1)
         self._y_min.setMinimumWidth(90)
 
-        self._y_max = QDoubleSpinBox()
+        self._y_max = _AutoDoubleSpinBox()
         self._y_max.setRange(-1e6, 1e6)
-        self._y_max.setSpecialValueText("auto")
         self._y_max.setValue(self._y_max.minimum())
         self._y_max.setDecimals(1)
         self._y_max.setMinimumWidth(90)
 
-        # Row 6 — data range (seconds) — filters which bouts contribute
-        self._data_min_s = QDoubleSpinBox()
+        # Row 6 — data range (seconds) — filters which bouts contribute.
+        # Empty field == "auto" (see _AutoDoubleSpinBox); the unit lives in the
+        # row label so the empty box can show its "auto" placeholder.
+        self._data_min_s = _AutoDoubleSpinBox()
         self._data_min_s.setRange(-1e6, 1e6)
-        self._data_min_s.setSpecialValueText("auto")
         self._data_min_s.setValue(self._data_min_s.minimum())
         self._data_min_s.setDecimals(1)
-        self._data_min_s.setSuffix(" s")
         self._data_min_s.setMinimumWidth(100)
         self._data_min_s.setToolTip(
             "Include only bouts starting at or after this time (seconds). "
+            "Leave empty (auto) for no lower bound. "
             "Affects bar graphs, statistics, and all aggregated metrics."
         )
 
-        self._data_max_s = QDoubleSpinBox()
+        self._data_max_s = _AutoDoubleSpinBox()
         self._data_max_s.setRange(-1e6, 1e6)
-        self._data_max_s.setSpecialValueText("auto")
         self._data_max_s.setValue(self._data_max_s.minimum())
         self._data_max_s.setDecimals(1)
-        self._data_max_s.setSuffix(" s")
         self._data_max_s.setMinimumWidth(100)
         self._data_max_s.setToolTip(
             "Include only bouts ending at or before this time (seconds). "
+            "Leave empty (auto) for no upper bound. "
             "Affects bar graphs, statistics, and all aggregated metrics."
         )
 
@@ -4975,9 +5003,9 @@ class _GraphsWidget(QWidget):
 
         data_range_row = QHBoxLayout()
         data_range_row.setSpacing(6)
-        data_range_row.addWidget(QLabel("min"))
+        data_range_row.addWidget(QLabel("from"))
         data_range_row.addWidget(self._data_min_s)
-        data_range_row.addWidget(QLabel("max"))
+        data_range_row.addWidget(QLabel("to"))
         data_range_row.addWidget(self._data_max_s)
         data_range_row.addStretch(1)
 
@@ -5097,7 +5125,7 @@ class _GraphsWidget(QWidget):
         ctrl_vbox.addLayout(action_row2)
         # X/Y axis range overrides live in the Settings… dialog to keep the
         # panel uncluttered; x_axis_row/y_axis_row hold the persistent spinboxes.
-        ctrl_vbox.addLayout(_labeled_row("Data Range:", data_range_row))
+        ctrl_vbox.addLayout(_labeled_row("Data Range (s):", data_range_row))
         ctrl_vbox.addLayout(_labeled_row("Bout Filter:", bout_filter_row))
         ctrl_vbox.addLayout(_until_scale_row)
 
@@ -5551,7 +5579,9 @@ class _GraphsWidget(QWidget):
                 if splitter is not None:
                     total = splitter.width()
                     if total > 400:
-                        left = 360
+                        # Start the handle at 50% width (controls | plot), while
+                        # never letting the controls fall below their min width.
+                        left = max(360, total // 2)
                         self._splitter_g_init = True
                         splitter.setSizes([left, max(400, total - left)])
                         # setSizes lands on the next layout pass; sync the
@@ -6297,9 +6327,9 @@ class _GraphsWidget(QWidget):
                 gdf = sess_bin[sess_bin["group"] == g]
                 stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
                 stats["sem"] = stats["sem"].fillna(0)
-                minutes = stats["time_bin_s"] / 60.0
+                seconds = stats["time_bin_s"]
                 color = self._host._group_color(g, gi)
-                ax.plot(minutes, stats["mean"], marker=".", label=str(g), color=color)
+                ax.plot(seconds, stats["mean"], marker=".", label=str(g), color=color)
                 if error_style != "None":
                     eb = stats["sem"].to_numpy() * (1.0 if error_style == "SEM" else
                                                      (stats["mean"].count()**0.5 if error_style == "SD" else 1.96))
@@ -6311,12 +6341,12 @@ class _GraphsWidget(QWidget):
                         eb = stats["sem"].to_numpy() * 1.96
                     else:
                         eb = stats["sem"].to_numpy()
-                    ax.fill_between(minutes, stats["mean"] - eb,
+                    ax.fill_between(seconds, stats["mean"] - eb,
                                     stats["mean"] + eb, alpha=0.2, color=color)
             eb_lbl = f" \u00b1 {error_style}" if error_style != "None" else ""
             self._apply(ax, title=f"Time Course: {metric_label} by Group",
                         ylabel=f"{metric_label}{eb_lbl}",
-                        xlabel=f"Time (min, bin={bin_seconds}s)")
+                        xlabel=f"Time (s, bin={bin_seconds}s)")
             ax.legend(fontsize=gs["legend_fontsize"], loc=gs["legend_loc"])
         else:
             # Collapse across all sessions → mean ± SEM
@@ -6329,17 +6359,17 @@ class _GraphsWidget(QWidget):
                 bdf = sess_bin[sess_bin["behavior"] == bname]
                 stats = bdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
                 stats["sem"] = stats["sem"].fillna(0)
-                minutes = stats["time_bin_s"] / 60.0
+                seconds = stats["time_bin_s"]
                 color = _PALETTE[bi % len(_PALETTE)]
-                ax.plot(minutes, stats["mean"], marker=".", label=str(bname), color=color)
+                ax.plot(seconds, stats["mean"], marker=".", label=str(bname), color=color)
                 if error_style != "None":
                     eb = stats["sem"].to_numpy() * (1.96 if error_style == "95% CI" else 1.0)
-                    ax.fill_between(minutes, stats["mean"] - eb,
+                    ax.fill_between(seconds, stats["mean"] - eb,
                                     stats["mean"] + eb, alpha=0.2, color=color)
             eb_lbl = f" \u00b1 {error_style}" if error_style != "None" else ""
             self._apply(ax, title=f"Time Course: {metric_label}{eb_lbl} across sessions",
                         ylabel=f"{metric_label}{eb_lbl}",
-                        xlabel=f"Time (min, bin={bin_seconds}s)")
+                        xlabel=f"Time (s, bin={bin_seconds}s)")
             if sess_bin["behavior"].nunique() > 1:
                 ax.legend(fontsize=gs["legend_fontsize"], loc=gs["legend_loc"])
 
@@ -6469,6 +6499,10 @@ class _GraphsWidget(QWidget):
             self._ethogram_cache_key = _cache_key
 
         # -- Render from cache (fast path, even on session filter changes) --------
+        # The data range is intentionally excluded from the cache key so it can
+        # be applied here at render time: bouts are clipped to [lo, hi] so the
+        # ethogram honours the same Data Range window as the bar/over-time views.
+        lo_s, hi_s = self._get_data_range_seconds()
         sessions = sorted(self._checked_ethogram_sessions() or checked)
         session_idx = {s: i for i, s in enumerate(sessions)}
 
@@ -6479,6 +6513,24 @@ class _GraphsWidget(QWidget):
             for sess_label, bouts in sess_bouts.items():
                 if sess_label not in session_idx or not bouts:
                     continue
+                if lo_s is not None or hi_s is not None:
+                    clipped: list[tuple[float, float]] = []
+                    for start_s, dur_s in bouts:
+                        end_s = start_s + dur_s
+                        if lo_s is not None:
+                            if end_s <= lo_s:
+                                continue
+                            start_s = max(start_s, lo_s)
+                        if hi_s is not None:
+                            if start_s >= hi_s:
+                                continue
+                            end_s = min(end_s, hi_s)
+                        new_dur = end_s - start_s
+                        if new_dur > 0:
+                            clipped.append((start_s, new_dur))
+                    bouts = clipped
+                    if not bouts:
+                        continue
                 y = session_idx[sess_label]
                 # broken_barh draws all segments as one PatchCollection — much
                 # faster than individual barh calls for large bout counts.
@@ -6671,11 +6723,11 @@ class _GraphsWidget(QWidget):
             agg = binned.groupby(["behavior", "time_bin_s"])[col].sum().reset_index()
         for bname, grp in agg.groupby("behavior"):
             ordered = grp.sort_values("time_bin_s")
-            minutes = ordered["time_bin_s"] / 60.0
-            ax.plot(minutes, ordered[col], marker=".", label=str(bname))
-            ax.fill_between(minutes, 0, ordered[col], alpha=0.15)
+            seconds = ordered["time_bin_s"]
+            ax.plot(seconds, ordered[col], marker=".", label=str(bname))
+            ax.fill_between(seconds, 0, ordered[col], alpha=0.15)
         self._apply(ax, title=f"Time-Binned {metric_label} (Checked Subjects)",
-                    ylabel=metric_label, xlabel=f"Time (min, bin={bin_seconds}s)")
+                    ylabel=metric_label, xlabel=f"Time (s, bin={bin_seconds}s)")
         if binned["behavior"].nunique() > 1:
             ax.legend(fontsize=self._gs()["legend_fontsize"], loc=self._gs()["legend_loc"])
 
@@ -6717,17 +6769,17 @@ class _GraphsWidget(QWidget):
             gdf = sess_bin[sess_bin["group"] == g]
             stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
             stats["sem"] = stats["sem"].fillna(0)
-            minutes = stats["time_bin_s"] / 60.0
+            seconds = stats["time_bin_s"]
             color = self._host._group_color(g, gi)
-            ax.plot(minutes, stats["mean"], marker=".", label=str(g), color=color)
+            ax.plot(seconds, stats["mean"], marker=".", label=str(g), color=color)
             if error_style != "None":
                 eb = stats["sem"].to_numpy() * (1.96 if error_style == "95% CI" else 1.0)
-                ax.fill_between(minutes, stats["mean"] - eb,
+                ax.fill_between(seconds, stats["mean"] - eb,
                                 stats["mean"] + eb, alpha=0.2, color=color)
         eb_lbl = f" \u00b1 {error_style}" if error_style != "None" else ""
         self._apply(ax, title=f"Time-Binned {metric_label} by Group",
                     ylabel=f"{metric_label}{eb_lbl}",
-                    xlabel=f"Time (min, bin={bin_seconds}s)")
+                    xlabel=f"Time (s, bin={bin_seconds}s)")
         ax.legend(fontsize=self._gs()["legend_fontsize"], loc=self._gs()["legend_loc"])
 
     def _combined_overview(self, df: pd.DataFrame) -> None:
@@ -6885,17 +6937,17 @@ class _GraphsWidget(QWidget):
             gdf = sess_bin[sess_bin["group"] == g]
             stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
             stats["sem"] = stats["sem"].fillna(0)
-            minutes = stats["time_bin_s"] / 60.0
+            seconds = stats["time_bin_s"]
             color = self._host._group_color(g, gi)
-            ax.plot(minutes, stats["mean"], marker=".", label=str(g), color=color, markersize=4)
+            ax.plot(seconds, stats["mean"], marker=".", label=str(g), color=color, markersize=4)
             error_style = gs.get("error_style", "SEM")
             if error_style != "None":
                 eb = stats["sem"].to_numpy() * (1.96 if error_style == "95% CI" else 1.0)
-                ax.fill_between(minutes, stats["mean"] - eb,
+                ax.fill_between(seconds, stats["mean"] - eb,
                                 stats["mean"] + eb, alpha=0.2, color=color)
         eb_lbl = f" \u00b1 {gs.get('error_style', 'SEM')}" if gs.get("error_style", "SEM") != "None" else ""
         self._apply(ax, title=str(beh_name), ylabel=f"{ylabel}{eb_lbl}",
-                    xlabel=f"Time (min, bin={bin_seconds}s)")
+                    xlabel=f"Time (s, bin={bin_seconds}s)")
         ax.legend(fontsize="x-small", loc="upper left",
                   bbox_to_anchor=(1.02, 1.0), borderaxespad=0,
                   frameon=True, framealpha=0.9)
@@ -6984,6 +7036,11 @@ class _GraphsWidget(QWidget):
             legend_combo.addItem(loc)
         legend_combo.setCurrentText(str(gs["legend_loc"]))
 
+        legend_fs = QSpinBox(dlg)
+        legend_fs.setRange(4, 24)
+        legend_fs.setValue(_legend_fs_to_pt(gs.get("legend_fontsize", "small")))
+        legend_fs.setToolTip("Font size (in points) of the legend text on graphs.")
+
         error_style_combo = QComboBox(dlg)
         for es in ("SEM", "SD", "95% CI", "None"):
             error_style_combo.addItem(es, userData=es)
@@ -7065,12 +7122,11 @@ class _GraphsWidget(QWidget):
         }
         _axis_dlg_spins: dict[str, QDoubleSpinBox] = {}
         for _akey, _aholder in _axis_holders.items():
-            _asp = QDoubleSpinBox(dlg)
+            _asp = _AutoDoubleSpinBox(dlg)
             _asp.setRange(-1e6, 1e6)
             _asp.setDecimals(1)
-            _asp.setSpecialValueText("auto")
             _asp.setValue(_aholder.value())
-            _asp.setToolTip("Leave at 'auto' to let matplotlib choose the limit.")
+            _asp.setToolTip("Leave empty (auto) to let matplotlib choose the limit.")
             _axis_dlg_spins[_akey] = _asp
 
         form.addRow("Title font size:", title_fs)
@@ -7078,6 +7134,7 @@ class _GraphsWidget(QWidget):
         form.addRow("Tick font size:", tick_fs)
         form.addRow("Export DPI:", dpi_spin)
         form.addRow("Legend position:", legend_combo)
+        form.addRow("Legend font size:", legend_fs)
         form.addRow("Error bar style:", error_style_combo)
         form.addRow("Bar spacing:", bar_spacing_spin)
         form.addRow("Error bar cap width:", eb_capsize_spin)
@@ -7108,6 +7165,7 @@ class _GraphsWidget(QWidget):
         gs["tick_fontsize"] = tick_fs.value()
         gs["dpi"] = dpi_spin.value()
         gs["legend_loc"] = legend_combo.currentText()
+        gs["legend_fontsize"] = legend_fs.value()
         gs["error_style"] = str(error_style_combo.currentData() or "SEM")
         gs["bar_spacing"] = bar_spacing_spin.value()
         gs["eb_capsize"] = eb_capsize_spin.value()
@@ -7631,6 +7689,7 @@ class _GraphsWidget(QWidget):
         selected_bids = self._host._selected_behavior_ids()
         checked = self._host._summary_tab._checked_subjects()
         eth_checked = self._checked_ethogram_sessions() or checked
+        lo_s, hi_s = self._get_data_range_seconds()
         bid_to_name = {
             str(b.behavior_id): str(b.name or b.behavior_id)
             for b in self._host._behaviors.behaviors
@@ -7654,6 +7713,17 @@ class _GraphsWidget(QWidget):
                     continue
                 start_s = float(bout["start_frame"]) / fps
                 end_s = float(bout["end_frame"]) / fps
+                # Honour the Data Range window (matches the on-screen ethogram).
+                if lo_s is not None:
+                    if end_s <= lo_s:
+                        continue
+                    start_s = max(start_s, lo_s)
+                if hi_s is not None:
+                    if start_s >= hi_s:
+                        continue
+                    end_s = min(end_s, hi_s)
+                if end_s <= start_s:
+                    continue
                 max_end_s = max(max_end_s, end_s)
                 beh_sess_bouts[bname].setdefault(sess_label, []).append((start_s, end_s))
 
@@ -7831,6 +7901,50 @@ class _GraphsWidget(QWidget):
         self.update_graph()
 
 
+def _apply_bg_adjustments(
+    img_rgb: "np.ndarray | None",
+    contrast_pct: float,
+    brightness: float,
+    sharpness_pct: float,
+    blur: float,
+) -> "np.ndarray | None":
+    """Apply contrast/brightness/sharpness/blur + CLAHE to an RGB uint8 image.
+
+    Shared by the Spatial Heatmap and Density Analysis tabs so both produce an
+    identically-styled background from the same slider values.  Returns the
+    adjusted image, or the input unchanged if OpenCV is unavailable / on error.
+    """
+    if img_rgb is None or not _ensure_cv2():
+        return img_rgb
+    try:
+        contrast_scale = float(contrast_pct) / 100.0
+        img_f = img_rgb.astype(np.float32)
+        img_f = (img_f - 128.0) * contrast_scale + 128.0 + float(brightness)
+        out = np.clip(img_f, 0, 255).astype(np.uint8)
+        sharp_pct = float(sharpness_pct)
+        if sharp_pct != 100:
+            strength = (sharp_pct - 100) / 100.0
+            if strength > 0:
+                blurred = cv2.GaussianBlur(out, (0, 0), 3)
+                out = cv2.addWeighted(out, 1.0 + strength, blurred, -strength, 0)
+            else:
+                sigma = max(0.5, abs(strength) * 5)
+                ksize = int(sigma * 3) | 1
+                out = cv2.GaussianBlur(out, (ksize, ksize), sigma)
+        blur_sigma = int(blur)
+        if blur_sigma > 0:
+            ksize = blur_sigma * 2 + 1
+            out = cv2.GaussianBlur(out, (ksize, ksize), blur_sigma)
+        lab = cv2.cvtColor(out, cv2.COLOR_RGB2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        cl = clahe.apply(l_ch)
+        out = cv2.cvtColor(cv2.merge((cl, a_ch, b_ch)), cv2.COLOR_LAB2RGB)
+        return out
+    except Exception:
+        return img_rgb
+
+
 # ======================================================================
 # Sub-tab 3: Spatial Heatmap
 # ======================================================================
@@ -7845,6 +7959,13 @@ class _HeatmapWidget(QWidget):
         self._selected_subjects: set[str] = set()
         self._subject_groups: dict[str, str] = {}
         self._custom_bg_path: str | None = None  # user-imported image
+        # Cached clean-plate background (the expensive temporal-median composite).
+        # Reused across renders so changing display settings / regenerating the
+        # heatmap doesn't re-read + re-median video frames every time.  Keyed by
+        # (bg_mode, target sessions); "Regenerate BG" forces a fresh build.
+        self._bg_plate_cache: np.ndarray | None = None
+        self._bg_plate_key: Any = None
+        self._bg_force_regen: bool = False
 
         # -- subject / behavior selectors -----------------------------
         self._select_subjects_btn = QPushButton("Select Subjects…")
@@ -7944,7 +8065,16 @@ class _HeatmapWidget(QWidget):
         self._bg_mode_combo = QComboBox()
         self._bg_mode_combo.addItem("Auto (from video)", userData="auto")
         self._bg_mode_combo.addItem("Custom image…", userData="custom")
+        self._bg_mode_combo.addItem("From Density Analysis", userData="from_density")
         self._bg_mode_combo.addItem("None (blank)", userData="none")
+        self._bg_mode_combo.setToolTip(
+            "Background source for the heatmap.\n"
+            "• Auto: clean plate built from the video (mouse removed).\n"
+            "• Custom image: your own picture.\n"
+            "• From Density Analysis: reuse the exact background last rendered on\n"
+            "  the Density Analysis tab, so both figures match without re-tuning.\n"
+            "• None: blank dark canvas."
+        )
         self._bg_mode_combo.currentIndexChanged.connect(self._on_bg_mode_changed)
 
         self._bg_alpha = QSlider(Qt.Orientation.Horizontal)
@@ -7999,13 +8129,24 @@ class _HeatmapWidget(QWidget):
 
         self._image_adjust_btn.clicked.connect(_show_image_adjust)
 
+        self._regen_bg_btn = QPushButton("Regenerate BG")
+        self._regen_bg_btn.setToolTip(
+            "Rebuild the clean-plate background from the video frames.\n"
+            "The plate is cached and reused between renders, so this is only\n"
+            "needed after changing the selected subjects or the source video."
+        )
+        self._regen_bg_btn.clicked.connect(self._regenerate_bg)
+
         bg_grp = QGroupBox("Background Image")
         bf = QFormLayout(bg_grp)
         bf.setContentsMargins(4, 2, 4, 2)
         bf.setSpacing(3)
         bf.addRow("Source:", self._bg_mode_combo)
         bf.addRow("Opacity:", self._bg_alpha)
-        bf.addRow(self._image_adjust_btn)
+        _bg_btn_row = QHBoxLayout()
+        _bg_btn_row.addWidget(self._image_adjust_btn)
+        _bg_btn_row.addWidget(self._regen_bg_btn)
+        bf.addRow(_bg_btn_row)
 
         # ── Display group ────────────────────────────────────────────
         self._show_legend = QCheckBox("Show behavior legend")
@@ -8210,6 +8351,14 @@ class _HeatmapWidget(QWidget):
             self._subject_groups = groups
             self._host._status.setText(f"Selected {len(checked)} subject(s) for heatmap.")
 
+    def _regenerate_bg(self) -> None:
+        """Force a rebuild of the cached clean-plate background, then re-render."""
+        self._bg_force_regen = True
+        self._bg_plate_cache = None
+        self._bg_plate_key = None
+        self._host._status.setText("Rebuilding background plate…")
+        self._generate()
+
     def _on_bg_mode_changed(self, idx: int) -> None:
         mode = str(self._bg_mode_combo.currentData())
         if mode == "custom":
@@ -8385,7 +8534,6 @@ class _HeatmapWidget(QWidget):
         _orig_video_h: int = 0
         _comp_target_size: tuple[int, int] | None = None
         COMPOSITE_SCALE_W = 480
-        MAX_COMPOSITE_VIDEOS = 10
         bg_mode = str(self._bg_mode_combo.currentData())
 
         # Always read original video dims for axis scaling even if bg is off
@@ -8414,10 +8562,25 @@ class _HeatmapWidget(QWidget):
                 self._host._status.setText(f"Failed to load custom image: {exc}")
 
         elif bg_mode == "auto" and _CV2_OK and len(target_sids) > 0:
-            import traceback
+            # Clean background plate: sample many frames spread across each
+            # video and take the per-pixel TEMPORAL MEDIAN.  Because the animal
+            # occupies any given pixel only briefly, the median collapses to the
+            # static arena and the moving mouse blob disappears.  (Averaging
+            # first-frames — the old approach — left a ghost mouse wherever an
+            # animal happened to be sitting at t=0.)
+            AUTO_MEDIAN_VIDEOS = 3   # few videos suffice; time-sampling one already cleans the plate
+            FRAMES_PER_VIDEO = 48    # temporal samples per video (median needs a spread)
+            plate_key = ("auto", tuple(target_sids[:AUTO_MEDIAN_VIDEOS]))
+            _plate_cached = (
+                self._bg_plate_cache is not None
+                and self._bg_plate_key == plate_key
+                and not self._bg_force_regen
+            )
             frames: list[np.ndarray] = []
-            errors: list[str] = []
-            for sid in target_sids[:MAX_COMPOSITE_VIDEOS]:
+            # Skip the expensive frame-read + median entirely when a valid plate
+            # is already cached (iterate nothing).
+            for sid in ([] if _plate_cached else target_sids[:AUTO_MEDIAN_VIDEOS]):
+                cap = None
                 try:
                     sess = session_by_id.get(sid)
                     if sess is None:
@@ -8429,56 +8592,75 @@ class _HeatmapWidget(QWidget):
                     if not vp.exists():
                         continue
                     cap = cv2.VideoCapture(str(vp))
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    ret, bgr = cap.read()
-                    cap.release()
-                    if not ret or bgr is None:
-                        continue
-                    if _orig_video_h == 0:
-                        _orig_video_h, _orig_video_w = bgr.shape[:2]
-                    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    if _comp_target_size is None:
-                        _scale = COMPOSITE_SCALE_W / max(rgb.shape[1], 1)
-                        _comp_target_size = (COMPOSITE_SCALE_W, max(1, int(rgb.shape[0] * _scale)))
-                    rgb_small = cv2.resize(rgb, _comp_target_size, interpolation=cv2.INTER_AREA)
-                    frames.append(rgb_small.astype("float32"))
-                except Exception as exc:
-                    errors.append(str(exc))
-            if frames:
-                bg_image = np.mean(frames, axis=0).astype("uint8")
+                    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                    if total <= 1:
+                        idxs = [0]
+                    else:
+                        idxs = np.unique(
+                            np.linspace(0, total - 1, min(FRAMES_PER_VIDEO, total))
+                            .astype(int)
+                        )
+                    for fi in idxs:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
+                        ret, bgr = cap.read()
+                        if not ret or bgr is None:
+                            continue
+                        if _orig_video_h == 0:
+                            _orig_video_h, _orig_video_w = bgr.shape[:2]
+                        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        if _comp_target_size is None:
+                            _scale = COMPOSITE_SCALE_W / max(rgb.shape[1], 1)
+                            _comp_target_size = (COMPOSITE_SCALE_W, max(1, int(rgb.shape[0] * _scale)))
+                        rgb_small = cv2.resize(rgb, _comp_target_size, interpolation=cv2.INTER_AREA)
+                        frames.append(rgb_small)
+                except Exception:
+                    pass
+                finally:
+                    if cap is not None:
+                        cap.release()
+            if _plate_cached:
+                bg_image = self._bg_plate_cache.copy()
+            elif frames:
+                bg_image = np.median(np.stack(frames, axis=0), axis=0).astype("uint8")
                 if _orig_video_w > 0 and _orig_video_h > 0:
                     bg_image = cv2.resize(bg_image, (_orig_video_w, _orig_video_h),
                                           interpolation=cv2.INTER_LINEAR)
+                self._bg_plate_cache = bg_image.copy()
+                self._bg_plate_key = plate_key
 
-        # Apply preprocessing to bg_image (auto or custom)
-        if bg_image is not None and _CV2_OK:
-            try:
-                contrast_scale = self._pp_contrast.value() / 100.0
-                brightness_offset = float(self._pp_brightness.value())
-                img_f = bg_image.astype(np.float32)
-                img_f = (img_f - 128.0) * contrast_scale + 128.0 + brightness_offset
-                bg_image = np.clip(img_f, 0, 255).astype(np.uint8)
-                sharp_pct = self._pp_sharpness.value()
-                if sharp_pct != 100:
-                    strength = (sharp_pct - 100) / 100.0
-                    if strength > 0:
-                        blurred = cv2.GaussianBlur(bg_image, (0, 0), 3)
-                        bg_image = cv2.addWeighted(bg_image, 1.0 + strength, blurred, -strength, 0)
-                    else:
-                        sigma = max(0.5, abs(strength) * 5)
-                        ksize = int(sigma * 3) | 1
-                        bg_image = cv2.GaussianBlur(bg_image, (ksize, ksize), sigma)
-                blur_sigma = self._pp_blur.value()
-                if blur_sigma > 0:
-                    ksize = blur_sigma * 2 + 1
-                    bg_image = cv2.GaussianBlur(bg_image, (ksize, ksize), blur_sigma)
-                lab = cv2.cvtColor(bg_image, cv2.COLOR_RGB2LAB)
-                l_ch, a_ch, b_ch = cv2.split(lab)
-                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-                cl = clahe.apply(l_ch)
-                bg_image = cv2.cvtColor(cv2.merge((cl, a_ch, b_ch)), cv2.COLOR_LAB2RGB)
-            except Exception as exc:
-                self._host._status.setText(f"Background preprocessing failed: {exc}")
+        elif bg_mode == "from_density":
+            # Reuse the exact, already-adjusted background from the Density
+            # Analysis tab so the two figures match without re-tuning.
+            shared = self._host._shared_bg_images.get("density")
+            if shared is not None:
+                bg_image = shared.copy()
+                if _orig_video_w > 0 and _orig_video_h > 0 and _CV2_OK:
+                    bg_image = cv2.resize(bg_image, (_orig_video_w, _orig_video_h),
+                                          interpolation=cv2.INTER_LINEAR)
+            else:
+                self._host._status.setText(
+                    "No Density Analysis background yet — generate a figure on "
+                    "that tab first, then reselect this source."
+                )
+
+        # Apply preprocessing to backgrounds this tab produced (auto/custom).
+        # A "From Density Analysis" plate is already adjusted — use it as-is.
+        if bg_image is not None and bg_mode != "from_density":
+            bg_image = _apply_bg_adjustments(
+                bg_image,
+                self._pp_contrast.value(),
+                self._pp_brightness.value(),
+                self._pp_sharpness.value(),
+                self._pp_blur.value(),
+            )
+            # Publish for the Density Analysis tab to borrow.
+            if bg_image is not None:
+                self._host._shared_bg_images["heatmap"] = bg_image.copy()
+
+        # Clear the regenerate request regardless of source, so a "Regenerate
+        # BG" click made while a non-auto source was active doesn't force an
+        # unintended plate rebuild the next time Auto is selected.
+        self._bg_force_regen = False
 
         # pose look-up per session
         poses_by_sid: dict[str, Any] = {}
@@ -8511,38 +8693,45 @@ class _HeatmapWidget(QWidget):
             bid_to_name[bid] = str(b.name)
             bid_to_color[bid] = str(b.color or _PALETTE[i_b % len(_PALETTE)])
 
-        # bout intervals
-        bouts_dir = project_root / "derived" / "behavior_bouts"
+        # bout intervals — read the SAME filtered/positive bouts that every
+        # other analytics view uses: host._raw_bouts.  That collection is built
+        # by _load_raw_bouts from (1) per-behavior temporal-refinement postprocess
+        # output and (2) the target_behavior probability traces recomputed with
+        # the per-behavior thresholds from temporal_review_settings.json — i.e.
+        # exactly what passes the temporal-review filter.  The Spatial Heatmap
+        # previously used its own _load_tr_bouts, which skipped the
+        # target_behavior trace recompute and so plotted nothing for
+        # multi-behavior target_behavior projects even after TR had been run.
+        # We only ever graph bouts that pass the filter; unify on _raw_bouts so
+        # this tab matches Density Analysis exactly.
+        raw_bouts = self._host._raw_bouts
+        target_sid_set = {str(s) for s in target_sids}
         behavior_bouts: dict[str, pd.DataFrame] = {}
         for b in behavior_list:
             bid = str(b.behavior_id)
             if behavior_filter and bid not in behavior_filter:
                 continue
-            frames: list[pd.DataFrame] = []
-            bout_path = bouts_dir / f"{bid}_bouts.parquet"
-            parquet_exists = bout_path.exists()
-            if parquet_exists:
-                # Parquet is the authoritative source for this behavior.
-                # If it exists but has no rows for the selected sessions, that
-                # correctly means the animal showed no instances of this behavior
-                # in those sessions — do NOT fall back to any other data source,
-                # which could mix in bouts from a different behavior entirely.
+            bdf: pd.DataFrame | None = None
+            raw_df = raw_bouts.get(bid)
+            if raw_df is not None and not raw_df.empty and "session_id" in raw_df.columns:
                 try:
-                    bdf = pd.read_parquet(bout_path)
-                    bdf = bdf[bdf["session_id"].astype(str).isin(target_sids)].reset_index(drop=True)
-                    bdf = self._host._apply_prechop_to_bout_df(bdf, rebase=False)
-                    if not bdf.empty:
-                        frames.append(bdf)
+                    sel = raw_df[raw_df["session_id"].astype(str).isin(target_sid_set)].copy()
+                    if not sel.empty:
+                        sel = self._host._apply_prechop_to_bout_df(sel, rebase=False)
+                        bdf = sel if not sel.empty else None
                 except Exception:
-                    parquet_exists = False  # treat corrupt file as absent
-            if not parquet_exists:
-                # No exported parquet at all — try temporal-refinement per-session bouts
+                    bdf = None
+            # Fallback: analytics not refreshed yet → read TR postprocess directly.
+            if bdf is None and not raw_bouts:
+                frames: list[pd.DataFrame] = []
                 for sid in target_sids:
                     tr_bouts = self._load_tr_bouts(bid, sid)
                     if tr_bouts is not None and not tr_bouts.empty:
                         frames.append(tr_bouts)
-            if frames:
-                behavior_bouts[bid] = pd.concat(frames, ignore_index=True)
+                if frames:
+                    bdf = pd.concat(frames, ignore_index=True)
+            if bdf is not None and not bdf.empty:
+                behavior_bouts[bid] = bdf.reset_index(drop=True)
 
         # -- draw -----------------------------------------------------
         self._figure.clear()
@@ -9007,6 +9196,7 @@ class _DensityAnalysisWidget(QWidget):
         "normalize_mode": "peak",    # "peak" | "sum"
         "diff_metric": "signed",     # "signed" | "normalized" | "log2ratio"
         "diff_mask_threshold": 0.05, # mask diff where both groups < this fraction of peak
+        "diff_smooth_radius": 0,     # extra spatial averaging (grid cells) on the diff map
         "show_group_contours": False, # overlay individual group contours on diff map
         "max_w": 800,
         "max_h": 600,
@@ -9036,6 +9226,14 @@ class _DensityAnalysisWidget(QWidget):
         self._density_manifest_cache: dict[str, Any] = {}
         self._density_session_source_cache: dict[str, dict[str, Any] | None] = {}
 
+        # ── shared background adjustment state (both sub-panels) ──────────
+        # One set of contrast/brightness/sharpness/blur controls + custom image,
+        # matching the Spatial Heatmap so figures can share a look.
+        self._da_custom_bg_path: str | None = None
+        self._da_custom_bg_cache: np.ndarray | None = None   # loaded+resized custom image
+        self._da_custom_bg_cache_key: Any = None
+        self._build_bg_adjust_dialog()
+
         # ── build inner sub-tabs ──────────────────────────────────────
         self._inner = QTabWidget()
         self._density_panel = self._build_density_panel()
@@ -9046,6 +9244,144 @@ class _DensityAnalysisWidget(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self._inner, 1)
+
+    # ──────────────────────────────────────────────────────────────────
+    # Shared background adjustment / composition
+    # ──────────────────────────────────────────────────────────────────
+
+    def _build_bg_adjust_dialog(self) -> None:
+        """Create the shared background-adjustment dialog (contrast / brightness /
+        sharpness / blur) used by both Density sub-panels.  Mirrors the Spatial
+        Heatmap's Image Adjust controls so both tabs can style backgrounds the
+        same way."""
+        self._da_pp_contrast = QSlider(Qt.Orientation.Horizontal)
+        self._da_pp_contrast.setRange(50, 300)
+        self._da_pp_contrast.setValue(130)
+        self._da_pp_brightness = QSlider(Qt.Orientation.Horizontal)
+        self._da_pp_brightness.setRange(-80, 80)
+        self._da_pp_brightness.setValue(0)
+        self._da_pp_sharpness = QSlider(Qt.Orientation.Horizontal)
+        self._da_pp_sharpness.setRange(0, 300)
+        self._da_pp_sharpness.setValue(100)
+        self._da_pp_blur = QSlider(Qt.Orientation.Horizontal)
+        self._da_pp_blur.setRange(0, 10)
+        self._da_pp_blur.setValue(0)
+
+        self._da_image_adjust_dialog = QDialog(self)
+        self._da_image_adjust_dialog.setWindowTitle("Background Adjustments")
+        self._da_image_adjust_dialog.resize(360, 200)
+        _f = QFormLayout(self._da_image_adjust_dialog)
+        _f.addRow("Contrast:", self._da_pp_contrast)
+        _f.addRow("Brightness:", self._da_pp_brightness)
+        _f.addRow("Sharpness:", self._da_pp_sharpness)
+        _f.addRow("Blur:", self._da_pp_blur)
+        _btn_row = QHBoxLayout()
+        _close_btn = QPushButton("Close")
+        _close_btn.clicked.connect(self._da_image_adjust_dialog.hide)
+        _btn_row.addStretch(1)
+        _btn_row.addWidget(_close_btn)
+        _f.addRow(_btn_row)
+
+        # Adjustments are display-only → redraw both sub-panels from cache.
+        for _s in (self._da_pp_contrast, self._da_pp_brightness,
+                   self._da_pp_sharpness, self._da_pp_blur):
+            _s.valueChanged.connect(self._on_bg_adjust_changed)
+
+    def _on_bg_adjust_changed(self, _v: int = 0) -> None:
+        self._dm_auto_redraw()
+        self._diff_auto_redraw()
+
+    def _open_bg_adjust_dialog(self) -> None:
+        self._da_image_adjust_dialog.show()
+        self._da_image_adjust_dialog.raise_()
+        self._da_image_adjust_dialog.activateWindow()
+
+    def _pick_da_custom_bg(self) -> None:
+        """Prompt for a custom background image (shared by both sub-panels)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Background Image", "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All Files (*)",
+        )
+        if path:
+            self._da_custom_bg_path = path
+            self._da_custom_bg_cache = None
+            self._da_custom_bg_cache_key = None
+            self._host._status.setText(f"Custom background: {path}")
+
+    def _on_da_bg_mode_changed(self, combo: QComboBox) -> None:
+        """Prompt for a custom image when 'Custom image…' is selected."""
+        mode = str(combo.currentData() or "")
+        if mode == "custom":
+            self._pick_da_custom_bg()
+            if not self._da_custom_bg_path:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(max(0, combo.findData("auto")))
+                combo.blockSignals(False)
+
+    def _resize_bg(self, img: "np.ndarray | None", video_w: int, video_h: int) -> "np.ndarray | None":
+        if img is None or not _ensure_cv2():
+            return img
+        if img.shape[1] != int(video_w) or img.shape[0] != int(video_h):
+            try:
+                return cv2.resize(img, (int(video_w), int(video_h)),
+                                  interpolation=cv2.INTER_LINEAR)
+            except Exception:
+                return img
+        return img
+
+    def _load_da_custom_bg(self, video_w: int, video_h: int) -> "np.ndarray | None":
+        path = self._da_custom_bg_path
+        if not path or not _ensure_cv2():
+            return None
+        key = (path, int(video_w), int(video_h))
+        if self._da_custom_bg_cache is not None and self._da_custom_bg_cache_key == key:
+            return self._da_custom_bg_cache
+        try:
+            raw = cv2.imread(path, cv2.IMREAD_COLOR)
+            if raw is None:
+                return None
+            rgb = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
+            rgb = cv2.resize(rgb, (int(video_w), int(video_h)),
+                             interpolation=cv2.INTER_LINEAR)
+            self._da_custom_bg_cache = rgb
+            self._da_custom_bg_cache_key = key
+            return rgb
+        except Exception:
+            return None
+
+    def _compose_render_bg(
+        self, bg_mode: str, raw_plate: "np.ndarray | None",
+        video_w: int, video_h: int,
+    ) -> "np.ndarray | None":
+        """Return the final RGB background to draw for *bg_mode*.
+
+        For "auto"/"custom" the raw plate is adjusted with the shared sliders and
+        published to the cross-tab store so the Spatial Heatmap can reuse it.
+        For "from_heatmap" the Spatial Heatmap's already-adjusted plate is reused
+        as-is (identical look, no re-adjustment)."""
+        if bg_mode == "none":
+            return None
+        if bg_mode == "from_heatmap":
+            shared = self._host._shared_bg_images.get("heatmap")
+            if shared is None:
+                self._host._status.setText(
+                    "No Spatial Heatmap background yet — generate one on that tab first."
+                )
+                return None
+            return self._resize_bg(shared.copy(), video_w, video_h)
+        raw = self._load_da_custom_bg(video_w, video_h) if bg_mode == "custom" else raw_plate
+        if raw is None:
+            return None
+        adj = _apply_bg_adjustments(
+            raw,
+            self._da_pp_contrast.value(),
+            self._da_pp_brightness.value(),
+            self._da_pp_sharpness.value(),
+            self._da_pp_blur.value(),
+        )
+        if adj is not None:
+            self._host._shared_bg_images["density"] = adj.copy()
+        return adj
 
     # ──────────────────────────────────────────────────────────────────
     # Panel builders
@@ -9182,10 +9518,26 @@ class _DensityAnalysisWidget(QWidget):
 
         self._dm_bg_mode_combo = QComboBox()
         self._dm_bg_mode_combo.addItem("Auto (from video)", userData="auto")
+        self._dm_bg_mode_combo.addItem("Custom image…", userData="custom")
+        self._dm_bg_mode_combo.addItem("From Spatial Heatmap", userData="from_heatmap")
         self._dm_bg_mode_combo.addItem("None (dark)", userData="none")
         self._dm_bg_mode_combo.setCurrentIndex(
-            0 if self._settings["bg_mode"] == "auto" else 1
+            0 if self._settings["bg_mode"] == "auto" else 3
         )
+        self._dm_bg_mode_combo.setToolTip(
+            "Background source.  'From Spatial Heatmap' reuses that tab's exact\n"
+            "adjusted background so the figures match without re-tuning."
+        )
+        self._dm_bg_mode_combo.currentIndexChanged.connect(
+            lambda: self._on_da_bg_mode_changed(self._dm_bg_mode_combo)
+        )
+
+        self._dm_image_adjust_btn = QPushButton("Image Adjust…")
+        self._dm_image_adjust_btn.setToolTip(
+            "Contrast / brightness / sharpness / blur for the background "
+            "(shared with the Group Comparison sub-tab)."
+        )
+        self._dm_image_adjust_btn.clicked.connect(self._open_bg_adjust_dialog)
 
         self._dm_bg_alpha = QSlider(Qt.Orientation.Horizontal)
         self._dm_bg_alpha.setRange(0, 100)
@@ -9220,6 +9572,7 @@ class _DensityAnalysisWidget(QWidget):
         bg_alpha_row.addWidget(self._dm_bg_alpha_lbl)
         disp_f.addRow("BG source:", self._dm_bg_mode_combo)
         disp_f.addRow("BG opacity:", bg_alpha_row)
+        disp_f.addRow(self._dm_image_adjust_btn)
         disp_f.addRow(self._dm_show_colorbar)
         disp_f.addRow(self._dm_show_count)
 
@@ -9388,6 +9741,24 @@ class _DensityAnalysisWidget(QWidget):
             "respective peaks.  Prevents noise amplification in unvisited areas."
         )
 
+        self._diff_smooth_slider = QSlider(Qt.Orientation.Horizontal)
+        self._diff_smooth_slider.setRange(0, 80)
+        self._diff_smooth_slider.setValue(int(self._settings["diff_smooth_radius"]))
+        self._diff_smooth_slider.setToolTip(
+            "Spatially average each group's density over a larger neighbourhood\n"
+            "before subtracting.  0 = raw resolution (sharp, patchy).  Larger\n"
+            "values pool a wider area, merging small opposite-sign specks into the\n"
+            "surrounding trend — e.g. isolated blue spots inside a mostly-red\n"
+            "region blend into one red field.  Units are grid cells."
+        )
+        self._diff_smooth_lbl = QLabel(
+            "off" if int(self._settings["diff_smooth_radius"]) == 0
+            else f"{int(self._settings['diff_smooth_radius'])} cells"
+        )
+        self._diff_smooth_slider.valueChanged.connect(
+            lambda v: self._diff_smooth_lbl.setText("off" if v == 0 else f"{v} cells")
+        )
+
         self._diff_show_contours = QCheckBox("Overlay group contours")
         self._diff_show_contours.setChecked(bool(self._settings["show_group_contours"]))
         self._diff_show_contours.setToolTip(
@@ -9401,6 +9772,10 @@ class _DensityAnalysisWidget(QWidget):
         metric_f.setSpacing(4)
         metric_f.addRow("Metric:", self._diff_metric_combo)
         metric_f.addRow("Mask threshold:", self._diff_mask_spin)
+        _diff_smooth_row = QHBoxLayout()
+        _diff_smooth_row.addWidget(self._diff_smooth_slider)
+        _diff_smooth_row.addWidget(self._diff_smooth_lbl)
+        metric_f.addRow("Averaging radius:", _diff_smooth_row)
         metric_f.addRow(self._diff_show_contours)
 
         # ── Shared bandwidth / display ────────────────────────────────
@@ -9455,7 +9830,23 @@ class _DensityAnalysisWidget(QWidget):
 
         self._diff_bg_mode_combo = QComboBox()
         self._diff_bg_mode_combo.addItem("Auto (from video)", userData="auto")
+        self._diff_bg_mode_combo.addItem("Custom image…", userData="custom")
+        self._diff_bg_mode_combo.addItem("From Spatial Heatmap", userData="from_heatmap")
         self._diff_bg_mode_combo.addItem("None (dark)", userData="none")
+        self._diff_bg_mode_combo.setToolTip(
+            "Background source.  'From Spatial Heatmap' reuses that tab's exact\n"
+            "adjusted background so the figures match without re-tuning."
+        )
+        self._diff_bg_mode_combo.currentIndexChanged.connect(
+            lambda: self._on_da_bg_mode_changed(self._diff_bg_mode_combo)
+        )
+
+        self._diff_image_adjust_btn = QPushButton("Image Adjust…")
+        self._diff_image_adjust_btn.setToolTip(
+            "Contrast / brightness / sharpness / blur for the background "
+            "(shared with the Density Maps sub-tab)."
+        )
+        self._diff_image_adjust_btn.clicked.connect(self._open_bg_adjust_dialog)
 
         self._diff_bg_alpha = QSlider(Qt.Orientation.Horizontal)
         self._diff_bg_alpha.setRange(0, 100)
@@ -9491,6 +9882,7 @@ class _DensityAnalysisWidget(QWidget):
         diff_bg_alpha_row.addWidget(self._diff_bg_alpha_lbl)
         diff_disp_f.addRow("BG source:", self._diff_bg_mode_combo)
         diff_disp_f.addRow("BG opacity:", diff_bg_alpha_row)
+        diff_disp_f.addRow(self._diff_image_adjust_btn)
         diff_disp_f.addRow(self._diff_show_colorbar)
         diff_disp_f.addRow(self._diff_show_count)
 
@@ -9544,6 +9936,7 @@ class _DensityAnalysisWidget(QWidget):
         for _sig in [
             self._diff_metric_combo.currentIndexChanged,
             self._diff_mask_spin.valueChanged,
+            self._diff_smooth_slider.valueChanged,
             self._diff_show_contours.toggled,
             self._diff_colormap_combo.currentTextChanged,
             self._diff_overlay_alpha.valueChanged,
@@ -10046,28 +10439,66 @@ class _DensityAnalysisWidget(QWidget):
         self, session_ids: list[str], bg_mode: str,
         video_w: int, video_h: int,
     ) -> np.ndarray | None:
-        """Composite background from up to 8 sessions.  Returns RGB uint8 or None."""
+        """Build a clean background plate with the moving subject removed.
+
+        Rather than averaging a handful of first-frames (which leaves faint
+        ghost blobs wherever an animal happened to be sitting), this samples
+        many frames spread across each source video and takes the *per-pixel
+        temporal median*.  Because the animal occupies any given pixel only
+        briefly, the median collapses to the static arena and the mouse blob
+        disappears — no explicit segmentation needed.  Returns RGB uint8 or
+        None.
+        """
         if bg_mode == "none" or not _ensure_cv2():
             return None
+
+        SAMPLE_W = 640          # cap sampling resolution for speed / memory
+        FRAMES_PER_VIDEO = 48   # temporal samples per video (median needs a spread)
+        MAX_VIDEOS = 4
+
+        scale  = min(1.0, SAMPLE_W / max(video_w, 1))
+        samp_w = max(1, int(round(video_w * scale)))
+        samp_h = max(1, int(round(video_h * scale)))
+
         frames: list[np.ndarray] = []
-        for sid in session_ids[:8]:
+        for sid in session_ids[:MAX_VIDEOS]:
             source = self._resolve_density_session_source(sid)
             vp = source.get("video_path") if source else None
             if vp is None or not vp.exists():
                 continue
+            cap = None
             try:
                 cap = cv2.VideoCapture(str(vp))
-                ret, bgr = cap.read()
-                cap.release()
-                if ret and bgr is not None:
+                total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                if total <= 1:
+                    idxs = [0]
+                else:
+                    idxs = np.unique(
+                        np.linspace(0, total - 1, min(FRAMES_PER_VIDEO, total))
+                        .astype(int)
+                    )
+                for fi in idxs:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, int(fi))
+                    ret, bgr = cap.read()
+                    if not ret or bgr is None:
+                        continue
                     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                    rgb = cv2.resize(rgb, (video_w, video_h), interpolation=cv2.INTER_AREA)
-                    frames.append(rgb.astype("float32"))
+                    rgb = cv2.resize(rgb, (samp_w, samp_h), interpolation=cv2.INTER_AREA)
+                    frames.append(rgb)
             except Exception:
                 pass
+            finally:
+                if cap is not None:
+                    cap.release()
+
         if not frames:
             return None
-        return np.mean(frames, axis=0).astype("uint8")
+
+        # Median across the pooled samples → static plate (subject removed).
+        plate = np.median(np.stack(frames, axis=0), axis=0).astype("uint8")
+        if (samp_w, samp_h) != (video_w, video_h):
+            plate = cv2.resize(plate, (video_w, video_h), interpolation=cv2.INTER_LINEAR)
+        return plate
 
     def _estimate_subject_size(self, session_ids: list[str]) -> float | None:
         """Return the estimated subject keypoint span in pixels."""
@@ -10239,6 +10670,10 @@ class _DensityAnalysisWidget(QWidget):
         status_parts: list[str] = []
         grid_h_fb = max(1, int(round(grid_res * video_h / max(video_w, 1))))
 
+        # Compose the final background once (adjusted plate, custom image, or the
+        # Spatial Heatmap's shared background) — reused across every subplot.
+        bg_render = self._compose_render_bg(bg_mode, bg_image, video_w, video_h)
+
         for r_idx, b in enumerate(behaviors):
             bid    = str(b.behavior_id)
             b_name = str(b.name)
@@ -10252,8 +10687,8 @@ class _DensityAnalysisWidget(QWidget):
                 ax = fig.add_subplot(n_rows, n_cols, r_idx * n_cols + c_idx + 1)
                 ax.set_facecolor("#121212")
 
-                if bg_image is not None and bg_alpha > 0 and bg_mode != "none":
-                    ax.imshow(bg_image, aspect="auto", alpha=bg_alpha,
+                if bg_render is not None and bg_alpha > 0:
+                    ax.imshow(bg_render, aspect="auto", alpha=bg_alpha,
                               extent=[0, video_w, video_h, 0], origin="upper")
 
                 if n_pts >= 10:
@@ -10356,6 +10791,7 @@ class _DensityAnalysisWidget(QWidget):
         # Display-only (no recompute needed)
         metric        = str(self._diff_metric_combo.currentData() or "signed")
         mask_threshold = float(self._diff_mask_spin.value())
+        smooth_radius = float(self._diff_smooth_slider.value())
         show_contours = self._diff_show_contours.isChecked()
         colormap      = str(self._diff_colormap_combo.currentText())
         bg_mode       = str(self._diff_bg_mode_combo.currentData() or "auto")
@@ -10445,6 +10881,10 @@ class _DensityAnalysisWidget(QWidget):
         status_parts: list[str] = []
         grid_h_fb = max(1, int(round(grid_res * video_h / max(video_w, 1))))
 
+        # Compose the final background once for all subplots (adjusted plate,
+        # custom image, or the Spatial Heatmap's shared background).
+        bg_render = self._compose_render_bg(bg_mode, bg_image, video_w, video_h)
+
         for col_idx, b in enumerate(behaviors):
             bid    = str(b.behavior_id)
             b_name = str(b.name)
@@ -10454,11 +10894,27 @@ class _DensityAnalysisWidget(QWidget):
             n_a  = cached_b.get("n_a", 0)
             n_b  = cached_b.get("n_b", 0)
 
+            # Optional extra spatial averaging: pool each group's density over a
+            # wider neighbourhood before subtracting, so small opposite-sign
+            # specks dissolve into the surrounding trend.  A broad hotspot keeps
+            # its magnitude through a Gaussian blur (only its edges soften),
+            # while a small sharp peak spreads thin and fades — so an isolated
+            # blue spot inside a mostly-red region blends into one red field.
+            # Do NOT re-normalise each field afterwards: that would rescale the
+            # faded speck straight back up and defeat the merge.  Display-only —
+            # operates on the cached grids, no recompute.
+            if smooth_radius > 0:
+                from scipy.ndimage import gaussian_filter as _gf
+                if Z_a.max() > 0:
+                    Z_a = _gf(Z_a, sigma=smooth_radius)
+                if Z_b.max() > 0:
+                    Z_b = _gf(Z_b, sigma=smooth_radius)
+
             ax = fig.add_subplot(1, n_beh, col_idx + 1)
             ax.set_facecolor("#121212")
 
-            if bg_image is not None and bg_alpha > 0 and bg_mode != "none":
-                ax.imshow(bg_image, aspect="auto", alpha=bg_alpha,
+            if bg_render is not None and bg_alpha > 0:
+                ax.imshow(bg_render, aspect="auto", alpha=bg_alpha,
                           extent=[0, video_w, video_h, 0], origin="upper")
 
             if n_a < 10 and n_b < 10:
@@ -16185,6 +16641,12 @@ class _SessionSectionsWidget(QWidget):
         tick_fs.setValue(int(gs.get("tick_fontsize", 8)))
         form.addRow("Tick font size:", tick_fs)
 
+        legend_fs = QSpinBox(dlg)
+        legend_fs.setRange(4, 24)
+        legend_fs.setValue(_legend_fs_to_pt(gs.get("legend_fontsize", "small")))
+        legend_fs.setToolTip("Font size (in points) of the legend text on graphs.")
+        form.addRow("Legend font size:", legend_fs)
+
         error_cb = QComboBox(dlg)
         for _es in ("SEM", "SD", "95% CI", "None"):
             error_cb.addItem(_es, userData=_es)
@@ -16257,6 +16719,7 @@ class _SessionSectionsWidget(QWidget):
         gs["title_fontsize"] = title_fs.value()
         gs["axis_fontsize"] = axis_fs.value()
         gs["tick_fontsize"] = tick_fs.value()
+        gs["legend_fontsize"] = legend_fs.value()
         gs["error_style"] = str(error_cb.currentData() or "SEM")
         gs["show_indiv_points"] = indiv_chk.isChecked()
         gs["eb_capsize"] = eb_cap.value()
@@ -18577,6 +19040,12 @@ class _VelocityWidget(QWidget):
         tick_fs.setValue(int(gs.get("tick_fontsize", 8)))
         form.addRow("Tick font size:", tick_fs)
 
+        legend_fs = QSpinBox(dlg)
+        legend_fs.setRange(4, 24)
+        legend_fs.setValue(_legend_fs_to_pt(gs.get("legend_fontsize", "small")))
+        legend_fs.setToolTip("Font size (in points) of the legend text on graphs.")
+        form.addRow("Legend font size:", legend_fs)
+
         error_cb = QComboBox(dlg)
         for es in ("SEM", "SD", "95% CI", "None"):
             error_cb.addItem(es, userData=es)
@@ -18652,6 +19121,7 @@ class _VelocityWidget(QWidget):
         gs["title_fontsize"] = title_fs.value()
         gs["axis_fontsize"] = axis_fs.value()
         gs["tick_fontsize"] = tick_fs.value()
+        gs["legend_fontsize"] = legend_fs.value()
         gs["error_style"] = str(error_cb.currentData() or "SEM")
         gs["show_indiv_points"] = indiv_chk.isChecked()
         gs["dpi"] = dpi_spin.value()

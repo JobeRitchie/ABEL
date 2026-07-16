@@ -23,6 +23,7 @@ from abel.services.behavior_adaptive_feature_cache_service import (
     MultiScaleFeatureCacheConfig,
 )
 from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
+from abel.utils import xgb_predict
 
 
 @dataclass
@@ -577,7 +578,7 @@ class BehaviorAdaptiveBenchmarkService:
                 multiclass=False,
             )
             model.fit(x_train, y_train)
-        y_prob = model.predict_proba(x_val)[:, 1]
+        y_prob = xgb_predict.predict_proba(model, x_val)[:, 1]
 
         metrics = BehaviorAdaptiveBenchmarkService._metrics_binary(y_val, y_prob)
         metrics["status"] = "ok"
@@ -686,7 +687,7 @@ class BehaviorAdaptiveBenchmarkService:
                 n_classes=len(labels),
             )
             clf.fit(train[feature_cols].to_numpy(dtype=float), y_train)
-        prob = clf.predict_proba(val[feature_cols].to_numpy(dtype=float))
+        prob = xgb_predict.predict_proba(clf, val[feature_cols].to_numpy(dtype=float))
         pred = np.argmax(prob, axis=1)
 
         cm = confusion_matrix(y_val, pred, labels=np.arange(len(labels)))
@@ -1065,10 +1066,17 @@ class BehaviorAdaptiveBenchmarkService:
 
         baseline_metrics = self._read_baseline_metrics(project_root)
 
+        # Phase 1 benchmarking runs at a single representative segment window
+        # (see ``selected_scales`` above), so the feature cache holds exactly one
+        # entry. The expert pass, modality benchmarking, and confound analysis
+        # all operate on that one window's labeled segments — no multi-scale
+        # selection heuristics are needed, and the labeled table is derived once
+        # and reused for the confound step.
         expert_results: dict[str, Any] = {}
         scale_results: dict[str, Any] = {}
+        scale_labeled: pd.DataFrame | None = None
 
-        _progress("Phase 1: running per-scale expert benchmarks.")
+        _progress("Phase 1: running expert benchmarks.")
         for scale_key, meta in (cache.get("scales") or {}).items():
             seg_path = Path(str(meta.get("segment_features", "")))
             if not seg_path.exists():
@@ -1077,10 +1085,13 @@ class BehaviorAdaptiveBenchmarkService:
             labeled = self._assign_labels_to_segments(seg_df, review_intervals, safe_behavior, confound_map)
             if cfg.quick_feature_test and len(labeled) > int(cfg.subset_max_segments_per_scale):
                 labeled = labeled.sample(n=int(cfg.subset_max_segments_per_scale), random_state=42)
+            # Reused below for the confound analysis (avoids re-reading the parquet
+            # and re-deriving labels).
+            scale_labeled = labeled
             if labeled.empty:
                 scale_results[scale_key] = {
                     "status": "skipped",
-                    "reason": "No overlap between reviewed labels and scale windows.",
+                    "reason": "No overlap between reviewed labels and segment windows.",
                     "scale_sec": float(meta.get("scale_sec", 0.0)),
                 }
                 continue
@@ -1096,10 +1107,7 @@ class BehaviorAdaptiveBenchmarkService:
             scale_out["n_labeled_rows"] = int(len(labeled))
             scale_results[scale_key] = scale_out
 
-            if cfg.enable_modality_benchmarking and scale_key == max(
-                (cache.get("scales") or {}).keys(),
-                key=lambda k: float((cache.get("scales") or {}).get(k, {}).get("scale_sec", 0.0)),
-            ):
+            if cfg.enable_modality_benchmarking:
                 for family_name, cols in families.items():
                     expert_results[family_name] = self._train_binary_expert(
                         labeled,
@@ -1107,53 +1115,15 @@ class BehaviorAdaptiveBenchmarkService:
                         prefer_gpu=gpu_available,
                     )
 
-        # Fallback: ensure expert results exist even if "largest scale" heuristic had no rows.
-        if not expert_results and cfg.enable_modality_benchmarking:
-            for scale_key, meta in (cache.get("scales") or {}).items():
-                seg_path = Path(str(meta.get("segment_features", "")))
-                if not seg_path.exists():
-                    continue
-                labeled = self._assign_labels_to_segments(pd.read_parquet(seg_path), review_intervals, safe_behavior, confound_map)
-                if cfg.quick_feature_test and len(labeled) > int(cfg.subset_max_segments_per_scale):
-                    labeled = labeled.sample(n=int(cfg.subset_max_segments_per_scale), random_state=42)
-                if labeled.empty:
-                    continue
-                families = self._feature_families(labeled)
-                for family_name, cols in families.items():
-                    if family_name in expert_results:
-                        continue
-                    expert_results[family_name] = self._train_binary_expert(
-                        labeled,
-                        cols,
-                        prefer_gpu=gpu_available,
-                    )
-                if expert_results:
-                    break
-
-        # Confound analysis on the best-labeled scale.
+        # Confound analysis reuses the labeled segments from the pass above.
         _progress("Phase 1: computing confound analysis.")
         confound_results: dict[str, Any] = {"enabled": False, "reason": "not run"}
-        if cfg.enable_confound_analysis:
-            best_scale_key = None
-            best_count = -1
-            for scale_key, meta in (cache.get("scales") or {}).items():
-                seg_path = Path(str(meta.get("segment_features", "")))
-                if not seg_path.exists():
-                    continue
-                labeled = self._assign_labels_to_segments(pd.read_parquet(seg_path), review_intervals, safe_behavior, confound_map)
-                if len(labeled) > best_count:
-                    best_count = len(labeled)
-                    best_scale_key = scale_key
-            if best_scale_key is not None:
-                seg_path = Path(str((cache.get("scales") or {}).get(best_scale_key, {}).get("segment_features", "")))
-                labeled = self._assign_labels_to_segments(pd.read_parquet(seg_path), review_intervals, safe_behavior, confound_map)
-                if cfg.quick_feature_test and len(labeled) > int(cfg.subset_max_segments_per_scale):
-                    labeled = labeled.sample(n=int(cfg.subset_max_segments_per_scale), random_state=42)
-                confound_results = self._compute_confound_analysis(
-                    labeled,
-                    safe_behavior,
-                    prefer_gpu=gpu_available,
-                )
+        if cfg.enable_confound_analysis and scale_labeled is not None:
+            confound_results = self._compute_confound_analysis(
+                scale_labeled,
+                safe_behavior,
+                prefer_gpu=gpu_available,
+            )
 
         # Recommendations and weights.
         margin_stat = self._estimate_margin_stat(confound_results)

@@ -14,16 +14,19 @@ from PySide6.QtCore import Qt, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -39,6 +42,7 @@ from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.preprocessing_service import ClipExtractionConfig, ClipExtractionService
 from abel.storage.file_store import read_yaml, write_yaml
 from abel.workers.task_worker import TaskWorker
+from abel.utils.error_text import format_task_error
 
 if TYPE_CHECKING:
     import numpy as np
@@ -128,7 +132,11 @@ class ClipExtractionTab(QWidget):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSortingEnabled(True)
         self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setStretchLastSection(False)
+        # Let the "Source" column absorb extra width so the table fills the
+        # panel instead of leaving a dead margin on the right; the rest keep
+        # their natural sizes.
+        _header = self._table.horizontalHeader()
+        _header.setStretchLastSection(False)
         self._table.setColumnWidth(0, 130)
         self._table.setColumnWidth(1, 150)
         self._table.setColumnWidth(2, 36)
@@ -137,10 +145,11 @@ class ClipExtractionTab(QWidget):
         self._table.setColumnWidth(5, 64)
         self._table.setColumnWidth(6, 120)
         self._table.setColumnWidth(7, 40)
+        _header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setFixedHeight(120)
+        self._log.setMinimumHeight(80)
 
         refresh_btn = QPushButton("Refresh Sessions")
         refresh_btn.clicked.connect(self._refresh)
@@ -173,6 +182,20 @@ class ClipExtractionTab(QWidget):
         # All source types enabled by default; populated on first refresh.
         self._source_filter_enabled: dict[str, bool] = {}
 
+        # Hide-reviewed filter: when on, candidates that already carry a
+        # reviewer label are dropped from the table so the queue only shows
+        # windows still needing review.  The reviewed-ID set is cached per
+        # refresh (it reads reviewer_labels.parquet) and reused across combo
+        # changes, which fire _on_session_changed frequently.
+        self._hide_reviewed_chk = QCheckBox("Hide reviewed clips")
+        self._hide_reviewed_chk.setChecked(False)
+        self._hide_reviewed_chk.setToolTip(
+            "Hide candidates you've already reviewed (any accept / reject / "
+            "relabel decision). Your review labels and clip files are untouched."
+        )
+        self._hide_reviewed_chk.toggled.connect(self._on_session_changed)
+        self._reviewed_ids: set[str] = set()
+
         self._progress = QProgressBar()
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
@@ -195,19 +218,38 @@ class ClipExtractionTab(QWidget):
         row.addWidget(refresh_btn)
         row.addWidget(self._run_btn)
         row.addWidget(self._filter_sources_btn)
+        row.addWidget(self._hide_reviewed_chk)
         row.addWidget(self._clear_btn)
         row.addWidget(self._clear_candidates_btn)
         row.addWidget(self._cancel_btn)
         row.addStretch()
 
+        # Candidate table (top) and run log (bottom) share a vertical splitter
+        # so the user can rebalance them; the table gets the bulk of the space.
+        log_widget = QWidget()
+        log_layout = QVBoxLayout(log_widget)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(4)
+        log_layout.addWidget(QLabel("Log:"))
+        log_layout.addWidget(self._log, 1)
+
+        body_split = QSplitter(Qt.Orientation.Vertical)
+        body_split.setChildrenCollapsible(True)
+        body_split.setHandleWidth(8)
+        body_split.addWidget(self._table)
+        body_split.addWidget(log_widget)
+        body_split.setStretchFactor(0, 1)
+        body_split.setStretchFactor(1, 0)
+        body_split.setSizes([520, 160])
+
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
         layout.addWidget(params)
         layout.addLayout(row)
         layout.addWidget(self._progress)
         layout.addWidget(self._status)
-        layout.addWidget(self._table, 1)
-        layout.addWidget(QLabel("Log:"))
-        layout.addWidget(self._log)
+        layout.addWidget(body_split, 1)
 
         self._bind_project_setting_persistence()
 
@@ -289,6 +331,7 @@ class ClipExtractionTab(QWidget):
         self._crop_area_percent.setValue(125.0)
         self._before_sec.setValue(0.0)
         self._after_sec.setValue(0.0)
+        self._hide_reviewed_chk.setChecked(False)
 
     def _bind_project_setting_persistence(self) -> None:
         self._session_combo.currentIndexChanged.connect(lambda _i: self._persist_ui_settings_to_project())
@@ -300,6 +343,7 @@ class ClipExtractionTab(QWidget):
         self._crop_area_percent.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._before_sec.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._after_sec.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
+        self._hide_reviewed_chk.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
 
     def _on_preset_changed(self, _index: int) -> None:
         preset = self._preset_combo.currentData()
@@ -321,6 +365,7 @@ class ClipExtractionTab(QWidget):
             "crop_area_percent": float(self._crop_area_percent.value()),
             "before_sec": float(self._before_sec.value()),
             "after_sec": float(self._after_sec.value()),
+            "hide_reviewed": bool(self._hide_reviewed_chk.isChecked()),
         }
 
     def _persist_ui_settings_to_project(self) -> None:
@@ -366,6 +411,7 @@ class ClipExtractionTab(QWidget):
             self._crop_area_percent.setValue(float(ui.get("crop_area_percent", 125.0)))
             self._before_sec.setValue(float(ui.get("before_sec", 0.0)))
             self._after_sec.setValue(float(ui.get("after_sec", 0.0)))
+            self._hide_reviewed_chk.setChecked(bool(ui.get("hide_reviewed", False)))
         finally:
             self._loading_ui_settings = False
 
@@ -381,11 +427,16 @@ class ClipExtractionTab(QWidget):
         # Remember selections so they can be restored after the combo rebuild.
         prev_session = self._session_combo.currentData()
         prev_behavior = self._behavior_combo.currentData()
+        prev_preset = self._preset_combo.currentData()
+        prev_preset_id = getattr(prev_preset, "preset_id", "") if prev_preset is not None else ""
 
         # Block signals during rebuild to avoid spurious _on_session_changed calls
-        # (which would clear the table mid-rebuild, making clips appear to vanish).
+        # (which would clear the table mid-rebuild, making clips appear to vanish)
+        # and spurious _on_preset_changed calls (which would reset the crop area
+        # to the preset baseline and stomp the user's chosen value).
         self._session_combo.blockSignals(True)
         self._behavior_combo.blockSignals(True)
+        self._preset_combo.blockSignals(True)
 
         self._session_combo.clear()
         self._behavior_combo.clear()
@@ -399,7 +450,23 @@ class ClipExtractionTab(QWidget):
         for p in self._service.load_project_presets():
             self._preset_combo.addItem(p.name, userData=p)
 
+        # Restore previously selected preset by id (the objects are freshly loaded,
+        # so identity-based findData would not match).
+        if prev_preset_id:
+            for i in range(self._preset_combo.count()):
+                data = self._preset_combo.itemData(i)
+                if getattr(data, "preset_id", "") == prev_preset_id:
+                    self._preset_combo.setCurrentIndex(i)
+                    break
+
         rows = self._combined_candidates()
+        # Cache the reviewed-segment set once per refresh so the "Hide reviewed
+        # clips" filter doesn't re-read reviewer_labels.parquet on every combo
+        # change (_on_session_changed fires often).
+        try:
+            self._reviewed_ids = self._candidate_service.reviewed_segment_ids()
+        except Exception:
+            self._reviewed_ids = set()
         self._candidates_by_session = {}
         for r in rows:
             self._candidates_by_session.setdefault(r.session_id, []).append(r)
@@ -445,6 +512,7 @@ class ClipExtractionTab(QWidget):
 
         self._session_combo.blockSignals(False)
         self._behavior_combo.blockSignals(False)
+        self._preset_combo.blockSignals(False)
 
         if not self._session_order:
             self._status.setText("No subjects found. Run Data Import first.")
@@ -478,6 +546,9 @@ class ClipExtractionTab(QWidget):
                 rows = [c for c in rows if c.behavior_id == behavior_id]
         # Apply source type filter.
         rows = self._apply_source_filter(rows)
+        # Hide already-reviewed candidates when the filter is on.
+        if self._hide_reviewed_chk.isChecked() and self._reviewed_ids:
+            rows = [c for c in rows if str(c.window_id).strip() not in self._reviewed_ids]
         self._populate_table(rows)
 
     def _apply_source_filter(self, rows: list[CandidateWindow]) -> list[CandidateWindow]:
@@ -506,7 +577,7 @@ class ClipExtractionTab(QWidget):
 
     def _open_source_filter_dialog(self) -> None:
         """Show a dialog where the user can check/uncheck candidate source types."""
-        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QCheckBox  # noqa: PLC0415
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox  # noqa: PLC0415
 
         source_types = self._discover_source_types()
         # Ensure every discovered type is in the filter dict (default enabled).
@@ -1240,7 +1311,7 @@ class ClipExtractionTab(QWidget):
         self._waiting_for_worker_finish = False
         self._set_busy_state(False)
         self._append_log("Clip extraction failed:")
-        self._append_log(traceback_text[:600])
+        self._append_log(format_task_error(traceback_text))
         self._progress.setFormat("Error")
         self._status.setText("Clip extraction crashed.")
 

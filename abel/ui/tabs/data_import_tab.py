@@ -37,11 +37,36 @@ from abel.ui.keypoint_mapping_dialog import KeypointMappingDialog
 from abel.ui.pixel_scale_calibration_dialog import PixelScaleCalibrationDialog
 
 
+# Session-table column indices (see _populate_table header order).
+_COL_SUBJECT = 1
+_COL_SESSION_TYPE = 2
+_COL_PXMM = 7
+_EDITABLE_COLS = {_COL_SUBJECT, _COL_SESSION_TYPE, _COL_PXMM}
+
+
+class _SortableTableItem(QTableWidgetItem):
+    """Table item that sorts numerically when both cells hold numbers.
+
+    Plain ``QTableWidgetItem`` sorts lexically, so "10" would sort before "2"
+    for the Score/px-mm columns. Fall back to case-insensitive text order for
+    non-numeric cells (subject, session type, filenames, paths).
+    """
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:  # type: ignore[override]
+        a = self.text().strip()
+        b = other.text().strip() if isinstance(other, QTableWidgetItem) else ""
+        try:
+            return float(a) < float(b)
+        except (ValueError, TypeError):
+            return a.casefold() < b.casefold()
+
+
 class DataImportTab(QWidget):
     """Imports video and pose files and builds linked sessions."""
 
     _copy_progress_signal = Signal(str)
     _copy_log_signal = Signal(str)
+    _blocking_done_signal = Signal()  # emitted (from a worker thread) when a wait-dialog task finishes
     num_animals_changed = Signal(int)  # emitted when the user changes the project's animal count
 
     def __init__(self, import_service: ImportService, parent=None) -> None:
@@ -54,11 +79,14 @@ class DataImportTab(QWidget):
         self._manifest = ImportManifest()
         self._is_populating_table = False
         self.status = QLabel("No project loaded.")
-        self.session_table = QTableWidget(0, 9)
+        self.session_table = QTableWidget(0, 10)
         self.session_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.session_table.setHorizontalHeaderLabels(
-            ["Session ID", "Subject", "Video Asset", "Pose Asset", "Score", "Notes", "px/mm", "Video Path", "Pose Path"]
+            ["Session ID", "Subject", "Session Type", "Video Asset", "Pose Asset", "Score", "Notes", "px/mm", "Video Path", "Pose Path"]
         )
+        # Click a header to sort by that column (e.g. group by Session Type).
+        self.session_table.setSortingEnabled(True)
+        self.session_table.horizontalHeader().setSortIndicatorShown(True)
         self.session_table.itemChanged.connect(self._on_session_item_changed)
         self.log_panel = QTextEdit()
         self.log_panel.setReadOnly(True)
@@ -418,21 +446,45 @@ class DataImportTab(QWidget):
 
     def _build_manifest(self) -> None:
         settings = self._subject_settings_from_ui()
-        if self._manifest.linked_sessions:
-            # Additive path: preserve existing sessions and only add new ones.
-            self._import_service.merge_new_files(
-                self._manifest,
-                self._video_paths,
-                self._pose_paths,
-                settings=settings,
+
+        # Auto Match probes every video/pose file's metadata, which can be slow
+        # when the source files live on a network drive. Run that I/O off the GUI
+        # thread behind a modal wait dialog so the window stays responsive. The
+        # keypoint probe (also file I/O) piggybacks on the same worker and its
+        # result is handed back for the on-thread GUI update below.
+        def _work() -> dict:
+            if self._manifest.linked_sessions:
+                # Additive path: preserve existing sessions and only add new ones.
+                self._import_service.merge_new_files(
+                    self._manifest,
+                    self._video_paths,
+                    self._pose_paths,
+                    settings=settings,
+                )
+            else:
+                # Fresh project: build from scratch.
+                self._manifest = self._import_service.build_manifest(
+                    self._video_paths,
+                    self._pose_paths,
+                    subject_name_settings=settings,
+                )
+            return self._pose_keypoint_sets()
+
+        file_sets, error = self._run_blocking(
+            "Auto Matching",
+            "Scanning imported videos and pose files and linking sessions…\n"
+            "Please wait — reading from the source folders (slow over a network drive).",
+            _work,
+        )
+        if error is not None:
+            self._logger.error("Auto match failed", exc_info=error)
+            QMessageBox.critical(
+                self,
+                "Auto Match Failed",
+                f"Could not finish matching the imported files:\n\n{error}",
             )
-        else:
-            # Fresh project: build from scratch.
-            self._manifest = self._import_service.build_manifest(
-                self._video_paths,
-                self._pose_paths,
-                subject_name_settings=settings,
-            )
+            return
+
         self._populate_table(self._manifest)
         linked = self._manifest.linked_sessions
         self._append_log(
@@ -448,12 +500,16 @@ class DataImportTab(QWidget):
                 f"Scale helper: {missing_scale} session(s) have no px/mm value. "
                 "Enter px/mm in the import table to enable physical-unit metric scaling."
             )
-        self._check_keypoint_consistency()
+        self._check_keypoint_consistency(file_sets)
         self._save_manifest(silent=True)
 
     def _populate_table(self, manifest: ImportManifest) -> None:
         """Fill the session table with human-readable filenames."""
         self._is_populating_table = True
+        # Suspend sorting while filling: with it live, each setItem could reorder
+        # rows mid-populate and scramble the row→value mapping.
+        sorting_was_enabled = self.session_table.isSortingEnabled()
+        self.session_table.setSortingEnabled(False)
         video_by_id = {v.asset_id: v for v in manifest.videos}
         pose_by_id = {p.asset_id: p for p in manifest.poses}
         linked = manifest.linked_sessions
@@ -479,9 +535,12 @@ class DataImportTab(QWidget):
             video_active = (video.local_path or video.source_path) if video else ""
             pose_active = (pose.local_path or pose.source_path) if pose else ""
 
+            session_type = self._import_service.effective_session_type(manifest, session)
+
             values = [
                 session.session_id,
                 subject_name,
+                session_type,
                 video_name,
                 pose_name,
                 f"{session.pairing_score:.2f}",
@@ -491,27 +550,44 @@ class DataImportTab(QWidget):
                 str(Path(pose_active).parent) if pose_active else "",
             ]
             for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
+                item = _SortableTableItem(value)
                 item.setToolTip(value)  # full path visible on hover
-                if col not in {1, 6}:
+                if col not in _EDITABLE_COLS:
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.session_table.setItem(row, col, item)
+        self.session_table.setSortingEnabled(sorting_was_enabled)
         self._is_populating_table = False
 
     def _on_session_item_changed(self, item: QTableWidgetItem) -> None:
         if self._is_populating_table:
             return
-        if item.column() not in {1, 6}:
+        if item.column() not in _EDITABLE_COLS:
             return
         row = item.row()
-        if row < 0 or row >= len(self._manifest.linked_sessions):
+        # Resolve by Session ID (column 0), not row index: sorting reorders rows
+        # so the visual row no longer lines up with linked_sessions positionally.
+        id_item = self.session_table.item(row, 0)
+        if id_item is None:
             return
-
-        session = self._manifest.linked_sessions[row]
-        if item.column() == 1:
+        session = next(
+            (s for s in self._manifest.linked_sessions if s.session_id == id_item.text()),
+            None,
+        )
+        if session is None:
+            return
+        if item.column() == _COL_SUBJECT:
             self._import_service.update_session_subject(self._manifest, session.session_id, item.text())
             self._save_manifest(silent=True)
             self._append_log(f"Updated subject for {session.session_id}: {item.text().strip() or 'unset'}")
+            return
+
+        if item.column() == _COL_SESSION_TYPE:
+            self._import_service.update_session_type(self._manifest, session.session_id, item.text())
+            self._save_manifest(silent=True)
+            self._append_log(
+                f"Updated session type for {session.session_id}: "
+                f"{item.text().strip() or 'unset (regex-derived)'}"
+            )
             return
 
         raw = item.text().strip()
@@ -607,15 +683,102 @@ class DataImportTab(QWidget):
         if answer != QMessageBox.StandardButton.Yes:
             return
 
-        summary = self._import_service.remove_sessions(self._project_root, self._manifest, session_ids)
+        # Removal prunes many large per-session caches (parquet stores, clip
+        # trees), which can take a while. Run it off the GUI thread behind a
+        # modal busy dialog so the window keeps pumping events instead of going
+        # "(Not Responding)".
+        summary = self._run_session_removal(session_ids)
+        if summary is None:
+            return  # an error was reported to the user
+
         self._video_paths = [Path(v.source_path) for v in self._manifest.videos]
         self._pose_paths = [Path(p.source_path) for p in self._manifest.poses]
         self._populate_table(self._manifest)
         self._save_manifest(silent=True)
-        self._append_log(
+        message = (
             f"Removed {summary['sessions']} session(s), deleted {summary['files']} file(s), "
             f"cleaned {summary['rows']} row(s) of associated data."
         )
+        if summary.get("remapped"):
+            message += (
+                f" Re-pointed {summary['remapped']} label/decision/seed(s) at the "
+                "sessions that still hold the same recordings."
+            )
+        self._append_log(message)
+
+    def _run_blocking(self, title: str, message: str, work):
+        """Run *work* on a worker thread behind a modal indeterminate wait dialog.
+
+        Returns ``(result, error)`` where exactly one is meaningful: ``error`` is
+        the caught exception (or ``None`` on success). The GUI thread blocks in a
+        local event loop until the worker signals completion, so the dialog keeps
+        painting and the window stays responsive instead of "(Not Responding)".
+
+        ``work`` must be self-contained (no Qt widget access) — only its return
+        value crosses back; do all GUI updates in the caller after this returns.
+        """
+        import threading
+        from PySide6.QtCore import QEventLoop
+        from PySide6.QtWidgets import QProgressDialog
+
+        progress = QProgressDialog(
+            message,
+            None,  # no cancel button — these tasks aren't safely interruptible
+            0,
+            0,  # min == max == 0 → indeterminate "busy" bar
+            self,
+        )
+        progress.setWindowTitle(title)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+
+        box: dict = {}
+        loop = QEventLoop()
+
+        def _work() -> None:
+            try:
+                box["result"] = work()
+            except Exception as exc:  # noqa: BLE001 - surfaced to the caller
+                box["error"] = exc
+            finally:
+                # Queued across threads → loop.quit runs on the GUI thread.
+                self._blocking_done_signal.emit()
+
+        self._blocking_done_signal.connect(loop.quit)
+        try:
+            threading.Thread(target=_work, daemon=True).start()
+            loop.exec()
+        finally:
+            self._blocking_done_signal.disconnect(loop.quit)
+            progress.close()
+
+        return box.get("result"), box.get("error")
+
+    def _run_session_removal(self, session_ids: list[str]) -> dict | None:
+        """Delete sessions on a worker thread, showing a modal wait dialog.
+
+        Returns the removal summary dict, or ``None`` if it failed (the error is
+        shown to the user).
+        """
+        summary, error = self._run_blocking(
+            "Removing Sessions",
+            "Removing sessions and clearing associated data…\nPlease wait.",
+            lambda: self._import_service.remove_sessions(
+                self._project_root, self._manifest, session_ids
+            ),
+        )
+        if error is not None:
+            self._logger.error("Session removal failed", exc_info=error)
+            QMessageBox.critical(
+                self,
+                "Removal Failed",
+                f"Could not finish removing the selected session(s):\n\n{error}",
+            )
+            return None
+        return summary
 
     # ── Keypoint consistency ─────────────────────────────────────────
 
@@ -680,12 +843,18 @@ class DataImportTab(QWidget):
                 continue
         return out
 
-    def _check_keypoint_consistency(self) -> None:
-        """Flag pose files whose keypoints don't match the project scheme."""
+    def _check_keypoint_consistency(self, file_sets: dict[str, list[str]] | None = None) -> None:
+        """Flag pose files whose keypoints don't match the project scheme.
+
+        *file_sets* may be supplied by a caller that already probed the pose files
+        (e.g. off the GUI thread) to avoid re-reading them here; otherwise they're
+        probed on demand.
+        """
         if not self._manifest.linked_sessions:
             self._keypoint_warning.hide()
             return
-        file_sets = self._pose_keypoint_sets()
+        if file_sets is None:
+            file_sets = self._pose_keypoint_sets()
         if not file_sets:
             self._keypoint_warning.hide()
             return
@@ -959,9 +1128,11 @@ class DataImportTab(QWidget):
         default_session_id = None
         rows = sorted({index.row() for index in self.session_table.selectionModel().selectedRows()})
         if rows:
-            row = rows[0]
-            if 0 <= row < len(self._manifest.linked_sessions):
-                default_session_id = self._manifest.linked_sessions[row].session_id
+            # Read the Session ID from column 0 rather than indexing positionally,
+            # since the table may be sorted into a different order.
+            id_item = self.session_table.item(rows[0], 0)
+            if id_item is not None:
+                default_session_id = id_item.text()
 
         dlg = PixelScaleCalibrationDialog(
             import_service=self._import_service,
@@ -1194,6 +1365,9 @@ class DataImportTab(QWidget):
             name = Path(asset.source_path).name
             if name in available:
                 asset.source_path = str(available[name])
+                # Drop any in-project copy so the new source is what's actually
+                # read (local_path wins over source_path everywhere downstream).
+                asset.local_path = None
                 matched += 1
                 continue
             if kind == "pose":
@@ -1214,6 +1388,7 @@ class DataImportTab(QWidget):
                         candidates = same_ext
                 if len(candidates) == 1:
                     asset.source_path = str(candidates[0])
+                    asset.local_path = None
                     matched += 1
                     lenient += 1
                 elif len(candidates) > 1:
@@ -1222,6 +1397,12 @@ class DataImportTab(QWidget):
         if matched:
             # Save directly — bypass _save_manifest to avoid triggering auto-copy.
             self._import_service.save_manifest(self._project_root, self._manifest)
+            # The relocated files are new data, so any features cached from the
+            # old files are stale. Invalidate them so extraction rebuilds from
+            # the new source (otherwise the old copies would keep being used).
+            if self._project_root and kind == "pose":
+                from abel.services.feature_prep_service import FeaturePrepService
+                FeaturePrepService.invalidate_caches(self._project_root)
             self._populate_table(self._manifest)
             msg = f"Relocated {matched}/{len(assets)} {label} files to {folder}."
             if lenient:
@@ -1233,6 +1414,11 @@ class DataImportTab(QWidget):
                 msg += (
                     f" Skipped {len(ambiguous)} with multiple possible matches "
                     f"({', '.join(ambiguous[:3])}{'…' if len(ambiguous) > 3 else ''})."
+                )
+            if kind == "pose":
+                msg += (
+                    " Cleared any in-project copies so the new pose files are now "
+                    "active — re-run feature extraction to apply them."
                 )
             self._append_log(msg)
         else:

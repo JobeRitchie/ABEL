@@ -586,7 +586,6 @@ class DirectRunService:
 
                 pp_cfg = TemporalRefinementConfig(
                     onset_threshold=onset,
-                    offset_threshold=onset,
                     min_bout_duration_frames=min_bout,
                     merge_gap_frames=merge_gap,
                 )

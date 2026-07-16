@@ -144,3 +144,129 @@ def test_end_to_end_pooling_join(svc, tmp_path):
     assert animals("grooming") == {"track_1"}
     # Relational (Phase-3) feature column survives the label join.
     assert "social_dist_centroid_to_centroid_nearest_norm_mean" in merged.columns
+
+
+def test_structured_label_store_round_trip(tmp_path):
+    """The exact soundboard payload round-trips for revisiting/editing a clip."""
+    rs = ReviewService()
+    rs.set_project(tmp_path)
+    wid = f"seg_track_0_{SESS}_0_29"
+    payload = [
+        {"behavior_id": "rearing", "focal_animal_id": "sub:track_0", "partner_animal_id": None},
+        {"behavior_id": "sniffing", "focal_animal_id": "sub:track_0", "partner_animal_id": "sub:track_1"},
+    ]
+    rs.save_structured_labels(wid, payload)
+    assert rs.get_structured_labels(wid) == payload
+
+    # Editing replaces the stored set (no accumulation).
+    rs.save_structured_labels(wid, [{"behavior_id": "grooming", "focal_animal_id": "sub:track_1", "partner_animal_id": None}])
+    assert [l["behavior_id"] for l in rs.get_structured_labels(wid)] == ["grooming"]
+
+    # Empty payload clears the entry.
+    rs.save_structured_labels(wid, [])
+    assert rs.get_structured_labels(wid) == []
+    # Unknown window -> empty.
+    assert rs.get_structured_labels("nope") == []
+
+
+def test_recommit_replaces_segment_labels(tmp_path):
+    """Re-committing an edited clip purges prior label rows instead of duplicating."""
+    rs = ReviewService()
+    rs.set_project(tmp_path)
+    seg = f"seg_track_0_{SESS}_0_29"
+
+    rs.append_segment_label(ReviewerLabelRecord(segment_id=seg, review_label="rearing", reviewer_id="rev"))
+    labels = rs.load_segment_labels()
+    assert [r.review_label for r in labels] == ["rearing"]
+
+    # Edit: purge this segment's rows, then write the new label.
+    rs.remove_segment_labels([seg])
+    rs.append_segment_label(ReviewerLabelRecord(segment_id=seg, review_label="grooming", reviewer_id="rev"))
+    labels = rs.load_segment_labels()
+    assert [r.review_label for r in labels] == ["grooming"]  # replaced, not duplicated
+
+
+def test_load_labels_rebuilds_chips_without_reemitting():
+    """Soundboard.load_labels rebuilds display chips and does not re-emit structured labels."""
+    from PySide6.QtWidgets import QApplication
+    from abel.ui.behavior_soundboard import BehaviorSoundboard
+
+    app = QApplication.instance() or QApplication([])
+    emitted = []
+    sb = BehaviorSoundboard()
+    sb.configure(
+        [("rearing", "Rearing", "r", False, "none"),
+         ("sniffing", "Sniffing", "s", True, "mutual"),
+         ("fighting", "Fighting", "f", True, "directed")],
+        lambda b: None, {},
+        on_structured=lambda *a: emitted.append(a),
+    )
+    sb.set_animals([("sub:track_0", "black", (200, 0, 0)), ("sub:track_1", "green", (0, 200, 0))])
+    sb.load_labels([
+        {"behavior_id": "rearing", "focal_animal_id": "sub:track_0", "partner_animal_id": None},
+        {"behavior_id": "sniffing", "focal_animal_id": "sub:track_0", "partner_animal_id": "sub:track_1"},
+        {"behavior_id": "fighting", "focal_animal_id": "sub:track_1", "partner_animal_id": "sub:track_0"},
+    ])
+    assert len(sb._clip_labels) == 3
+    assert emitted == []  # load must not re-emit
+    displays = [l["display"] for l in sb._clip_labels]
+    assert displays[0] == "Rearing: black"
+    assert "⇄" in displays[1]  # mutual arrow, both names
+    assert "→" in displays[2]  # directed arrow
+    # Loaded labels feed the next commit payload.
+    captured = []
+    sb._on_commit = lambda L: captured.append(L)
+    sb._commit()
+    assert len(captured) == 1 and len(captured[0]) == 3
+
+
+def test_commit_does_not_wipe_auto_advanced_labels():
+    """After commit auto-advances and repopulates, the next clip's labels survive."""
+    from PySide6.QtWidgets import QApplication
+    from abel.ui.behavior_soundboard import BehaviorSoundboard
+
+    app = QApplication.instance() or QApplication([])
+    sb = BehaviorSoundboard()
+    next_clip = [{"behavior_id": "rearing", "focal_animal_id": "sub:track_1", "partner_animal_id": None}]
+
+    def on_commit(_payload):
+        # Simulate the review tab auto-advancing to the next clip and loading
+        # that clip's previously-committed labels back into the soundboard.
+        sb.load_labels(next_clip)
+
+    sb.configure(
+        [("rearing", "Rearing", "r", False, "none"), ("sniffing", "Sniffing", "s", True, "mutual")],
+        lambda b: None, {}, on_commit=on_commit,
+    )
+    sb.set_animals([("sub:track_0", "black", (200, 0, 0)), ("sub:track_1", "green", (0, 200, 0))])
+    sb._on_animal_clicked("sub:track_0")
+    sb._on_behavior_clicked("rearing")
+    assert len(sb._clip_labels) == 1
+    sb._commit()
+    # The clear must happen before the callback, so the auto-loaded next-clip
+    # labels are not wiped by the post-commit clear.
+    assert len(sb._clip_labels) == 1
+    assert sb._clip_labels[0]["focal_animal_id"] == "sub:track_1"
+
+
+def test_review_label_display_is_animal_aware(svc):
+    """The review-tab 'Active labels' tags name the mouse and social direction."""
+    import re
+    from abel.ui.tabs.review_tab import ReviewTab
+
+    name_by_id = {"sub:track_0": "black female", "sub:track_1": "green female"}
+    structured = [
+        {"behavior_id": "rearing", "focal_animal_id": "sub:track_0", "partner_animal_id": None},
+        {"behavior_id": "fighting", "focal_animal_id": "sub:track_0", "partner_animal_id": "sub:track_1"},
+        {"behavior_id": "sniffing", "focal_animal_id": "sub:track_1", "partner_animal_id": "sub:track_0"},
+    ]
+    tags = ReviewTab._format_structured_tags(structured, name_by_id, svc)
+    plain = [re.sub("<[^>]+>", "", t) for t in tags]
+    assert plain[0] == "Rearing · black female"                       # solo -> animal named
+    assert plain[1] == "Fighting · black female → green female"       # directed -> actor → recipient
+    assert plain[2] == "Sniffing · green female ⇄ black female"       # mutual -> pair
+    # Unknown behavior/animal degrade gracefully rather than crash.
+    fallback = ReviewTab._format_structured_tags(
+        [{"behavior_id": "???", "focal_animal_id": "ghost", "partner_animal_id": None}], {}, svc,
+    )
+    assert re.sub("<[^>]+>", "", fallback[0]) == "??? · ghost"

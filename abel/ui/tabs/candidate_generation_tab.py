@@ -38,6 +38,7 @@ from abel.services.motif_service import MotifDiscoveryService
 from abel.services.pose_features_service import PoseFeaturesService
 from abel.services.seed_service import SeedService
 from abel.workers.task_worker import TaskWorker
+from abel.utils.error_text import format_task_error
 
 logger = logging.getLogger("abel")
 
@@ -501,7 +502,7 @@ class CandidateGenerationTab(QWidget):
         self._cancel_btn.setEnabled(False)
         self._progress.setFormat("Error")
         self._append_log("Candidate generation failed:")
-        self._append_log(traceback_text[:800])
+        self._append_log(format_task_error(traceback_text))
         logger.error("Candidate generation error:\n%s", traceback_text)
 
     @Slot(int, int, str)

@@ -17,11 +17,12 @@ import numpy as np
 import pandas as pd
 
 from abel.benchmark.configs import AblationSuite
-from abel.temporal_refinement.bout_postprocess import (
-    merge_close_bouts,
-    remove_short_bouts,
-    smooth_probabilities,
-    threshold_probabilities,
+from abel.utils import xgb_predict
+from abel.temporal_refinement.refined_eval import (
+    apply_temporal_refinement as _shared_apply_temporal_refinement,
+)
+from abel.temporal_refinement.refined_eval import (
+    load_temporal_settings as _shared_load_temporal_settings,
 )
 
 logger = logging.getLogger("abel.benchmark")
@@ -259,53 +260,12 @@ class AblationRunner:
     ) -> dict[str, Any]:
         """Load per-behavior temporal refinement settings from the project.
 
-        Returns a dict with onset_threshold, min_bout_duration_frames,
-        merge_gap_frames.  Falls back to __all__ defaults if the behavior
-        is not found.
+        Thin wrapper around the shared refinement engine
+        (:func:`abel.temporal_refinement.refined_eval.load_temporal_settings`)
+        so the benchmark, the Validation tab and the external suite all resolve
+        settings identically.
         """
-        defaults = {
-            "onset_threshold": 0.65,
-            "min_bout_duration_frames": 8,
-            "merge_gap_frames": 4,
-        }
-
-        review_path = project_root / "config" / "temporal_review_settings.json"
-        if not review_path.exists():
-            return defaults
-
-        try:
-            with open(review_path, "r") as f:
-                raw = json.load(f)
-        except Exception:
-            return defaults
-
-        # Start with the __all__ baseline
-        all_cfg = raw.get("__all__", {})
-        settings = {**defaults, **all_cfg}
-
-        # Try to find a per-behavior override.  Keys in by_behavior may be
-        # UUIDs, so we need the behavior_definitions.yaml to resolve names.
-        by_behavior = raw.get("by_behavior", {})
-        uuid_to_name: dict[str, str] = {}
-        defs_path = project_root / "config" / "behavior_definitions.yaml"
-        if defs_path.exists():
-            try:
-                import yaml
-
-                with open(defs_path, "r") as f:
-                    defs = yaml.safe_load(f) or {}
-                for b in defs.get("behaviors", []):
-                    uuid_to_name[b["behavior_id"]] = b.get("name", "")
-            except Exception:
-                pass
-
-        for uid, cfg in by_behavior.items():
-            name = uuid_to_name.get(uid, uid)
-            if name == target_behavior or uid == target_behavior:
-                settings.update(cfg)
-                break
-
-        return settings
+        return _shared_load_temporal_settings(project_root, target_behavior)
 
     @staticmethod
     def _apply_temporal_refinement(
@@ -321,94 +281,21 @@ class AblationRunner:
     ) -> np.ndarray:
         """Apply the real bout-extraction pipeline and map results back to clips.
 
-        For each session:
-        1. Build a frame-level probability trace by assigning each clip's
-           target-class probability to its [start_frame, end_frame] range,
-           then linearly interpolating gaps between clips.
-        2. Apply smoothing → hysteresis thresholding → merge close bouts →
-           remove short bouts.
-        3. Map the resulting binary bout trace back to clip predictions:
-           a clip is predicted positive if the majority of its frames
-           fall inside a predicted bout.
-
-        Returns a new copy of *preds* (argmax indices) with temporal
-        refinement applied.
+        Thin wrapper around the shared refinement engine
+        (:func:`abel.temporal_refinement.refined_eval.apply_temporal_refinement`)
+        so the benchmark and the metrics surfaces refine identically.
         """
-        preds = np.argmax(probs, axis=1).copy()
-
-        for sid in np.unique(session_ids):
-            mask = session_ids == sid
-            idxs = np.where(mask)[0]
-            if len(idxs) < 2:
-                continue
-
-            sf = start_frames[idxs].astype(int)
-            ef = end_frames[idxs].astype(int)
-            order = np.argsort(sf)
-            idxs = idxs[order]
-            sf = sf[order]
-            ef = ef[order]
-
-            # Target-class probabilities for these clips
-            clip_probs = probs[idxs, target_col].astype(float)
-
-            # Build frame-level trace
-            trace_start = int(sf[0])
-            trace_end = int(ef[-1])
-            n_frames = trace_end - trace_start + 1
-            if n_frames <= 0:
-                continue
-
-            frame_trace = np.full(n_frames, np.nan, dtype=np.float32)
-
-            # Assign clip probabilities to their frame ranges
-            for i in range(len(idxs)):
-                local_s = int(sf[i]) - trace_start
-                local_e = int(ef[i]) - trace_start
-                local_e = min(local_e, n_frames - 1)
-                frame_trace[local_s : local_e + 1] = clip_probs[i]
-
-            # Interpolate NaN gaps (linear between last known and next known)
-            nans = np.isnan(frame_trace)
-            if nans.any() and not nans.all():
-                known = np.where(~nans)[0]
-                frame_trace = np.interp(
-                    np.arange(n_frames), known, frame_trace[known],
-                ).astype(np.float32)
-
-            # ── Real bout postprocess pipeline ──
-            # 1. Smooth
-            frame_trace = smooth_probabilities(
-                frame_trace, method="moving_average", window=smooth_window,
-            )
-
-            # 2. Hysteresis threshold (offset = onset * 0.7 — standard ratio)
-            offset_thresh = onset_threshold * 0.7
-            binary = threshold_probabilities(
-                frame_trace, onset_threshold, offset_thresh,
-            )
-
-            # 3. Merge close bouts
-            binary = merge_close_bouts(binary, merge_gap_frames)
-
-            # 4. Remove short bouts
-            binary = remove_short_bouts(binary, min_bout_duration_frames)
-
-            # ── Map binary bout trace back to clip predictions ──
-            for i in range(len(idxs)):
-                local_s = int(sf[i]) - trace_start
-                local_e = int(ef[i]) - trace_start
-                local_e = min(local_e, n_frames - 1)
-                clip_span = binary[local_s : local_e + 1]
-                if len(clip_span) > 0 and clip_span.mean() >= 0.5:
-                    preds[idxs[i]] = target_col
-                else:
-                    # Find the most likely non-target class
-                    p = probs[idxs[i]].copy()
-                    p[target_col] = -1.0
-                    preds[idxs[i]] = int(np.argmax(p))
-
-        return preds
+        return _shared_apply_temporal_refinement(
+            probs,
+            target_col,
+            session_ids,
+            start_frames,
+            end_frames,
+            onset_threshold,
+            min_bout_duration_frames,
+            merge_gap_frames,
+            smooth_window=smooth_window,
+        )
 
     @staticmethod
     def _generate_cv_splits(
@@ -801,6 +688,10 @@ class AblationRunner:
                 )
                 est.fit(fd.x_train, fd.y_train,
                         sample_weight=fd.sample_weights)
+                # Before calibration: CalibratedClassifierCV.fit() itself calls
+                # predict_proba on CPU arrays, so the booster must already be on the
+                # CPU or that fit pays the host→device copy too.
+                xgb_predict.ensure_cpu_prediction(est)
 
                 # ── Calibration ───────────────────────────────────
                 clf = est
@@ -811,7 +702,7 @@ class AblationRunner:
                     )
                     calibrated.fit(fd.x_val, fd.y_val)
                     clf = calibrated
-                probs = clf.predict_proba(fd.x_val)
+                probs = xgb_predict.predict_proba(clf, fd.x_val)
 
                 # ── Temporal refinement (bout postprocessing) ─────
                 temporal_on = bool(

@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from abel.storage.file_store import write_json
+import pytest
+
+from abel.storage.file_store import read_json, write_json
 from abel.models.schemas import ImportManifest, ImportNameSettings, LinkedSession, PoseAsset, VideoAsset
 from abel.services.import_service import ImportService
 
@@ -141,6 +143,18 @@ def test_remove_sessions_prunes_manifest_and_associated_data(tmp_path: Path) -> 
             ],
         },
     )
+    # External window candidates (active-learning / temporal-bout review queues)
+    # persist across tabs and must also be pruned so removed sessions do not leak
+    # clips/windows into the review UI.
+    write_json(
+        project_root / "derived" / "review_tables" / "external_window_candidates.json",
+        {
+            "candidates": [
+                {"window_id": "e1", "session_id": "session_drop", "start_frame": 0, "end_frame": 10},
+                {"window_id": "e2", "session_id": "session_keep", "start_frame": 0, "end_frame": 10},
+            ],
+        },
+    )
 
     service = ImportService()
     summary = service.remove_sessions(project_root, manifest, ["session_drop"])
@@ -152,6 +166,56 @@ def test_remove_sessions_prunes_manifest_and_associated_data(tmp_path: Path) -> 
     assert len(manifest.poses) == 1
     assert not (project_root / "derived" / "pose_features" / "session_drop.npz").exists()
     assert not (project_root / "derived" / "syllables" / "session_drop_syllables.npz").exists()
+
+    external = read_json(
+        project_root / "derived" / "review_tables" / "external_window_candidates.json", {}
+    )
+    kept_sessions = {row["session_id"] for row in external.get("candidates", [])}
+    assert kept_sessions == {"session_keep"}
+
+
+def test_remove_sessions_prunes_session_keyed_parquets(tmp_path: Path) -> None:
+    pd = pytest.importorskip("pandas")
+
+    project_root = tmp_path / "project"
+    (project_root / "derived" / "representations").mkdir(parents=True)
+    (project_root / "derived" / "pose_features").mkdir(parents=True)
+
+    manifest = ImportManifest(
+        videos=[
+            VideoAsset(asset_id="v1", source_path="DG01.avi", subject_id="DG01"),
+            VideoAsset(asset_id="v2", source_path="DG02.avi", subject_id="DG02"),
+        ],
+        poses=[
+            PoseAsset(asset_id="p1", source_path="DG01.csv", format="csv", subject_id="DG01"),
+            PoseAsset(asset_id="p2", source_path="DG02.csv", format="csv", subject_id="DG02"),
+        ],
+        linked_sessions=[
+            LinkedSession(session_id="session_keep", video_asset_id="v1", pose_asset_id="p1", subject_id="DG01"),
+            LinkedSession(session_id="session_drop", video_asset_id="v2", pose_asset_id="p2", subject_id="DG02"),
+        ],
+    )
+
+    frame_path = project_root / "derived" / "representations" / "frame_features.parquet"
+    pd.DataFrame(
+        {"session_id": ["session_keep", "session_keep", "session_drop"],
+         "frame": [0, 1, 0], "feat": [1.0, 2.0, 3.0]}
+    ).to_parquet(frame_path, index=False)
+
+    pose_path = project_root / "derived" / "pose_features" / "frame_pose.parquet"
+    pd.DataFrame(
+        {"session_id": ["session_drop", "session_keep"], "frame": [0, 0], "x": [9.0, 8.0]}
+    ).to_parquet(pose_path, index=False)
+
+    service = ImportService()
+    service.remove_sessions(project_root, manifest, ["session_drop"])
+
+    frame_df = pd.read_parquet(frame_path)
+    assert set(frame_df["session_id"]) == {"session_keep"}
+    assert len(frame_df) == 2
+
+    pose_df = pd.read_parquet(pose_path)
+    assert set(pose_df["session_id"]) == {"session_keep"}
 
 
 def test_update_session_pixels_per_mm_and_lookup() -> None:

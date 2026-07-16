@@ -1,0 +1,680 @@
+behaviors:
+- behavior_id: no_behavior
+  name: No Behavior
+  short_name: none
+  description: Universal negative label indicating none of the defined behaviors.
+  operational_definition: Use when the clip does not contain any behavior currently
+    defined in this project.
+  inclusion_criteria: No defined target behavior is present.
+  exclusion_criteria: Any clip where a defined behavior is clearly present.
+  min_duration_sec: 0.0
+  parent_category: null
+  review_priority: 999
+  color: '#90A4AE'
+  keyboard_shortcut: n
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history: []
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: f5ccb390-9829-48e5-b265-7f35e8ad8b69
+  name: Sniff Left Cup
+  short_name: SniffL
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#4A90E2'
+  keyboard_shortcut: l
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:57:42.676010'
+    snapshot:
+      behavior_id: f5ccb390-9829-48e5-b265-7f35e8ad8b69
+      name: Sniff Left Cup
+      short_name: Sniff_L
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: l
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+  name: Sniff Right Cup
+  short_name: SniffR
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#42e23f'
+  keyboard_shortcut: r
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:56:06.736193'
+    snapshot:
+      behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+      name: Sniff Right Cup
+      short_name: SniffR
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: r
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  - timestamp: '2026-07-15T18:57:16.313555'
+    snapshot:
+      behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+      name: Sniff Right Cup
+      short_name: SniffR
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#42e23f'
+      keyboard_shortcut: r
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history:
+      - timestamp: '2026-07-15T18:56:06.736193'
+        snapshot:
+          behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+          name: Sniff Right Cup
+          short_name: SniffR
+          description: ''
+          operational_definition: ''
+          inclusion_criteria: ''
+          exclusion_criteria: ''
+          min_duration_sec: 0.5
+          parent_category: null
+          review_priority: 1
+          color: '#4A90E2'
+          keyboard_shortcut: r
+          is_active: true
+          is_social: false
+          directionality: none
+          notes: ''
+          version_history: []
+          prompt_template:
+            primary_question: Does this clip contain the target behavior?
+            secondary_discriminators: ''
+            exclusion_cues: ''
+            ambiguity_instructions: Use ambiguous if uncertain.
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  - timestamp: '2026-07-15T18:57:31.208341'
+    snapshot:
+      behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+      name: Sniff Right Cup
+      short_name: Sniff_R
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#42e23f'
+      keyboard_shortcut: r
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history:
+      - timestamp: '2026-07-15T18:56:06.736193'
+        snapshot:
+          behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+          name: Sniff Right Cup
+          short_name: SniffR
+          description: ''
+          operational_definition: ''
+          inclusion_criteria: ''
+          exclusion_criteria: ''
+          min_duration_sec: 0.5
+          parent_category: null
+          review_priority: 1
+          color: '#4A90E2'
+          keyboard_shortcut: r
+          is_active: true
+          is_social: false
+          directionality: none
+          notes: ''
+          version_history: []
+          prompt_template:
+            primary_question: Does this clip contain the target behavior?
+            secondary_discriminators: ''
+            exclusion_cues: ''
+            ambiguity_instructions: Use ambiguous if uncertain.
+      - timestamp: '2026-07-15T18:57:16.313555'
+        snapshot:
+          behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+          name: Sniff Right Cup
+          short_name: SniffR
+          description: ''
+          operational_definition: ''
+          inclusion_criteria: ''
+          exclusion_criteria: ''
+          min_duration_sec: 0.5
+          parent_category: null
+          review_priority: 1
+          color: '#42e23f'
+          keyboard_shortcut: r
+          is_active: true
+          is_social: false
+          directionality: none
+          notes: ''
+          version_history:
+          - timestamp: '2026-07-15T18:56:06.736193'
+            snapshot:
+              behavior_id: edd0b833-ed19-4b28-8771-314f1b02af61
+              name: Sniff Right Cup
+              short_name: SniffR
+              description: ''
+              operational_definition: ''
+              inclusion_criteria: ''
+              exclusion_criteria: ''
+              min_duration_sec: 0.5
+              parent_category: null
+              review_priority: 1
+              color: '#4A90E2'
+              keyboard_shortcut: r
+              is_active: true
+              is_social: false
+              directionality: none
+              notes: ''
+              version_history: []
+              prompt_template:
+                primary_question: Does this clip contain the target behavior?
+                secondary_discriminators: ''
+                exclusion_cues: ''
+                ambiguity_instructions: Use ambiguous if uncertain.
+          prompt_template:
+            primary_question: Does this clip contain the target behavior?
+            secondary_discriminators: ''
+            exclusion_cues: ''
+            ambiguity_instructions: Use ambiguous if uncertain.
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+  name: Climb Left Cup
+  short_name: ClimbL
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#e258b9'
+  keyboard_shortcut: c
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:56:14.414191'
+    snapshot:
+      behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+      name: Climb Left Cup
+      short_name: ClimbL
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: c
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  - timestamp: '2026-07-15T18:57:20.871451'
+    snapshot:
+      behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+      name: Climb Left Cup
+      short_name: ClimbL
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#e258b9'
+      keyboard_shortcut: c
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history:
+      - timestamp: '2026-07-15T18:56:14.414191'
+        snapshot:
+          behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+          name: Climb Left Cup
+          short_name: ClimbL
+          description: ''
+          operational_definition: ''
+          inclusion_criteria: ''
+          exclusion_criteria: ''
+          min_duration_sec: 0.5
+          parent_category: null
+          review_priority: 1
+          color: '#4A90E2'
+          keyboard_shortcut: c
+          is_active: true
+          is_social: false
+          directionality: none
+          notes: ''
+          version_history: []
+          prompt_template:
+            primary_question: Does this clip contain the target behavior?
+            secondary_discriminators: ''
+            exclusion_cues: ''
+            ambiguity_instructions: Use ambiguous if uncertain.
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  - timestamp: '2026-07-15T18:57:38.465466'
+    snapshot:
+      behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+      name: Climb Left Cup
+      short_name: Climb_L
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#e258b9'
+      keyboard_shortcut: c
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history:
+      - timestamp: '2026-07-15T18:56:14.414191'
+        snapshot:
+          behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+          name: Climb Left Cup
+          short_name: ClimbL
+          description: ''
+          operational_definition: ''
+          inclusion_criteria: ''
+          exclusion_criteria: ''
+          min_duration_sec: 0.5
+          parent_category: null
+          review_priority: 1
+          color: '#4A90E2'
+          keyboard_shortcut: c
+          is_active: true
+          is_social: false
+          directionality: none
+          notes: ''
+          version_history: []
+          prompt_template:
+            primary_question: Does this clip contain the target behavior?
+            secondary_discriminators: ''
+            exclusion_cues: ''
+            ambiguity_instructions: Use ambiguous if uncertain.
+      - timestamp: '2026-07-15T18:57:20.871451'
+        snapshot:
+          behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+          name: Climb Left Cup
+          short_name: ClimbL
+          description: ''
+          operational_definition: ''
+          inclusion_criteria: ''
+          exclusion_criteria: ''
+          min_duration_sec: 0.5
+          parent_category: null
+          review_priority: 1
+          color: '#e258b9'
+          keyboard_shortcut: c
+          is_active: true
+          is_social: false
+          directionality: none
+          notes: ''
+          version_history:
+          - timestamp: '2026-07-15T18:56:14.414191'
+            snapshot:
+              behavior_id: cdc196ac-6775-4cea-ba16-f9b3d969866f
+              name: Climb Left Cup
+              short_name: ClimbL
+              description: ''
+              operational_definition: ''
+              inclusion_criteria: ''
+              exclusion_criteria: ''
+              min_duration_sec: 0.5
+              parent_category: null
+              review_priority: 1
+              color: '#4A90E2'
+              keyboard_shortcut: c
+              is_active: true
+              is_social: false
+              directionality: none
+              notes: ''
+              version_history: []
+              prompt_template:
+                primary_question: Does this clip contain the target behavior?
+                secondary_discriminators: ''
+                exclusion_cues: ''
+                ambiguity_instructions: Use ambiguous if uncertain.
+          prompt_template:
+            primary_question: Does this clip contain the target behavior?
+            secondary_discriminators: ''
+            exclusion_cues: ''
+            ambiguity_instructions: Use ambiguous if uncertain.
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: 749591a3-236a-4713-81be-b886f5574ac5
+  name: Climb Right Cup
+  short_name: ClimbR
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#e21b50'
+  keyboard_shortcut: k
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:56:18.282343'
+    snapshot:
+      behavior_id: 749591a3-236a-4713-81be-b886f5574ac5
+      name: Climb Right Cup
+      short_name: ClimbR
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: k
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: 9c59bbe9-8bd8-4162-ad40-3ebddb55d98e
+  name: Groom
+  short_name: Groom
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#d1e237'
+  keyboard_shortcut: g
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:56:26.982831'
+    snapshot:
+      behavior_id: 9c59bbe9-8bd8-4162-ad40-3ebddb55d98e
+      name: Groom
+      short_name: Groom
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: g
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: 709d4f12-4e56-4c09-873b-db7ef10ca0ef
+  name: Rear Wall
+  short_name: Rear
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#1fcfe2'
+  keyboard_shortcut: r
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:56:32.763802'
+    snapshot:
+      behavior_id: 709d4f12-4e56-4c09-873b-db7ef10ca0ef
+      name: Rear Wall
+      short_name: Rear
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: r
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: 446c73f2-69f9-4077-8656-c50679c335bf
+  name: Proximity Left Cup
+  short_name: ProxL
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#6d1ae2'
+  keyboard_shortcut: p
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:56:37.730062'
+    snapshot:
+      behavior_id: 446c73f2-69f9-4077-8656-c50679c335bf
+      name: Proximity Left Cup
+      short_name: ProxL
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: p
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.
+- behavior_id: de762f3a-7b7d-4ec2-8753-cea89e565d0f
+  name: Proximity Right Cup
+  short_name: ProxR
+  description: ''
+  operational_definition: ''
+  inclusion_criteria: ''
+  exclusion_criteria: ''
+  min_duration_sec: 0.5
+  parent_category: null
+  review_priority: 1
+  color: '#5ae290'
+  keyboard_shortcut: x
+  is_active: true
+  is_social: false
+  directionality: none
+  notes: ''
+  version_history:
+  - timestamp: '2026-07-15T18:57:01.307584'
+    snapshot:
+      behavior_id: de762f3a-7b7d-4ec2-8753-cea89e565d0f
+      name: Proximity Right Cup
+      short_name: ProxR
+      description: ''
+      operational_definition: ''
+      inclusion_criteria: ''
+      exclusion_criteria: ''
+      min_duration_sec: 0.5
+      parent_category: null
+      review_priority: 1
+      color: '#4A90E2'
+      keyboard_shortcut: x
+      is_active: true
+      is_social: false
+      directionality: none
+      notes: ''
+      version_history: []
+      prompt_template:
+        primary_question: Does this clip contain the target behavior?
+        secondary_discriminators: ''
+        exclusion_cues: ''
+        ambiguity_instructions: Use ambiguous if uncertain.
+  prompt_template:
+    primary_question: Does this clip contain the target behavior?
+    secondary_discriminators: ''
+    exclusion_cues: ''
+    ambiguity_instructions: Use ambiguous if uncertain.

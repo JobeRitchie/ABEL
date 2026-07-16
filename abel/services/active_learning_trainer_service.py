@@ -16,6 +16,7 @@ import pandas as pd
 from abel.models.schemas import ModelCard
 from abel.services.provenance_service import ProvenanceService
 from abel.storage.file_store import write_json, write_yaml
+from abel.utils import xgb_predict
 
 logger = logging.getLogger("abel")
 
@@ -46,6 +47,19 @@ class TrainingConfig:
     augmentation_jitter_sigma: float = 0.05   # noise level as fraction of per-feature std
     augmentation_dropout_prob: float = 0.10   # fraction of features randomly zeroed per copy
     augmentation_copies: int = 3              # synthetic copies per positive example
+    # After the held-out evaluation, refit the model that actually ships on ALL
+    # labeled rows (train + held-out) so per-session corrections (e.g. temporal
+    # false-positive feedback on a validation-fold mouse) reach inference.  The
+    # reported metrics/split_manifest still come from the honest held-out split.
+    # Disabled automatically for the validation/benchmark platform, which needs
+    # the held-out model (it supplies a precomputed split).
+    deploy_refit_on_all_data: bool = True
+    # Very-low-sample guard.  When the number of trainable labeled rows is below
+    # this threshold, reserving a hold-out test set wastes scarce examples and
+    # yields meaningless metrics — so no rows are held out and the model trains
+    # on ALL examples (reported metrics become in-sample, flagged in the log).
+    # Never applied when the caller supplies a precomputed split.
+    min_holdout_samples: int = 10
 
 
 @dataclass
@@ -516,6 +530,101 @@ class ActiveLearningTrainerService:
 
         return df
 
+    def _compute_sample_weights(
+        self, fit_df: pd.DataFrame, cfg: "TrainingConfig"
+    ) -> "tuple[np.ndarray, float, int, int, bool]":
+        """Adaptive per-row sample weights from class imbalance.
+
+        Returns ``(sample_weights, nb_weight, n_pos, n_neg, auto_applied)``.
+        When ``no_behavior_sample_weight`` is 0 the negative weight is derived
+        from the pos/neg ratio (clamped to [0.33, 3.0]); a manual value >0 is
+        used directly.  The no_behavior model inverts which class is "negative".
+        Shared by the held-out fit and the deploy refit so both weight identically.
+        """
+        sample_weights = np.ones(len(fit_df), dtype=float)
+        labels_raw = fit_df["label"].astype(str)
+        target_label_check = str(cfg.target_label or "").strip()
+        _nb_tokens_sw = {"no_behavior", "no_behaviour", "nobehavior", "nobehaviour"}
+        _target_is_nb_sw = (
+            target_label_check.lower().replace("_", "").replace(" ", "") in _nb_tokens_sw
+        )
+        if _target_is_nb_sw:
+            neg_mask = np.array([lbl.strip() == "has_behavior" for lbl in labels_raw])
+        else:
+            neg_mask = np.array([
+                lbl.strip().lower().replace("_", "").replace(" ", "") in _nb_tokens_sw
+                for lbl in labels_raw
+            ])
+        n_neg = int(neg_mask.sum())
+        n_pos_w = len(fit_df) - n_neg
+        nb_weight = float(cfg.no_behavior_sample_weight)
+        auto_applied = False
+        if nb_weight <= 0.0 and n_pos_w > 0 and n_neg > 0:
+            nb_weight = float(np.clip(n_pos_w / n_neg, 0.33, 3.0))
+            auto_applied = True
+        elif nb_weight <= 0.0:
+            nb_weight = 1.0
+        if nb_weight != 1.0 and len(neg_mask):
+            sample_weights[neg_mask] = nb_weight
+        return sample_weights, nb_weight, n_pos_w, n_neg, auto_applied
+
+    def _fit_with_gpu_fallback(
+        self, est, params: "dict[str, Any]", x, y, sample_weights, cfg: "TrainingConfig"
+    ):
+        """Fit ``est`` with the XGBoost CUDA→CPU retry used across the service.
+
+        Returns ``(est, used_cpu_fallback, model_device_requested,
+        model_device_used, fallback_reason)``.  ``est`` may be replaced by a
+        fresh CPU estimator on fallback.  Shared by the held-out fit and the
+        deploy refit so both handle GPU failures identically.
+        """
+        used_cpu_fallback = False
+        model_device_requested = str((params or {}).get("device", "")).strip().lower() or "auto"
+        model_device_used = "cpu"
+        fallback_reason = ""
+        if cfg.classifier_family.lower().strip() == "xgboost":
+            try:
+                est_params = est.get_params() if hasattr(est, "get_params") else {}
+                requested_from_est = str(est_params.get("device", model_device_requested)).strip().lower()
+                if requested_from_est:
+                    model_device_requested = requested_from_est
+            except Exception:
+                pass
+        try:
+            est.fit(x, y, sample_weight=sample_weights)
+            if model_device_requested.startswith("cuda"):
+                model_device_used = "gpu"
+        except Exception as exc:
+            family = cfg.classifier_family.lower().strip()
+            requested_device = str((params or {}).get("device", "")).lower().strip()
+            exc_msg = str(exc).lower()
+            is_gpu_error = "cuda" in exc_msg or "gpu" in exc_msg or "invalid device" in exc_msg
+            should_retry_xgb_cpu = (
+                family == "xgboost"
+                and (requested_device in {"cuda", "cuda:0"} or (requested_device == "" and is_gpu_error))
+            )
+            if not should_retry_xgb_cpu:
+                raise
+            logger.warning(
+                "XGBoost CUDA training failed (%s). Retrying on CPU.",
+                str(exc).splitlines()[0],
+            )
+            fallback_reason = str(exc).splitlines()[0]
+            cpu_params = dict(params)
+            cpu_params["device"] = "cpu"
+            cpu_params.setdefault("tree_method", "hist")
+            est = self._make_estimator("xgboost", cpu_params, cfg.random_state)
+            est.fit(x, y, sample_weight=sample_weights)
+            used_cpu_fallback = True
+            model_device_used = "cpu"
+        # Training is done; everything downstream (calibration, validation inference,
+        # deployment, dense inference) feeds this model CPU numpy.  Leaving the booster
+        # on cuda makes each of those copy the whole matrix host→device — ~7x slower
+        # than just scoring on the CPU, and the source of XGBoost's "mismatched
+        # devices" warning.  See abel.utils.xgb_predict.
+        xgb_predict.ensure_cpu_prediction(est)
+        return est, used_cpu_fallback, model_device_requested, model_device_used, fallback_reason
+
     def train_and_evaluate(
         self,
         df: pd.DataFrame,
@@ -884,16 +993,62 @@ class ActiveLearningTrainerService:
                 raise ValueError("No feature columns remain after feature_cols_override.")
             _log(f"feature_cols_override: {len(feature_cols)} feature(s) retained.")
 
+        # ── Very-low-sample guard: skip the hold-out split ────────────────
+        # With only a handful of labeled clips, reserving a test set wastes
+        # scarce positives and yields meaningless metrics.  Train on ALL rows
+        # instead and flag the metrics as in-sample.  Honoured only for the
+        # internal split — a caller-supplied precomputed split (validation /
+        # benchmark platform) always keeps its held-out rows.
+        _no_holdout = False
         if _use_precomputed:
             _roles_final = df["_eval_split_role"].to_numpy()
             train_idx = np.where(_roles_final == "train")[0]
             val_idx = np.where(_roles_final == "val")[0]
+        elif len(df) < int(cfg.min_holdout_samples):
+            _no_holdout = True
+            train_idx = np.arange(len(df), dtype=int)
+            val_idx = train_idx
+            logger.warning(
+                "Very low sample size (%d labeled row(s) < min_holdout_samples=%d): "
+                "skipping the held-out test split. Training on ALL examples; "
+                "reported metrics are in-sample (training data), not a "
+                "generalization estimate.",
+                len(df), int(cfg.min_holdout_samples),
+            )
+            _log(
+                f"Very low sample size ({len(df)} labeled rows): not holding out any "
+                f"examples — training on all data. Metrics are in-sample, not held-out."
+            )
         else:
             train_idx, val_idx = self._split(df, cfg.split_strategy, cfg.test_size, cfg.random_state)
         if "_eval_split_role" in df.columns:
             df = df.drop(columns=["_eval_split_role"])
         train_df = df.iloc[train_idx]
         val_df = df.iloc[val_idx]
+
+        # Some labels are training aids, not held-out evaluation data, and must
+        # never enter the validation split or they pollute the reported metrics:
+        #   * temporal-review feedback (``temporal_feedback``) — FP/FN corrections
+        #     a reviewer commits to CORRECT the model, not to grade it;
+        #   * cross-project imported examples (``imported:*``) — they come from
+        #     OTHER projects/subjects, so scoring them here isn't a clean
+        #     held-out generalization test for THIS project.
+        # Both are kept in training but moved out of validation.
+        if "label_source" in val_df.columns and not val_df.empty:
+            _src = val_df["label_source"].astype(str)
+            _refine_only = _src.eq("temporal_feedback") | _src.str.startswith("imported:")
+            _n_refine = int(_refine_only.sum())
+            if _n_refine:
+                # In no-holdout mode train_df already contains every row, so only
+                # trim them out of validation — re-adding would duplicate them.
+                if not _no_holdout:
+                    train_df = pd.concat([train_df, val_df.loc[_refine_only]])
+                val_df = val_df.loc[~_refine_only]
+                logger.info(
+                    "Excluded %d refinement-only row(s) (temporal_feedback / imported) "
+                    "from validation; kept for training.",
+                    _n_refine,
+                )
 
         # Build label map from the training split so encoded classes remain
         # contiguous (0..K-1). Some estimators (notably XGBoost) reject sparse
@@ -973,47 +1128,16 @@ class ActiveLearningTrainerService:
         # no_behavior and negatives are "has_behavior".  We detect this
         # and invert the weighting direction so the minority class
         # (whichever it is) receives the upweight.
-        sample_weights = np.ones(len(train_df), dtype=float)
-        train_labels_raw = train_df["label"].astype(str)
-        target_label_check = str(cfg.target_label or "").strip()
-        _nb_tokens_sw = {"no_behavior", "no_behaviour", "nobehavior", "nobehaviour"}
-        _target_is_nb_sw = (
-            target_label_check.lower().replace("_", "").replace(" ", "")
-            in _nb_tokens_sw
+        sample_weights, nb_weight, n_pos_w, n_neg, _auto_weight_applied = (
+            self._compute_sample_weights(train_df, cfg)
         )
-
-        if _target_is_nb_sw:
-            # No-behavior model: positive = no_behavior, negative = has_behavior
-            neg_mask = np.array([
-                lbl.strip() == "has_behavior"
-                for lbl in train_labels_raw
-            ])
-        else:
-            # Standard model: negative = any no_behavior variant
-            neg_mask = np.array([
-                lbl.strip().lower().replace("_", "").replace(" ", "") in _nb_tokens_sw
-                for lbl in train_labels_raw
-            ])
-        n_neg = int(neg_mask.sum())
-        n_pos_w = len(train_df) - n_neg
-
-        nb_weight = float(cfg.no_behavior_sample_weight)
-        if nb_weight <= 0.0 and n_pos_w > 0 and n_neg > 0:
-            # Auto: set weight so effective negative mass ≈ positive mass.
-            # Clamp to [0.33, 3.0] to avoid extreme corrections.
-            auto_weight = float(np.clip(n_pos_w / n_neg, 0.33, 3.0))
-            nb_weight = auto_weight
+        if _auto_weight_applied:
             logger.info(
                 "Adaptive sample weight: %d positives / %d negatives → "
                 "negative_weight=%.3f.",
                 n_pos_w, n_neg, nb_weight,
             )
             _log(f"Adaptive sample weight: {n_pos_w} pos / {n_neg} neg → weight={nb_weight:.3f}")
-        elif nb_weight <= 0.0:
-            nb_weight = 1.0  # fallback if auto can't compute
-
-        if nb_weight != 1.0:
-            sample_weights[neg_mask] = nb_weight
 
         # ── Training-time feature augmentation ────────────────────────
         # Creates synthetic positive examples with Gaussian jitter + feature
@@ -1042,45 +1166,9 @@ class ActiveLearningTrainerService:
                 )
 
         _log(f"Fitting {cfg.classifier_family} (device={str(params.get('device', 'auto'))})…")
-        used_cpu_fallback = False
-        model_device_requested = str((params or {}).get("device", "")).strip().lower() or "auto"
-        model_device_used = "cpu"
-        if cfg.classifier_family.lower().strip() == "xgboost":
-            try:
-                est_params = est.get_params() if hasattr(est, "get_params") else {}
-                requested_from_est = str(est_params.get("device", model_device_requested)).strip().lower()
-                if requested_from_est:
-                    model_device_requested = requested_from_est
-            except Exception:
-                pass
-        try:
-            est.fit(x_train_np, y_train, sample_weight=sample_weights)
-            if model_device_requested.startswith("cuda"):
-                model_device_used = "gpu"
-        except Exception as exc:
-            family = cfg.classifier_family.lower().strip()
-            requested_device = str((params or {}).get("device", "")).lower().strip()
-            exc_msg = str(exc).lower()
-            is_gpu_error = "cuda" in exc_msg or "gpu" in exc_msg or "invalid device" in exc_msg
-            should_retry_xgb_cpu = (
-                family == "xgboost"
-                and (requested_device in {"cuda", "cuda:0"} or (requested_device == "" and is_gpu_error))
-            )
-            if not should_retry_xgb_cpu:
-                raise
-
-            logger.warning(
-                "XGBoost CUDA training failed (%s). Retrying on CPU.",
-                str(exc).splitlines()[0],
-            )
-            fallback_reason = str(exc).splitlines()[0]
-            cpu_params = dict(params)
-            cpu_params["device"] = "cpu"
-            cpu_params.setdefault("tree_method", "hist")
-            est = self._make_estimator("xgboost", cpu_params, cfg.random_state)
-            est.fit(x_train_np, y_train, sample_weight=sample_weights)
-            used_cpu_fallback = True
-            model_device_used = "cpu"
+        est, used_cpu_fallback, model_device_requested, model_device_used, fallback_reason = (
+            self._fit_with_gpu_fallback(est, params, x_train_np, y_train, sample_weights, cfg)
+        )
 
         if cfg.require_gpu and model_device_used != "gpu":
             reason = fallback_reason or "Training backend did not execute on GPU."
@@ -1114,7 +1202,7 @@ class ActiveLearningTrainerService:
                 clf = calibrated
 
         _log("Running validation inference…")
-        probs = clf.predict_proba(val_df[feature_cols].to_numpy(dtype=float))
+        probs = xgb_predict.predict_proba(clf, val_df[feature_cols].to_numpy(dtype=float))
         preds = np.argmax(probs, axis=1)
 
         precision = float(precision_score(y_val, preds, average="macro", zero_division=0))
@@ -1181,6 +1269,97 @@ class ActiveLearningTrainerService:
         except Exception as exc:
             logger.debug("Could not extract feature importance: %s", exc)
 
+        # ── Refit the DEPLOYED model on ALL labeled rows ──────────────────
+        # The metrics/split_manifest above stay honest (held-out split).  But
+        # the model we persist should learn from every labeled row — including
+        # the held-out sessions and any temporal-feedback corrections on them —
+        # so per-mouse fixes actually reach inference.  Skipped when a caller
+        # supplied a precomputed split (validation/benchmark platform needs the
+        # held-out model) or when the split had no genuine hold-out.
+        deploy_est = est
+        deploy_clf = clf
+        deploy_inv = inv
+        deploy_target_idx = target_idx
+        deployed_on = "train_split"
+        n_deploy_train = int(len(train_df))
+        _has_holdout = (
+            precomputed_split is None
+            and len(train_idx) > 0
+            and len(val_idx) > 0
+            and int(len(train_idx)) < int(len(df))
+        )
+        if cfg.deploy_refit_on_all_data and _has_holdout:
+            try:
+                _log("Refitting deployed model on all labeled data (train + held-out)…")
+                d_y_full, deploy_inv = self._label_map(df["label"])
+                d_label_to_idx = {v: k for k, v in deploy_inv.items()}
+                d_x = df[feature_cols].to_numpy(dtype=float)
+                d_weights_noaug, _, _, _, _ = self._compute_sample_weights(df, cfg)
+                d_x_fit, d_y_fit, d_weights_fit = d_x, d_y_full, d_weights_noaug
+                if cfg.enable_feature_augmentation:
+                    d_target_idx_aug = d_label_to_idx.get(str(cfg.target_label or "").strip())
+                    if d_target_idx_aug is not None:
+                        rng_aug_d = np.random.RandomState(int(cfg.random_state) + 2)
+                        d_x_fit, d_y_fit, d_weights_fit = self._augment_training_features(
+                            d_x.copy(), d_y_full.copy(), d_weights_noaug.copy(),
+                            target_label_idx=d_target_idx_aug,
+                            jitter_sigma=cfg.augmentation_jitter_sigma,
+                            dropout_prob=cfg.augmentation_dropout_prob,
+                            n_copies=cfg.augmentation_copies,
+                            rng=rng_aug_d,
+                        )
+                d_est = self._make_estimator(cfg.classifier_family, params, cfg.random_state)
+                d_est, _, _, d_device_used, _ = self._fit_with_gpu_fallback(
+                    d_est, params, d_x_fit, d_y_fit, d_weights_fit, cfg
+                )
+                deploy_est = d_est
+                deploy_clf = d_est
+                # Calibrate via internal CV — refitting on all data leaves no
+                # separate hold-out, so cross-validated calibration is used
+                # instead of the prefit-on-validation path.
+                if cfg.calibration_method in {"sigmoid", "isotonic"}:
+                    _, d_counts = np.unique(d_y_full, return_counts=True)
+                    n_cv = int(max(2, min(3, int(d_counts.min())))) if len(d_counts) >= 2 else 0
+                    if n_cv >= 2 and int(d_counts.min()) >= 2:
+                        method = "sigmoid" if cfg.calibration_method == "sigmoid" else "isotonic"
+                        try:
+                            fresh = self._make_estimator(cfg.classifier_family, params, cfg.random_state)
+                            d_cal = CalibratedClassifierCV(estimator=fresh, method=method, cv=n_cv)
+                            d_cal.fit(d_x, d_y_full, sample_weight=d_weights_noaug)
+                            deploy_clf = d_cal
+                        except Exception as cal_exc:
+                            logger.warning(
+                                "Deploy CV calibration failed (%s); shipping uncalibrated all-data model.",
+                                cal_exc,
+                            )
+                            deploy_clf = d_est
+                deploy_target_idx = next(
+                    (idx for idx, name in deploy_inv.items() if str(name) == str(cfg.target_label or "").strip()),
+                    None,
+                )
+                if deploy_target_idx is None:
+                    deploy_target_idx = next(
+                        (idx for idx, name in deploy_inv.items()
+                         if not str(name).startswith("not_") and str(name) not in {"ambiguous", "boundary_error"}),
+                        target_idx,
+                    )
+                n_deploy_train = int(len(df))
+                deployed_on = "all_data"
+                _log(f"Deployed model refit on all {n_deploy_train} labeled rows (device={d_device_used}).")
+                logger.info(
+                    "Deployed model refit on all labeled data: %d rows "
+                    "(reported metrics remain from the held-out split).",
+                    n_deploy_train,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Deploy refit on all data failed (%s); shipping the held-out model instead.",
+                    exc,
+                )
+                deploy_est, deploy_clf, deploy_inv, deploy_target_idx = est, clf, inv, target_idx
+                deployed_on = "train_split"
+                n_deploy_train = int(len(train_df))
+
         metrics = {
             "precision": precision,
             "recall": recall,
@@ -1191,10 +1370,14 @@ class ActiveLearningTrainerService:
             "n_train": int(len(train_df)),
             "n_val": int(len(val_df)),
             "n_features": len(feature_cols),
+            "holdout": (not _no_holdout),
+            "evaluated_on": ("train_in_sample" if _no_holdout else "held_out"),
             "adaptive_complexity": bool(cfg.adaptive_complexity),
             "adaptive_sample_weight": float(nb_weight),
             "dropped_zero_variance_features": bool(cfg.drop_zero_variance_features),
             "calibration_fitted_on": "validation",
+            "deployed_on": deployed_on,
+            "n_deploy_train": int(n_deploy_train),
             "used_cpu_fallback": bool(used_cpu_fallback),
             "model_device_requested": model_device_requested,
             "model_device_used": model_device_used,
@@ -1213,12 +1396,15 @@ class ActiveLearningTrainerService:
                 _meta_cols.append(_c)
         val_meta = val_df[_meta_cols].copy()
 
+        # Ship the deployed model (refit on all data when enabled); the
+        # validation artifacts (y_val/val_probs/val_preds/metrics/split_manifest)
+        # stay from the honest held-out evaluation above.
         return TrainEvalResult(
-            fitted_estimator=est,
-            calibrated_model=clf,
+            fitted_estimator=deploy_est,
+            calibrated_model=deploy_clf,
             feature_cols=feature_cols,
-            label_map=inv,
-            target_idx=(int(target_idx) if target_idx is not None else None),
+            label_map=deploy_inv,
+            target_idx=(int(deploy_target_idx) if deploy_target_idx is not None else None),
             y_val=y_val,
             val_probs=probs,
             val_preds=preds,
@@ -1244,6 +1430,21 @@ class ActiveLearningTrainerService:
         pred_df = result.val_meta[["segment_id", "animal_id", "session_id"]].copy()
         pred_df["label_true"] = result.y_val
         pred_df["label_pred"] = result.val_preds
+        # Persist the held-out target probability so downstream tools can grade
+        # the model honestly at a chosen threshold and after temporal refinement.
+        # segment_predictions.parquet cannot be used for this: it is produced by
+        # the deploy model, which is refit on ALL data (val included), so scoring
+        # the held-out set with it leaks. These probabilities come from the
+        # honest train/val split and are the only leak-free per-segment scores.
+        if (
+            result.val_probs is not None
+            and result.target_idx is not None
+            and getattr(result.val_probs, "ndim", 0) == 2
+            and 0 <= int(result.target_idx) < result.val_probs.shape[1]
+            and result.val_probs.shape[0] == len(pred_df)
+        ):
+            pred_df["prediction_prob"] = np.asarray(result.val_probs)[:, int(result.target_idx)].astype(float)
+            pred_df["target_index"] = int(result.target_idx)
         pred_df.to_parquet(model_dir / "validation_predictions.parquet", index=False)
 
         _log("Saving model artifacts…")
@@ -1308,7 +1509,7 @@ class ActiveLearningTrainerService:
 
         clf = payload["model"]
         feature_cols: list[str] = payload["feature_cols"]
-        probs = clf.predict_proba(segment_df[feature_cols].to_numpy(dtype=float))
+        probs = xgb_predict.predict_proba(clf, segment_df[feature_cols].to_numpy(dtype=float))
         max_prob = probs.max(axis=1)
 
         out = segment_df[["segment_id", "start_frame", "end_frame", "animal_id", "session_id"]].copy()

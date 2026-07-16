@@ -34,22 +34,15 @@ def smooth_probabilities(
 def threshold_probabilities(
     prob_trace: np.ndarray,
     onset_thresh: float,
-    offset_thresh: float | None = None,
 ) -> np.ndarray:
-    """Convert probabilities to a binary trace with optional hysteresis."""
-    x = np.asarray(prob_trace, dtype=np.float32)
-    on = float(onset_thresh)
-    off = float(offset_thresh if offset_thresh is not None else onset_thresh)
+    """Convert probabilities to a binary trace using a single threshold.
 
-    active = False
-    out = np.zeros(len(x), dtype=np.uint8)
-    for i, p in enumerate(x):
-        if not active and p >= on:
-            active = True
-        elif active and p < off:
-            active = False
-        out[i] = 1 if active else 0
-    return out
+    A frame is positive when its (smoothed) probability is at or above
+    ``onset_thresh``. This is the only gate in the pipeline — bouts are defined
+    by the threshold, min-bout, and merge-gap flags from the Temporal Review tab.
+    """
+    x = np.asarray(prob_trace, dtype=np.float32)
+    return (x >= float(onset_thresh)).astype(np.uint8)
 
 
 def remove_short_bouts(binary_trace: np.ndarray, min_duration_frames: int) -> np.ndarray:

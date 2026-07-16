@@ -9,8 +9,19 @@ REM - Launches the app
 cd /d "%~dp0"
 
 if not exist "logs" mkdir "logs"
+
+REM Launcher log. Normally this is launcher_last.log, but if a FIRST ABEL
+REM instance is still running its launcher window keeps that file locked (it is
+REM piping the app's output there). Writing to a locked file fails with
+REM "The process cannot access the file because it is being used by another
+REM process." and — because the final launch line also redirects here — cmd
+REM would skip starting the app entirely. So if the canonical log is locked,
+REM fall back to a unique per-launch log and let this second instance start.
+REM A failed redirect does NOT set errorlevel, but a redirect failure inside a
+REM command group does make the group "fail", so detect the lock with ( ) || .
 set "RUN_LOG=logs\launcher_last.log"
-echo ==== ABEL launcher run: %DATE% %TIME% ==== > "%RUN_LOG%"
+( >>"%RUN_LOG%" echo. ) 2>nul || set "RUN_LOG=logs\launcher_%RANDOM%.log"
+>"%RUN_LOG%" echo ==== ABEL launcher run: %DATE% %TIME% ====
 
 echo ==============================================
 echo ABEL Launcher

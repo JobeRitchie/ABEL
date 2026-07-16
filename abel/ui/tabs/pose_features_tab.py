@@ -67,6 +67,7 @@ from abel.ui.smoothing_preview_dialog import SmoothingPreviewDialog
 from abel.ui.widgets.progress_panel import ProgressPanel
 from abel.utils.run_timeline import RunTimeline, Stage
 from abel.workers.task_worker import TaskWorker
+from abel.utils.error_text import format_task_error
 
 # Timeline stage for the fast pose-only (.npz) kinematic extraction that the
 # Features tab has always done, before the heavier Active-Learning prep stages.
@@ -307,6 +308,22 @@ class PoseFeaturesTab(QWidget):
         )
         param_form.addRow("", self._p_use_video)
         self._p_use_video.stateChanged.connect(self._save_extraction_settings)
+
+        # ── Advanced ROI features toggle ────────────────────────────────
+        self._p_advanced_roi = QCheckBox("Advanced ROI features (edge, corner, position within zone)")
+        self._p_advanced_roi.setChecked(True)
+        self._p_advanced_roi.setToolTip(
+            "When enabled, each ROI contributes shape-aware features for every zone you have "
+            "defined: whether the animal is inside it, signed distance to its boundary, distance "
+            "to the nearest corner, and normalized position along the zone's long and short axes.\n\n"
+            "Without these, an ROI is reduced to its centre point, so a large or elongated zone "
+            "(e.g. a whole EPM open arm) cannot tell the model where inside the zone the animal is "
+            "— the arm tip and the maze centre look alike.\n\n"
+            "Disable only to reproduce a pre-0.8 feature set exactly. Changing this rebuilds "
+            "context features."
+        )
+        param_form.addRow("", self._p_advanced_roi)
+        self._p_advanced_roi.stateChanged.connect(self._save_extraction_settings)
 
         # ── Local Motion settings ───────────────────────────────────────
         motion_box = QGroupBox("Local Motion Settings")
@@ -731,6 +748,7 @@ class PoseFeaturesTab(QWidget):
                 "interpolate_dropouts": self._p_interp.isChecked(),
                 "smoothing_window": self._p_smooth.value(),
                 "use_video_features": self._p_use_video.isChecked(),
+                "advanced_roi_features": self._p_advanced_roi.isChecked(),
             }
             write_yaml(path, raw)
         except Exception:
@@ -747,13 +765,14 @@ class PoseFeaturesTab(QWidget):
                 # Fall back to legacy keys in behavior_model
                 model = raw.get("behavior_model") or {}
                 self._p_use_video.setChecked(bool(model.get("use_video_features", False)))
+                self._p_advanced_roi.setChecked(bool(model.get("advanced_roi_features", True)))
                 return
 
             # Block signals while bulk-loading to avoid N redundant writes
             widgets = [
                 self._p_win_dur, self._p_stride, self._p_fps,
                 self._p_likelihood, self._p_interp, self._p_smooth,
-                self._p_use_video,
+                self._p_use_video, self._p_advanced_roi,
             ]
             for w in widgets:
                 w.blockSignals(True)
@@ -765,6 +784,9 @@ class PoseFeaturesTab(QWidget):
             self._p_interp.setChecked(bool(cfg.get("interpolate_dropouts", True)))
             self._p_smooth.setValue(int(cfg.get("smoothing_window", 5)))
             self._p_use_video.setChecked(bool(cfg.get("use_video_features", False)))
+            # Default on: projects saved before this setting existed should gain
+            # the advanced ROI features rather than silently stay on centre-only.
+            self._p_advanced_roi.setChecked(bool(cfg.get("advanced_roi_features", True)))
 
             for w in widgets:
                 w.blockSignals(False)
@@ -1342,6 +1364,7 @@ class PoseFeaturesTab(QWidget):
             return
         cfg = PrepConfig(
             use_video_features=self._p_use_video.isChecked(),
+            advanced_roi_features=self._p_advanced_roi.isChecked(),
             segment_window_frames=max(8, int(round(
                 float(self._last_run_preset.window_duration_sec) * float(self._last_run_preset.source_fps)))),
             segment_stride_frames=max(1, int(round(
@@ -1385,7 +1408,7 @@ class PoseFeaturesTab(QWidget):
         self._progress.setFormat("Error")
         self._prep_panel.stop()
         self._append_log("Feature preparation failed:")
-        self._append_log(traceback_text[:600])
+        self._append_log(format_task_error(traceback_text))
         logger.error("Feature preparation error:\n%s", traceback_text)
 
     # ── Prep timeline plumbing ──────────────────────────────────────────
@@ -1537,6 +1560,7 @@ class PoseFeaturesTab(QWidget):
         model["segment_window_frames"] = int(window_frames)
         model["segment_stride_frames"] = int(stride_frames)
         model["use_video_features"] = self._p_use_video.isChecked()
+        model["advanced_roi_features"] = self._p_advanced_roi.isChecked()
         raw["behavior_model"] = model
         write_yaml(path, raw)
         self._append_log(

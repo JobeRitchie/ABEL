@@ -27,6 +27,10 @@ class ImportService:
 
     VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv"}
     POSE_EXTENSIONS = {".csv", ".h5", ".hdf5"}
+    # Segment ids, clip ids and review keys embed their session as a ``session_<hex>``
+    # token (``bout_<uuid>_session_0952e047_44761_44775``), so re-pointing a recording
+    # at a new session id is a token substitution wherever those ids are persisted.
+    _SESSION_TOKEN_RE = re.compile(r"session_[0-9a-fA-F]+")
     # SLEAP predictions aren't read directly — they're converted to a DLC ``.h5``
     # (see :meth:`convert_sleap_poses`) that then flows through the normal path.
     SLEAP_EXTENSIONS = set(SLEAP_POSE_EXTENSIONS)
@@ -173,6 +177,51 @@ class ImportService:
             pose.subject_id = clean_subject
         return manifest
 
+    def update_session_type(
+        self, manifest: ImportManifest, session_id: str, session_type: str
+    ) -> ImportManifest:
+        """Set one linked session's explicit session-type override.
+
+        An empty string clears the override so the effective type falls back to
+        the regex-derived value.  Manual overrides survive a regex reapply, just
+        like hand-set subjects.
+        """
+        clean = session_type.strip() or None
+        session = next(
+            (s for s in manifest.linked_sessions if s.session_id == session_id), None
+        )
+        if session is None:
+            return manifest
+        session.session_type = clean
+        return manifest
+
+    def effective_session_type(
+        self, manifest: ImportManifest, session: LinkedSession
+    ) -> str:
+        """Resolve the display session type for a linked session.
+
+        Priority: explicit override → regex-derived type stored on the video
+        asset (``VideoAsset.session_id``) → filename stem with the subject prefix
+        stripped.  Returns an empty string when nothing can be derived.
+        """
+        if session.session_type:
+            return session.session_type
+        video = next(
+            (v for v in manifest.videos if v.asset_id == session.video_asset_id), None
+        )
+        if video is None:
+            return ""
+        if video.session_id:
+            return str(video.session_id)
+        # Fallback: strip the subject prefix off the filename stem.
+        subject = str(session.subject_id or video.subject_id or "")
+        stem = Path(video.source_path).stem
+        if subject and stem.startswith(subject):
+            return stem[len(subject):].lstrip("_- ")
+        if not subject:
+            return stem
+        return ""
+
     def update_session_pixels_per_mm(
         self,
         manifest: ImportManifest,
@@ -271,25 +320,24 @@ class ImportService:
         so that files imported in separate batches can still be paired.
 
         Existing sessions (including hand-edited subject names) are never modified.
+
+        A file is recognised by *filename*, not by its absolute path: re-adding a
+        recording that already exists under a different folder (after the project
+        or the media folder moved) re-points the existing asset instead of adding
+        a second copy of it, so the session — and every label and derived artifact
+        hanging off its ``session_id`` — stays attached.
         """
         settings = settings or manifest.subject_name_settings or ImportNameSettings()
         manifest.subject_name_settings = settings
 
-        existing_video_paths = {v.source_path for v in manifest.videos}
-        existing_pose_paths = {p.source_path for p in manifest.poses}
-
-        fresh_videos = [
-            self._video_asset(path, settings)
-            for path in video_paths
-            if path.suffix.lower() in self.VIDEO_EXTENSIONS
-            and str(path) not in existing_video_paths
-        ]
-        fresh_poses = [
-            self._pose_asset(path, settings)
-            for path in pose_paths
-            if path.suffix.lower() in self.POSE_EXTENSIONS
-            and str(path) not in existing_pose_paths
-        ]
+        fresh_videos = self._collect_fresh(
+            video_paths, self.VIDEO_EXTENSIONS, manifest.videos,
+            lambda path: self._video_asset(path, settings),
+        )
+        fresh_poses = self._collect_fresh(
+            pose_paths, self.POSE_EXTENSIONS, manifest.poses,
+            lambda path: self._pose_asset(path, settings),
+        )
 
         manifest.videos.extend(fresh_videos)
         manifest.poses.extend(fresh_poses)
@@ -306,13 +354,313 @@ class ImportService:
             existing_pairs = {
                 (s.video_asset_id, s.pose_asset_id) for s in manifest.linked_sessions
             }
+            # A recording may only be linked once. Assets are deduplicated above, so
+            # this only bites when a manifest already carries duplicates; it stops a
+            # merge from compounding them.
+            videos_by_id = {v.asset_id: v for v in manifest.videos}
+            linked_keys = {
+                self._match_key(Path(videos_by_id[vid].source_path))
+                for vid in linked_video_ids
+                if vid in videos_by_id
+            }
             new_sessions = [
                 s for s in new_sessions
                 if (s.video_asset_id, s.pose_asset_id) not in existing_pairs
+                and self._match_key(Path(videos_by_id[s.video_asset_id].source_path))
+                not in linked_keys
             ]
             manifest.linked_sessions.extend(new_sessions)
 
         return manifest
+
+    def _collect_fresh(
+        self,
+        paths: list[Path],
+        extensions: set[str],
+        existing: list,
+        make_asset: Callable[[Path], object],
+    ) -> list:
+        """Return assets for the genuinely new files among *paths*.
+
+        Files already imported are skipped. When such a file now lives somewhere
+        else and the recorded path has gone stale, the existing asset is re-pointed
+        at the new location rather than duplicated.
+        """
+        by_name = {self._asset_key(a.source_path): a for a in existing}
+        fresh: list = []
+        for path in paths:
+            if path.suffix.lower() not in extensions:
+                continue
+            known = by_name.get(self._asset_key(path))
+            if known is not None:
+                if not Path(known.source_path).exists() and path.exists():
+                    logger.info(
+                        "Re-pointing %s: %s -> %s", path.name, known.source_path, path
+                    )
+                    known.source_path = str(path)
+                continue
+            asset = make_asset(path)
+            by_name[self._asset_key(path)] = asset
+            fresh.append(asset)
+        return fresh
+
+    @staticmethod
+    def _asset_key(path: Path | str) -> str:
+        """Identity of an imported file: its filename, case-folded.
+
+        Filenames are already the project-wide key for a recording — poses are
+        paired to videos by filename stem and the session registry is keyed by
+        ``video_filename`` — so two assets sharing a filename are the same
+        recording, whatever folder they were picked from.
+        """
+        return Path(path).name.casefold()
+
+    def find_duplicate_sessions(self, manifest: ImportManifest) -> dict[str, list[str]]:
+        """Group sessions that describe the same recording.
+
+        Returns ``{canonical_session_id: [duplicate_session_ids...]}`` for every
+        recording linked more than once, keyed by video filename. The first-linked
+        session wins as canonical — it is the one the project's labels and derived
+        data were built against.
+
+        Projects imported before duplicate detection existed can carry these when a
+        recording was re-added from a different folder (see :meth:`merge_new_files`).
+        """
+        videos_by_id = {v.asset_id: v for v in manifest.videos}
+        by_key: dict[str, list[str]] = {}
+        for session in manifest.linked_sessions:
+            video = videos_by_id.get(session.video_asset_id)
+            if video is None:
+                continue
+            key = self._asset_key(video.source_path)
+            by_key.setdefault(key, []).append(session.session_id)
+        return {ids[0]: ids[1:] for ids in by_key.values() if len(ids) > 1}
+
+    def duplicate_session_remap(
+        self, manifest: ImportManifest, removed_ids: set[str],
+    ) -> dict[str, str]:
+        """Map each removed session onto the kept session for the same recording.
+
+        Only sessions whose video stays linked under another id are included:
+        dropping one of two entries for one recording is a de-duplication, and the
+        review work recorded against the dropped id describes the same frames of the
+        same video, so it belongs to the surviving session.
+        """
+        videos_by_id = {v.asset_id: v for v in manifest.videos}
+
+        def video_key(session: LinkedSession) -> str | None:
+            video = videos_by_id.get(session.video_asset_id)
+            return self._asset_key(video.source_path) if video else None
+
+        kept_by_key: dict[str, str] = {}
+        for session in manifest.linked_sessions:
+            if session.session_id in removed_ids:
+                continue
+            key = video_key(session)
+            if key and key not in kept_by_key:
+                kept_by_key[key] = session.session_id
+
+        remap: dict[str, str] = {}
+        for session in manifest.linked_sessions:
+            if session.session_id not in removed_ids:
+                continue
+            key = video_key(session)
+            canonical = kept_by_key.get(key) if key else None
+            if canonical:
+                remap[session.session_id] = canonical
+        return remap
+
+    def stale_session_remap(self, project_root: Path, manifest: ImportManifest) -> dict[str, str]:
+        """Map registry sessions the manifest no longer knows onto their current id.
+
+        A recording keeps its filename across re-imports but is minted a fresh
+        ``session_id`` each time, so labels recorded before a re-import or a
+        de-duplication address a session that no longer exists. The registry — a log
+        of every session ever imported, keyed by video filename — is what lets those
+        labels be traced back to the session that now owns the same recording.
+        """
+        current_ids = {s.session_id for s in manifest.linked_sessions}
+        videos_by_id = {v.asset_id: v for v in manifest.videos}
+        current_by_key: dict[str, list[str]] = {}
+        for session in manifest.linked_sessions:
+            video = videos_by_id.get(session.video_asset_id)
+            if video:
+                key = self._asset_key(video.source_path)
+                current_by_key.setdefault(key, []).append(session.session_id)
+
+        remap: dict[str, str] = {}
+        for old_id, entry in self.load_registry(project_root).items():
+            if old_id in current_ids or not isinstance(entry, dict):
+                continue
+            filename = entry.get("video_filename")
+            if not filename:
+                continue
+            matches = current_by_key.get(self._asset_key(filename), [])
+            if len(matches) == 1:
+                remap[old_id] = matches[0]
+        return remap
+
+    def remap_session_references(self, project_root: Path, remap: dict[str, str]) -> dict[str, int]:
+        """Re-point persisted review work from old session ids onto current ones.
+
+        Labels, review decisions and seeds are the user's own work, and they are keyed
+        by ids that embed the owning session (``segment_id``, ``clip_id``). When a
+        recording's session id changes, those keys must follow it — otherwise the
+        labels match no feature row and are silently dropped from training. Derived
+        caches are deliberately not touched here: they are rebuilt from the manifest.
+
+        Returns the number of rows rewritten per artifact.
+        """
+        counts = {"labels": 0, "decisions": 0, "seeds": 0}
+        if not remap:
+            return counts
+
+        labels_path = project_root / "derived" / "review_labels" / "reviewer_labels.parquet"
+        if labels_path.exists():
+            try:
+                import pandas as pd
+
+                labels = pd.read_parquet(labels_path)
+                if not labels.empty and "segment_id" in labels.columns:
+                    before = labels["segment_id"].astype(str)
+                    after = before.map(lambda text: self._rewrite_session_tokens(text, remap))
+                    changed = int((after != before).sum())
+                    if changed:
+                        labels["segment_id"] = after
+                        labels.to_parquet(labels_path, index=False)
+                        counts["labels"] = changed
+            except Exception:
+                logger.warning("Could not remap session ids in %s", labels_path, exc_info=True)
+
+        counts["decisions"] = self._remap_json_rows(
+            project_root / "derived" / "review_tables" / "review_decisions.json",
+            key="decisions",
+            fields=("clip_id", "segment_id", "session_id"),
+            remap=remap,
+        )
+        counts["seeds"] = self._remap_json_rows(
+            project_root / "config" / "seeds.json",
+            key="seeds",
+            fields=("session_id", "segment_id"),
+            remap=remap,
+        )
+
+        if any(counts.values()):
+            logger.info(
+                "Re-pointed review work from %d old session id(s): %d label(s), "
+                "%d decision(s), %d seed(s).",
+                len(remap), counts["labels"], counts["decisions"], counts["seeds"],
+            )
+        return counts
+
+    @classmethod
+    def _rewrite_session_tokens(cls, text: object, remap: dict[str, str]) -> str:
+        return cls._SESSION_TOKEN_RE.sub(
+            lambda match: remap.get(match.group(0), match.group(0)), str(text)
+        )
+
+    @classmethod
+    def _remap_json_rows(
+        cls, path: Path, key: str, fields: tuple[str, ...], remap: dict[str, str],
+    ) -> int:
+        if not path.exists():
+            return 0
+        try:
+            raw = read_json(path, {})
+        except Exception:
+            return 0
+        rows = raw.get(key, [])
+        if not isinstance(rows, list):
+            return 0
+
+        changed = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            touched = False
+            for field in fields:
+                value = row.get(field)
+                if not isinstance(value, str):
+                    continue
+                rewritten = cls._rewrite_session_tokens(value, remap)
+                if rewritten != value:
+                    row[field] = rewritten
+                    touched = True
+            changed += 1 if touched else 0
+
+        if changed:
+            write_json(path, {**raw, key: rows})
+        return changed
+
+    @classmethod
+    def _prune_review_work_by_session(
+        cls, project_root: Path, removed_ids: set[str],
+    ) -> int:
+        """Drop reviewer decisions/labels that address a removed session.
+
+        Review decisions (``review_decisions.json``), reviewer labels
+        (``reviewer_labels.parquet``) and the soundboard round-trip store are the
+        user's own work, keyed by ids that embed the owning session
+        (``clip_id``/``segment_id``/window id). Unlike the derived caches they are
+        *not* rebuilt from the manifest, so a removed session's reviews linger in
+        the queue forever — showing a raw ``session_<hex>`` code with no subject
+        and no clip. Duplicate removals are re-pointed onto the surviving session
+        before this runs (see :meth:`remap_session_references`), so anything still
+        naming a removed id here belongs to a recording that has genuinely left
+        the project. The generic ``session_id``-column parquet pruner can't touch
+        reviewer_labels — its session lives inside ``segment_id`` — so it is
+        handled explicitly here. Returns rows removed across all three stores.
+        """
+        if not removed_ids:
+            return 0
+
+        def targets_removed(text: object) -> bool:
+            return any(
+                tok in removed_ids for tok in cls._SESSION_TOKEN_RE.findall(str(text))
+            )
+
+        removed = cls._filter_json_list(
+            project_root / "derived" / "review_tables" / "review_decisions.json",
+            key="decisions",
+            keep_fn=lambda row: not any(
+                targets_removed(row.get(f))
+                for f in ("clip_id", "segment_id", "session_id")
+            ),
+        )
+
+        # Soundboard structured-label store is keyed by window id (embeds session).
+        struct_path = project_root / "derived" / "review_labels" / "soundboard_labels.json"
+        if struct_path.exists():
+            try:
+                raw = read_json(struct_path, {"windows": {}})
+                windows = raw.get("windows", {}) or {}
+                kept = {wid: v for wid, v in windows.items() if not targets_removed(wid)}
+                if len(kept) != len(windows):
+                    removed += len(windows) - len(kept)
+                    write_json(struct_path, {"windows": kept})
+            except Exception:
+                logger.warning(
+                    "Could not prune soundboard labels for removed sessions", exc_info=True
+                )
+
+        labels_path = project_root / "derived" / "review_labels" / "reviewer_labels.parquet"
+        if labels_path.exists():
+            try:
+                import pandas as pd
+
+                labels = pd.read_parquet(labels_path)
+                if not labels.empty and "segment_id" in labels.columns:
+                    keep = ~labels["segment_id"].astype(str).map(targets_removed)
+                    dropped = int((~keep).sum())
+                    if dropped:
+                        labels[keep].reset_index(drop=True).to_parquet(labels_path, index=False)
+                        removed += dropped
+            except Exception:
+                logger.warning(
+                    "Could not prune reviewer labels for removed sessions", exc_info=True
+                )
+
+        return removed
 
     def remove_sessions(
         self,
@@ -323,12 +671,20 @@ class ImportService:
         """Remove sessions from manifest and delete session-associated project data."""
         target_ids = {sid for sid in session_ids if sid}
         if not target_ids:
-            return {"sessions": 0, "files": 0, "rows": 0}
+            return {"sessions": 0, "files": 0, "rows": 0, "remapped": 0}
 
         kept_sessions = [s for s in manifest.linked_sessions if s.session_id not in target_ids]
         removed_sessions = len(manifest.linked_sessions) - len(kept_sessions)
         if removed_sessions <= 0:
-            return {"sessions": 0, "files": 0, "rows": 0}
+            return {"sessions": 0, "files": 0, "rows": 0, "remapped": 0}
+
+        # Must run before the manifest is rewritten below — it needs the sessions and
+        # videos that are about to be dropped. Removing a duplicate of a recording that
+        # stays in the project re-points its review work at the surviving session; the
+        # pruning further down would otherwise orphan every label recorded against it.
+        remapped = self.remap_session_references(
+            project_root, self.duplicate_session_remap(manifest, target_ids)
+        )
 
         manifest.linked_sessions = kept_sessions
 
@@ -352,6 +708,16 @@ class ImportService:
 
             clips_dir = project_root / "derived" / "clips" / sid
             files_removed += self._delete_tree(clips_dir)
+
+        # Per-session caches are scattered across derived/ under names that embed
+        # the session id — pose_features/sessions/<sid>.parquet, context_features/
+        # sessions/<sid>.parquet, temporal_refinement/**/<sid>_bouts.parquet,
+        # analytics_cache/<sid>_*.json. None are rebuilt on removal, so a session
+        # deleted here otherwise keeps feeding inference, analytics and the UMAP.
+        # Session ids are unique 8-hex tokens, so a name match is an exact hit.
+        files_removed += self._delete_session_named_artifacts(
+            project_root / "derived", target_ids
+        )
 
         rows_removed += self._filter_json_list(
             project_root / "config" / "seeds.json",
@@ -387,11 +753,105 @@ class ImportService:
             keep_fn=lambda row: row.get("session_id") not in target_ids,
         )
 
+        # External window candidates (active-learning / temporal-bout review queues)
+        # persist across tabs and are NOT rebuilt from the manifest, so removed
+        # sessions leak clips/windows here unless explicitly pruned.
+        rows_removed += self._filter_json_list(
+            project_root / "derived" / "review_tables" / "external_window_candidates.json",
+            key="candidates",
+            keep_fn=lambda row: row.get("session_id") not in target_ids,
+        )
+
+        # Reviewer decisions/labels are the user's own work and are NOT rebuilt.
+        # Without this, a removed session's reviews linger in the queue as a raw
+        # session_<hex> code with no subject and no extracted clip.
+        rows_removed += self._prune_review_work_by_session(project_root, target_ids)
+
+        # Aggregate feature/representation parquet stores are keyed by session and
+        # are large content-caches that are NOT rebuilt on session removal. If not
+        # pruned, removed sessions keep flowing into dense inference, the unified
+        # UMAP, analytics, etc. ("Loaded ... 71 sessions" long after 45 were
+        # dropped). Filter each in place so only retained sessions survive.
+        kept_ids = {s.session_id for s in manifest.linked_sessions}
+        for rel in (
+            "derived/representations/frame_features.parquet",
+            "derived/representations/segment_features.parquet",
+            "derived/representations/enriched_segments.parquet",
+            "derived/pose_features/frame_pose.parquet",
+            "derived/context_features/frame_context.parquet",
+            "derived/training_sets/training_set.parquet",
+        ):
+            rows_removed += self._prune_parquet_by_session(project_root / rel, kept_ids)
+
+        # Bout tables are written one-per-behavior-model, so glob rather than name them.
+        for path in sorted((project_root / "derived" / "behavior_bouts").glob("*.parquet")):
+            rows_removed += self._prune_parquet_by_session(path, kept_ids)
+
         return {
             "sessions": removed_sessions,
             "files": files_removed,
             "rows": rows_removed,
+            "remapped": sum(remapped.values()),
         }
+
+    @staticmethod
+    def _delete_session_named_artifacts(root: Path, session_ids: set[str]) -> int:
+        """Delete every file/dir under *root* whose name embeds a removed session id.
+
+        Returns the number of files deleted. Failures are logged, never raised — a
+        session removal must not abort because one cache file was locked.
+        """
+        if not root.exists() or not session_ids:
+            return 0
+        targets = [
+            path
+            for path in root.rglob("*")
+            if any(sid in path.name for sid in session_ids)
+        ]
+        removed = 0
+        for path in sorted(targets, key=lambda p: len(p.parts), reverse=True):
+            try:
+                if path.is_dir():
+                    removed += ImportService._delete_tree(path)
+                elif path.exists():
+                    path.unlink()
+                    removed += 1
+            except Exception:  # noqa: BLE001 - best-effort cache cleanup
+                logger.warning("Could not delete %s for removed session", path, exc_info=True)
+        return removed
+
+    @staticmethod
+    def _prune_parquet_by_session(path: Path, kept_session_ids: set[str]) -> int:
+        """Drop rows for removed sessions from a ``session_id``-keyed parquet.
+
+        Rewrites *path* in place keeping only rows whose ``session_id`` is in
+        *kept_session_ids*. Returns the number of rows removed (0 when the file
+        is absent, has no ``session_id`` column, or nothing matched). Failures
+        are swallowed and logged — a session removal must not abort because one
+        derived cache could not be rewritten.
+        """
+        if not path.exists():
+            return 0
+        try:
+            import pandas as pd
+
+            df = pd.read_parquet(path)
+        except Exception:
+            logger.warning("Could not read %s while pruning removed sessions", path, exc_info=True)
+            return 0
+        if "session_id" not in df.columns or df.empty:
+            return 0
+        keep_mask = df["session_id"].astype(str).isin({str(s) for s in kept_session_ids})
+        removed = int((~keep_mask).sum())
+        if removed <= 0:
+            return 0
+        try:
+            df[keep_mask].reset_index(drop=True).to_parquet(path, index=False)
+            logger.info("Pruned %d rows for removed sessions from %s", removed, path.name)
+        except Exception:
+            logger.warning("Could not rewrite %s while pruning removed sessions", path, exc_info=True)
+            return 0
+        return removed
 
     @staticmethod
     def extract_subject_name(path: Path, settings: ImportNameSettings | None = None) -> str | None:

@@ -1218,14 +1218,13 @@ class ExportService:
 
                 cfg = self._temporal_review_settings_for_token(token)
                 onset = float(cfg.get("onset_threshold", 0.65))
-                offset = float(cfg.get("offset_threshold", onset))
                 min_bout = int(cfg.get("min_bout_duration_frames", 8))
                 merge_gap = int(cfg.get("merge_gap_frames", 4))
 
                 probs = pd.to_numeric(df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
                 # Apply smoothing BEFORE thresholding, matching Temporal Review UI
                 probs = smooth_probabilities(probs, method="moving_average", window=5)
-                binary = self._threshold_probabilities(probs, onset, offset)
+                binary = self._threshold_probabilities(probs, onset)
                 binary = self._merge_close_bouts(binary, merge_gap)
                 binary = self._remove_short_bouts(binary, min_bout)
                 intervals = self._binary_trace_to_intervals(binary)
@@ -1254,7 +1253,6 @@ class ExportService:
     def _temporal_review_settings_for_token(self, token: str) -> dict[str, Any]:
         defaults: dict[str, Any] = {
             "onset_threshold": 0.65,
-            "offset_threshold": 0.65,
             "min_bout_duration_frames": 8,
             "merge_gap_frames": 4,
         }
@@ -1307,24 +1305,12 @@ class ExportService:
             if isinstance(values, dict):
                 cfg.update(values)
 
-        if "offset_threshold" not in cfg:
-            cfg["offset_threshold"] = cfg.get("onset_threshold", 0.65)
         return cfg
 
     @staticmethod
-    def _threshold_probabilities(prob_trace: np.ndarray, onset_thresh: float, offset_thresh: float) -> np.ndarray:
+    def _threshold_probabilities(prob_trace: np.ndarray, onset_thresh: float) -> np.ndarray:
         x = np.asarray(prob_trace, dtype=np.float32)
-        on = float(onset_thresh)
-        off = float(offset_thresh)
-        active = False
-        out = np.zeros(len(x), dtype=np.uint8)
-        for i, p in enumerate(x):
-            if not active and p >= on:
-                active = True
-            elif active and p < off:
-                active = False
-            out[i] = 1 if active else 0
-        return out
+        return (x >= float(onset_thresh)).astype(np.uint8)
 
     @staticmethod
     def _remove_short_bouts(binary_trace: np.ndarray, min_duration_frames: int) -> np.ndarray:

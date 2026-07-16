@@ -70,6 +70,7 @@ def draw_keypoints(
     conf_row: np.ndarray,
     conf_thresh: float = 0.2,
     point_scale: float = 1.0,
+    border_scale: float = 1.0,
 ) -> np.ndarray:
     """Return a copy of *bgr* with pose dots drawn for one frame's keypoints.
 
@@ -77,7 +78,8 @@ def draw_keypoints(
     original video's pixel space) and confidences.  Low-confidence or non-finite
     parts are skipped.  Dot size scales with frame height to stay legible after
     the cell is downscaled; *point_scale* is a user-facing multiplier on that
-    size (>1 draws larger dots, <1 smaller).
+    size (>1 draws larger dots, <1 smaller).  *border_scale* multiplies the black
+    outline thickness (>1 thicker, <1 thinner); 0 removes the outline entirely.
     """
     import cv2  # noqa: PLC0415
 
@@ -87,7 +89,10 @@ def draw_keypoints(
     h = bgr.shape[0]
     scale = max(0.1, float(point_scale))
     radius = max(1, int(round((h / 250) * scale)))
-    thickness = max(1, radius // 2)
+    bscale = max(0.0, float(border_scale))
+    # Default outline is radius//2; the multiplier scales that. A zero/near-zero
+    # multiplier drops the outline so the dot is drawn flat.
+    thickness = int(round(max(1, radius // 2) * bscale)) if bscale > 0.0 else 0
     out = bgr.copy()
     for p in range(n_parts):
         conf = conf_row[p]
@@ -100,7 +105,8 @@ def draw_keypoints(
         color = _KEYPOINT_PALETTE[p % len(_KEYPOINT_PALETTE)]
         center = (int(round(x)), int(round(y)))
         cv2.circle(out, center, radius, color, -1, lineType=cv2.LINE_AA)
-        cv2.circle(out, center, radius, (0, 0, 0), thickness, lineType=cv2.LINE_AA)
+        if thickness >= 1:
+            cv2.circle(out, center, radius, (0, 0, 0), thickness, lineType=cv2.LINE_AA)
     return out
 
 
@@ -122,6 +128,7 @@ def render_cell(
     out_fps: float = 30.0,
     crop_scale: float = 1.0,
     keypoint_scale: float = 1.0,
+    keypoint_border_scale: float = 1.0,
 ) -> bool:
     """Render one bout window to a square ``cell_px`` clip; return True on success.
 
@@ -206,6 +213,7 @@ def render_cell(
                 frame = draw_keypoints(
                     frame, pose_x[fidx], pose_y[fidx], pose_conf[fidx],
                     point_scale=keypoint_scale,
+                    border_scale=keypoint_border_scale,
                 )
 
             cx, cy = last_cx, last_cy

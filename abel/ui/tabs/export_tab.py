@@ -34,6 +34,7 @@ from abel.services.candidate_service import CandidateGenerationService
 from abel.services.export_service import ExportService
 from abel.services.review_service import ReviewService
 from abel.workers.task_worker import TaskWorker
+from abel.utils.error_text import format_task_error
 
 
 _SESSION_PICKER_ROWS_PER_COLUMN = 10
@@ -715,7 +716,7 @@ class ExportTab(QWidget):
         self._progress.setValue(0)
         self._progress.setFormat("Error")
         self._status.setText("Export failed.")
-        QMessageBox.warning(self, "Export failed", traceback_text[:800])
+        QMessageBox.warning(self, "Export failed", format_task_error(traceback_text))
 
     @Slot(object)
     def _on_labeled_export_finished(self, out) -> None:
@@ -755,8 +756,8 @@ class ExportTab(QWidget):
         self._progress.setFormat("Error")
         self._status.setText("Labeled video export failed.")
         self._append_export_log("Labeled video export failed.")
-        self._append_export_log(traceback_text[:800])
-        QMessageBox.warning(self, "Export failed", traceback_text[:800])
+        self._append_export_log(format_task_error(traceback_text))
+        QMessageBox.warning(self, "Export failed", format_task_error(traceback_text))
 
     @Slot(int, int, str)
     def _on_progress_update(self, done: int, total: int, message: str) -> None:

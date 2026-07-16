@@ -7,10 +7,84 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "July 1, 2026"
+VERSION_DATE = "July 16, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.8.0", "July 16, 2026", [
+        "Methods tab: a new project-independent tab documenting ABEL's "
+        "statistical procedures for users and reviewers — a References subtab "
+        "(the peer-reviewed source justifying each procedure, with links) and a "
+        "Formulas subtab (the raw formula ABEL evaluates, each tied to its code), "
+        "rendered from a single methods-content source of truth.",
+        "Targeted Clip Mining: a new dialog turns each candidate window into "
+        "interpretable, physically-meaningful metrics (time in a zone, distance "
+        "to a zone, centroid speed, distance travelled, body elongation, …), then "
+        "lets you mine every clip whose metrics satisfy user-defined criteria — "
+        "and an Essence Extractor that infers those criteria automatically from a "
+        "handful of exemplar clips.",
+        "Deployment-accurate model evaluation: a new refined-evaluation engine "
+        "grades trained models on the bouts the product actually ships (smooth → "
+        "threshold → merge close bouts → drop short bouts, using each behavior's "
+        "Temporal Review settings) instead of the raw prob ≥ 0.5 cut, reports "
+        "held-out refined metrics, and guards against evaluation leakage from the "
+        "deploy model.",
+        "Automatic temporal-refinement settings: ABEL can now search a grid of "
+        "(onset threshold, min bout duration, merge gap) against held-out "
+        "probabilities and reviewer labels and suggest the combination that "
+        "maximizes event-level bout F1 — the same number the Temporal Review tab "
+        "and Validation report judge, using shared bout-matching primitives.",
+        "Calibrated, cross-run ETAs: a per-project timing profile records the "
+        "wall-clock cost of each pipeline phase (Preparing, Training, Scoring, "
+        "Evaluating, Benchmarking, …) observed in ANY run — single or batch, "
+        "retrain / pipeline / run-model — so a later run of any kind seeds a "
+        "calibrated estimate, and batch runs show a whole-run ETA rather than "
+        "summed per-phase guesses.",
+        "Session types and smarter session selection: sessions now carry an "
+        "editable Session Type; a shared 'Choose Sessions' dialog (Active "
+        "Learning and Temporal Refinement) filters by type with a 'Check all of "
+        "type' button; and ABEL detects duplicate imported sessions and repairs "
+        "stale session references.",
+        "Removal cascade: deleting sessions or behaviors now prunes every derived "
+        "artifact that referenced them — per-session parquet/JSON caches, review "
+        "work, and trained-model label references — so inference and analytics "
+        "never read orphaned data.",
+        "Imported-model label-map consistency: shared target-class resolution "
+        "(tolerant of punctuation and case) plus an import-time remap and a repair "
+        "pass keep an imported model pointed at the correct target behavior even "
+        "when its stored behavior ids differ from the host project's.",
+        "Regenerate Missing Clips: Active Learning persists every ranked window "
+        "but extracts clips for only a subset; a new Review-tab action "
+        "regenerates the missing clips on demand.",
+        "Validation platform expansion: additional publication-grade checks "
+        "(leave-one-subject-out, held-out leakage guards, model-vs-human "
+        "agreement reporting CCC and bias, class discrimination, feature-bucket "
+        "coverage), a consolidated suite report, GUI panels, and Prism/CSV export.",
+        "Faster XGBoost inference: predictions now run on the CPU via DMatrix so a "
+        "GPU-fit booster no longer copies the whole feature matrix host→device on "
+        "every call, alongside broader fusion-inference performance work.",
+        "Advanced ROI features: freehand polygon ROIs, easier num-animals "
+        "editing, and additional per-ROI geometric features computed per tracked "
+        "individual.",
+        "Spatial analytics — clean backgrounds and manuscript-consistent figures: "
+        "Density Analysis and the Spatial Heatmap now build the background by "
+        "temporal-median compositing across video frames, so the moving animal is "
+        "removed instead of leaving ghost blobs. The Spatial Heatmap caches this "
+        "plate with a 'Regenerate BG' button so it isn't rebuilt every render. "
+        "The Group Comparison map gains an 'averaging radius' control that pools "
+        "each group's density over a wider area, merging small opposite-sign "
+        "specks into the surrounding trend. Both tabs gained shared "
+        "contrast/brightness/sharpness/blur and custom-image controls and can "
+        "reuse each other's exact background, so figures match without re-tuning. "
+        "The Spatial Heatmap now draws from the same filtered temporal-review "
+        "bouts as the rest of Analytics, fixing behaviors that plotted nothing.",
+        "Robustness and internals: input preflight validation fails a "
+        "preprocessing run fast with an actionable message; worker errors surface "
+        "the exception message first instead of truncating it away; atomic "
+        "parquet writes; structured multi-animal label persistence (bulk upsert, "
+        "per-window structured labels); active-learning sample weighting with a "
+        "GPU-fit fallback; inline UMAP; and substantially expanded test coverage.",
+    ]),
     ("0.7.0", "July 1, 2026", [
         "SLEAP import: ABEL now imports SLEAP prediction files (.slp) directly. "
         "Data Import detects a SLEAP pose file, offers to convert it to ABEL's "

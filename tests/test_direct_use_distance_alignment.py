@@ -58,3 +58,66 @@ def test_old_model_columns_realign_to_canonical_data() -> None:
     assert np.allclose(fixed[:, 2], [0.1, 0.2, 0.3])
     # Column order (and therefore the model's feature order) is preserved.
     assert len(aligned_cols) == len(model_cols)
+
+
+# ---------------------------------------------------------------------------
+# Segment-level names carry a statistic suffix (dist_a_to_b_norm_mean). It must
+# be split off before the endpoints are sorted, or it gets swept into the second
+# endpoint — turning dist_nose_to_left_ear_mean into dist_left_ear_mean_to_nose,
+# a name no table has, which then silently reindexes to a fill value.
+# ---------------------------------------------------------------------------
+
+
+def test_canonical_distance_name_handles_statistic_suffixes() -> None:
+    from abel.services.behavior_representation_service import canonical_distance_name as cdn
+
+    assert cdn("dist_nose_to_left_ear_mean") == "dist_left_ear_to_nose_mean"
+    assert cdn("dist_left_ear_to_nose_mean") == "dist_left_ear_to_nose_mean"
+    assert cdn("dist_nose_to_left_ear_norm_std") == "dist_left_ear_to_nose_norm_std"
+    assert cdn("dist_nose_to_center_body_p90") == "dist_center_body_to_nose_p90"
+    # Non-distance and ROI columns are untouched.
+    assert cdn("nose_speed_mean") == "nose_speed_mean"
+    assert cdn("nose_to_target_dist_mean") == "nose_to_target_dist_mean"
+
+
+def test_aligner_reads_the_other_spelling_when_model_has_only_one() -> None:
+    """The v0.5.2 case: model predates canonicalisation, data is canonical."""
+    from abel.services.behavior_representation_service import align_model_feature_columns
+
+    model_cols = ["dist_nose_to_left_ear_mean", "speed_mean"]
+    data_cols = {"dist_left_ear_to_nose_mean", "speed_mean"}
+    source, nan_fill = align_model_feature_columns(model_cols, data_cols)
+
+    # Reads the real value under the canonical spelling — not a fill.
+    assert source == ["dist_left_ear_to_nose_mean", "speed_mean"]
+    assert nan_fill == [False, False]
+
+
+def test_aligner_nan_fills_the_surplus_slot_of_a_double_named_pair() -> None:
+    """Both spellings in one model: in training one held the value, one was NaN.
+
+    Copying the value into both would present a combination the model never saw,
+    and 0.0 would assert an average distance (the features are z-scored).
+    """
+    from abel.services.behavior_representation_service import align_model_feature_columns
+
+    model_cols = ["dist_left_ear_to_nose_mean", "dist_nose_to_left_ear_mean"]
+    data_cols = {"dist_left_ear_to_nose_mean"}
+    source, nan_fill = align_model_feature_columns(model_cols, data_cols)
+
+    # Canonical slot reads the value; the surplus legacy slot is NaN, not 0.0.
+    assert source[0] == "dist_left_ear_to_nose_mean"
+    assert nan_fill[0] is False
+    assert nan_fill[1] is True
+
+
+def test_aligner_zero_fills_genuinely_absent_columns() -> None:
+    from abel.services.behavior_representation_service import align_model_feature_columns
+
+    model_cols = ["flow_mag_paw_L_mean", "speed_mean"]
+    data_cols = {"speed_mean"}
+    source, nan_fill = align_model_feature_columns(model_cols, data_cols)
+
+    assert source == ["flow_mag_paw_L_mean", "speed_mean"]
+    # Not a pair-order case, so it stays a real gap: zero-filled by the caller.
+    assert nan_fill == [False, False]

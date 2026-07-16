@@ -124,6 +124,18 @@ def test_select_grid_bouts_empty_behavior(tmp_path: Path) -> None:
     assert svc.select_grid_bouts("not_a_behavior") == []
 
 
+def test_select_grid_bouts_banded_orders_rows_high_to_low(tmp_path: Path) -> None:
+    svc = _service(_make_project(tmp_path))
+    # Three detected bouts at 0.95, 0.85, 0.70. With a 3-row × 1-col grid each row
+    # is a distinct probability band, ordered top (highest) → bottom (lowest).
+    specs = svc.select_grid_bouts("groom", layout="bands", rows=3, cols=1)
+    assert len(specs) == 3
+    probs = [round(s.mean_prob, 2) for s in specs]
+    assert probs == sorted(probs, reverse=True)
+    assert probs[0] == pytest.approx(0.95, abs=1e-3)
+    assert probs[-1] == pytest.approx(0.70, abs=1e-3)
+
+
 def _add_subject_manifest(root: Path, mapping: dict[str, str]) -> None:
     """Write a minimal import manifest mapping session_id -> subject_id."""
     path = root / "derived" / "review_tables" / "import_manifest.json"
