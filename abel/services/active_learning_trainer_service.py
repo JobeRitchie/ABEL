@@ -631,7 +631,7 @@ class ActiveLearningTrainerService:
         config: TrainingConfig | None = None,
         *,
         project_root: Path | None = None,
-        precomputed_split: "tuple[np.ndarray, np.ndarray] | None" = None,
+        precomputed_split: "tuple[np.ndarray, ...] | None" = None,
         feature_cols_override: "list[str] | None" = None,
         progress_cb: "Callable[[str], None] | None" = None,
     ) -> "TrainEvalResult":
@@ -645,6 +645,18 @@ class ActiveLearningTrainerService:
         ``feature_cols_override`` intersects the engine-selected feature columns
         (used by ablation runs).  ``project_root`` is only read from (feature
         exclusions / trim report) and never written by this method.
+
+        ``precomputed_split`` may carry an optional third index array,
+        ``(train_idx, val_idx, cal_idx)``, naming rows used **only** to fit the
+        probability calibrator.  Without it the calibrator falls back to fitting
+        on the validation split — correct for the product (the calibrator must
+        see the model's behaviour on unseen data, and the deployed model is
+        refit and CV-calibrated anyway) but *not* for measurement: whoever
+        scores those same validation rows is then reading a calibrator that was
+        fit on them.  Measured across 7 projects / 23 behaviors at a 50-clip
+        budget, that inflated calibration's apparent macro-F1 gain from +0.064
+        to +0.073.  Callers who report metrics on the validation split should
+        pass ``cal_idx``.
         """
         import time
         from sklearn.calibration import CalibratedClassifierCV, calibration_curve
@@ -669,10 +681,13 @@ class ActiveLearningTrainerService:
         # (co-occurring expansion, untrainable filtering, label collapse, capping).
         _use_precomputed = precomputed_split is not None
         if _use_precomputed:
-            _tr_idx0, _va_idx0 = precomputed_split
+            _tr_idx0, _va_idx0 = precomputed_split[0], precomputed_split[1]
+            _cal_idx0 = precomputed_split[2] if len(precomputed_split) > 2 else None
             _roles = np.array(["drop"] * len(df), dtype=object)
             _roles[np.asarray(_tr_idx0, dtype=int)] = "train"
             _roles[np.asarray(_va_idx0, dtype=int)] = "val"
+            if _cal_idx0 is not None:
+                _roles[np.asarray(_cal_idx0, dtype=int)] = "cal"
             df["_eval_split_role"] = _roles
             df = df[df["_eval_split_role"] != "drop"].reset_index(drop=True)
 
@@ -1000,10 +1015,12 @@ class ActiveLearningTrainerService:
         # internal split — a caller-supplied precomputed split (validation /
         # benchmark platform) always keeps its held-out rows.
         _no_holdout = False
+        cal_idx = np.empty(0, dtype=int)
         if _use_precomputed:
             _roles_final = df["_eval_split_role"].to_numpy()
             train_idx = np.where(_roles_final == "train")[0]
             val_idx = np.where(_roles_final == "val")[0]
+            cal_idx = np.where(_roles_final == "cal")[0]
         elif len(df) < int(cfg.min_holdout_samples):
             _no_holdout = True
             train_idx = np.arange(len(df), dtype=int)
@@ -1025,6 +1042,9 @@ class ActiveLearningTrainerService:
             df = df.drop(columns=["_eval_split_role"])
         train_df = df.iloc[train_idx]
         val_df = df.iloc[val_idx]
+        # Dedicated calibration rows (never trained on, never scored) — empty
+        # unless the caller supplied cal_idx.
+        cal_df = df.iloc[cal_idx]
 
         # Some labels are training aids, not held-out evaluation data, and must
         # never enter the validation split or they pollute the reported metrics:
@@ -1072,6 +1092,13 @@ class ActiveLearningTrainerService:
             )
             val_df = train_df.copy()
         y_val = np.asarray([label_to_idx[str(label)] for label in val_df["label"]], dtype=int)
+        # Same label-map filtering for the calibration split: a calibrator can
+        # only be fit on classes the model was actually trained to emit.
+        if not cal_df.empty:
+            cal_df = cal_df.loc[cal_df["label"].astype(str).isin(label_to_idx)].copy()
+        y_cal = np.asarray(
+            [label_to_idx[str(label)] for label in cal_df["label"]], dtype=int
+        ) if not cal_df.empty else np.empty(0, dtype=int)
 
         # ── Adaptive model complexity ─────────────────────────────
         # When enabled, scale tree count and depth to the ratio of
@@ -1178,27 +1205,47 @@ class ActiveLearningTrainerService:
         clf = est
         # Detect degenerate validation split early — needed to guard calibration.
         _degenerate_val_early = len(set(y_val.tolist())) < 2
-        if cfg.calibration_method in {"sigmoid", "isotonic"}:
-            if _degenerate_val_early:
+        # Prefer a dedicated calibration split when the caller supplied one: it
+        # keeps the calibrator off the rows the run is scored on.  Falls back to
+        # the validation split (product behaviour) when absent or single-class.
+        _cal_supplied = _use_precomputed and len(cal_idx) > 0
+        _use_cal_split = len(y_cal) > 0 and len(set(y_cal.tolist())) > 1
+        # A caller that supplied cal_idx is telling us it will score the
+        # validation split, so calibrating on that split would be a leak.  If the
+        # supplied slice turns out to be unusable, skip calibration entirely
+        # rather than quietly falling back to it.
+        _cal_unusable = _cal_supplied and not _use_cal_split
+        if _cal_unusable:
+            logger.warning(
+                "Calibration split has only one class (%d row(s)); skipping "
+                "calibration — refusing to fall back to the validation split, "
+                "which the caller scores.",
+                len(y_cal),
+            )
+        if cfg.calibration_method in {"sigmoid", "isotonic"} and not _cal_unusable:
+            if _degenerate_val_early and not _use_cal_split:
                 logger.warning(
                     "Skipping calibration: validation set has only one class (%d row(s)). "
                     "Metrics will be marked as unreliable.",
                     len(y_val),
                 )
             else:
-                _log(f"Calibrating predictions on held-out validation data ({cfg.calibration_method})…")
+                _src_name = "dedicated calibration split" if _use_cal_split else "held-out validation data"
+                _log(f"Calibrating predictions on {_src_name} ({cfg.calibration_method})…")
                 method = "sigmoid" if cfg.calibration_method == "sigmoid" else "isotonic"
                 if _FrozenEstimator is not None:
                     calibrated = CalibratedClassifierCV(estimator=_FrozenEstimator(est), method=method)
                 else:
                     calibrated = CalibratedClassifierCV(estimator=est, method=method, cv="prefit")
-                # Fit the calibrator on the VALIDATION split so the sigmoid learns
-                # from the model's behaviour on unseen data.  Fitting on training
-                # data (the previous approach) caused the sigmoid to learn the
+                # Fit the calibrator on data the model has NOT been trained on, so
+                # the sigmoid learns from its behaviour on unseen rows.  Fitting on
+                # training data (the original approach) made the sigmoid learn the
                 # overconfident training-time probability distribution, which then
                 # compressed moderate predictions on novel subjects toward zero.
-                x_val_cal = val_df[feature_cols].to_numpy(dtype=float)
-                calibrated.fit(x_val_cal, y_val)
+                # A dedicated calibration split is preferred when supplied; the
+                # validation split is the product fallback.
+                _cal_frame, _cal_y = (cal_df, y_cal) if _use_cal_split else (val_df, y_val)
+                calibrated.fit(_cal_frame[feature_cols].to_numpy(dtype=float), _cal_y)
                 clf = calibrated
 
         _log("Running validation inference…")

@@ -524,6 +524,7 @@ class ClipExtractionTab(QWidget):
         if self._external_candidates:
             status += f" Includes {len(self._external_candidates)} external candidate(s) from {self._external_source_label}."
         self._status.setText(status)
+        self._sync_source_filter_button()
         self._on_session_changed(self._session_combo.currentIndex())
 
     def _on_session_changed(self, _idx: int) -> None:
@@ -579,11 +580,11 @@ class ClipExtractionTab(QWidget):
         """Show a dialog where the user can check/uncheck candidate source types."""
         from PySide6.QtWidgets import QDialog, QDialogButtonBox  # noqa: PLC0415
 
+        # Prune stale keys so the dict (and the button count) matches the
+        # source types actually present now — otherwise the button could read
+        # "5 sources" while the dialog shows only 4 checkboxes.
+        self._sync_source_filter_button()
         source_types = self._discover_source_types()
-        # Ensure every discovered type is in the filter dict (default enabled).
-        for st in source_types:
-            if st not in self._source_filter_enabled:
-                self._source_filter_enabled[st] = True
 
         # Friendly display names for source types.
         _display = {
@@ -635,16 +636,28 @@ class ClipExtractionTab(QWidget):
         for st, cb in checkboxes.items():
             self._source_filter_enabled[st] = cb.isChecked()
 
-        # Update the button label to show how many are enabled.
+        self._sync_source_filter_button()
+
+        # Re-apply to the table.
+        self._on_session_changed(0)
+
+    def _sync_source_filter_button(self) -> None:
+        """Prune stale source keys and update the Filter Sources button label.
+
+        The count on the button must match the number of checkboxes the dialog
+        would show — i.e. the source types actually present among the loaded
+        candidates — so we drop any keys for sources that are no longer present.
+        """
+        source_types = self._discover_source_types()
+        self._source_filter_enabled = {
+            st: self._source_filter_enabled.get(st, True) for st in source_types
+        }
         n_on = sum(1 for v in self._source_filter_enabled.values() if v)
         n_total = len(self._source_filter_enabled)
         if n_on < n_total:
             self._filter_sources_btn.setText(f"Filter Sources ({n_on}/{n_total})")
         else:
             self._filter_sources_btn.setText("Filter Sources…")
-
-        # Re-apply to the table.
-        self._on_session_changed(0)
 
     def _selected_candidates_by_session(
         self,

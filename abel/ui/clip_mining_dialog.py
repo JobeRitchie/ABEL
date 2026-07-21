@@ -13,6 +13,16 @@ builds criteria and clicks **Find matches**, which scores the pool in a
 background worker (progress bar shown) and caches the table; later criteria edits
 re-filter the cached table instantly.  Essence extraction scores only the handful
 of selected exemplar clips, so it works without a full pool scan.
+
+Hand-set criteria stay on the interpretable pose/ROI metrics — those are the ones
+a human can reason about and set a number for.  The **Essence Extractor** also
+ranges over the project's *extracted* per-window features (the classifier's own
+oscillation / rotation / jerk / context columns), because it picks its own
+features and that is where behaviours like a wet-dog-shake actually separate.
+Whatever it picks is shown as an editable row with a humanised name, so the
+definition stays inspectable.  Those features are precomputed, so an essence
+built on them needs no pose file — and mining them reads the feature table
+directly instead of re-scoring every segment from pose.
 """
 
 from __future__ import annotations
@@ -31,6 +41,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -48,7 +59,10 @@ from abel.services.clip_metrics_service import (
     ClipRef,
     Criterion,
     MetricDef,
-    METRIC_BY_ID,
+    is_rich_metric,
+    metric_def_for,
+    metric_label,
+    rich_metric_def,
 )
 from abel.workers.task_worker import TaskWorker
 
@@ -77,17 +91,23 @@ class _CriterionRow(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
+        # Measured, not hard-coded: extracted-feature labels are long, and every
+        # width here must survive Windows display scaling.
+        em = self.fontMetrics().horizontalAdvance("M")
 
         self.enable = QPushButton("✓")
         self.enable.setCheckable(True)
         self.enable.setChecked(True)
-        self.enable.setFixedWidth(28)
+        self.enable.setFixedWidth(2 * em)
         self.enable.setToolTip("Include this criterion when matching")
         self.enable.toggled.connect(lambda _c: (self._sync_enabled(), self.changed.emit()))
         layout.addWidget(self.enable)
 
         self.metric = QComboBox()
-        self.metric.setMinimumWidth(230)
+        self.metric.setMinimumWidth(22 * em)
+        self.metric.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
         for m in metric_defs:
             self.metric.addItem(f"{m.group} — {m.label}", userData=m.id)
             self.metric.setItemData(self.metric.count() - 1, m.description, Qt.ItemDataRole.ToolTipRole)
@@ -97,7 +117,7 @@ class _CriterionRow(QWidget):
         layout.addWidget(QLabel("≥"))
         self.low = QLineEdit()
         self.low.setPlaceholderText("any")
-        self.low.setFixedWidth(64)
+        self.low.setFixedWidth(6 * em)
         self.low.setValidator(QDoubleValidator())
         self.low.textChanged.connect(lambda _t: self.changed.emit())
         layout.addWidget(self.low)
@@ -105,13 +125,13 @@ class _CriterionRow(QWidget):
         layout.addWidget(QLabel("≤"))
         self.high = QLineEdit()
         self.high.setPlaceholderText("any")
-        self.high.setFixedWidth(64)
+        self.high.setFixedWidth(6 * em)
         self.high.setValidator(QDoubleValidator())
         self.high.textChanged.connect(lambda _t: self.changed.emit())
         layout.addWidget(self.high)
 
         self.unit = QLabel("")
-        self.unit.setFixedWidth(40)
+        self.unit.setFixedWidth(4 * em)
         self.unit.setStyleSheet("color: #78909C;")
         layout.addWidget(self.unit)
 
@@ -121,7 +141,7 @@ class _CriterionRow(QWidget):
         layout.addWidget(self.hint)
 
         self.remove_btn = QPushButton("✕ Remove")
-        self.remove_btn.setMinimumWidth(80)
+        self.remove_btn.setMinimumWidth(8 * em)
         self.remove_btn.setToolTip("Remove this criterion")
         self.remove_btn.setStyleSheet(
             "QPushButton { color: #C62828; font-weight: 600; }"
@@ -140,8 +160,11 @@ class _CriterionRow(QWidget):
 
     def _on_metric_changed(self) -> None:
         mid = self.metric.currentData()
-        m = METRIC_BY_ID.get(mid)
+        m = metric_def_for(mid)
         self.unit.setText(m.unit if m else "")
+        # Extracted features are machine-named; their description is the only
+        # place the raw column name is visible, so keep it one hover away.
+        self.metric.setToolTip(m.description if m else "")
         if self._stats is not None and mid in self._stats.columns:
             col = pd.to_numeric(self._stats[mid], errors="coerce")
             col = col[np.isfinite(col)]
@@ -249,6 +272,17 @@ class ClipMiningDialog(QDialog):
         self._mining = False
         self._essence_busy = False
         self._suspend_updates = False
+        # Contrastive essence state: a background sample the exemplars are compared
+        # against, plus the graded exemplar-likeness ranker built from the last
+        # extraction (orders matches so "load top N" gets the best first).
+        self._bg_df: pd.DataFrame | None = None
+        self._bg_key: frozenset | None = None  # sessions the cached background covers
+        self._bg_ids: list[str] = []           # windows behind the cached background
+        self._essence_scorer = None
+        self._rank_scores: pd.Series | None = None
+        # Extracted-feature ids the essence has committed to (criteria or ranker),
+        # so their columns can be joined onto the scored pool before mining.
+        self._rich_needed: list[str] = []
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -315,17 +349,41 @@ class ClipMiningDialog(QDialog):
         ess = QHBoxLayout()
         self._essence_btn = QPushButton("⤢ Extract essence from selected clips")
         self._essence_btn.setToolTip(
-            "Find the features the selected review clips most have in common and add the\n"
-            "top few as criteria automatically — you don't pick the features, it does.\n"
+            "Find what makes the selected review clips *different from the rest of the\n"
+            "pool* and add the most distinguishing features as criteria automatically —\n"
+            "you don't pick the features, it does. It searches the zone/motion metrics\n"
+            "above AND this project's extracted per-window features (the same ones the\n"
+            "classifier learns from, including rhythm, rotation and jerk), so it can lock\n"
+            "onto things no hand-set criterion can express. Matches are then ranked by\n"
+            "how exemplar-like they are, so loading the top N gets the best first.\n"
             "This window stays open — change your selection behind it, then click again."
         )
         self._essence_btn.clicked.connect(self._extract_essence)
         ess.addWidget(self._essence_btn)
-        ess.addWidget(QLabel("range:"))
-        self._essence_method = QComboBox()
-        self._essence_method.addItem("min–max (tight)", "minmax")
-        self._essence_method.addItem("10–90th pct (robust)", "p10p90")
-        ess.addWidget(self._essence_method)
+        ess.addWidget(QLabel("top features:"))
+        self._essence_topk = QSpinBox()
+        self._essence_topk.setRange(1, 20)
+        self._essence_topk.setValue(5)
+        self._essence_topk.setToolTip(
+            "How many of the most *distinguishing* features to add as criteria —\n"
+            "the ones that best separate the selected clips from the rest of the\n"
+            "pool. More features means a tighter, more specific definition."
+        )
+        ess.addWidget(self._essence_topk)
+        ess.addWidget(QLabel("breadth:"))
+        self._essence_breadth = QComboBox()
+        # Recall target for the contrastive box: how much of the selected clips the
+        # criteria must keep. Lower = tighter/more precise, higher = broader.
+        self._essence_breadth.addItem("Balanced", 0.80)
+        self._essence_breadth.addItem("Broad (more recall)", 0.90)
+        self._essence_breadth.addItem("Tight (more precise)", 0.65)
+        self._essence_breadth.setToolTip(
+            "How much of your selected clips the extracted criteria must keep.\n"
+            "Broad keeps almost all of them (surfaces more, looser definition);\n"
+            "Tight drops outlier clips for a sharper, more specific definition\n"
+            "that matches fewer of the pool. Re-run Extract essence after changing."
+        )
+        ess.addWidget(self._essence_breadth)
         ess.addStretch(1)
         root.addLayout(ess)
 
@@ -409,11 +467,43 @@ class ClipMiningDialog(QDialog):
 
     # -- metric computation (deferred until the user mines) ------------------
 
+    def _feature_only_criteria(self) -> bool:
+        """True when nothing in play needs pose.
+
+        Every active bound and every ranker feature is an extracted feature, so the
+        pool can be read straight from the feature table instead of recomputing
+        pose metrics for all 40-odd thousand segments — the usual state right after
+        Extract essence, and the reason mining no longer needs the pose drive.
+        """
+        ids = [
+            c.metric_id for c in self._current_criteria()
+            if c.enabled and (c.low is not None or c.high is not None)
+        ]
+        ids += list(getattr(self._essence_scorer, "feature_ids", []) or [])
+        return bool(ids) and all(is_rich_metric(m) for m in ids)
+
+    def _needs_pose_scoring(self) -> bool:
+        """True when an active criterion has no column in the cached pool table.
+
+        Happens when the pool was read from the feature table (no pose pass) and
+        the user then adds a hand-set geometry criterion — Find matches must do the
+        real scoring pass rather than silently ignoring the new bound.
+        """
+        if self._df is None:
+            return True
+        return any(
+            c.metric_id not in self._df.columns and not is_rich_metric(c.metric_id)
+            for c in self._current_criteria()
+            if c.enabled and (c.low is not None or c.high is not None)
+        )
+
     def _mine(self) -> None:
         """Score the full pool (first time) then count matches for the criteria."""
-        if self._mining:
+        # Essence runs in a worker that shares the pool/background caches, so the
+        # two jobs never overlap.
+        if self._mining or self._essence_busy:
             return
-        if self._scored:
+        if self._scored and not self._needs_pose_scoring():
             # Metrics already cached — criteria edits just re-filter.
             self._update_count()
             return
@@ -429,6 +519,27 @@ class ClipMiningDialog(QDialog):
             )
             return
 
+        # Pure extracted-feature criteria (the usual case straight after Extract
+        # essence) are already computed per window, so the pool is read from the
+        # feature table — no pose pass, and no dependency on the pose drive.
+        if self._feature_only_criteria():
+            self._start_feature_pool_scan(clips)
+            return
+
+        # Scoring re-reads each session's raw pose; if it's gone every clip
+        # scores all-NaN and no criterion can match. Warn, and only abort if
+        # *every* session is unreadable (a partial pool can still be mined).
+        missing = self._metrics.unresolved_pose_clips(clips)
+        if missing:
+            self._warn_missing_pose(missing, "in this project")
+            if len(missing) >= len({c.session_id for c in clips}):
+                self._count_label.setText(
+                    "Couldn't read pose for any session — see the message above. "
+                    "Extract essence still works: it can range over this project's "
+                    "extracted features, which need no pose file."
+                )
+                return
+
         self._mining = True
         self._mine_btn.setEnabled(False)
         self._progress.setVisible(True)
@@ -439,6 +550,29 @@ class ClipMiningDialog(QDialog):
         worker.signals.finished.connect(self._on_metrics_ready)
         worker.signals.failed.connect(self._on_metrics_failed)
         QThreadPool.globalInstance().start(worker)
+
+    def _start_feature_pool_scan(self, clips: list[ClipRef]) -> None:
+        """Read the pool's extracted-feature values for the current criteria."""
+        from PySide6.QtCore import QThreadPool
+
+        want = self._rich_needed + [c.metric_id for c in self._current_criteria()]
+        cols = [m for m in dict.fromkeys(want) if is_rich_metric(m)]
+        self._mining = True
+        self._mine_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress.setRange(0, 0)  # a table read, not a per-clip scan
+        self._progress.setFormat("Reading extracted features…")
+        worker = TaskWorker(
+            self._feature_pool_job, [c.window_id for c in clips], cols
+        )
+        worker.signals.finished.connect(self._on_metrics_ready)
+        worker.signals.failed.connect(self._on_metrics_failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _feature_pool_job(self, window_ids: list[str], cols: list[str]) -> pd.DataFrame:
+        """Worker-thread read of the feature table for the pool (no widget access)."""
+        df = self._metrics.load_rich_features(metric_ids=cols, segment_ids=set(window_ids))
+        return df.reindex([str(w) for w in window_ids])
 
     def _emit_progress(self, done: int, total: int) -> None:
         # Runs in the worker thread; the queued signal marshals to the UI thread.
@@ -461,10 +595,16 @@ class ClipMiningDialog(QDialog):
         self._progress.setRange(0, 1)
         self._progress.setValue(1)
         self._progress.setFormat(f"Scored {len(df)} segment(s)")
+        # Join on any extracted-feature columns the current essence needs, so the
+        # scope hints and the match count cover them too.
+        self._ensure_rich_columns()
         # Populate the live scope hints on every existing row.
         for r in self._rows:
-            r._stats = df
+            r._stats = self._df
             r._on_metric_changed()
+        # Now that the pool is scored, grade it with the last essence ranker (if
+        # any) so matches load most-exemplar-like first.
+        self._refresh_rank_scores()
         self._update_count()
 
     def _on_metrics_failed(self, tb: str) -> None:
@@ -523,11 +663,72 @@ class ClipMiningDialog(QDialog):
         self._add_row(mid)
         self._search.clear()
 
+    def _register_metrics(self, metric_ids: list[str]) -> None:
+        """Make extracted-feature ids displayable as criteria rows.
+
+        The project registry only knows the interpretable metrics; essence may
+        commit to any extracted feature, so a display definition (humanised label,
+        feature family, raw column name in the tooltip) is minted on demand and
+        appended to the row list.  It also joins the search index, so a feature the
+        essence has surfaced once can be re-added by name afterwards.
+        """
+        known = {m.id for m in self._metric_defs}
+        for mid in metric_ids:
+            if mid in known or not is_rich_metric(mid):
+                continue
+            d = rich_metric_def(mid)
+            self._metric_defs.append(d)
+            known.add(mid)
+            self._feature_display[f"{d.group} — {d.label}"] = d.id
+            self._feature_index.append(
+                (d.id, f"{d.group} {d.label} {d.description}".lower())
+            )
+
+    def _ensure_rich_columns(self) -> None:
+        """Join any extracted-feature columns the criteria/ranker need onto the pool.
+
+        The scored pool table holds the interpretable metrics only; essence
+        criteria can name extracted features, whose values are read straight from
+        the project's feature table for the rows already scored.  Cheap and
+        idempotent — once a column is present the lookup is skipped, so this is
+        safe to call from the live criteria-count path.
+        """
+        if self._df is None or self._df.empty:
+            return
+        want = self._rich_needed + [c.metric_id for c in self._current_criteria()]
+        need = [
+            m for m in dict.fromkeys(want)
+            if is_rich_metric(m) and m not in self._df.columns
+        ]
+        if not need:
+            return
+        try:
+            self._df = self._metrics.attach_rich_columns(self._df, need)
+        except Exception:
+            return  # mine() simply ignores criteria whose column is absent
+        for r in self._rows:
+            r._stats = self._df
+        self._refresh_rank_scores()
+
+    def _refresh_rank_scores(self) -> None:
+        """Grade the scored pool with the current essence ranker (best-first order)."""
+        self._rank_scores = None
+        if self._essence_scorer is None or self._df is None:
+            return
+        try:
+            self._rank_scores = self._essence_scorer.score(self._df)
+        except Exception:
+            self._rank_scores = None
+
     def _restore_or_seed(self) -> None:
         """Rebuild rows from the project's saved criteria, or seed a starter row."""
         criteria, match_all = self._metrics.load_criteria()
         if match_all is not None:
             (self._match_all if match_all else self._match_any).setChecked(True)
+        # A saved essence may reference extracted features — register them (and
+        # remember them for the pool join) before any row tries to show one.
+        self._register_metrics([c.metric_id for c in criteria])
+        self._rich_needed = [c.metric_id for c in criteria if is_rich_metric(c.metric_id)]
         self._suspend_updates = True
         try:
             if criteria:
@@ -615,6 +816,30 @@ class ClipMiningDialog(QDialog):
         finally:
             self._suspend_updates = was_suspended
 
+    # -- missing pose ---------------------------------------------------------
+
+    def _warn_missing_pose(self, missing: dict[str, str | None], scope: str) -> None:
+        """Explain that the raw pose behind these clips can't be read.
+
+        Without it every metric comes back NaN, which otherwise masquerades as
+        "no shared features" — so we say so plainly instead of failing silently.
+        """
+        n = len(missing)
+        paths = [p for p in missing.values() if p]
+        detail = (
+            f"The pose tracking for {n} session{'s' if n != 1 else ''} {scope} "
+            "could not be read — the file may have moved or its drive may be "
+            "disconnected.\n\n"
+            "Re-link those sessions (or reconnect the drive) so their pose can "
+            "be loaded, then try again."
+        )
+        if paths:
+            sample = "\n".join(f"  • {p}" for p in paths[:5])
+            if len(paths) > 5:
+                sample += f"\n  … and {len(paths) - 5} more"
+            detail += "\n\nMissing files:\n" + sample
+        QMessageBox.warning(self, "Pose data not found", detail)
+
     # -- essence -------------------------------------------------------------
 
     def _collect_exemplars(self) -> list[ClipRef]:
@@ -623,46 +848,188 @@ class ClipMiningDialog(QDialog):
         except Exception:
             return []
 
-    def _extract_essence(self) -> None:
-        """Discover the features the selected clips most share and add the top few.
+    # How many background segments to contrast the exemplars against.
+    _BG_SAMPLE = 1000
 
-        Works straight off the highlighted clips — it scores just those exemplars,
-        with no full-pool scan required.  If the pool happens to already be scored
-        (after a Find matches), that baseline is reused to also favour features that
-        are discriminative; otherwise ranking falls back to a scale-free measure.
+    def _essence_background(
+        self, exemplars: list[ClipRef]
+    ) -> tuple["pd.DataFrame | None", list[str]]:
+        """``(clip-metric table, window ids)`` the exemplars are contrasted against.
+
+        Prefers the already-scored pool (representative and free).  Before any
+        Find matches, it samples other segments from the *same recordings* as the
+        exemplars: their pose is already loaded to score the exemplars, so this
+        stays quick, and "how do these clips differ from the rest of these
+        recordings" is a valid, session-controlled contrast.  The sample is cached
+        so repeated extractions don't rescore it.
+
+        The ids are returned alongside the table because the extracted-feature
+        half of the contrast is looked up by window id, and it stays usable even
+        when the pose-derived table comes back empty (unreadable pose).
+        """
+        if self._df is not None and not self._df.empty:
+            bg = self._df
+            if len(bg) > self._BG_SAMPLE:
+                bg = bg.sample(self._BG_SAMPLE, random_state=0)
+            # Only the pose-derived half: the extracted-feature columns are
+            # re-read by window id (the pool table may carry a few of them
+            # already, and they must not be contributed twice).
+            keep = [c for c in bg.columns if not is_rich_metric(c)]
+            ids = [str(w) for w in bg.index]
+            return (bg[keep] if keep else None), ids
+        exclude = {c.window_id for c in exemplars}
+        ex_sessions = frozenset(c.session_id for c in exemplars)
+        # Reuse the cached sample only when it covers the *current* selection's
+        # sessions — otherwise a changed selection would be contrasted against a
+        # stale background and essence would look like it "didn't update".
+        if self._bg_key == ex_sessions and self._bg_ids:
+            return self._bg_df, self._bg_ids
+        if not self._clip_by_id:
+            clips = self._metrics.load_segment_pool(self._scope_sessions)
+            self._clip_by_id = {c.window_id: c for c in clips}
+        pool = [
+            c for wid, c in self._clip_by_id.items()
+            if wid not in exclude and c.session_id in ex_sessions
+        ]
+        if not pool:
+            self._bg_df, self._bg_key, self._bg_ids = None, None, []
+            return None, []
+        rng = np.random.default_rng(0)
+        idx = rng.choice(len(pool), size=min(self._BG_SAMPLE, len(pool)), replace=False)
+        sample = [pool[i] for i in idx]
+        try:
+            # Serial (max_workers=1): the exemplar sessions are few, so loading
+            # each session's pose once in-process beats per-worker reloads.
+            self._bg_df = self._metrics.compute(sample, max_workers=1)
+        except Exception:
+            self._bg_df = None
+        self._bg_key = ex_sessions
+        self._bg_ids = [c.window_id for c in sample]
+        return self._bg_df, self._bg_ids
+
+    def _extract_essence(self) -> None:
+        """Discover what makes the selected clips different and add the top features.
+
+        Works straight off the highlighted clips — no full-pool scan required.  The
+        search ranges over BOTH metric spaces (see :meth:`_essence_job`), and runs
+        in a background worker because reading the extracted-feature table and the
+        greedy criteria search together take a second or two.
         """
         if self._essence_busy or self._mining:
             return
+        from PySide6.QtCore import QThreadPool
+
         exemplars = self._collect_exemplars()
         if not exemplars:
             self._count_label.setText(
                 "Select one or more clips in the review list first, then Extract essence."
             )
             return
-        self._run_similarity_essence(exemplars)
-
-    def _run_similarity_essence(self, exemplars: list[ClipRef]) -> None:
-        """Score the exemplars, find the top shared features, and add them as criteria."""
-        method = str(self._essence_method.currentData())
         self._essence_busy = True
         self._essence_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress.setRange(0, 0)  # indeterminate — the search isn't countable
+        self._progress.setFormat("Extracting essence…")
+        k = int(self._essence_topk.value())
+        recall_target = float(self._essence_breadth.currentData())
+        worker = TaskWorker(self._essence_job, exemplars, k, recall_target)
+        worker.signals.finished.connect(self._on_essence_ready)
+        worker.signals.failed.connect(self._on_essence_failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _essence_job(
+        self, exemplars: list[ClipRef], k: int, recall_target: float
+    ) -> dict:
+        """Worker-thread half of Extract essence — no widget access in here.
+
+        Builds the contrast over both metric spaces at once (interpretable clip
+        metrics *and* the project's extracted per-window features), so zone
+        geometry and the oscillation/angular family compete on merit for the
+        criteria slots.  The pose-derived half is skipped for clips whose pose file
+        can't be read — with the extracted features present that is a note, not a
+        failure, because they are precomputed and need no pose drive.
+        """
+        missing = self._metrics.unresolved_pose_clips(exemplars)
+        posed = [c for c in exemplars if c.session_id not in missing]
+        # Score the exemplars and the background independently: a background
+        # failure must not discard the (good) exemplar metrics and abort essence.
+        ex_df = None
+        if posed:
+            try:
+                ex_df = self._metrics.compute(posed)
+            except Exception:
+                ex_df = None
         try:
-            ex_df = self._metrics.compute(exemplars)
+            bg_df, bg_ids = self._essence_background(exemplars)
         except Exception:
-            ex_df = None
-        finally:
-            self._essence_busy = False
+            bg_df, bg_ids = None, []
+        frames = self._metrics.essence_frames(
+            [c.window_id for c in exemplars], bg_ids, ex_df, bg_df
+        )
+        notes = list(frames.notes)
+        if missing and "pose metrics" not in frames.sources:
+            notes.append(
+                f"Pose unreadable for {len(missing)} session(s), so the zone/geometry "
+                "metrics were left out of this essence."
+            )
+        if not frames.usable():
+            return {"crits": [], "scorer": None, "frames": frames, "notes": notes,
+                    "n_ex": 0, "missing": missing}
+        crits = self._metrics.extract_similar_essence(
+            frames.exemplars, frames.background, k=k, recall_target=recall_target
+        )
+        try:
+            scorer = self._metrics.build_essence_scorer(
+                frames.exemplars, frames.background
+            )
+        except Exception:
+            scorer = None
+        return {"crits": crits, "scorer": scorer, "frames": frames, "notes": notes,
+                "n_ex": int(len(frames.exemplars)), "missing": missing}
+
+    def _on_essence_failed(self, tb: str) -> None:
+        self._essence_busy = False
+        self._progress.setRange(0, 1)
+        self._progress.setValue(0)
+        self._progress.setFormat("Essence extraction failed")
         self.refresh_exemplar_count()
-        if ex_df is None or ex_df.empty:
-            self._count_label.setText("Could not compute metrics for the selected clips.")
-            return
-        crits = self._metrics.extract_similar_essence(ex_df, self._df, k=3, method=method)
-        if not crits:
+        self._count_label.setText("Essence extraction failed — see log.")
+
+    def _on_essence_ready(self, out: dict) -> None:
+        """UI-thread half: install the discovered criteria and report what was used."""
+        self._essence_busy = False
+        self._progress.setRange(0, 1)
+        self._progress.setValue(1)
+        self._progress.setVisible(self._scored)
+        if self._scored:
+            self._progress.setFormat(f"Scored {len(self._df)} segment(s)")
+        self.refresh_exemplar_count()
+        frames = out["frames"]
+        note = " ".join(out["notes"])
+        if not frames.usable():
+            missing = out["missing"]
+            if missing:
+                self._warn_missing_pose(missing, "in your selection")
             self._count_label.setText(
-                "Couldn't find shared features — pick two or more clips that are alike."
+                ("Could not read features for the selected clips. " + note).strip()
             )
             return
-        # Replace the criteria with the discovered top shared features.
+        crits = out["crits"]
+        self._essence_scorer = out["scorer"]
+        self._rank_scores = None  # regraded below, once the criteria are installed
+        if not crits:
+            self._count_label.setText(
+                "Couldn't find distinguishing features — pick two or more clips "
+                "that are alike. " + note
+            )
+            return
+        # Extracted features aren't in the project's metric registry, so register
+        # the chosen ones before any row tries to display them.
+        chosen = [c.metric_id for c in crits]
+        ranker = list(getattr(self._essence_scorer, "feature_ids", []) or [])
+        self._register_metrics(chosen + ranker)
+        self._rich_needed = [m for m in dict.fromkeys(chosen + ranker) if is_rich_metric(m)]
+        # Replace the criteria with the discovered distinguishing features.
         self._suspend_updates = True
         try:
             self._clear_rows()
@@ -671,15 +1038,23 @@ class ClipMiningDialog(QDialog):
                 row.set_range(c.low, c.high)
         finally:
             self._suspend_updates = False
-        labels = ", ".join(
-            METRIC_BY_ID[c.metric_id].label if c.metric_id in METRIC_BY_ID else c.metric_id
-            for c in crits
-        )
-        self._count_label.setText(
-            f"Added {len(crits)} shared feature(s) from {len(ex_df)} clip(s): {labels}. "
-            "Click Find matches to search the pool."
-        )
+        labels = ", ".join(metric_label(c.metric_id) for c in crits)
+        # Grade the already-scored pool with the new ranker (joining on any
+        # feature columns it needs) so matches load most-exemplar-like first.
+        self._ensure_rich_columns()
+        self._refresh_rank_scores()
+        # Refresh match count / apply state against the new criteria first. When the
+        # pool is already scored that live count IS the "it updated" feedback; when
+        # it isn't, keep the informative feature list instead of the generic prompt.
         self._update_count()
+        if self._df is None:
+            self._count_label.setText(
+                f"Added {len(crits)} distinguishing feature(s) from {out['n_ex']} "
+                f"clip(s): {labels}. Click Find matches to search the pool "
+                f"(ranked by similarity). {note}".rstrip()
+            )
+        elif note:
+            self._count_label.setText(self._count_label.text() + " " + note)
 
     # -- mining --------------------------------------------------------------
 
@@ -702,8 +1077,10 @@ class ClipMiningDialog(QDialog):
                     if active else "Add one or more criteria, then Find matches."
                 )
             return
+        self._ensure_rich_columns()
         res = self._metrics.mine(
-            self._df, self._current_criteria(), match_all=self._match_all.isChecked()
+            self._df, self._current_criteria(), match_all=self._match_all.isChecked(),
+            rank_scores=self._rank_scores,
         )
         self._last_matches = res.matched_ids
         self._last_scores = res.scores

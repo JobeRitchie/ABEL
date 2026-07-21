@@ -104,6 +104,11 @@ def test_train_uses_contiguous_label_ids(monkeypatch, tmp_path: Path):
             calibration_method="none",
             split_strategy="group_shuffle_session",
             model_version="test_model_v1",
+            # This test is about label encoding across a split that drops a label,
+            # so the split above must actually be used.  At the default
+            # min_holdout_samples=10 the very-low-sample guard would train on all
+            # 3 rows and the encoding path under test would never run.
+            min_holdout_samples=0,
         ),
     )
 

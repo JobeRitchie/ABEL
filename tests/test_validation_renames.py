@@ -80,9 +80,16 @@ def test_blank_project_rename_restores_the_original_name() -> None:
     assert not p.is_renamed
 
 
-# ── The point of it all: renames make two projects poolable ────────────────
+# ── Same-named behaviors from different assays stay separate ────────────────
 
-def test_renames_let_two_projects_pool_into_one_generalization_bar() -> None:
+def test_same_behavior_in_two_assays_stays_two_generalization_bars() -> None:
+    """A "Groom" model in one assay says nothing about "Groom" in another.
+
+    Even when a rename makes two projects spell a behavior identically, the
+    generalization panel must keep them as two bars keyed by assay — never average
+    two independently-trained models into one fabricated number. Renames still
+    relabel; they no longer pool.
+    """
     from abel.validation.plots import pool_generalization_by_behavior
 
     a = _project()
@@ -110,8 +117,12 @@ def test_renames_let_two_projects_pool_into_one_generalization_bar() -> None:
 
     df = pool_generalization_by_behavior([result(a, "b1", 0.9), result(b, "g", 0.7)])
 
-    # One bar, not two: the rename is what asserted these are the same behavior.
-    assert list(df["behavior"]) == ["Groom"]
-    assert int(df.loc[0, "n_projects"]) == 2
-    assert int(df.loc[0, "n_cells"]) == 6      # pooled over project x seed, not mean-of-means
-    assert df.loc[0, "kappa"] == pytest.approx(0.8)
+    # Two rows, assay-scoped and never merged: same behavior name, different models.
+    assert len(df) == 2
+    assert set(df["behavior"]) == {"Groom"}
+    assert set(df["label"]) == {"Novel Object · Groom", "EPM_v2 · Groom"}
+    # Each row keeps only its own project's 3 seed cells — no cross-assay pooling.
+    assert sorted(df["n_cells"]) == [3, 3]
+    by_label = df.set_index("label")
+    assert by_label.loc["Novel Object · Groom", "kappa"] == pytest.approx(0.9)
+    assert by_label.loc["EPM_v2 · Groom", "kappa"] == pytest.approx(0.7)

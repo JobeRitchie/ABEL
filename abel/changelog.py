@@ -7,10 +7,79 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "July 16, 2026"
+VERSION_DATE = "July 21, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.9.0", "July 21, 2026", [
+        "External Validation & Meta-Analysis Suite now ships with ABEL: the "
+        "cross-project suite (learning curves, ablation, behavior "
+        "discrimination, generalization / human agreement, active learning vs. "
+        "random, behaviorscape, video-feature value, throughput) and its "
+        "launcher are part of the application rather than a local-only tool, "
+        "with its test suite included.",
+        "Validation sessions: a run's setup — which projects were loaded, which "
+        "behaviors were checked or unchecked, and every project/behavior rename "
+        "applied on top — is now saved and reloadable, and each run is filed "
+        "inside the session it came from with a frozen copy of that setup. "
+        "Everything lives in one workspace folder (default “ABEL Validation” in "
+        "your user folder, or set ABEL_VALIDATION_HOME), so results are no "
+        "longer scattered next to whichever project happened to be first. "
+        "Reloading reports anything that moved, lost its training set, or would "
+        "collide by name, and a project on an unmounted drive is kept in the "
+        "record rather than quietly erased from it.",
+        "Rare-behavior discovery analysis: a new validation arm measures "
+        "whether ABEL's clip hunting (essence mining, active learning, UMAP "
+        "neighbourhoods) actually finds a rare behavior faster than random or "
+        "whole-video review, with a cheap up-front rarity + evidence check so a "
+        "hunt is never launched on too few confirmed positives, plus "
+        "cross-validated enrichment, effort-to-quality curves and rarity "
+        "scaling.",
+        "Feature-role clustering: a new analysis clusters behaviors by which "
+        "feature modality they actually rely on (pose, kinematics, context, "
+        "video), reporting each cluster's over-pose ΔF1 so “what kind of "
+        "measurement does this behavior need?” has an answer backed by the "
+        "ablation numbers.",
+        "Prism-ready and meta-summary exports: every validation run now writes "
+        "GraphPad-shaped pivots (prism/) and consolidated summary tables "
+        "(summary/) automatically, so figures no longer need hand-reformatting "
+        "of the tidy results table.",
+        "Assay-scoped behaviors in validation: behaviors with the same name in "
+        "different assays (EPM “Rear” vs. OFT “Rear”) are never pooled, and the "
+        "behaviorscape PERMANOVA is reported as descriptive rather than "
+        "inferential where pooling would have been required.",
+        "Project and behavior renaming in the validation suite: rename either "
+        "for reporting and the new name flows into every figure, table and "
+        "export, while lookups on disk keep using the original name — so "
+        "matching names across projects merges them in the generalization "
+        "figure without touching any project.",
+        "Essence Extractor over the shipped feature space: exemplar-driven clip "
+        "mining can now range over the same ~1100 extracted features the "
+        "classifier consumes, not just the ~30 interpretable clip metrics, with "
+        "a contrastive search that picks the features separating exemplars from "
+        "the background pool, human-readable criteria labels, and degenerate "
+        "features (constant across the fixed window) excluded by construction.",
+        "Raw-data availability warning: a project whose videos or pose files "
+        "live on an unmounted or unreachable drive now says so when you open a "
+        "tab that needs them, and before a long validation run starts, instead "
+        "of silently degrading into empty results — once per distinct problem, "
+        "app-wide.",
+        "Calibration leakage fix: probability calibration can now be fit on a "
+        "dedicated split the model was never trained on and that the run is not "
+        "scored on. Where a caller supplies that split, calibration is skipped "
+        "rather than quietly falling back to the scored split.",
+        "Review tab behavior filter no longer polluted by UMAP display labels: "
+        "coordinates carrying display names (“A + B” multi-labels, cluster "
+        "names, short-name codes) are mapped back to real behavior ids, and "
+        "anything that doesn't resolve to one defined behavior lands as "
+        "unassigned instead of creating a duplicate filter entry.",
+        "Clip-mining and Review fixes: the source-filter button count now "
+        "matches the sources actually present, mined clips that are already "
+        "reviewed are surfaced when reviewed rows are shown, “no matches” is "
+        "distinguished from “all matches hidden by the filter”, and edge-case "
+        "candidates selected in Active Learning now land in the Clips tab "
+        "visibly instead of looking like a no-op.",
+    ]),
     ("0.8.0", "July 16, 2026", [
         "Methods tab: a new project-independent tab documenting ABEL's "
         "statistical procedures for users and reviewers — a References subtab "

@@ -36,6 +36,7 @@ from abel.services.seed_service import SeedService
 from abel.services.settings_service import SettingsService
 from abel.ui.assets import icon_path
 from abel.ui.dialogs import ProjectWizardDialog
+from abel.ui.raw_data_warning import RawDataWarningPresenter
 from abel.ui.startup_widget import StartupWidget
 from abel.ui.tabs.active_learning_tab import ActiveLearningTab
 from abel.ui.tabs.behavior_tab import BehaviorTab
@@ -92,6 +93,9 @@ class MainWindow(QMainWindow):
         self._validation_service = ValidationService()
         self._export_service.set_behavior_service(self._behavior_service)
         self._project: ProjectContext | None = None
+        # Shared across every tab so the "raw data unreachable" warning has one
+        # voice and one cadence (once per distinct problem) app-wide.
+        self._raw_data_warning = RawDataWarningPresenter(self)
 
         self.stack = QStackedWidget()
         self.startup = StartupWidget()
@@ -489,6 +493,13 @@ class MainWindow(QMainWindow):
         root = context.project_root
         QTimer.singleShot(0, lambda: self._update_home_stats(root))
 
+        # Raw-data availability: a project whose videos/pose live on an unmounted
+        # drive opens fine and then degrades silently downstream, so tell the user
+        # at open time rather than letting them discover it in an empty result.
+        # Deferred so the window paints first (the check touches the filesystem).
+        self._raw_data_warning.reset(root)
+        QTimer.singleShot(0, lambda: self._raw_data_warning.check(root))
+
     def _on_num_animals_changed(self, n: int) -> None:
         """Persist a change to the project's animal count (keeps in-memory config in sync)."""
         if self._project is None:
@@ -538,6 +549,7 @@ class MainWindow(QMainWindow):
                 self._lazy_init_tab(sub)
         else:
             self._lazy_init_tab(widget)
+        self._check_raw_data_for_tab(widget)
 
     def _on_sub_tab_changed(self, index: int) -> None:
         """Lazy-init the sub-tab that just became visible inside a group."""
@@ -547,6 +559,29 @@ class MainWindow(QMainWindow):
         widget = group.widget(index)
         if widget is not None:
             self._lazy_init_tab(widget)
+            self._check_raw_data_for_tab(widget)
+
+    # Tabs that never touch raw video or pose — warning here would be pure noise.
+    _RAW_DATA_EXEMPT_ATTRS = (
+        "settings_tab", "dependencies_tab", "logs_tab", "help_tab",
+        "info_tab", "home_tab", "methods_tab", "data_import_tab",
+    )
+
+    def _check_raw_data_for_tab(self, widget) -> None:
+        """Warn once per distinct problem when a tab that needs raw data opens.
+
+        Hooked into the two central tab-change handlers rather than added to each
+        tab, so every current and future tab is covered by construction and the
+        warning cannot drift out of sync between them.  Data Import is exempt
+        because relinking missing files is exactly what that tab is *for* — the
+        dialog would fire on the way to the fix.
+        """
+        if self._project is None or widget is None:
+            return
+        exempt = {getattr(self, attr, None) for attr in self._RAW_DATA_EXEMPT_ATTRS}
+        if widget in exempt:
+            return
+        self._raw_data_warning.check(self._project.project_root)
 
     def _compute_project_stats(self, project_root: Path) -> dict:
         """Fast stats read from persisted files for the home tab."""

@@ -44,9 +44,7 @@ Thumbs.db
 *.xls
 ~$*
 
-# --- External validation / meta-analysis suite (kept local, not committed) ---
-abel/validation/
-run_validation.bat
-tests/test_validation_engine.py
+# --- Validation run outputs (results live in the workspace, never in-tree) ---
 abel_validation_runs/
+unfiled_runs/
 NSF.behaviors.yaml

@@ -2115,17 +2115,41 @@ class ReviewTab(QWidget):
         )
 
     def _apply_mining_view(self) -> None:
-        """Build the visible queue from the mined ID set, ranked by match score."""
+        """Build the visible queue from the mined ID set, ranked by match score.
+
+        The mining filter narrows the queue to the matched windows, but it still
+        honours the review-status toggles ("Show reviewed", "Reviewed + Clips
+        Only") — otherwise those controls would silently stop working for the rest
+        of the session once a mining batch has been loaded.
+        """
         mined = self._mined_ids or set()
+        show_reviewed = bool(self._show_reviewed_chk.isChecked())
+        reviewed_with_clips_only = bool(self._reviewed_with_clips_btn.isChecked())
+        if reviewed_with_clips_only:
+            show_reviewed = True
         rows = [c for c in self._all_candidates if c.window_id in mined]
+        # Apply the reviewed-status filter within the mined set.
+        if reviewed_with_clips_only:
+            rows = [
+                c for c in rows
+                if c.window_id in self._decision_by_clip_id and self._candidate_clip_path(c)
+            ]
+        elif not show_reviewed:
+            rows = [c for c in rows if c.window_id not in self._decision_by_clip_id]
         have = {c.window_id for c in rows}
-        # Surface mined clips that are already reviewed (not in the live queue).
-        for wid in mined:
-            if wid in have:
-                continue
-            decision = self._decision_by_clip_id.get(wid)
-            if decision is not None:
-                rows.append(self._candidate_from_decision(decision))
+        # Surface mined clips that are already reviewed (not in the live queue) —
+        # only when reviewed rows are being shown, so the toggle stays meaningful.
+        if show_reviewed:
+            for wid in mined:
+                if wid in have:
+                    continue
+                decision = self._decision_by_clip_id.get(wid)
+                if decision is None:
+                    continue
+                cand = self._candidate_from_decision(decision)
+                if reviewed_with_clips_only and not self._candidate_clip_path(cand):
+                    continue
+                rows.append(cand)
                 have.add(wid)
         rows.sort(
             key=lambda c: (
@@ -2141,12 +2165,20 @@ class ReviewTab(QWidget):
 
         has_rows = bool(rows)
         self._empty_label.setVisible(not has_rows)
+        n_mined = len(mined)
         if not has_rows:
-            self._candidate_label.setText("No mined clips match")
+            # Distinguish "no matches" from "all matches hidden by the reviewed filter".
+            if n_mined and not show_reviewed:
+                self._candidate_label.setText(
+                    "All mined clips are reviewed — enable 'Show reviewed' to see them"
+                )
+            else:
+                self._candidate_label.setText("No mined clips match")
             self._player.close_clip()
             self._current_candidate_idx = -1
             return
-        self._candidate_label.setText(f"Mined queue: {len(rows)} clip(s)")
+        suffix = "" if show_reviewed else " unreviewed"
+        self._candidate_label.setText(f"Mined queue: {len(rows)}{suffix} clip(s)")
         next_idx = self._current_candidate_idx if 0 <= self._current_candidate_idx < len(rows) else 0
         self._load_candidate(next_idx, select_row=True)
 
@@ -3683,6 +3715,10 @@ class ReviewTab(QWidget):
         svc = ClipMetricsService()
         svc.set_project(project_root)
         df = svc.compute(refs)
+        # An essence may be defined on extracted features, which are precomputed
+        # per window rather than derived from pose; join those columns on so the
+        # audit judges them instead of reporting the clips as "no data".
+        df = svc.attach_rich_columns(df, [c.metric_id for c in criteria])
         return svc.check_essence(df, criteria, match_all)
 
     def _close_essence_progress(self) -> None:

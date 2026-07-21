@@ -4940,6 +4940,30 @@ class ActiveLearningTab(QWidget):
         # Build CandidateWindow objects from selected segments
         from abel.models.schemas import CandidateWindow  # noqa: PLC0415
 
+        # The UMAP coord parquet's ``behavior_label`` column holds *display*
+        # names (behaviour name / short_name, "A + B" multi-labels, or cluster
+        # names like "Unclassified"), NOT canonical behaviour ids — see
+        # EvaluationService.generate_unified_umap. Storing it straight into
+        # ``behavior_id`` pollutes the Review-tab behaviour filter with
+        # duplicate entries (a name-string "Groom" renders identically to the
+        # real behaviour's "Groom") and stray short-name codes ("Wetdogshake",
+        # "none"). Map each label back to its behaviour id; anything that
+        # doesn't resolve to a single defined behaviour lands as unassigned.
+        defined_bids = {str(b.behavior_id).strip() for b in self._behaviors.behaviors}
+        name_to_bid: dict[str, str] = {}
+        for b in self._behaviors.behaviors:
+            bid = str(b.behavior_id).strip()
+            for key in (b.name, b.short_name):
+                k = str(key or "").strip().lower()
+                if k:
+                    name_to_bid.setdefault(k, bid)
+
+        def _canonical_behavior_id(raw_label: object) -> str | None:
+            lbl = str(raw_label or "").strip()
+            if not lbl or lbl in defined_bids:
+                return lbl or None
+            return name_to_bid.get(lbl.lower())
+
         windows: list[CandidateWindow] = []
         for idx in selected_indices:
             row = coord_df.iloc[idx]
@@ -4952,17 +4976,34 @@ class ActiveLearningTab(QWidget):
                 session_id=sid,
                 start_frame=start,
                 end_frame=end,
-                behavior_id=str(row.get("behavior_label", "")),
+                behavior_id=_canonical_behavior_id(row.get("behavior_label", "")),
                 total_score=1.0,
                 source="umap_interactive_selection",
                 selection_reason="umap_selection",
             ))
 
         if windows:
-            self.uncertainty_candidates_updated.emit(
+            # Route through edge_case_candidates_requested (not
+            # uncertainty_candidates_updated): that handler both loads the
+            # windows into the Clips tab AND switches to it, so the user
+            # actually sees them land.  The uncertainty signal deliberately
+            # stays on the current tab, which made the selection look like a
+            # no-op.  These are still only *candidates* — clips must be
+            # extracted before they appear in the Review tab.
+            self.edge_case_candidates_requested.emit(
                 windows, f"UMAP Selection ({len(windows)} segments)"
             )
-            self._append_log(f"Sent {len(windows)} UMAP-selected segments to clip extraction.")
+            self._append_log(
+                f"Loaded {len(windows)} UMAP-selected segments into the Clips tab."
+            )
+            QMessageBox.information(
+                self,
+                "UMAP Selection Loaded",
+                f"{len(windows)} selected segment(s) were loaded into the "
+                "<b>Clips</b> tab as candidates.<br><br>"
+                "Click <b>Extract Clips</b> there to generate the clip files — "
+                "they'll then appear in the <b>Review</b> tab for labeling.",
+            )
 
     # ------------------------------------------------------------------
     # Unified UMAP across all behaviour models

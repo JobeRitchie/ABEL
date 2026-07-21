@@ -134,6 +134,75 @@ def test_write_all_emits_readme_and_tables(tmp_path):
     assert "Grouped" in readme  # the table type the user must pick before pasting
 
 
+# ── The rest of the analyses must pre-pivot too (no hand-reformatting) ───────
+
+
+def test_sig_cleanup_kills_float_dust_and_negative_zero():
+    """1e-17 CI noise and -0.0 must render as a clean 0; real small values survive."""
+    assert prism._sig(1.9262369477246465e-17) == 0.0
+    assert prism._sig(-0.0) == 0.0
+    assert prism._sig(0.11223551643754803) == 0.1122      # 4 sig figs
+    assert prism._sig(0.000019262) == 1.926e-05           # genuine small value kept
+
+
+def test_prism_al_curves_share_one_x_and_split_by_metric():
+    df = pd.DataFrame({
+        "project_id": ["P", "P", "P", "P"],
+        "behavior_name": ["Rear", "Rear", "Rear", "Rear"],
+        "strategy": ["active_learning", "active_learning", "random", "random"],
+        "n_clips_reviewed": [20, 50, 20, 50],
+        "f1_mean": [0.4, 0.6, 0.3, 0.4],
+        "pr_auc_mean": [0.1, 0.2, 0.1, 0.1],
+        "pos_discovered_mean": [7.0, 14.0, 3.0, 4.0],
+    })
+    out = prism.prism_al_curves(df)
+    assert set(out) == {"prism_al_curve_f1.csv", "prism_al_curve_pr_auc.csv",
+                        "prism_al_curve_pos_discovered.csv"}
+    f1 = out["prism_al_curve_f1.csv"]
+    assert list(f1.columns) == ["Clips reviewed", "P · Rear — AL", "P · Rear — Random"]
+    assert list(f1["Clips reviewed"]) == [20, 50]
+
+
+def test_prism_calibration_and_time_budget_emit_paired_xy():
+    rel = pd.DataFrame({
+        "project": ["P", "P", "P"], "behavior": ["Rear", "Rear", "Rear"],
+        "mean_confidence": [0.1, 0.5, 0.9], "empirical_accuracy": [0.12, 0.48, 0.91],
+        "count": [10, 20, 30],
+    })
+    c = prism.prism_calibration(rel)
+    assert list(c.columns) == ["P · Rear — confidence", "P · Rear — accuracy"]
+
+    tb = pd.DataFrame({
+        "project": ["P", "P"], "behavior": ["Rear", "Rear"], "session": ["s1", "s2"],
+        "true_prevalence": [0.09, 0.03], "pred_prevalence": [0.10, 0.08],
+    })
+    t = prism.prism_time_budget(tb)
+    assert list(t.columns) == ["P · Rear — true", "P · Rear — pred"]
+
+
+def test_prism_discrimination_drops_zero_baseline_from_error_reduction():
+    df = pd.DataFrame({
+        "project": ["P", "P"], "pair": ["A vs B", "A vs B"],
+        "label": ["Pose only", "+ Video"],
+        "roc_auc": [0.80, 0.95], "error_reduction": [0.0, 0.75],
+    })
+    out = prism.prism_discrimination(df)
+    roc = out["prism_discrimination_roc_auc.csv"]
+    err = out["prism_discrimination_error_reduction.csv"]
+    assert list(roc.columns) == ["Pair", "Pose only", "+ Video"]
+    assert list(roc["Pair"]) == ["P · A vs B"]
+    # Pose-only error reduction is 0 by definition — never emit that column.
+    assert "Pose only" not in err.columns
+    assert list(err.columns) == ["Pair", "+ Video"]
+
+
+def test_prism_accuracy_by_behavior_renames_to_prism_headers():
+    df = pd.DataFrame({"project_id": ["P"], "behavior_name": ["Rear"],
+                       "f1_mean": [0.85], "f1_ci": [0.02], "n": [10]})
+    out = prism.prism_accuracy_by_behavior(df)
+    assert list(out.columns) == ["Project", "Behavior", "F1", "F1 95% CI", "N"]
+
+
 # ── Absent modalities must not appear anywhere ──────────────────────────────
 
 

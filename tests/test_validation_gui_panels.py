@@ -37,12 +37,13 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 from abel.validation.plots import LEARNING_CURVE_VIEWS  # noqa: E402
 from abel.validation.runner import (  # noqa: E402
     ANALYSIS_ABLATION, ANALYSIS_AL_CURVE, ANALYSIS_DISCRIMINATION,
-    ANALYSIS_GENERALIZATION, ANALYSIS_LEARNING_CURVE, RunOutputs,
+    ANALYSIS_GENERALIZATION, ANALYSIS_LEARNING_CURVE, ANALYSIS_RARE_DISCOVERY,
+    RunOutputs,
 )
 
 ALL_ANALYSES = [
     ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_DISCRIMINATION,
-    ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE,
+    ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE, ANALYSIS_RARE_DISCOVERY,
 ]
 
 PROJ = "proj1"          # runner._tag() of a project id
@@ -104,6 +105,16 @@ def _fake_run_dir(root: Path) -> Path:
     _csv(run / "active_learning" / "al_vs_random_points.csv")
     _csv(run / "active_learning" / "al_vs_random_summary.csv")
 
+    # rare discovery
+    _png(run / "rare_discovery" / f"{PROJ}__{BEH}.png")
+    _csv(run / "rare_discovery" / "discovery.csv")
+    _csv(run / "rare_discovery" / "rarity_scaling.csv")
+    _csv(run / "prism" / "prism_behavior_rarity.csv")
+    _csv(run / "prism" / "prism_discovery_reviewed.csv")
+    _csv(run / "prism" / "prism_effort_reviewed.csv")
+    _csv(run / "prism" / "prism_discovery_fullpool.csv")
+    _csv(run / "prism" / "prism_rarity_scaling.csv")
+
     # cross-project (written on every run)
     _png(run / "cross_project" / "0_forest_by_behavior.png")
     _png(run / "cross_project" / "accuracy_bars.png")
@@ -138,6 +149,7 @@ def populated_window(qapp, tmp_path):
         ("_disc_panel", "Discrimination"),
         ("_gen_panel", "Generalization"),
         ("_al_panel", "Active Learning"),
+        ("_rare_panel", "Rare Discovery"),
         ("_cross_panel", "Cross-Project"),
     ],
 )
@@ -172,11 +184,22 @@ def test_discrimination_views_cover_each_feature_family(populated_window):
 def test_data_export_targets_resolve(populated_window):
     """Every tab also has a CSV wired up, so Export/Copy Data is not dead."""
     for attr in ("_lc_panel", "_abl_panel", "_disc_panel", "_gen_panel",
-                 "_al_panel", "_cross_panel"):
+                 "_al_panel", "_rare_panel", "_cross_panel"):
         panel = getattr(populated_window, attr)
         table = panel._current_table()
         assert table is not None and Path(table).exists(), f"{attr}: no exportable data"
         assert panel._csv_btn.isEnabled() and panel._copy_btn.isEnabled()
+
+
+def test_rare_discovery_panel_exposes_per_figure_prism_exports(populated_window):
+    """The rare-discovery tab should offer a separate export for each figure."""
+    labels = [populated_window._rare_panel._data_combo.itemText(i)
+              for i in range(populated_window._rare_panel._data_combo.count())]
+    assert "Behavior rarity" in labels
+    assert "Discovery curve (reviewed)" in labels
+    assert "Effort-to-N (reviewed)" in labels
+    assert "Discovery curve (full pool)" in labels
+    assert "Rarity scaling" in labels
 
 
 @pytest.mark.parametrize(
