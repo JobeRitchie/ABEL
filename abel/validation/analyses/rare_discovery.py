@@ -80,7 +80,9 @@ from abel.services.active_learning_trainer_service import ActiveLearningTrainerS
 from abel.services.clip_metrics_service import ClipMetricsService
 from abel.utils import xgb_predict
 from abel.validation import metrics as vmetrics
+from abel.validation import prism as _prism
 from abel.validation.analyses import al_curve
+from abel.validation.prism import _replicate_block
 from abel.validation.datamodel import CellResult, ProjectRef
 from abel.validation.holdout import HoldoutSplit
 from abel.validation.holdout import split as holdout_split
@@ -124,6 +126,11 @@ class DiscoveryPoint:
     n_found_mean: float       # confirmed held-out positives discovered by here
     n_found_ci: float         # t-based 95% half-width across seeds
     n_seeds: int
+    # The per-seed counts the mean/CI were computed from. Kept so the Prism export
+    # can emit replicate subcolumns: a 95% CI half-width is not an error format
+    # Prism accepts, so summarising here would make the curve unplottable with
+    # error bars. Defaulted -> older pickled results still load.
+    n_found_seeds: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -167,6 +174,11 @@ class RareDiscoveryResult:
     # Label→window join coverage for a full-pool run (see _label_coverage).  Empty
     # on the reviewed pool, where every clip is labelled by construction.
     coverage_note: str = ""
+    # Configured effort targets (build order) and the seed count every arm ran, so
+    # the Prism exports emit an identical column block for every project instead
+    # of one derived from whichever targets happened to be reached.
+    effort_targets: list[int] = field(default_factory=list)
+    n_seeds: int = 0
 
     def provenance(self) -> str:
         """One-line pool description stamped on every figure.
@@ -836,6 +848,8 @@ def _assemble_result(
         n_pool=int(n_pool), n_pos_pool=int(n_pos_pool),
         n_seed_pos=int(n_seed_pos), prevalence=float(prevalence),
         sec_per_clip_review=float(sec_per_clip_review),
+        effort_targets=[int(t) for t in effort_targets],
+        n_seeds=max((len(a) for a in per_seed.values() if a), default=0),
     )
     for strat in strategies:
         full = per_seed.get(strat) or []
@@ -850,15 +864,19 @@ def _assemble_result(
                 n_reviewed=int(k),
                 n_found_mean=float(np.mean(vals)),
                 n_found_ci=vmetrics.ci95(np.asarray(vals, dtype=float)),
-                n_seeds=len(vals)))
+                n_seeds=len(vals),
+                n_found_seeds=[float(v) for v in vals]))
         for target in effort_targets:
-            efforts = [_first_reach(a, target) for a in full]
-            efforts = [float(e) for e in efforts if e is not None]
-            if efforts:
-                cur.effort_to_n[int(target)] = float(np.mean(efforts))
+            # One entry per seed, NaN where that seed never reached N -- see the
+            # matching comment in _assemble_quality.
+            raw = [_first_reach(a, target) for a in full]
+            efforts = [float("nan") if e is None else float(e) for e in raw]
+            reached = [e for e in efforts if np.isfinite(e)]
+            cur.effort_to_n_seeds[int(target)] = efforts
+            if reached:
+                cur.effort_to_n[int(target)] = float(np.mean(reached))
                 cur.effort_to_n_ci[int(target)] = vmetrics.ci95(
-                    np.asarray(efforts, dtype=float))
-                cur.effort_to_n_seeds[int(target)] = efforts
+                    np.asarray(reached, dtype=float))
         result.curves[strat] = cur
         for pt in cur.points:
             result.cells.append(CellResult(
@@ -914,6 +932,14 @@ class EffortToQualityResult:
     best_pr_auc: float = float("nan")
     curves: dict[str, QualityCurve] = field(default_factory=dict)
     cells: list[CellResult] = field(default_factory=list)
+    # Every CONFIGURED target label, in build order, and the seed count every arm
+    # ran. Exports must key off these rather than off the labels that happen to
+    # appear in `curves`: a target no seed reached is absent from effort_seeds, so
+    # deriving the column set from observed keys gave each project a different set
+    # of columns -- pasting two projects into one Prism table then shifted the
+    # groups silently.
+    target_labels: list[str] = field(default_factory=list)
+    n_seeds: int = 0
 
     def clips_to(self, strategy: str, target_label: str) -> float | None:
         cur = self.curves.get(strategy)
@@ -1146,17 +1172,25 @@ def _assemble_quality(
         project_id=project.project_id, behavior_id=str(behavior_id),
         behavior_name=behavior_name, pool_label=pool_label, k0=int(k0),
         seed_pos=int(seed_pos), sec_per_clip_review=float(sec_per_clip_review),
-        best_f1=float(best_f1), best_pr_auc=float(best_pr))
+        best_f1=float(best_f1), best_pr_auc=float(best_pr),
+        target_labels=[lab for lab, _, _ in targets],
+        n_seeds=max((len(per_seed.get(s) or []) for s in strategies), default=0))
     for strat in strategies:
         trajs, pts = agg[strat]
         cur = QualityCurve(strategy=strat, points=pts)
         for (label, mpos, thr) in targets:
-            efforts = [_effort_to_threshold(t, mpos, thr) for t in trajs]
-            efforts = [float(e) for e in efforts if e is not None]
-            if efforts:
-                cur.effort[label] = float(np.mean(efforts))
-                cur.effort_ci[label] = vmetrics.ci95(np.asarray(efforts, dtype=float))
-                cur.effort_seeds[label] = efforts
+            # Keep one entry PER SEED, NaN where that seed never reached the
+            # target. Compacting the list (the old behaviour) both lost which
+            # seed a value came from -- so replicate columns could not line up
+            # across targets -- and hid the censoring: a mean over "the 2 of 5
+            # seeds that got there" reads as a fast arm, when it is a rare one.
+            raw = [_effort_to_threshold(t, mpos, thr) for t in trajs]
+            efforts = [float("nan") if e is None else float(e) for e in raw]
+            reached = [e for e in efforts if np.isfinite(e)]
+            cur.effort_seeds[label] = efforts
+            if reached:
+                cur.effort[label] = float(np.mean(reached))
+                cur.effort_ci[label] = vmetrics.ci95(np.asarray(reached, dtype=float))
         result.curves[strat] = cur
         for pt in pts:
             result.cells.append(CellResult(
@@ -1236,6 +1270,58 @@ def run_effort_to_quality(
         sec_per_clip_review=sec_per_clip_review)
 
 
+def read_full_window_pool(project: ProjectRef, columns: "list[str] | None" = None) -> pd.DataFrame:
+    """Every window the project has features for — the grid *and* the enrichment cache.
+
+    ``segment_features.parquet`` holds only windows on the extraction stride grid.
+    Review clips that do not land on that grid (bout-based, temporal-refinement and
+    random-sampled clips) are featurised separately by the Active Learning tab and
+    persisted to ``enriched_segments.parquet`` — with the same z-scoring and summary
+    statistics as the representation builder, so the two are directly comparable.
+
+    Reading only the grid file therefore drops a large, *labelled* slice of the pool:
+    measured across the manuscript projects it read 3_chamber_social as 71 % covered
+    and Novel-object as 26 %, when the union covers 100 % of both.  Prevalence is
+    ``n_pos / n_pool``, so those missing rows silently inflate every enrichment ratio
+    derived from it.  Always build the pool through here.
+    """
+    rep = project.root / "derived" / "representations"
+    grid_path = rep / "segment_features.parquet"
+    if not grid_path.exists():
+        return pd.DataFrame()
+    frames = [pd.read_parquet(grid_path, columns=columns)]
+
+    enriched_path = rep / "enriched_segments.parquet"
+    if enriched_path.exists():
+        try:
+            enriched = pd.read_parquet(enriched_path, columns=columns)
+        except Exception:
+            enriched = pd.DataFrame()
+        if not enriched.empty:
+            # The enrichment cache carries the label columns the training merge adds;
+            # keep only what the grid table has so the pool stays one schema.
+            shared = [c for c in frames[0].columns if c in enriched.columns]
+            frames.append(enriched[shared])
+
+    pool = pd.concat(frames, ignore_index=True) if len(frames) > 1 else frames[0]
+    if "segment_id" in pool.columns:
+        pool = pool.drop_duplicates(subset=["segment_id"], keep="first")
+    return pool
+
+
+def _read_training_labels(project: ProjectRef) -> pd.DataFrame:
+    """Training-set labels plus ``label_source`` when the snapshot carries one.
+
+    ``label_source`` is what marks cross-project imports, and older snapshots
+    predate the column, so it is read optionally rather than required.
+    """
+    cols = ["segment_id", "label", "label_source"]
+    try:
+        return pd.read_parquet(project.training_set_path, columns=cols)
+    except Exception:
+        return pd.read_parquet(project.training_set_path, columns=cols[:2])
+
+
 @dataclass
 class _LabelCoverage:
     """How much of the training set is actually joinable to the full window pool."""
@@ -1246,15 +1332,18 @@ class _LabelCoverage:
     warning: str = ""
 
 
-# A full-pool hunt joins labels to segment_features.parquet BY ID.  Three distinct
-# things break that join, and only one is fixable by re-extracting:
-#   1. off-grid ids — reviewed clips get ids from the clip's own frames, but the
-#      feature table only holds windows on the extraction stride grid, so bout /
-#      temporal-refinement clips can never match (measured mostly redundant with
-#      an on-grid positive, so benign, but it caps coverage below 1.0);
-#   2. never-extracted sessions — a stale or partial extraction (the real bug;
-#      one project was missing 93 of 162 sessions);
-#   3. a non-standard window length from a different extraction config.
+# A full-pool hunt joins labels to the window pool BY ID.  What is left after
+# read_full_window_pool() folds in the enrichment cache:
+#   1. cross-project imported rows (``label_source == "imported:*"``) — they name a
+#      foreign project's sessions and are never in this project's pool, by design;
+#   2. labels whose session was removed from the import manifest but whose rows were
+#      left in the training snapshot (orphans — prune them, do not re-extract);
+#   3. a non-standard window length from a different extraction config;
+#   4. review clips whose features were never enriched, because the enrichment cache
+#      was invalidated by a representation rebuild and no training run has re-run it.
+# Prevalence is n_pos / n_pool, so any of these deflates the denominator's numerator
+# and inflates enrichment without bound — one project reported "4901x".  Refuse
+# rather than emit a number nobody can interpret.
 # Prevalence is n_pos / n_pool, so any of these deflates the denominator's numerator
 # and inflates enrichment without bound — one project reported "4901x".  Refuse
 # rather than emit a number nobody can interpret.
@@ -1266,8 +1355,16 @@ _SESSION_RE = re.compile(r"session_([0-9a-fA-F]+)$")
 
 def _label_coverage(ts: pd.DataFrame, seg_ids: np.ndarray,
                     pos_ids: set[str]) -> _LabelCoverage:
-    """Fraction of labels / sessions that survive the join to the window pool."""
+    """Fraction of labels / sessions that survive the join to the window pool.
+
+    Cross-project imported rows are excluded from the denominator: they name the
+    *source* project's sessions and can never appear in this project's window pool,
+    so counting them reads a project that simply borrowed training examples as
+    broken.  One manuscript project is half imports — 4,122 of 9,905 rows.
+    """
     pool_ids = set(str(s) for s in seg_ids)
+    if "label_source" in ts.columns:
+        ts = ts[~ts["label_source"].astype(str).str.startswith("imported")]
     all_label_ids = ts["segment_id"].astype(str)
     id_frac = float(all_label_ids.isin(pool_ids).mean()) if len(all_label_ids) else 0.0
 
@@ -1338,12 +1435,10 @@ def run_full_pool_supplement(
     # Read the shipped per-window features straight from segment_features.parquet —
     # the same feature extraction the classifier uses, so the full-pool essence
     # matches the reviewed-pool essence (and needs no raw pose).
-    seg_path = (project.root / "derived" / "representations"
-                / "segment_features.parquet")
-    if not seg_path.exists():
-        raise ValueError("Full segment pool is empty (no segment_features.parquet).")
     _log(f"{behavior_name}: loading shipped features for the full pool…")
-    seg_df = pd.read_parquet(seg_path)
+    seg_df = read_full_window_pool(project)
+    if seg_df.empty:
+        raise ValueError("Full segment pool is empty (no segment_features.parquet).")
     seg_ids = seg_df["segment_id"].astype(str).to_numpy()
     metrics = _essence_feature_frame(seg_df)
     if metrics.shape[1] == 0:
@@ -1351,7 +1446,7 @@ def run_full_pool_supplement(
             "Full-pool essence supplement found no usable shipped features in "
             "segment_features.parquet.")
 
-    ts = pd.read_parquet(project.training_set_path, columns=["segment_id", "label"])
+    ts = _read_training_labels(project)
     pos_ids = set(ts.loc[ts["label"].astype(str).str.strip() == str(behavior_id).strip(),
                          "segment_id"].astype(str))
     is_known_pos = np.asarray([str(s) in pos_ids for s in seg_ids])
@@ -1421,6 +1516,9 @@ class RarityPoint:
     ratio_mean: float            # random ÷ essence (× fewer clips with targeting)
     n_pos_kept: int
     n_seeds: int
+    # Per-seed clip counts behind the two means, for the Prism replicate export.
+    essence_effort_seeds: list[float] = field(default_factory=list)
+    random_effort_seeds: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -1526,7 +1624,9 @@ def run_rarity_scaling(
                 random_effort_mean=rm,
                 random_effort_ci=vmetrics.ci95(np.asarray(r_eff, dtype=float)),
                 ratio_mean=rm / em if em > 0 else float("nan"),
-                n_pos_kept=int(n_keep), n_seeds=min(len(e_eff), len(r_eff))))
+                n_pos_kept=int(n_keep), n_seeds=min(len(e_eff), len(r_eff)),
+                essence_effort_seeds=[float(v) for v in e_eff],
+                random_effort_seeds=[float(v) for v in r_eff]))
             _log(f"{behavior_name}: prevalence {p:.1%} → essence {em:.0f} vs "
                  f"random {rm:.0f} clips ({rm / max(1, em):.1f}× fewer)")
     result.points.sort(key=lambda pt: pt.prevalence, reverse=True)
@@ -1550,9 +1650,17 @@ class BehaviorRarityResult:
     target_vs_rest_p: float = float("nan")  # one-sided: target < pooled rest
     rarer_than_target: list[str] = field(default_factory=list)  # honesty: anything rarer
     excluded: list[str] = field(default_factory=list)  # behaviours left out (e.g. under-scored)
+    # Where the prevalence came from: "bouts" (unbiased deployment detections) or
+    # "labels" (the flagged fallback).  Never silently mixed — see
+    # :func:`_prevalence_table`.
+    source: str = "bouts"
 
     def target_mean(self) -> float:
         return float(self.means.get(self.target_name, float("nan")))
+
+    def source_caveat(self) -> str:
+        """Empty for the unbiased source; the loud caveat for the label fallback."""
+        return LABEL_SOURCE_CAVEAT if self.source == PREVALENCE_SOURCE_LABELS else ""
 
 
 def _session_frame_extents(project: ProjectRef) -> "pd.Series":
@@ -1573,7 +1681,192 @@ def _project_fps(project: ProjectRef, fps: float | None = None) -> float:
         return 30.0
 
 
-def _prevalence_table(
+# Below this pooled detected-time fraction (behaviour frames ÷ frames of the
+# sessions the deployment run actually covered) the ``behavior_bouts`` parquets
+# are not a deployment read-out at all — they are leftovers from
+# ``evaluation_service.evaluate_and_save``, which writes the same filename for the
+# handful of bouts in its *eval split*.  Measured across the eight manuscript
+# projects the healthy ones sit at 1.7 %–11.9 % pooled; a stale-artifact project
+# sits at 0.08 %, so anything under half a percent is degenerate, not rare.
+_MIN_POOLED_DETECTED_FRACTION = 0.005
+
+PREVALENCE_SOURCE_TRACES = "traces"
+PREVALENCE_SOURCE_BOUTS = "bouts"
+PREVALENCE_SOURCE_LABELS = "labels"
+
+# Stamped on every figure/report built from the fallback, because a label share is
+# NOT an unbiased prevalence: active learning deliberately over-samples the clips
+# the model is unsure about, so it over-represents hard behaviours.
+LABEL_SOURCE_CAVEAT = (
+    "Prevalence from active-learning-selected LABELS (no usable deployment bout "
+    "detections in this project) — biased sampling, not deployment rarity.")
+
+
+# A behaviour is "silent" in a session when its prevalence there is under this
+# fraction of its own active level (its 90th percentile across sessions) — i.e.
+# effectively absent, rather than merely low.  Relative, not absolute, so it works
+# for a behaviour occupying 40 % of a session and one occupying 0.5 %.
+_SILENT_REL_FLOOR = 0.05
+_SILENT_ACTIVE_QUANTILE = 0.90
+# Above this share of silent sessions the behaviour is structurally gated by the
+# design — it *cannot* occur in much of the dataset — rather than genuinely rare
+# within the sessions where it can.  Measured across the eight manuscript projects:
+# the gated cases (fear-conditioning Shocked, NSF Freeze) sit at 45 %; the real
+# rare targets (Wet dog shake 16 %, open-field Freeze 15 %, Sniff TMT 10 %) sit
+# well below, and 37 of 43 behaviours are under 10 %.
+_MAX_SILENT_FRACTION = 0.30
+
+
+def session_zero_inflation(per: pd.DataFrame, measure: str = "time_fraction") -> pd.DataFrame:
+    """Per-behaviour silent-session share and prevalence *where it does occur*.
+
+    Returns one row per behaviour: ``behavior, behavior_id, silent_fraction,
+    prevalence_overall, prevalence_when_active, gated``.
+
+    This distinguishes the two ways a behaviour can look rare on a project-wide
+    average, which the discovery hunt must not confuse:
+
+    * **Genuinely rare** — infrequent everywhere it is scored (wet dog shake:
+      0.40 % overall, 0.47 % where active, silent in 16 % of sessions).  This is a
+      real clip-hunting target; finding it is hard *because it is rare*.
+    * **Structurally gated** — common in one kind of session and impossible in the
+      rest, so the project-wide mean is dragged down by sessions the behaviour
+      could never occur in.  Fear conditioning's *Shocked* is the archetype: no
+      shock is delivered in most sessions, so it is silent in ~45 % of them while
+      running 1.67 % where it is actually possible.  Hunting it does not measure
+      rare-behaviour discovery, it measures whether the tool can find the shock
+      sessions — and the "effort to find N" numbers are meaningless because most
+      of the pool is ineligible by design.
+    """
+    rows: list[dict] = []
+    for (bid, name), g in per.groupby(["behavior_id", "behavior"]):
+        v = g[measure].to_numpy(dtype=float)
+        v = v[np.isfinite(v)]
+        if len(v) == 0:
+            continue
+        active = float(np.quantile(v, _SILENT_ACTIVE_QUANTILE))
+        cut = _SILENT_REL_FLOOR * active
+        silent = float(np.mean(v < cut)) if active > 0 else 1.0
+        live = v[v >= cut]
+        rows.append({
+            "behavior": str(name), "behavior_id": str(bid),
+            "silent_fraction": silent,
+            "prevalence_overall": float(v.mean()),
+            "prevalence_when_active": float(live.mean()) if len(live) else float("nan"),
+            "gated": bool(silent >= _MAX_SILENT_FRACTION),
+        })
+    return pd.DataFrame(rows)
+
+
+def _trace_prevalence_table(
+    project: ProjectRef,
+    behavior_ids: list[str],
+    *,
+    fps: float,
+    log: Callable[[str], None] = lambda _m: None,
+) -> pd.DataFrame:
+    """Prevalence from the dense temporal-refinement probability traces.
+
+    The best source available, and the one a *current* run always leaves behind:
+    competitive multi-behaviour inference writes one row per frame per session with
+    a ``prob_<behavior_id>`` column for every behaviour and a ``predicted_behavior``
+    winner, under ``temporal_refinement/target_behavior/<inference_dir>/
+    probability_traces/``.  Prevalence is the winner's share of scored frames.
+
+    Why this and not ``behavior_bouts/`` (:func:`_bout_prevalence_table`): the bout
+    parquets exported alongside these traces are the *group-level* postprocess, so
+    every row is stamped ``behavior_id = "target_behavior"`` — the per-behaviour
+    identity survives only here, in the traces.  A project can therefore have a
+    complete, current, 69-session deployment run and still show nothing but stale
+    per-behaviour bouts, which is exactly how fear conditioning came to rank its
+    most abundant behaviour (freezing, 49 % of frames here) as the rarest.
+
+    One caveat, immaterial to *ranking*: the winner-take-all read-out does not apply
+    the per-behaviour probability thresholds and minimum-bout durations from
+    Temporal Review, so an individual prevalence can differ slightly from what the
+    app reports as bouts.  The relative ordering — all this feeds — is unaffected.
+    """
+    latest_path = (project.root / "derived" / "temporal_refinement"
+                   / "target_behavior" / "latest.json")
+    if not latest_path.exists():
+        return pd.DataFrame()
+    try:
+        import json  # noqa: PLC0415
+
+        inference_dir = str(json.loads(
+            latest_path.read_text(encoding="utf-8")).get("inference_dir", "") or "").strip()
+    except Exception as exc:  # unreadable manifest — fall through to the next source
+        log(f"rarity: cannot read temporal-refinement manifest ({type(exc).__name__})")
+        return pd.DataFrame()
+    traces_dir = Path(inference_dir) / "probability_traces"
+    if not inference_dir or not traces_dir.is_dir():
+        return pd.DataFrame()
+
+    traces = sorted(traces_dir.glob("*.parquet"))
+    if not traces:
+        return pd.DataFrame()
+
+    # Only a genuinely COMPETITIVE run can be read this way.  ``predicted_behavior``
+    # is an argmax, so a single-behaviour inference makes that behaviour the winner
+    # on every frame and reports it at 100 % — worse than useless for a rarity
+    # ranking.  Require at least two of the requested behaviours to carry a
+    # ``prob_`` column, else fall through to the bout detections.
+    try:
+        cols = set(pd.read_parquet(traces[0]).columns)
+    except Exception:
+        return pd.DataFrame()
+    wanted = {str(b) for b in behavior_ids if f"prob_{b}" in cols}
+    if len(wanted) < 2:
+        log(f"rarity: temporal-refinement traces cover only {len(wanted)} of the "
+            f"selected behaviours (not a competitive run) — not usable")
+        return pd.DataFrame()
+    uncovered = [project.behavior_label(b) for b in behavior_ids
+                 if str(b) not in wanted]
+    if uncovered:
+        log(f"rarity: {', '.join(uncovered)} absent from the dense run — excluded")
+
+    rows: list[dict] = []
+    for tp in traces:
+        try:
+            d = pd.read_parquet(tp, columns=["predicted_behavior"])
+        except Exception:
+            continue
+        if d.empty:
+            continue
+        # Session id is carried in the filename, not the columns.
+        sid = re.sub(r"_(chunk_)?trace$", "", tp.stem)
+        n_frames = len(d)
+        sess_min = n_frames / max(1e-9, fps) / 60.0
+        pred = d["predicted_behavior"].astype(str).to_numpy()
+        # Bout count = contiguous runs of the behaviour, so bout_rate stays
+        # comparable with the bouts-derived table.
+        starts = np.concatenate([[True], pred[1:] != pred[:-1]])
+        for bid in sorted(wanted):
+            hit = pred == str(bid)
+            rows.append({
+                "session": sid, "behavior": project.behavior_label(bid),
+                "behavior_id": str(bid),
+                "n_bouts": int(np.sum(hit & starts)),
+                "time_fraction": float(np.sum(hit)) / n_frames,
+                "bout_rate": int(np.sum(hit & starts)) / max(1e-9, sess_min),
+            })
+    if not rows:
+        return pd.DataFrame()
+    per = pd.DataFrame(rows)
+    measured = per.groupby("behavior_id")["time_fraction"].sum()
+    dead = [project.behavior_label(b) for b, v in measured.items() if v <= 0.0]
+    if dead:
+        # Never scored anywhere in a dense run: unmeasurable, not rarest-at-zero.
+        log(f"rarity: {', '.join(dead)} never predicted in the dense traces — "
+            f"excluded (NOT ranked as rarest)")
+        per = per[~per["behavior_id"].isin(
+            [b for b, v in measured.items() if v <= 0.0])]
+    log(f"rarity: using dense temporal-refinement traces "
+        f"({per['session'].nunique()} sessions)")
+    return per.reset_index(drop=True)
+
+
+def _bout_prevalence_table(
     project: ProjectRef,
     behavior_ids: list[str],
     *,
@@ -1583,27 +1876,58 @@ def _prevalence_table(
     """Long per-(session, behaviour) prevalence from the dense bout detections.
 
     Columns: ``session, behavior, behavior_id, n_bouts, time_fraction, bout_rate``.
-    This is the cheap read that both the rarity figure and the *auto-target*
-    picker (:func:`rank_behaviors_by_rarity`) run on — it touches only the shipped
-    ``behavior_bouts`` parquets, no model fitting and no pose.
+    Touches only the shipped ``behavior_bouts`` parquets — no model fitting, no pose.
+
+    Two things this must not do, both of which silently manufacture a "rarest"
+    behaviour out of missing data rather than out of biology:
+
+    * **A behaviour with no detections is unmeasurable, not rare.**  An empty
+      ``<id>_bouts.parquet`` (the file exists, zero rows) used to average to a
+      time fraction of exactly 0.0 and therefore win the rarity ranking outright —
+      which is how fear conditioning came to nominate *freezing*, its single most
+      abundant behaviour, as the rarest.  Absent and empty are now treated alike:
+      dropped from the table with a logged reason.
+    * **Sessions no run covered are not sessions with zero behaviour.**  Prevalence
+      is averaged over the *run-covered* sessions — the union of sessions appearing
+      in any behaviour's bouts file — not over every session in the pool.  Zero-
+      filling the rest penalised whichever behaviour happened to be deployed over
+      fewer sessions (DG_EPM covers 21 of 57; TMT 21 of 29), which is a property of
+      when the run was launched, not of how rare the behaviour is.  True zeros
+      *within* the covered set are still counted, so a behaviour genuinely absent
+      from a covered session is not flattered.
     """
     sess_len = _session_frame_extents(project)
+    sess_len.index = sess_len.index.astype(str)
     sess_min = sess_len / fps / 60.0
     bouts_dir = project.root / "derived" / "behavior_bouts"
 
-    rows: list[dict] = []
+    # Pass 1: read what exists, and learn which sessions the run actually covered.
+    detected: dict[str, tuple[str, pd.DataFrame]] = {}
+    covered: set[str] = set()
     for bid in behavior_ids:
         name = project.behavior_label(bid)
         # bouts are filed by disk id; behavior_disk_name for renamed behaviours.
         path = bouts_dir / f"{bid}_bouts.parquet"
         if not path.exists():
-            log(f"rarity: no bouts file for {name} — skipping")
+            log(f"rarity: no bouts file for {name} — not measurable, excluded")
             continue
         d = pd.read_parquet(path)
+        if d.empty:
+            log(f"rarity: bouts file for {name} is empty (0 detections) — "
+                f"not measurable, excluded (NOT ranked as rarest)")
+            continue
         g = d.groupby(d["session_id"].astype(str)).agg(
             n_bouts=("start_frame", "size"), frames=("duration_frames", "sum"))
-        for sid in sess_len.index:
-            sid = str(sid)
+        detected[str(bid)] = (name, g)
+        covered |= set(g.index)
+
+    covered &= set(sess_len.index)
+    if not detected or not covered:
+        return pd.DataFrame()
+
+    rows: list[dict] = []
+    for bid, (name, g) in detected.items():
+        for sid in sorted(covered):
             nb = int(g["n_bouts"].get(sid, 0))
             fr = int(g["frames"].get(sid, 0))
             rows.append({
@@ -1612,7 +1936,104 @@ def _prevalence_table(
                 "time_fraction": fr / max(1, int(sess_len[sid])),
                 "bout_rate": nb / max(1e-9, float(sess_min.get(sid, np.nan))),
             })
+    per = pd.DataFrame(rows)
+
+    pooled = float(per["time_fraction"].sum() / max(1, len(covered)))
+    if pooled < _MIN_POOLED_DETECTED_FRACTION:
+        log(f"rarity: bout detections cover only {pooled:.3%} of the {len(covered)} "
+            f"covered sessions — this is a stale evaluation artifact, not a "
+            f"deployment read-out; bout-based rarity rejected")
+        return pd.DataFrame()
+    return per
+
+
+def _label_prevalence_table(
+    project: ProjectRef,
+    behavior_ids: list[str],
+    *,
+    fps: float,
+    log: Callable[[str], None] = lambda _m: None,
+) -> pd.DataFrame:
+    """Fallback prevalence from the confirmed labels, for projects with no bouts.
+
+    Same long schema as :func:`_bout_prevalence_table` so every downstream figure,
+    Prism export and report works unchanged — but built from
+    ``training_sets/training_set.parquet``: ``time_fraction`` is the behaviour's
+    share of *labeled* frames in a session and ``n_bouts`` its label count.
+
+    This is a biased estimate and is always reported as such
+    (:data:`LABEL_SOURCE_CAVEAT`): active learning picks clips the model is unsure
+    about, so the label mix over-represents hard behaviours and under-represents
+    the obvious ones.  It is used only to decide *which behaviour to hunt* when the
+    unbiased source is unavailable — a biased ordering beats nominating whichever
+    behaviour happens to have an empty parquet.
+    """
+    path = project.training_set_path
+    if not path.exists():
+        return pd.DataFrame()
+    df = pd.read_parquet(path, columns=["session_id", "start_frame", "end_frame", "label"])
+    df["session_id"] = df["session_id"].astype(str)
+    df["label"] = df["label"].astype(str).str.strip()
+    df["frames"] = (df["end_frame"] - df["start_frame"]).clip(lower=1)
+
+    sess_len = _session_frame_extents(project)
+    sess_len.index = sess_len.index.astype(str)
+    sess_min = sess_len / fps / 60.0
+    labeled_frames = df.groupby("session_id")["frames"].sum()
+
+    wanted = {str(b) for b in behavior_ids}
+    present = wanted & set(df["label"].unique())
+    if len(present) < 2:
+        log("rarity: fewer than two selected behaviours appear in the labels — "
+            "cannot rank")
+        return pd.DataFrame()
+
+    g = df[df["label"].isin(present)].groupby(["label", "session_id"]).agg(
+        n=("frames", "size"), frames=("frames", "sum"))
+    rows: list[dict] = []
+    for bid in sorted(present):
+        name = project.behavior_label(bid)
+        for sid in labeled_frames.index:
+            n = int(g["n"].get((bid, sid), 0))
+            fr = int(g["frames"].get((bid, sid), 0))
+            rows.append({
+                "session": sid, "behavior": name, "behavior_id": str(bid),
+                "n_bouts": n,
+                "time_fraction": fr / max(1, int(labeled_frames[sid])),
+                "bout_rate": n / max(1e-9, float(sess_min.get(sid, np.nan))),
+            })
+    missing = [project.behavior_label(b) for b in sorted(wanted - present)]
+    if missing:
+        log(f"rarity: no labels for {', '.join(missing)} — excluded")
     return pd.DataFrame(rows)
+
+
+def _prevalence_table(
+    project: ProjectRef,
+    behavior_ids: list[str],
+    *,
+    fps: float,
+    log: Callable[[str], None] = lambda _m: None,
+) -> tuple[pd.DataFrame, str]:
+    """Best available prevalence table, with the source it came from.
+
+    In preference order: the dense temporal-refinement traces a current run leaves
+    behind (:func:`_trace_prevalence_table`), then the exported per-behaviour bout
+    detections (:func:`_bout_prevalence_table`, which rejects stale evaluation
+    artifacts), then — flagged — the active-learning-selected labels.  Traces come
+    first because they are the only per-behaviour record a competitive multi-
+    behaviour run writes: its *bouts* are stamped ``target_behavior``, so a project
+    can have a complete current run and stale per-behaviour bouts at the same time.
+    """
+    per = _trace_prevalence_table(project, behavior_ids, fps=fps, log=log)
+    if not per.empty:
+        return per, PREVALENCE_SOURCE_TRACES
+    per = _bout_prevalence_table(project, behavior_ids, fps=fps, log=log)
+    if not per.empty:
+        return per, PREVALENCE_SOURCE_BOUTS
+    log("rarity: falling back to LABEL prevalence — biased, not deployment rarity")
+    return (_label_prevalence_table(project, behavior_ids, fps=fps, log=log),
+            PREVALENCE_SOURCE_LABELS)
 
 
 def rank_behaviors_by_rarity(
@@ -1622,15 +2043,24 @@ def rank_behaviors_by_rarity(
     exclude_behavior_ids: list[str] | None = None,
     measure: str = "time_fraction",
     fps: float | None = None,
+    skip_gated: bool = True,
     progress_cb: Callable[[str], None] | None = None,
 ) -> list[tuple[str, str, float]]:
     """Rank behaviours rarest→commonest: ``[(behavior_id, name, mean measure), …]``.
 
+    ``skip_gated`` drops behaviours that are rare only because the design silences
+    them in much of the dataset (:func:`session_zero_inflation`) — a shock response
+    in the two-thirds of sessions with no shock is not a rare-behaviour hunting
+    target.  Pass ``False`` to rank on the raw project-wide mean.
+
     The cheap first pass of a multi-project rare-discovery run: before spending
     hours on discovery/quality arms, read the dense bout detections and decide
     which behaviour in *this* project is actually the rare one worth hunting.
-    Behaviours with no bouts file (never deployed) are absent from the ranking
-    rather than silently ranked as "rarest" at zero.
+    Behaviours with no *usable* detections — no bouts file, or a file with zero
+    rows — are absent from the ranking rather than silently ranked as "rarest" at
+    zero.  When the project has no usable bout detections at all the ranking falls
+    back to (biased) label prevalence rather than returning an arbitrary order;
+    :func:`prevalence_source` reports which source was used.
     """
     def _log(msg: str) -> None:
         if progress_cb is not None:
@@ -1642,12 +2072,47 @@ def rank_behaviors_by_rarity(
     bids = [b for b in bids if str(b) not in excl]
     if not bids:
         return []
-    per = _prevalence_table(project, bids, fps=_project_fps(project, fps), log=_log)
+    per, source = _prevalence_table(
+        project, bids, fps=_project_fps(project, fps), log=_log)
     if per.empty:
         return []
+    if source == PREVALENCE_SOURCE_LABELS:
+        _log(f"rarity: {LABEL_SOURCE_CAVEAT}")
+
+    # Structurally gated behaviours are not rare in the sense the hunt measures —
+    # see :func:`session_zero_inflation`.  Demote rather than delete: if EVERY
+    # behaviour is gated, ranking them is still better than returning nothing.
+    if skip_gated and source != PREVALENCE_SOURCE_LABELS:
+        zi = session_zero_inflation(per, measure=measure)
+        gated = zi[zi["gated"]] if not zi.empty else zi
+        if not gated.empty and len(gated) < len(zi):
+            for _i, r in gated.iterrows():
+                _log(f"rarity: {r['behavior']} is silent in "
+                     f"{r['silent_fraction']:.0%} of sessions "
+                     f"({r['prevalence_overall']:.2%} overall but "
+                     f"{r['prevalence_when_active']:.2%} where it occurs) — "
+                     f"structurally gated by the design, not rare; not a hunt target")
+            per = per[~per["behavior_id"].isin(set(gated["behavior_id"]))]
+        elif not gated.empty:
+            _log("rarity: every behaviour looks session-gated — ranking them all "
+                 "rather than dropping the project")
+
     means = per.groupby(["behavior_id", "behavior"])[measure].mean().sort_values()
     return [(str(bid), str(name), float(val))
             for (bid, name), val in means.items()]
+
+
+def prevalence_source(
+    project: ProjectRef,
+    behavior_ids: list[str] | None = None,
+    *,
+    fps: float | None = None,
+) -> str:
+    """Which prevalence source this project resolves to — ``"bouts"`` or ``"labels"``."""
+    bids = list(behavior_ids or [b for b in project.behavior_names
+                                 if str(b) != "no_behavior"])
+    _per, source = _prevalence_table(project, bids, fps=_project_fps(project, fps))
+    return source
 
 
 def run_behavior_rarity(
@@ -1664,8 +2129,11 @@ def run_behavior_rarity(
 
     Prevalence is read from the shipped **deployed-model bout detections**
     (``derived/behavior_bouts/<id>_bouts.parquet``) — dense over every frame of
-    every session, so unlike the active-learning-selected *labels* it is an
-    unbiased picture of how often each behaviour actually occurs.  ``measure`` is
+    every session the run covered, so unlike the active-learning-selected *labels*
+    it is an unbiased picture of how often each behaviour actually occurs.  A
+    project whose bouts are missing or are stale evaluation-split artifacts falls
+    back to label prevalence with ``source == "labels"`` and the caveat stamped on
+    the figure (:func:`_prevalence_table`).  ``measure`` is
     ``time_fraction`` (behaviour frames ÷ session frames) or ``bout_rate``
     (bouts per minute).  Each session is one observation, giving a distribution
     per behaviour that a reviewer can run an ANOVA / Kruskal–Wallis on directly.
@@ -1694,11 +2162,14 @@ def run_behavior_rarity(
     excl.discard(str(target_behavior_id))
     excluded_names = [project.behavior_label(b) for b in bids if str(b) in excl]
     bids = [b for b in bids if str(b) not in excl]
-    sess_len = _session_frame_extents(project)
 
-    per = _prevalence_table(project, bids, fps=fps, log=_log)
+    per, source = _prevalence_table(project, bids, fps=fps, log=_log)
     if per.empty:
-        raise ValueError("No behavior_bouts files found — cannot measure rarity.")
+        raise ValueError(
+            "No usable prevalence source — neither deployment bout detections nor "
+            "labels can measure rarity in this project.")
+    if source == PREVALENCE_SOURCE_LABELS:
+        _log(f"rarity: {LABEL_SOURCE_CAVEAT}")
 
     target_name = project.behavior_label(target_behavior_id)
     means = (per.groupby("behavior")[measure].mean()
@@ -1728,9 +2199,10 @@ def run_behavior_rarity(
     return BehaviorRarityResult(
         project_id=project.project_id, target_name=target_name, measure=measure,
         per_session=per, means={b: float(means[b]) for b in order},
-        target_rank=rank, n_behaviors=len(order), n_sessions=int(sess_len.size),
+        target_rank=rank, n_behaviors=len(order),
+        n_sessions=int(per["session"].nunique()),
         kruskal_p=kruskal_p, target_vs_rest_p=tvr_p, rarer_than_target=rarer,
-        excluded=excluded_names)
+        excluded=excluded_names, source=source)
 
 
 # ── preflight: is there enough labeled evidence to hunt anything? ───────────
@@ -1777,11 +2249,33 @@ class ProjectPreflight:
     project_name: str
     behaviors: list[BehaviorPreflight] = field(default_factory=list)  # rarest first
     error: str = ""
+    # Behaviour the USER picked instead of the automatic choice.  The ranking is a
+    # heuristic over model output — it cannot know that a behaviour is gated by a
+    # design fact no file records, or that the interesting rare behaviour is the
+    # second one down.  An explicit pick always wins, and is never silently ignored.
+    target_override: str = ""
 
     @property
     def target(self) -> "BehaviorPreflight | None":
-        """The rarest behaviour that can actually be hunted."""
+        """The behaviour to hunt: the user's pick, else the rarest runnable one."""
+        if self.target_override:
+            picked = next((b for b in self.behaviors
+                           if b.behavior_id == self.target_override), None)
+            if picked is not None:
+                return picked
         return next((b for b in self.behaviors if b.runnable()), None)
+
+    def override_note(self) -> str:
+        """Human-readable note when the automatic pick was overridden."""
+        if not self.target_override:
+            return ""
+        auto = next((b for b in self.behaviors if b.runnable()), None)
+        tgt = self.target
+        if tgt is None or (auto is not None and auto.behavior_id == tgt.behavior_id):
+            return ""
+        return (f"{self.project_name}: hunting {tgt.behavior_name} "
+                f"(chosen by you) instead of {auto.behavior_name}"
+                if auto else f"{self.project_name}: hunting {tgt.behavior_name} (chosen by you)")
 
     @property
     def rarest(self) -> "BehaviorPreflight | None":
@@ -2191,6 +2685,12 @@ _MEASURE_LABEL = {
     "time_fraction": "Time in behaviour (fraction of session)",
     "bout_rate": "Bouts per minute",
 }
+# The label fallback measures a different denominator (labeled frames, not session
+# frames), so the axis must not claim the deployment quantity.
+_MEASURE_LABEL_FROM_LABELS = {
+    "time_fraction": "Share of LABELED frames (biased)",
+    "bout_rate": "Labeled segments per minute (biased)",
+}
 
 
 def plot_behavior_rarity(result: BehaviorRarityResult, out_path):
@@ -2215,12 +2715,20 @@ def plot_behavior_rarity(result: BehaviorRarityResult, out_path):
     ax.set_xticks(range(len(order)))
     ax.set_xticklabels([f"{b}\n(rank {i+1})" if b == result.target_name else b
                         for i, b in enumerate(order)], fontsize=8)
-    ax.set_ylabel(_MEASURE_LABEL.get(result.measure, result.measure))
+    measure_labels = (_MEASURE_LABEL_FROM_LABELS
+                      if result.source == PREVALENCE_SOURCE_LABELS else _MEASURE_LABEL)
+    ax.set_ylabel(measure_labels.get(result.measure, result.measure))
     sub = (f"Kruskal–Wallis p = {result.kruskal_p:.1e}   ·   "
            f"{result.target_name} < rest p = {result.target_vs_rest_p:.1e}")
     ax.set_title(f"How rare is {result.target_name}? — {result.project_id}\n{sub}",
                  fontsize=10)
     notes = []
+    if result.source_caveat():
+        # First, and in full: everything else on this panel is conditional on it.
+        # Wrapped, because at this width the one-liner runs off the axes.
+        import textwrap  # noqa: PLC0415
+
+        notes.extend(textwrap.wrap(result.source_caveat(), width=62))
     if result.rarer_than_target:
         notes.append(f"rarer still: {', '.join(result.rarer_than_target)}")
     if result.excluded:
@@ -2585,15 +3093,23 @@ def rarity_rows(result: "RarityScalingResult") -> list[dict]:
 # as consecutive columns (so Prism runs the test itself), no prose/JSON cells.
 
 
-def prism_behavior_rarity(result: BehaviorRarityResult) -> pd.DataFrame:
+def prism_behavior_rarity(result: BehaviorRarityResult,
+                          measure: str | None = None) -> pd.DataFrame:
     """Column table: rows = sessions, one column per behaviour, cell = the measure.
 
     This is the direct substrate for the rarity figure's stats — paste as a Prism
     Column table (groups = behaviours, each session a replicate) and run
     Analyze → ANOVA (or Kruskal–Wallis) → the WDS-vs-rest / omnibus p come out.
+
+    ``measure`` defaults to the one the figure was drawn with; the per-session
+    frame also carries ``bout_rate`` (the reviewer-facing "how often per minute"
+    unit) and ``n_bouts``, neither of which was reachable from Prism before.
     """
+    measure = measure or result.measure
+    if measure not in result.per_session.columns:
+        return pd.DataFrame()
     wide = result.per_session.pivot_table(
-        index="session", columns="behavior", values=result.measure, aggfunc="first")
+        index="session", columns="behavior", values=measure, aggfunc="first")
     # Columns rarest→common so the target sits where the figure shows it.
     order = [b for b in result.means if b in wide.columns]
     wide = wide.reindex(columns=order)
@@ -2601,24 +3117,56 @@ def prism_behavior_rarity(result: BehaviorRarityResult) -> pd.DataFrame:
     return wide.reset_index(drop=True)
 
 
+def _ordered_curves(result):
+    """``(label, curve)`` in canonical arm order, not dict-insertion order.
+
+    Insertion order varies with which arms ran, so two projects could otherwise
+    emit the same columns in different positions — invisible in the CSV and fatal
+    when the user pastes both into one Prism table.
+    """
+    ordered = [(s, result.curves[s]) for s in _ARM_ORDER if s in result.curves]
+    ordered += [(s, c) for s, c in result.curves.items() if s not in _ARM_ORDER]
+    return [(c.label(), c) for _, c in ordered]
+
+
 def prism_discovery(result: RareDiscoveryResult) -> pd.DataFrame:
-    """XY table: X = clips reviewed, one Y column per strategy (mean discovered)."""
+    """XY table: X = clips reviewed, per-seed replicate subcolumns per strategy.
+
+    Prism table type: XY, "Enter replicate values in side-by-side subcolumns".
+    Emitting the seeds rather than the mean lets Prism draw the error bars and run
+    the curve comparison itself; the previous mean-only export could only ever be
+    plotted as a bare line, because a ci95 half-width is not an error format Prism
+    accepts (see :func:`abel.validation.prism.sd_from_ci95`).
+    """
     budgets = sorted({p.n_reviewed for c in result.curves.values() for p in c.points})
+    n_rep = max((len(p.n_found_seeds) for c in result.curves.values()
+                 for p in c.points), default=0)
     out = pd.DataFrame({"Clips reviewed": budgets})
-    for strat, cur in result.curves.items():
-        m = {p.n_reviewed: p.n_found_mean for p in cur.points}
-        out[cur.label()] = [m.get(b, np.nan) for b in budgets]
+    for label, cur in _ordered_curves(result):
+        if n_rep:
+            _replicate_block(out, label,
+                             {p.n_reviewed: p.n_found_seeds for p in cur.points},
+                             budgets, n_rep)
+        else:  # older results carry no seeds; means keep the file pasteable
+            m = {p.n_reviewed: p.n_found_mean for p in cur.points}
+            out[label] = [m.get(b, np.nan) for b in budgets]
     return out
 
 
 def prism_effort(result: RareDiscoveryResult) -> pd.DataFrame:
-    """Grouped table: rows = strategy, per-seed clip-effort replicates per target N."""
-    targets = sorted({t for c in result.curves.values() for t in c.effort_to_n_seeds})
-    n_rep = max((len(c.effort_to_n_seeds.get(t, []))
-                 for c in result.curves.values() for t in targets), default=0)
+    """Grouped table: rows = strategy, per-seed clip-effort replicates per target N.
+
+    Column set and replicate count come from the run's *configuration*, so every
+    project emits the same block and the files stack.
+    """
+    targets = result.effort_targets or sorted(
+        {t for c in result.curves.values() for t in c.effort_to_n_seeds})
+    n_rep = result.n_seeds or max(
+        (len(c.effort_to_n_seeds.get(t, []))
+         for c in result.curves.values() for t in targets), default=0)
     rows = []
-    for strat, cur in result.curves.items():
-        row = {"Strategy": cur.label()}
+    for label, cur in _ordered_curves(result):
+        row = {"Strategy": label}
         for t in targets:
             seeds = cur.effort_to_n_seeds.get(t, [])
             for i in range(n_rep):
@@ -2628,24 +3176,55 @@ def prism_effort(result: RareDiscoveryResult) -> pd.DataFrame:
 
 
 def prism_quality(result: EffortToQualityResult, metric: str = "f1") -> pd.DataFrame:
-    """XY table: X = clips reviewed, one Y column per strategy (mean F1 or PR-AUC)."""
+    """XY table: X = clips reviewed, per-seed held-out F1 (or PR-AUC) replicates.
+
+    Prism table type: XY, "Enter replicate values in side-by-side subcolumns".
+    """
     is_f1 = metric == "f1"
     budgets = sorted({p.n_clips for c in result.curves.values() for p in c.points})
+    seeds_of = (lambda p: p.f1_seeds) if is_f1 else (lambda p: p.pr_auc_seeds)
+    mean_of = (lambda p: p.f1_mean) if is_f1 else (lambda p: p.pr_auc_mean)
+    n_rep = max((len(seeds_of(p)) for c in result.curves.values()
+                 for p in c.points), default=0)
     out = pd.DataFrame({"Clips reviewed": budgets})
-    for strat, cur in result.curves.items():
-        m = {p.n_clips: (p.f1_mean if is_f1 else p.pr_auc_mean) for p in cur.points}
-        out[cur.label()] = [m.get(b, np.nan) for b in budgets]
+    for label, cur in _ordered_curves(result):
+        if n_rep:
+            _replicate_block(out, label,
+                             {p.n_clips: seeds_of(p) for p in cur.points},
+                             budgets, n_rep)
+        else:
+            m = {p.n_clips: mean_of(p) for p in cur.points}
+            out[label] = [m.get(b, np.nan) for b in budgets]
     return out
 
 
+def _quality_target_labels(result: EffortToQualityResult) -> list[str]:
+    """Configured target labels in build order (falling back to observed keys)."""
+    if result.target_labels:
+        return list(result.target_labels)
+    seen: list[str] = []
+    for c in result.curves.values():
+        for lab in c.effort_seeds:
+            if lab not in seen:
+                seen.append(lab)
+    return seen
+
+
 def prism_effort_to_quality(result: EffortToQualityResult) -> pd.DataFrame:
-    """Grouped table: rows = strategy, per-seed clips-to-target replicate columns."""
-    labels = sorted({lab for c in result.curves.values() for lab in c.effort_seeds})
-    n_rep = max((len(c.effort_seeds.get(lab, []))
-                 for c in result.curves.values() for lab in labels), default=0)
+    """Grouped table: rows = strategy, per-seed clips-to-target replicate columns.
+
+    A blank cell means that seed never reached the target within the clip budget
+    -- real censoring, not a missing measurement. Pair with
+    ``prism_effort_to_quality_reached`` before quoting a mean: an arm that reached
+    a target on 2 of 5 seeds looks *faster* than one that reached it on all 5.
+    """
+    labels = _quality_target_labels(result)
+    n_rep = result.n_seeds or max(
+        (len(c.effort_seeds.get(lab, []))
+         for c in result.curves.values() for lab in labels), default=0)
     rows = []
-    for strat, cur in result.curves.items():
-        row = {"Strategy": cur.label()}
+    for label, cur in _ordered_curves(result):
+        row = {"Strategy": label}
         for lab in labels:
             seeds = cur.effort_seeds.get(lab, [])
             for i in range(n_rep):
@@ -2654,13 +3233,46 @@ def prism_effort_to_quality(result: EffortToQualityResult) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def prism_effort_to_quality_reached(result: EffortToQualityResult) -> pd.DataFrame:
+    """Grouped table: rows = strategy, cols = target, cell = seeds that reached it.
+
+    The denominator behind every mean in ``prism_effort_to_quality``. Without it
+    the censoring is invisible and the slowest arms look best, because only their
+    luckiest seeds contribute.
+    """
+    labels = _quality_target_labels(result)
+    n_rep = result.n_seeds
+    rows = []
+    for label, cur in _ordered_curves(result):
+        row = {"Strategy": label}
+        for lab in labels:
+            seeds = cur.effort_seeds.get(lab, [])
+            row[lab] = int(sum(1 for v in seeds if np.isfinite(v)))
+        if n_rep:
+            row["Seeds run"] = int(n_rep)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def prism_rarity_scaling(result: "RarityScalingResult") -> pd.DataFrame:
-    """XY table: X = prevalence, Y = essence & random clips-to-target."""
-    return pd.DataFrame({
-        "Prevalence": [p.prevalence for p in result.points],
-        "Essence Miner (clips)": [p.essence_effort_mean for p in result.points],
-        "Random clips": [p.random_effort_mean for p in result.points],
-    })
+    """XY table: X = prevalence, per-seed clips-to-target for essence vs random.
+
+    Prism table type: XY, "Enter replicate values in side-by-side subcolumns".
+    """
+    xs = [p.prevalence for p in result.points]
+    n_rep = max((max(len(p.essence_effort_seeds), len(p.random_effort_seeds))
+                 for p in result.points), default=0)
+    out = pd.DataFrame({"Prevalence": xs})
+    if not n_rep:
+        out["Essence Miner (clips)"] = [p.essence_effort_mean for p in result.points]
+        out["Random clips"] = [p.random_effort_mean for p in result.points]
+        return out
+    for name, attr in (("Essence Miner", "essence_effort_seeds"),
+                       ("Random clips", "random_effort_seeds")):
+        _replicate_block(out, name,
+                         {p.prevalence: getattr(p, attr) for p in result.points},
+                         xs, n_rep)
+    return out
 
 
 def write_prism(
@@ -2685,13 +3297,22 @@ def write_prism(
     suffix = f"__{stem}" if stem else ""
 
     def _w(df, name):
+        # Route through prism._write so these tables get the same treatment as the
+        # rest of the bundle: ASCII headers (the effort targets carry a literal
+        # ">=" that Excel/Prism would otherwise render as mojibake), a UTF-8 BOM,
+        # 4-significant-figure rounding, and all-NaN column pruning.
         if df is not None and not df.empty:
-            p = out / (name.replace(".csv", f"{suffix}.csv"))
-            df.round(6).to_csv(p, index=False)
-            written.append(p)
+            written.append(_prism._write(df, out / name.replace(".csv", f"{suffix}.csv")))
 
     if behavior_rarity is not None:
+        # The figure's own measure keeps the plain filename; the other two ship
+        # beside it so bout rate / bout counts are reachable without re-pivoting
+        # the tidy CSV by hand.
         _w(prism_behavior_rarity(behavior_rarity), "prism_behavior_rarity.csv")
+        for m in ("time_fraction", "bout_rate", "n_bouts"):
+            if m != behavior_rarity.measure:
+                _w(prism_behavior_rarity(behavior_rarity, m),
+                   f"prism_behavior_rarity_{m}.csv")
     if reviewed is not None:
         _w(prism_discovery(reviewed), "prism_discovery_reviewed.csv")
         _w(prism_effort(reviewed), "prism_effort_reviewed.csv")
@@ -2703,22 +3324,74 @@ def write_prism(
         _w(prism_quality(quality, "f1"), "prism_quality_f1.csv")
         _w(prism_quality(quality, "pr_auc"), "prism_quality_prauc.csv")
         _w(prism_effort_to_quality(quality), "prism_effort_to_quality.csv")
+        _w(prism_effort_to_quality_reached(quality),
+           "prism_effort_to_quality_reached.csv")
 
     if written:
-        (out / "README_PRISM_rare_discovery.txt").write_text(
-            "Rare-behavior discovery — Prism-ready tables\n"
-            "============================================\n"
-            "prism_behavior_rarity.csv   Column table; groups=behaviours, each session a\n"
-            "  replicate. Analyze -> Column statistics / ANOVA / Kruskal-Wallis for the\n"
-            "  'WDS < rest' p-value.\n"
-            "prism_discovery_*.csv       XY; X=clips reviewed, one Y per strategy.\n"
-            "prism_effort_reviewed.csv   Grouped; rows=strategy, 'N=<t>:<seed>' replicate\n"
-            "  columns of clips-to-N. Analyze -> ANOVA / t tests across strategies.\n"
-            "prism_rarity_scaling.csv    XY; X=prevalence, essence vs random clips-to-N.\n"
-            "prism_quality_f1.csv        XY; X=clips reviewed, one Y per strategy = held-out\n"
-            "  F1 of the model trained on the labels-so-far (prism_quality_prauc.csv = PR-AUC).\n"
-            "prism_effort_to_quality.csv Grouped; rows=strategy, '<target>:<seed>' replicate\n"
-            "  columns of clips-to-reach-quality. Analyze -> ANOVA / t tests across strategies.\n",
-            encoding="utf-8")
-        written.append(out / "README_PRISM_rare_discovery.txt")
+        n_rep = 0
+        for r in (reviewed, full):
+            if r is not None:
+                n_rep = max(n_rep, int(getattr(r, "n_seeds", 0) or 0))
+        if quality is not None:
+            n_rep = max(n_rep, int(getattr(quality, "n_seeds", 0) or 0))
+        rep = n_rep or 1
+        written.append(_prism.write_text(
+            out / "README_PRISM_rare_discovery.txt",
+            _RARE_README.format(suffix=suffix or "  (none: single-project run)",
+                                rep=rep)))
     return written
+
+
+# Every filename below carries the __<project> (and __<behavior>, where a project
+# hunted more than one) suffix that write_prism appends -- the previous README
+# named the unsuffixed stems, which matched no file actually on disk.
+_RARE_README = """\
+Rare-behavior discovery - Prism-ready tables
+============================================
+Filename suffix on this run: {suffix}
+Replicate (seed) count:      {rep}
+
+Each file is a direct paste into a new Prism table of the stated type. Blank cells
+are real and mean "never reached within the clip budget" -- leave them blank; Prism
+reads a blank as missing, which is what you want, and a 0 would be a lie.
+
+prism_behavior_rarity__*.csv
+    Column table; groups = behaviours, each session a replicate. Analyze ->
+    Column statistics / ANOVA / Kruskal-Wallis for the "target < rest" p-value.
+    Companions in the other two rarity units:
+      prism_behavior_rarity_bout_rate__*.csv     bouts per minute
+      prism_behavior_rarity_n_bouts__*.csv       raw bout counts
+      prism_behavior_rarity_time_fraction__*.csv fraction of session time
+
+prism_discovery_reviewed__*.csv / prism_discovery_fullpool__*.csv
+    XY -> "Enter replicate values in side-by-side subcolumns", {rep} subcolumns.
+    X = clips reviewed, one dataset per strategy, cells = per-seed positives found.
+    Prism draws the error bars and runs the comparison from these.
+    NOTE: the reviewed pool runs 4 arms and the full pool only 2 (essence vs
+    random) BY DESIGN. They are different experiments -- do not paste them into
+    one table.
+
+prism_quality_f1__*.csv / prism_quality_prauc__*.csv
+    XY -> replicate values, {rep} subcolumns. X = clips reviewed, cells = per-seed
+    held-out F1 (or PR-AUC) of the model trained on the labels-so-far.
+
+prism_rarity_scaling__*.csv
+    XY -> replicate values, {rep} subcolumns. X = prevalence, essence vs random
+    clips-to-target.
+
+prism_effort_reviewed__*.csv
+    Grouped -> replicate values. Rows = strategy, "N=<target>:<seed>" columns of
+    clips-to-N. Analyze -> ANOVA / t tests across strategies.
+
+prism_effort_to_quality__*.csv
+    Grouped -> replicate values. Rows = strategy, "<target>:<seed>" columns of
+    clips-to-reach-quality.
+prism_effort_to_quality_reached__*.csv
+    READ THIS BEFORE QUOTING A MEAN from the file above. Rows = strategy,
+    cells = how many seeds ever reached that target. A mean over the 2 of {rep}
+    seeds that got there makes a slow arm look fast; this is the denominator.
+
+prism_combined_enrichment.csv
+    Written once for the whole run (not per project): enrichment at the shared
+    clip budget, all projects together.
+"""

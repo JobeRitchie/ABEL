@@ -649,6 +649,98 @@ def human_ceiling_plot(gen_results: list, save_path: Path | None = None) -> "Fig
     return _save(fig, save_path)
 
 
+# ── Held-out confusion counts by behavior ──────────────────────────────────
+
+def _clip_unit(df: pd.DataFrame) -> str:
+    """Name the counted unit, with its measured duration when the run agrees on one.
+
+    ``clip_sec`` is per-project and projects genuinely differ (most use ~0.5 s but
+    it is configurable), so a single duration is only printed when every row in
+    the figure shares it — otherwise the axis would quietly attribute one assay's
+    clip length to all of them.
+    """
+    if "clip_sec" not in df.columns:
+        return "clips"
+    secs = pd.to_numeric(df["clip_sec"], errors="coerce").dropna().round(2).unique()
+    if len(secs) != 1 or secs[0] <= 0:
+        return "clips"
+    s = float(secs[0])
+    return f"clips (~{s:.1f} s)" if s >= 0.1 else f"clips (~{s:.2f} s)"
+
+
+
+def confusion_counts_by_behavior(conf_df: pd.DataFrame,
+                                 save_path: Path | None = None) -> "Figure | None":
+    """The counts behind the rates: found / missed / false-alarmed, per behavior.
+
+    Consumes :func:`cross_project.confusion_by_behavior`.  One stacked horizontal
+    bar per project·behavior with three segments — TP (found), FN (missed), FP
+    (false alarms) — so the bar's length is the union of what the reviewer marked
+    and what the model called, and the green share *is* the agreement.
+
+    TN is deliberately **not** drawn.  Under this imbalance it is 10-100× the
+    other three segments; including it would compress every bar into a sliver and
+    imply an accuracy the positives do not support.  The axis label names the
+    unit as reviewer-scored windows, because a count invites a reader to picture
+    bouts, which these are not.
+    """
+    if not _HAS_MPL or conf_df is None or conf_df.empty:
+        return None
+    need = {"project_id", "behavior_name", "tp", "fp", "fn"}
+    if not need <= set(conf_df.columns):
+        return None
+
+    df = conf_df.copy()
+    for col in ("tp", "fp", "fn"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df.dropna(subset=["tp", "fp", "fn"])
+    if df.empty:
+        return None
+    # Worst recall at the top of the reading order. Matplotlib's y axis runs
+    # bottom-up, so that is a *descending* sort; NaN recall (no held-out
+    # positives at all) is the worst case of the lot and leads.
+    pos = (df["tp"] + df["fn"]).replace(0, np.nan)
+    # (na_position="last" = last row = highest y = top of the drawn figure.)
+    df = df.assign(_recall=df["tp"] / pos).sort_values(
+        "_recall", ascending=False, na_position="last")
+
+    labels = [f"{r.project_id} · {r.behavior_name}" for r in df.itertuples()]
+    y = np.arange(len(df))
+    tp = df["tp"].to_numpy(float)
+    fn = df["fn"].to_numpy(float)
+    fp = df["fp"].to_numpy(float)
+
+    fig, ax = plt.subplots(figsize=(9.5, max(2.4, 0.42 * len(df) + 1.6)))
+    ax.barh(y, tp, color="#4CAF50", label="Found (TP)")
+    ax.barh(y, fn, left=tp, color="#FF9800", label="Missed (FN)")
+    ax.barh(y, fp, left=tp + fn, color="#F44336", label="False alarm (FP)")
+
+    span = float((tp + fn + fp).max()) or 1.0
+    for i, (t, f_n, f_p) in enumerate(zip(tp, fn, fp)):
+        ax.text(t + f_n + f_p + 0.01 * span, i,
+                f"  {int(round(t))} / {int(round(t + f_n))} found"
+                f"  ·  {int(round(f_p))} FP",
+                va="center", fontsize=8, color="#333")
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xlim(0, span * 1.42)
+    ax.set_xlabel(f"Held-out {_clip_unit(df)} scored by the reviewer (not bouts)")
+    ax.set_title("What the model got right, missed, and over-called\n"
+                 "Bar = reviewer positives + the model's extra calls; "
+                 "true negatives omitted", fontsize=11, loc="left")
+    ax.grid(axis="x", alpha=0.3)
+    ax.set_axisbelow(True)
+    # Below the axes, not inside them: the per-bar annotations run out into the
+    # right margin, which is exactly where an in-axes legend would sit. The strip
+    # reserved for it is a fixed 0.5 in, converted to the figure fraction the
+    # rect wants, because the figure's height grows with the behavior count.
+    strip = 0.5 / float(fig.get_figheight())
+    fig.legend(loc="lower center", ncol=3, fontsize=8, frameon=False)
+    fig.tight_layout(rect=(0, strip, 1, 1))
+    return _save(fig, save_path)
+
+
 # ── PR curve + confusion from retained arrays ──────────────────────────────
 
 def pr_curve(labelled_results: list[tuple[str, object]], title: str,
@@ -717,9 +809,13 @@ def discrimination_matrices(pair_results: list, save_path: Path | None = None,
     # one resting on 973 — it varies >3x within a project.
     n_hold = {frozenset({r.name_a, r.name_b}): (r.n_hold_a + r.n_hold_b)
               for r in pair_results if not r.error}
-    # Pairs that were never trained (dropped by max_pairs) must not look like pairs
-    # the baseline solved — three different meanings were sharing one grey.
-    ran = {frozenset({r.name_a, r.name_b}) for r in pair_results}
+    # Pairs with no trained result must not look like pairs the baseline solved —
+    # three different meanings were sharing one grey. This covers BOTH ways a pair
+    # can lack a number: dropped by the max_pairs cap (absent from pair_results), and
+    # selected but skipped for too few clips (present, with r.error set). The latter
+    # used to render as plain grey, which on the left-hand AUC panel could only ever
+    # be read as "already solved" — a reading that is impossible for an unscored pair.
+    ran = {frozenset({r.name_a, r.name_b}) for r in pair_results if not r.error}
 
     def _ink(cmap, norm_val: float) -> str:
         """Pick ink by the cell's actual luminance, not a guess about the colormap.
@@ -792,7 +888,8 @@ def discrimination_matrices(pair_results: list, save_path: Path | None = None,
     from matplotlib.patches import Patch  # noqa: PLC0415
     fig.legend(
         handles=[
-            Patch(facecolor="#eceff1", edgecolor="#B0BEC5", hatch="///", label="pair not run"),
+            Patch(facecolor="#eceff1", edgecolor="#B0BEC5", hatch="///",
+                  label="pair not run (past the max-pairs cap, or too few clips)"),
             Patch(facecolor="#eceff1", edgecolor="none",
                   label="already solved by the baseline (no error left to remove)"),
         ],
@@ -849,7 +946,10 @@ def discrimination_gain_plot(pair_results: list, save_path: Path | None = None
         sig = [r.is_significant(sname) for r in scored]
         offset = (si - n_sets / 2 + 0.5) * bar_h
         label = next((r.labels.get(sname, sname) for r in scored if sname in r.labels), sname)
-        ax.barh(y + offset, vals, bar_h, xerr=errs, color=_colour(si), label=label,
+        # Fixed family colour, not _colour(si): the positional palette recoloured
+        # "video" whenever a project lacked the context rung, so two figures in the
+        # same report disagreed about which colour meant which modality.
+        ax.barh(y + offset, vals, bar_h, xerr=errs, color=_family_colour(sname), label=label,
                 edgecolor="white", linewidth=0.3,
                 error_kw={"elinewidth": 0.8, "ecolor": "#444", "capsize": 2})
         for patch, s in zip(ax.patches[-n_pairs:], sig):
@@ -887,6 +987,310 @@ def discrimination_gain_plot(pair_results: list, save_path: Path | None = None
     ax.legend(loc="lower right", fontsize=8, frameon=False)
     ax.grid(axis="x", alpha=0.3)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
+    return _save(fig, save_path)
+
+
+# ── Pooled discrimination landscape (every project in one figure) ──────────
+#
+# The per-project matrices above are the archive: a full run writes one per project
+# PER add-on family, so a reader has to mentally join a dozen heatmaps to answer the
+# question the analysis exists for — across every assay, which behavior pairs does
+# pose already separate, which does it confuse, and which modality rescues the ones
+# it confuses.  That is one scatter, and these two panels are it.
+
+# Marker per project. Colour is spent on the feature family (the result), so the
+# assay has to be carried by shape.
+_PROJECT_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "p")
+
+# A pair the pose baseline separates perfectly has 1 − AUC == 0, which a log axis
+# cannot place. Pin those to one decade below, inside the "already solved" band.
+_MIN_POSE_ERROR = 1e-4
+
+# Display clamps. error_reduction is unbounded below (a family CAN hurt), and one
+# −4.0 outlier on a near-zero-headroom pair would flatten the informative 0–1 range.
+_ER_LO, _ER_HI = -0.5, 1.0
+
+_ALL_FEATURES_COLOUR = "#37474F"   # the union rung: neutral, not a modality
+_UNRESCUED_COLOUR = "#B0BEC5"      # no family measurably helps this pair
+
+
+def _family_colour(feature_set: str) -> str:
+    """Colour for one discrimination feature family.
+
+    Reuses the behaviorscape modality palette rather than this module's positional
+    ``_colour(i)``: with a per-index palette the same family draws in a different
+    colour whenever a project happens to lack one rung, and three figures in one
+    report then disagree about what "video" looks like.
+    """
+    from abel.validation import features as vfeat  # noqa: PLC0415
+    from abel.validation.analyses.behaviorscape import MODALITY_COLORS  # noqa: PLC0415
+
+    modality = {
+        "pose_only": vfeat.MODALITY_POSE,
+        "pose_context": vfeat.MODALITY_CONTEXT,
+        "pose_video": vfeat.MODALITY_VIDEO,
+        "pose_social": vfeat.MODALITY_SOCIAL,
+    }.get(str(feature_set))
+    if modality is not None:
+        return MODALITY_COLORS.get(modality, "#607D8B")
+    return _ALL_FEATURES_COLOUR if feature_set == "all_features" else "#607D8B"
+
+
+def _clip_for_display(values, lo: float, hi: float):
+    """Clip to the drawable range, reporting which points had to be moved.
+
+    Returns ``(clipped, was_clipped)`` so the caller can draw the moved points with
+    a caret — a clamped point silently redrawn at the axis limit is a lie about
+    where the datum sits.
+    """
+    arr = np.asarray(values, dtype=float)
+    out_of_range = np.isfinite(arr) & ((arr < lo) | (arr > hi))
+    return np.clip(arr, lo, hi), out_of_range
+
+
+def _short_pair_label(row, limit: int = 34) -> str:
+    """Just the pair — the assay is already carried by the marker shape.
+
+    Prefixing the project made every label ~50 characters, and at 6pt two of them
+    overprinted each other into an unreadable smear on the first render.
+    """
+    text = str(row["pair"])
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _annotate_points(ax, xs, ys, labels, order, *, max_labels: int = 8,
+                     x_gap: float = 0.22, y_gap: float = 0.05) -> None:
+    """Label points in ``order`` (best first), skipping ones that would overprint.
+
+    Two guards, both learned from the first render of this figure: a label near the
+    right edge is flipped to sit on the *left* of its point (otherwise it runs off
+    the axes), and a label whose box would land on one already placed is dropped
+    rather than drawn on top of it.  Proximity is judged in axes fractions, so it
+    behaves the same on the log x-axis as the linear one.
+
+    Call this AFTER the axis limits are final — it reads them to normalise.
+    """
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    is_log = ax.get_xscale() == "log"
+    lx0, lx1 = (np.log10(max(x0, 1e-12)), np.log10(max(x1, 1e-12))) if is_log else (x0, x1)
+
+    def _norm(x, y):
+        vx = np.log10(max(float(x), 1e-12)) if is_log else float(x)
+        return ((vx - lx0) / max(1e-9, lx1 - lx0), (float(y) - y0) / max(1e-9, y1 - y0))
+
+    placed: list[tuple[float, float]] = []
+    for idx in order:
+        if len(placed) >= max_labels:
+            break
+        if not (np.isfinite(xs[idx]) and np.isfinite(ys[idx])):
+            continue
+        nx, ny = _norm(xs[idx], ys[idx])
+        if any(abs(nx - px) < x_gap and abs(ny - py) < y_gap for px, py in placed):
+            continue
+        flip = nx > 0.55
+        ax.annotate(labels[idx], (xs[idx], ys[idx]), textcoords="offset points",
+                    xytext=(-7 if flip else 7, 4), ha="right" if flip else "left",
+                    fontsize=6.2, color="#37474F")
+        placed.append((nx, ny))
+
+
+def discrimination_landscape(disc_df: "pd.DataFrame", save_path: Path | None = None
+                             ) -> "Figure | None":
+    """The whole run's discrimination result in two panels, all projects pooled.
+
+    **Left — the landscape.**  One point per behavior pair.  x is the pose-only error
+    (``1 − ROC-AUC``) on a log axis, because most pairs sit above 0.98 AUC and a
+    linear axis stacks them all on the wall.  y is the share of that error removed by
+    the best *single* feature family, coloured by which family that was — grey where
+    no family's paired gain clears its own CI.  Pairs with no headroom left are still
+    drawn, as hollow dots in the shaded band: the wall of pose-solved pairs is a
+    result, and dropping it would overstate how much the extra modalities matter.
+
+    **Right — the volcano.**  One point per pair × family, so a pair that both video
+    and context rescue is distinguishable from one only video rescues — information
+    the left panel's "best family" necessarily collapses.  x is the same error-removed
+    scale; y is ``−log10 p`` of the paired t-test on the per-seed ΔAUC.  The two axes
+    are consistent by construction: dividing every paired seed difference by the
+    constant ``1 − pose AUC`` rescales the effect without touching the t statistic, so
+    this p IS the p of the error-reduction on the x-axis.
+
+    Takes the tidy frame from
+    :func:`abel.validation.analyses.discrimination.discrimination_rows` (not the
+    ``PairResult`` objects) so it can be re-rendered from a finished run's CSV, and
+    tested, without retraining anything.
+    """
+    if not _HAS_MPL or disc_df is None or getattr(disc_df, "empty", True):
+        return None
+    from abel.validation.analyses import discrimination as disc  # noqa: PLC0415
+
+    df = disc_df.copy()
+    for col in ("pose_only_auc", "error_reduction", "p_value", "n_holdout"):
+        if col not in df.columns:
+            return None  # pre-0.9.1 CSV without the landscape columns
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df[df["pose_only_auc"].notna()]
+    if df.empty:
+        return None
+    df["significant"] = df["significant"].astype(str).str.lower().eq("true")
+    if "project_name" not in df.columns:
+        df["project_name"] = df["project"].astype(str)
+
+    projects = list(dict.fromkeys(df["project_name"].astype(str)))
+    marker_of = {p: _PROJECT_MARKERS[i % len(_PROJECT_MARKERS)]
+                 for i, p in enumerate(projects)}
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.5, 5.8))
+
+    # ── Panel A: difficulty × rescue ───────────────────────────────────────
+    pairs = df[df["best_family"].astype(bool)] if "best_family" in df.columns \
+        else df.iloc[0:0]
+    # Pairs with no headroom never get a best_family row (error_reduction is NaN by
+    # design), so recover them from the baseline rows — they are the pose-solved wall.
+    base_rows = df[df["feature_set"] == disc.BASELINE_FEATURE_SET]
+    rescued_keys = set(zip(pairs["project"].astype(str), pairs["pair"].astype(str)))
+    solved = base_rows[[(p, q) not in rescued_keys for p, q in
+                        zip(base_rows["project"].astype(str), base_rows["pair"].astype(str))]]
+
+    def _pose_error(frame):
+        return np.maximum(1.0 - frame["pose_only_auc"].to_numpy(dtype=float),
+                          _MIN_POSE_ERROR)
+
+    if not solved.empty:
+        ax1.scatter(_pose_error(solved), np.zeros(len(solved)),
+                    s=18, facecolor="none", edgecolor=_UNRESCUED_COLOUR, linewidth=0.9,
+                    zorder=2)
+
+    y_clip, y_moved = _clip_for_display(pairs["error_reduction"], _ER_LO, _ER_HI)
+    x_vals = _pose_error(pairs)
+    # Held-out n spans >3x within a single project; a pair resting on 199 clips must
+    # not read as firmly as one resting on 973.
+    n_hold = pairs["n_holdout"].to_numpy(dtype=float)
+    sizes = 22.0 + 3.2 * np.sqrt(np.nan_to_num(n_hold, nan=0.0))
+    for i, (_, row) in enumerate(pairs.iterrows()):
+        sig = bool(row["significant"])
+        colour = _family_colour(row["feature_set"]) if sig else _UNRESCUED_COLOUR
+        ax1.scatter(x_vals[i], y_clip[i], s=sizes[i],
+                    marker=("^" if y_moved[i] and y_clip[i] >= _ER_HI else
+                            "v" if y_moved[i] else marker_of[str(row["project_name"])]),
+                    facecolor=colour if sig else "none",
+                    edgecolor=colour if sig else _UNRESCUED_COLOUR,
+                    linewidth=0.9, alpha=0.85 if sig else 0.9, zorder=3)
+
+    ax1.set_xscale("log")
+    ax1.set_xlim(_MIN_POSE_ERROR * 0.7, 0.75)
+    # Only reach below zero as far as a family actually hurt: a fixed -0.5 floor left
+    # the bottom 40% of the panel empty on runs where nothing hurt.
+    finite_y = y_clip[np.isfinite(y_clip)] if len(y_clip) else np.array([0.0])
+    ax1.set_ylim(min(-0.06, float(finite_y.min()) - 0.06) if finite_y.size else -0.06,
+                 _ER_HI + 0.08)
+    ax1.axvspan(ax1.get_xlim()[0], disc.MIN_HEADROOM, color="#ECEFF1", zorder=0)
+    ax1.axvline(disc.MIN_HEADROOM, color="#90A4AE", linewidth=0.9, linestyle=":")
+    ax1.axhline(0, color="#90A4AE", linewidth=0.9)
+    ax1.set_xlabel("Pose-only error, 1 − ROC-AUC  (right ⇒ pose confuses this pair)")
+    ax1.set_ylabel("Share of that error removed by the best feature family")
+    ax1.set_title("Discrimination landscape — every behavior pair, every assay\n"
+                  "colour = the modality that disambiguates the pair", fontsize=10)
+    ax1.text(float(np.sqrt(_MIN_POSE_ERROR * disc.MIN_HEADROOM)),
+             ax1.get_ylim()[1] * 0.5, "pose alone already solves these pairs",
+             fontsize=7, color="#78909C", va="center", ha="center", rotation=90)
+    ax1.grid(alpha=0.25, which="both")
+
+    # Label the pairs that carry the result: hard AND substantially rescued.
+    if not pairs.empty:
+        interest = x_vals * np.clip(y_clip, 0, None)
+        labels_a = [_short_pair_label(row) for _, row in pairs.iterrows()]
+        order_a = [int(i) for i in np.argsort(interest)[::-1]
+                   if np.isfinite(interest[i]) and interest[i] > 0]
+        _annotate_points(ax1, x_vals, y_clip, labels_a, order_a, max_labels=8)
+
+    # ── Panel B: volcano ──────────────────────────────────────────────────
+    vol = df[(df["feature_set"] != disc.BASELINE_FEATURE_SET)
+             & df["p_value"].notna() & df["error_reduction"].notna()]
+    n_untestable = int(((df["feature_set"] != disc.BASELINE_FEATURE_SET)
+                        & (df["p_value"].isna() | df["error_reduction"].isna())).sum())
+    ax2.axvline(0, color="#90A4AE", linewidth=0.9)
+    ax2.set_xlim(_ER_LO - 0.06, _ER_HI + 0.06)
+    if not vol.empty:
+        vx, vx_moved = _clip_for_display(vol["error_reduction"], _ER_LO, _ER_HI)
+        # p can underflow to 0 at 5 seeds; floor it so -log10 stays finite.
+        vy = -np.log10(np.maximum(vol["p_value"].to_numpy(dtype=float), 1e-12))
+        for i, (_, row) in enumerate(vol.iterrows()):
+            ax2.scatter(vx[i], vy[i], s=34,
+                        marker=("<" if vx_moved[i] and vx[i] <= _ER_LO else
+                                ">" if vx_moved[i] else marker_of[str(row["project_name"])]),
+                        facecolor=_family_colour(row["feature_set"]),
+                        edgecolor="white", linewidth=0.4, alpha=0.85, zorder=3)
+
+        ax2.set_ylim(bottom=0, top=max(2.0, float(np.nanmax(vy))) * 1.12)
+        ax2.axhline(-np.log10(0.05), color="#607D8B", linestyle="--", linewidth=1.0)
+        # BELOW its own line: the BH line sits just above it when few tests were run,
+        # and a label growing upward had the dotted line struck through it.
+        ax2.text(_ER_LO - 0.03, -np.log10(0.05), "p = 0.05", fontsize=6.8,
+                 color="#607D8B", va="top", ha="left")
+        # A full run runs 40-100 of these tests, so the bare 0.05 line expects a
+        # handful of false positives by construction. BH is the honest second line.
+        from abel.validation.metrics import benjamini_hochberg_threshold  # noqa: PLC0415
+
+        bh = benjamini_hochberg_threshold(vol["p_value"].tolist())
+        if np.isfinite(bh):
+            ax2.axhline(-np.log10(bh), color="#37474F", linestyle=":", linewidth=1.0)
+            # Opposite edge from the p=0.05 label: with few tests BH lands close to
+            # 0.05 and two labels at the same x overprinted into a smear.
+            ax2.text(_ER_HI + 0.04, -np.log10(bh), f"BH 5% FDR (p = {bh:.3g})",
+                     fontsize=6.8, color="#37474F", va="bottom", ha="right")
+
+        # Name the extremes on both sides — a family that HURTS a pair is a finding.
+        # One label per PAIR, not per point: a pair rescued by video AND by the
+        # all-features union printed its own name twice, side by side.
+        labels_b, order_b, seen = [], [], set()
+        for _, row in vol.iterrows():
+            labels_b.append(_short_pair_label(row))
+        for idx in np.argsort(np.abs(vx))[::-1]:
+            key = str(vol.iloc[int(idx)]["pair"])
+            if key in seen or vy[idx] < -np.log10(0.05):
+                continue
+            seen.add(key)
+            order_b.append(int(idx))
+        _annotate_points(ax2, vx, vy, labels_b, order_b, max_labels=6, x_gap=0.28)
+
+    ax2.set_xlabel("Share of pose-only error removed  (left of 0 ⇒ the family hurts)")
+    ax2.set_ylabel("−log₁₀ p  (paired t-test across seeds)")
+    ax2.set_title("Effect vs. evidence — every pair × feature family\n"
+                  "up = reproducible across seeds; right = large", fontsize=10)
+    ax2.grid(alpha=0.25)
+
+    # ── Shared legend: what the colours mean, what the shapes mean ────────
+    from matplotlib.lines import Line2D  # noqa: PLC0415
+
+    fams = [f for f in dict.fromkeys(df["feature_set"].astype(str))
+            if f and f != disc.BASELINE_FEATURE_SET]
+    handles = [Line2D([], [], marker="o", linestyle="none", markersize=7,
+                      markerfacecolor=_family_colour(f), markeredgecolor="white",
+                      label=disc.FEATURE_SET_LABELS.get(f, f).lstrip("+ ").strip())
+               for f in fams]
+    handles.append(Line2D([], [], marker="o", linestyle="none", markersize=7,
+                          markerfacecolor="none", markeredgecolor=_UNRESCUED_COLOUR,
+                          label="no family measurably helps"))
+    handles += [Line2D([], [], marker=marker_of[p], linestyle="none", markersize=6.5,
+                       markerfacecolor="#78909C", markeredgecolor="white", label=p)
+                for p in projects]
+    fig.legend(handles=handles, loc="lower center",
+               ncol=min(5, max(2, len(handles) // 2 + 1)),
+               fontsize=7.5, frameon=False, bbox_to_anchor=(0.5, -0.01))
+
+    note = ("Left: point size ∝ held-out clips; hollow = the best family's paired 95% CI "
+            "includes zero. Shaded band = pairs with under "
+            f"{disc.MIN_HEADROOM:.1%} pose-only error left, where a 'share removed' is "
+            "division by noise and is not computed. "
+            "Carets mark points clipped to the axis.")
+    if n_untestable:
+        note += (f"  {n_untestable} pair × family combination(s) omitted from the volcano: "
+                 "no pose-only error left to remove, under 2 usable seeds, or identical "
+                 "across every seed.")
+    fig.text(0.5, -0.075, note, ha="center", va="top", fontsize=7, color="#666",
+             wrap=True)
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
     return _save(fig, save_path)
 
 

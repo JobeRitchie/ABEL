@@ -7,7 +7,7 @@ figure backed by a handful of tables.  This module distils the exhaustive per-be
 exports into five small tables — one row per assay, or per behavior, or per feature
 family — that a person can plot directly:
 
-    summary_per_assay.csv            8 rows  — headline accuracy + κ/ECE/CCC per assay
+    summary_per_assay.csv            8 rows  — headline accuracy + counts + κ/ECE/CCC
     summary_per_behavior.csv        43 rows  — the master supplementary table
     summary_feature_value.csv       14 rows  — ΔF1 per enhancement × clip budget
     summary_discrimination.csv       3 rows  — error removed by feature family
@@ -33,6 +33,7 @@ from abel.validation.metrics import ci95
 _SOURCES: dict[str, tuple[str, str]] = {
     "publication_metrics": ("cross_project", "publication_metrics.csv"),
     "accuracy_by_behavior": ("cross_project", "accuracy_by_behavior.csv"),
+    "confusion_by_behavior": ("cross_project", "confusion_by_behavior.csv"),
     "generalization": ("generalization", "agreement.csv"),
     "calibration": ("calibration", "calibration.csv"),
     "time_budget": ("time_budget", "time_budget_agreement.csv"),
@@ -57,7 +58,10 @@ _HEADROOM_AUC = 0.998
 
 def _read(path: Path) -> pd.DataFrame | None:
     try:
-        return pd.read_csv(path) if path.is_file() else None
+        # utf-8-sig strips the BOM store.write_csv emits, and reads BOM-less
+        # UTF-8 (older runs) unchanged -- otherwise the first column of every
+        # source table would come back named "﻿project".
+        return pd.read_csv(path, encoding="utf-8-sig") if path.is_file() else None
     except Exception:  # noqa: BLE001 — a corrupt source must not sink the summary
         return None
 
@@ -124,9 +128,24 @@ def summary_per_assay(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
         if g is not None:
             out = out.merge(g, on="assay", how="left")
 
+    # Assay-level totals of the tangible counts: "across this assay's behaviors,
+    # the model recovered X of the Y windows the reviewer marked positive, with Z
+    # false alarms." Summing across *behaviors* is the meaningful direction (each
+    # behavior contributes its own positives); summing across seeds is not, and
+    # confusion_by_behavior has already collapsed that axis by averaging.
+    # TN is excluded on purpose — an assay-level accuracy off it would be ~0.99
+    # by imbalance alone.
+    conf = src.get("confusion_by_behavior")
+    if conf is not None and {"project_id", "tp", "fn", "fp"} <= set(conf.columns):
+        tot = (conf.groupby("project_id")[["tp", "fn", "fp"]].sum().reset_index()
+               .rename(columns={"project_id": "assay", "tp": "tp_total",
+                                "fn": "fn_total", "fp": "fp_total"}))
+        tot["n_pos_val_total"] = tot["tp_total"] + tot["fn_total"]
+        out = out.merge(tot, on="assay", how="left")
+
     order = ["assay", "assay_name", "n_behaviors", "f1", "mcc", "balanced_accuracy",
-             "roc_auc", "kappa", "mean_generalization_kappa", "mean_ece",
-             "mean_prevalence_ccc"]
+             "roc_auc", "kappa", "n_pos_val_total", "tp_total", "fn_total", "fp_total",
+             "mean_generalization_kappa", "mean_ece", "mean_prevalence_ccc"]
     return out[[c for c in order if c in out.columns]]
 
 
@@ -134,8 +153,9 @@ def summary_per_assay(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def summary_per_behavior(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """One row per (assay, behavior): held-out F1, generalization κ, ECE, prevalence
-    CCC/bias, video ΔF1, all-enhancements ΔF1 and the AL positives-found ratio."""
+    """One row per (assay, behavior): held-out F1 and the confusion counts behind
+    it, generalization κ, ECE, prevalence CCC/bias, video ΔF1, all-enhancements
+    ΔF1 and the AL positives-found ratio."""
     acc = src.get("accuracy_by_behavior")
     if acc is None or acc.empty:
         return pd.DataFrame()
@@ -154,6 +174,14 @@ def summary_per_behavior(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
                                         **cols_map})
         out = out.merge(part, on=["assay", "behavior"], how="left")
 
+    # Counts first, immediately beside F1: this is the master supplementary table,
+    # and a rate is only checkable if the reader can see the n it came from.
+    # Unit = one reviewer-scored held-out window (not a bout); counts are per fit,
+    # averaged over seeds. See cross_project.confusion_by_behavior.
+    _merge(src.get("confusion_by_behavior"),
+           {"n_val": "n_val", "n_pos_val": "n_pos_val",
+            "tp": "tp", "fn": "fn", "fp": "fp", "tn": "tn"},
+           extra_key="project_id", extra_beh="behavior_name")
     _merge(src.get("generalization"), {"cohen_kappa": "generalization_kappa"})
     _merge(src.get("calibration"), {"ece": "ece"})
     _merge(src.get("time_budget"),
@@ -290,25 +318,49 @@ _BUILDERS = {
     "summary_active_learning_curve.csv": summary_active_learning_curve,
 }
 
-_README = """\
+_README_HEAD = """\
 Meta summary tables
 ===================
 Distilled, assay-scoped summaries that back the one-figure manuscript story. Each is
 small enough to plot directly; the exhaustive per-behavior CSVs remain next door for
 the record.
 
-summary_per_assay.csv            One row per assay: F1/MCC/balanced-acc/ROC-AUC/kappa,
-                                 plus mean generalization kappa, ECE and prevalence CCC.
-summary_per_behavior.csv         One row per (assay, behavior): the master table joining
-                                 held-out F1, generalization kappa, ECE, prevalence
-                                 CCC/bias, video dF1, all-enhancements dF1, AL pos ratio.
-summary_feature_value.csv        ΔF1 over pose-only per enhancement × clip budget:
-                                 mean, 95% CI, and how many behaviors it helped (sig).
-summary_discrimination.csv       Over confusable pairs with headroom, the AUC each
-                                 feature family reaches and the % of remaining error removed.
-summary_active_learning_curve.csv  Positives found vs clips reviewed, pooled across
-                                 behaviors, AL vs random.
+These are READING tables: several carry two leading key columns and mix units in one
+table, so they are not direct Prism pastes. The one-file-per-figure Prism tables live
+in ../prism/ -- use those to plot, these to read.
 
+Files in THIS directory (only the summaries this run could build are listed):
+
+"""
+
+# One blurb per builder, emitted only for the files actually written. The previous
+# static string always advertised all five, so a run that could build one of them
+# (the usual case -- each needs its own upstream analysis to have run) shipped a
+# README describing four files that were not there.
+_README_SECTIONS = {
+    "summary_per_assay.csv":
+        "summary_per_assay.csv            One row per assay: F1/MCC/balanced-acc/\n"
+        "                                 ROC-AUC/kappa, plus mean generalization\n"
+        "                                 kappa, ECE and prevalence CCC.\n",
+    "summary_per_behavior.csv":
+        "summary_per_behavior.csv         One row per (assay, behavior): the master\n"
+        "                                 table joining held-out F1, generalization\n"
+        "                                 kappa, ECE, prevalence CCC/bias, video dF1,\n"
+        "                                 all-enhancements dF1, AL pos ratio.\n",
+    "summary_feature_value.csv":
+        "summary_feature_value.csv        dF1 over pose-only per enhancement x clip\n"
+        "                                 budget: mean, 95% CI, and how many behaviors\n"
+        "                                 it helped (sig).\n",
+    "summary_discrimination.csv":
+        "summary_discrimination.csv       Over confusable pairs with headroom, the AUC\n"
+        "                                 each feature family reaches and the % of\n"
+        "                                 remaining error removed.\n",
+    "summary_active_learning_curve.csv":
+        "summary_active_learning_curve.csv  Positives found vs clips reviewed, pooled\n"
+        "                                 across behaviors, AL vs random.\n",
+}
+
+_README_TAIL = """
 Behaviors are assay-scoped throughout: an assay's Rear and another assay's Rear are
 different models and stay different rows.
 """
@@ -335,10 +387,17 @@ def write_all(out_dir: str | Path, src: dict[str, pd.DataFrame]) -> list[Path]:
         return []
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    from abel.validation import prism
+
     for fname, df in tables.items():
         path = out_dir / fname
-        df.round(4).to_csv(path, index=False, encoding="utf-8")
+        # ASCII + BOM, same as the Prism bundle: these open in Excel on Windows.
+        # Not prism._write -- that prunes all-NaN columns, which is right for a
+        # plot-ready table and wrong here: "this metric was not computed" is
+        # information a reading table should keep showing.
+        prism._asciify(df.round(4)).to_csv(path, index=False, encoding="utf-8-sig")
         written.append(path)
-    (out_dir / "README_SUMMARY.txt").write_text(_README, encoding="utf-8")
-    written.append(out_dir / "README_SUMMARY.txt")
+    body = "".join(_README_SECTIONS.get(f, "") for f in tables)
+    written.append(prism.write_text(out_dir / "README_SUMMARY.txt",
+                                    _README_HEAD + body + _README_TAIL))
     return written

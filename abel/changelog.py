@@ -7,10 +7,71 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "July 21, 2026"
+VERSION_DATE = "July 23, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.10.0", "July 23, 2026", [
+        "Pooled discrimination landscape: the whole run's pairwise-discrimination "
+        "result now reads off one two-panel figure instead of a matrix per project "
+        "per feature family. Left, every behavior pair of every assay is placed by "
+        "how much error pose alone leaves against the share of that error the best "
+        "feature family removes, coloured by which modality does the work — so the "
+        "pairs pose already solves, the pairs a modality rescues, and the pairs that "
+        "are still unsolved separate into visible groups. Right, a volcano over every "
+        "pair × family sets effect size against reproducibility across seeds, with "
+        "both a p<0.05 and a Benjamini-Hochberg 5% FDR line, since a full run tests "
+        "40-100 combinations. The per-project matrices remain behind it as per-assay "
+        "detail.",
+        "Held-out confusion counts as a first-class output: TP / FN / FP per assay "
+        "and behavior are now promoted to their own table, figure, Prism export and "
+        "plain-language finding. F1 and PR-AUC are the comparable numbers, but counts "
+        "are what a reviewer can check against their own scoring — with the counts "
+        "taken from the headline cells only (never summed across seeds, which would "
+        "advertise an n the study never had) and the “these are windows, not bouts” "
+        "caveat carried alongside them.",
+        "Behavior rarity and prevalence reporting: validation now measures how rare "
+        "each behavior actually is, preferring dense temporal-refinement probability "
+        "traces, then bouts, then confirmed labels, and reports which source it used. "
+        "Per-session zero-inflation is reported separately from prevalence where the "
+        "behavior does occur, so a behavior absent from most sessions is no longer "
+        "averaged into looking merely uncommon.",
+        "Rare-behavior discovery expanded: effort-to-quality curves, clips-to-target "
+        "effort tables, rarity-scaling curves and per-seed replicate Prism exports for "
+        "every arm, plus label-coverage reporting against the full window pool (the "
+        "behavior grid unioned with the enrichment cache) so a poor join is visible "
+        "rather than silently shrinking the analysis.",
+        "Refinement evaluability gate: temporal refinement is no longer scored on "
+        "held-out sets where the labels are too sparse to score it. Segments are split "
+        "into runs of genuinely observed frames, and a set that cannot support the "
+        "measurement says so instead of returning bout metrics whose false positives "
+        "are interpolation gaps and whose false negatives are label fragmentation.",
+        "Validation suite interface rebuilt around its results: every analysis tab is "
+        "now settings and a plain-language explanation on the left, figures on the "
+        "right, with a scrollable thumbnail grid that fills the pane and re-flows on "
+        "resize, and an “Open Data Folder” button that goes straight to the figures, "
+        "CSVs and intermediates that tab produced. Forms survive narrow columns and "
+        "Windows display scaling rather than clipping their controls.",
+        "Prism-ready exports for the scatter analyses: the discrimination landscape "
+        "and volcano ship as Multiple-variables tables (one row per point, carrying "
+        "its x, y, family, assay, size and significance), and the raw per-seed ROC-AUCs "
+        "ship as replicate subcolumns so the paired test can be re-run in Prism rather "
+        "than taken on trust. Active-learning, effort-to-quality and rarity curves "
+        "likewise export per-seed replicates rather than pre-averaged means.",
+        "Paired significance testing unified and corrected: the ablation, video-value "
+        "and discrimination analyses now share one paired t-test. Its zero-variance "
+        "guard is a tolerance rather than an exact comparison — three identical "
+        "differences leave ~1e-18 of floating-point dust, which previously slipped "
+        "past the guard and produced p ≈ 1e-33 out of no variance at all.",
+        "Prism exports no longer zero a real p-value: the rounding rule that collapses "
+        "sub-1e-9 float dust to a clean zero is right for a confidence-interval "
+        "half-width and wrong for a p of 9e-10, which was exporting as “0” — a value a "
+        "p-value can never take.",
+        "Discrimination matrix cells no longer conflate three meanings: a behavior "
+        "pair skipped for too few clips is now hatched like any other untrained pair "
+        "instead of rendering in the same grey as “already solved by the baseline” — a "
+        "reading that is impossible for a pair that was never scored.",
+    ]),
     ("0.9.0", "July 21, 2026", [
         "External Validation & Meta-Analysis Suite now ships with ABEL: the "
         "cross-project suite (learning curves, ablation, behavior "

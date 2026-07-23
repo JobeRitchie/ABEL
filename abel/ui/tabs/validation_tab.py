@@ -13,6 +13,7 @@ Three subtabs share one :class:`ValidationService` and one assembled
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThreadPool, Signal
@@ -63,6 +64,10 @@ def _fmt(value: object, pct: bool = False) -> str:
         v = float(value)
     except (TypeError, ValueError):
         return str(value)
+    # NaN means "not measurable here" (e.g. refinement suppressed because the
+    # held-out windows cannot support min_bout) — never render it as "nan".
+    if not math.isfinite(v):
+        return "—"
     return f"{v:.0%}" if pct else f"{v:.3f}"
 
 
@@ -141,7 +146,7 @@ class LosoResultsDialog(QDialog):
             name = r.get("behavior_name", r.get("behavior_id", "?"))
             if r.get("error"):
                 rows.append(
-                    f"<tr><td>{name}</td><td colspan='4' style='color:#EF9A9A;'>"
+                    f"<tr><td>{name}</td><td colspan='6' style='color:#EF9A9A;'>"
                     f"{r['error']}</td></tr>"
                 )
                 continue
@@ -151,7 +156,8 @@ class LosoResultsDialog(QDialog):
                 f"<td align='center'>{_fmt(r.get('fold_prauc_mean'))} ± {_fmt(r.get('fold_prauc_sem'))}</td>"
                 f"<td align='center'>{_fmt(r.get('fold_f1_mean'))} ± {_fmt(r.get('fold_f1_sem'))}</td>"
                 f"<td align='center'>{_fmt(r.get('refined_f1'))}</td>"
-                f"<td align='center'>{_tpfpfn(r.get('bout_tp'), r.get('bout_fp'), r.get('bout_fn'))}</td>"
+                f"<td align='center'>{_tpfpfn(r.get('refined_tp'), r.get('refined_fp'), r.get('refined_fn'))}</td>"
+                f"<td align='center'>{r.get('refined_tn', '—')}</td>"
                 f"<td align='center'>{r.get('n_subjects', 0)}</td>"
                 "</tr>"
             )
@@ -160,11 +166,12 @@ class LosoResultsDialog(QDialog):
             "<p style='color:#90A4AE;'>Each mouse is held out once (Leave-One-Group-Out "
             "cross-validation). Bars above show per-fold mean ± SEM across held-out "
             "subjects; refinement-only labels (temporal feedback / imported) are excluded "
-            "from evaluation.</p>"
+            "from evaluation. Counts are per scored window, against the reviewer's own "
+            "accepted labels.</p>"
             "<table cellpadding='5' cellspacing='0'>"
             "<tr style='color:#B0BEC5;'><th align='left'>Behavior</th>"
             "<th>PR-AUC (mean±SEM)</th><th>F1 (mean±SEM)</th>"
-            "<th>pooled ref F1</th><th>TP/FP/FN (bouts)</th><th>n</th></tr>"
+            "<th>pooled ref F1</th><th>TP/FP/FN</th><th>TN</th><th>n</th></tr>"
             + "".join(rows)
             + "</table>"
         )
@@ -208,7 +215,7 @@ class ValidationOverviewPanel(QWidget):
 
     _COLUMNS = [
         "Behavior", "Model", "Quality", "F1", "Precision", "Recall",
-        "F1 (ref)", "Prec (ref)", "Rec (ref)", "TP/FP/FN (win)", "TP/FP/FN (bouts)",
+        "F1 (ref)", "Prec (ref)", "Rec (ref)", "TP/FP/FN (win)", "TN (win)",
         "PR-AUC", "Train", "Val", "Pos labels", "Neg labels", "Bouts", "Overlap",
     ]
 
@@ -271,20 +278,25 @@ class ValidationOverviewPanel(QWidget):
             "Negatives — counted per segment window, AFTER temporal refinement (the "
             "onset threshold + merge-gap + min-bout the product actually ships, not a "
             "raw 0.5 cut).\n\n"
+            "Ground truth is the reviewer's own accepted label for each window, so a "
+            "false positive means a human looked at that window and said it was not "
+            "this behavior.\n\n"
             "One real bout spans many windows, so a single loose boundary window still "
-            "shows here — see the bout column for the granularity you review.\n\n"
+            "counts here.\n\n"
             "Shows “—” for models trained before held-out probabilities were saved — "
             "retrain to populate."
         )
-        _bout_tip = (
-            "Event-level counts: whole refined bouts matched against labeled bouts by "
-            "temporal overlap (IoU ≥ 0.2), the same granularity you judge in the "
-            "Temporal Review tab. Boundary slop inside an otherwise-correct bout no "
-            "longer counts as both a false positive and a false negative.\n\n"
-            "Shows “—” for models trained before held-out probabilities were saved — "
-            "retrain to populate."
+        _tn_tip = (
+            "True Negatives: reviewed windows the model correctly left alone. Large "
+            "relative to TP/FP/FN because most reviewed windows are not any given "
+            "behavior — read it alongside precision rather than on its own.\n\n"
+            "An event-level (whole-bout) count used to sit here and was removed: bouts "
+            "cannot be scored from a held-out labeled subset, because the evaluated "
+            "unit is an isolated ~15-frame window while a bout needs contiguous "
+            "observation. It reported extreme false positives and negatives even for "
+            "well-trained models."
         )
-        for _tp_col, _tip in (("TP/FP/FN (win)", _win_tip), ("TP/FP/FN (bouts)", _bout_tip)):
+        for _tp_col, _tip in (("TP/FP/FN (win)", _win_tip), ("TN (win)", _tn_tip)):
             _h = self._table.horizontalHeaderItem(self._COLUMNS.index(_tp_col))
             if _h is not None:
                 _h.setToolTip(_tip)
@@ -335,7 +347,7 @@ class ValidationOverviewPanel(QWidget):
                 _fmt(data.get("refined_precision")),
                 _fmt(data.get("refined_recall")),
                 _tpfpfn(data.get("refined_tp"), data.get("refined_fp"), data.get("refined_fn")),
-                _tpfpfn(data.get("bout_tp"), data.get("bout_fp"), data.get("bout_fn")),
+                str(data.get("refined_tn") if data.get("refined_tn") is not None else "—"),
                 _fmt(data.get("pr_auc")),
                 str(data.get("n_train") if data.get("n_train") is not None else "—"),
                 str(data.get("n_val") if data.get("n_val") is not None else "—"),

@@ -147,6 +147,9 @@ class PairResult:
     gain: dict[str, float] = field(default_factory=dict)         # paired ΔAUC vs pose-only
     gain_ci: dict[str, float] = field(default_factory=dict)
     gain_n: dict[str, int] = field(default_factory=dict)
+    # Exact two-sided paired-t p per family. `is_significant` gives a boolean, which
+    # is not what a manuscript prints, and a volcano needs the p on its y-axis.
+    gain_p: dict[str, float] = field(default_factory=dict)
 
     cells: list[CellResult] = field(default_factory=list)
     error: str = ""
@@ -154,6 +157,36 @@ class PairResult:
     @property
     def pair_label(self) -> str:
         return f"{self.name_a} vs {self.name_b}"
+
+    @property
+    def project_name(self) -> str:
+        """Assay display name, recovered from the cells this pair produced.
+
+        `PairResult` is keyed by `project_id`; the readable name only ever reaches
+        it through :class:`CellResult`.  Falls back to the id so a pair that errored
+        before training (no cells) still labels itself.
+        """
+        for c in self.cells:
+            if getattr(c, "project_name", ""):
+                return str(c.project_name)
+        return str(self.project_id)
+
+    def best_single_family(self) -> str:
+        """The single add-on family that removes the most pose-only error.
+
+        Excludes ``all_features``: that rung is the *union* of the families, so
+        attributing a pair's rescue to it answers "do more features help" rather
+        than "WHICH modality disambiguates this pair" — the question the pairwise
+        design exists to ask.  Returns "" when no single family scored.
+        """
+        best, best_er = "", float("-inf")
+        for name in self.order:
+            if name in (BASELINE_FEATURE_SET, ALL_FEATURE_SET):
+                continue
+            er = self.error_reduction(name)
+            if np.isfinite(er) and er > best_er:
+                best, best_er = name, er
+        return best
 
     @property
     def baseline_auc(self) -> float:
@@ -413,6 +446,7 @@ def run_pair_discrimination(
         res.gain[name] = float(np.mean(paired)) if paired else float("nan")
         res.gain_ci[name] = _ci95(paired)
         res.gain_n[name] = len(paired)
+        res.gain_p[name] = vmetrics.paired_p(paired)
     return res
 
 
@@ -442,42 +476,91 @@ def run_discrimination(
 
 
 def discrimination_rows(results: list[PairResult]) -> pd.DataFrame:
-    """One row per (pair, feature family): separability + paired gain over pose-only."""
+    """One row per (pair, feature family): separability + paired gain over pose-only.
+
+    This is the single source both the per-project figures and the pooled
+    :func:`abel.validation.plots.discrimination_landscape` read from, so it carries
+    the pair-level context each row needs to be plotted on its own (``pose_only_auc``,
+    ``headroom``, ``best_family``) rather than requiring a re-join back to the
+    ``PairResult`` objects.
+    """
     rows = []
     for r in results:
         if r.error:
             rows.append({
-                "project": r.project_id, "pair": r.pair_label,
+                "project": r.project_id, "project_name": r.project_name,
+                "pair": r.pair_label,
+                "behavior_a": r.name_a, "behavior_b": r.name_b,
                 "feature_set": "", "label": "", "roc_auc": float("nan"),
                 "balanced_accuracy": float("nan"), "mcc": float("nan"), "f1": float("nan"),
+                "pose_only_auc": float("nan"), "headroom": float("nan"),
                 "auc_gain_vs_pose": float("nan"), "auc_gain_ci95": float("nan"),
-                "error_reduction": float("nan"), "significant": "",
+                "p_value": float("nan"), "n_seeds": 0,
+                "error_reduction": float("nan"), "significant": "", "best_family": False,
                 "n_train": r.n_train_a + r.n_train_b,
                 "n_holdout": r.n_hold_a + r.n_hold_b,
                 "error": r.error,
             })
             continue
+        best = r.best_single_family()
         for name in r.order:
             is_base = name == BASELINE_FEATURE_SET
             rows.append({
                 "project": r.project_id,
+                "project_name": r.project_name,
                 "pair": r.pair_label,
+                "behavior_a": r.name_a,
+                "behavior_b": r.name_b,
                 "feature_set": name,
                 "label": r.labels.get(name, name),
                 "roc_auc": r.auc.get(name, float("nan")),
                 "balanced_accuracy": r.balanced_accuracy.get(name, float("nan")),
                 "mcc": r.mcc.get(name, float("nan")),
                 "f1": r.f1.get(name, float("nan")),
+                # Pair-level context, repeated on every row of the pair: the
+                # difficulty this family was working against.
+                "pose_only_auc": r.baseline_auc,
+                "headroom": 1.0 - r.baseline_auc,
                 "auc_gain_vs_pose": 0.0 if is_base else r.gain.get(name, float("nan")),
                 "auc_gain_ci95": 0.0 if is_base else r.gain_ci.get(name, float("nan")),
+                "p_value": float("nan") if is_base else r.gain_p.get(name, float("nan")),
+                "n_seeds": len(r.auc_seeds.get(name, [])),
                 # Fraction of the baseline's remaining error the family removes —
                 # the honest magnitude once AUC is near ceiling.
                 "error_reduction": 0.0 if is_base else r.error_reduction(name),
                 "significant": "" if is_base else bool(r.is_significant(name)),
+                # Marks the one single-family row per pair that the landscape panel
+                # plots. False on the baseline and on all_features by construction.
+                "best_family": bool(name == best and not is_base),
                 "n_train": r.n_train_a + r.n_train_b,
                 "n_holdout": r.n_hold_a + r.n_hold_b,
                 "error": "",
             })
+    return pd.DataFrame(rows)
+
+
+def discrimination_seed_rows(results: list[PairResult]) -> pd.DataFrame:
+    """One row per (pair, feature family, seed): the raw held-out ROC-AUC.
+
+    The means and CIs above are summaries; these are the replicates behind them.
+    Exported so Prism (or a reviewer) can re-run the paired test on the same numbers
+    rather than taking our p on trust.
+    """
+    rows = []
+    for r in results:
+        if r.error:
+            continue
+        for name in r.order:
+            for rep, auc in enumerate(r.auc_seeds.get(name, [])):
+                rows.append({
+                    "project": r.project_id,
+                    "project_name": r.project_name,
+                    "pair": r.pair_label,
+                    "feature_set": name,
+                    "label": r.labels.get(name, name),
+                    "seed_index": rep + 1,
+                    "roc_auc": float(auc),
+                })
     return pd.DataFrame(rows)
 
 

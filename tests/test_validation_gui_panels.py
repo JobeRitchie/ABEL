@@ -157,7 +157,7 @@ def test_tab_shows_figures_after_run(populated_window, panel_attr, tab):
     """Each analysis tab renders at least one thumbnail once the run completes."""
     panel = getattr(populated_window, panel_attr)
     assert panel._current_images(), f"{tab} tab: no figures selected for display"
-    assert panel._strip._labels, f"{tab} tab: figures found but no thumbnail rendered"
+    assert panel._strip._items, f"{tab} tab: figures found but no thumbnail rendered"
 
 
 def test_every_view_of_every_panel_renders(populated_window):
@@ -168,7 +168,7 @@ def test_every_view_of_every_panel_renders(populated_window):
         assert combo.count() > 0, f"{attr}: view dropdown is empty"
         for i in range(combo.count()):
             combo.setCurrentIndex(i)
-            assert panel._strip._labels, (
+            assert panel._strip._items, (
                 f"{attr}: view '{combo.itemText(i)}' rendered no figures")
 
 
@@ -223,7 +223,121 @@ def test_worker_driven_tabs_show_figures(qapp, tmp_path, handler, panel_attr, ta
     getattr(win, handler)({"images": [img], "tables": {tab: csv}, "summary": "ok"})
     panel = getattr(win, panel_attr)
     assert panel._current_images(), f"{tab} tab: no figures selected for display"
-    assert panel._strip._labels, f"{tab} tab: figures found but no thumbnail rendered"
+    assert panel._strip._items, f"{tab} tab: figures found but no thumbnail rendered"
+    win.close()
+
+
+@pytest.mark.parametrize(
+    "panel_attr, expected_subdir",
+    [
+        ("_lc_panel", "learning_curves"),
+        ("_abl_panel", "ablation"),
+        ("_disc_panel", "discrimination"),
+        ("_gen_panel", "generalization"),
+        ("_al_panel", "active_learning"),
+        ("_rare_panel", "rare_discovery"),
+        ("_cross_panel", "cross_project"),
+    ],
+)
+def test_open_data_folder_points_at_this_tabs_run_output(
+        populated_window, panel_attr, expected_subdir):
+    """Every analysis tab can open the folder its own figures/CSVs were written to."""
+    panel = getattr(populated_window, panel_attr)
+    assert panel._folder_btn.isEnabled(), f"{panel_attr}: Open Data Folder is dead"
+    folders = list(panel._folders.values())
+    assert folders, f"{panel_attr}: no folder wired"
+    assert all(Path(f).is_dir() for f in folders), folders
+    assert any(Path(f).name == expected_subdir for f in folders), (
+        f"{panel_attr}: expected {expected_subdir}, got {[f.name for f in folders]}")
+
+
+def test_generalization_offers_each_of_its_output_folders(populated_window):
+    """Generalization writes three sibling folders; all three must be reachable."""
+    names = {Path(f).name for f in populated_window._gen_panel._folders.values()}
+    assert names == {"generalization", "time_budget", "calibration"}, names
+
+
+@pytest.mark.parametrize(
+    "handler, panel_attr, tab",
+    [
+        ("_on_behaviorscape_finished", "_bscape_panel", "Behaviorscape"),
+        ("_on_video_value_finished", "_vv_panel", "Video Features"),
+        ("_on_benchmark_finished", "_bench_panel", "Throughput"),
+    ],
+)
+def test_worker_driven_tabs_open_their_out_dir(qapp, tmp_path, handler, panel_attr, tab):
+    """The worker-fed tabs open the out_dir the worker actually wrote to."""
+    from abel.validation.gui import ValidationWindow
+
+    out_dir = tmp_path / f"{panel_attr}_out"
+    img = out_dir / "fig.png"
+    _png(img)
+    _csv(out_dir / "data.csv")
+
+    win = ValidationWindow()
+    getattr(win, handler)({"images": [img], "tables": {tab: out_dir / "data.csv"},
+                           "summary": "ok", "out_dir": out_dir})
+    panel = getattr(win, panel_attr)
+    assert panel._folder_btn.isEnabled()
+    assert list(panel._folders.values()) == [out_dir]
+    win.close()
+
+
+def test_folder_button_falls_back_to_where_the_files_live(qapp, tmp_path):
+    """No explicit folder → derive it from the figures/tables, never a dead button."""
+    from abel.validation.gui import ValidationWindow
+
+    img = tmp_path / "derived" / "fig.png"
+    _png(img)
+    win = ValidationWindow()
+    win._bench_panel.set_simple([img], None)
+    assert win._bench_panel._folder_btn.isEnabled()
+    assert list(win._bench_panel._folders.values()) == [img.parent]
+    win.close()
+
+
+def test_every_tab_has_an_open_data_folder_button(qapp):
+    """No tab should leave the user hunting for its files under the run directory."""
+    from PySide6.QtWidgets import QPushButton
+
+    from abel.validation.gui import ValidationWindow
+
+    win = ValidationWindow()
+    tabs = win._tabs
+    for i in range(tabs.count()):
+        texts = [b.text() for b in tabs.widget(i).findChildren(QPushButton)]
+        assert any("Open Data Folder" in t for t in texts), (
+            f"{tabs.tabText(i)} tab has no Open Data Folder button: {texts}")
+    win.close()
+
+
+def test_clicking_open_data_folder_opens_that_folder(qapp, tmp_path, monkeypatch):
+    """Clicking through actually hands the folder to the OS file manager."""
+    from abel.validation import gui as gui_mod
+    from abel.validation.gui import ValidationWindow
+
+    opened: list = []
+    monkeypatch.setattr(gui_mod, "_open_in_file_manager", opened.append)
+
+    img = tmp_path / "out" / "fig.png"
+    _png(img)
+    win = ValidationWindow()
+    win._bench_panel.set_simple([img], None, folder=img.parent)
+    win._bench_panel._folder_btn.click()
+    assert opened == [img.parent]
+    win.close()
+
+
+def test_folder_button_is_disabled_before_any_run(qapp):
+    """Nothing on disk yet → the button is disabled rather than opening nowhere."""
+    from abel.validation.gui import ValidationWindow
+
+    win = ValidationWindow()
+    for attr in ("_lc_panel", "_abl_panel", "_disc_panel", "_gen_panel", "_al_panel",
+                 "_rare_panel", "_cross_panel", "_suite_panel", "_bscape_panel",
+                 "_vv_panel", "_bench_panel"):
+        assert not getattr(win, attr)._folder_btn.isEnabled(), attr
+    assert not win._demo_folder_btn.isEnabled()
     win.close()
 
 
@@ -235,7 +349,7 @@ def test_missing_figure_is_skipped_not_raised(qapp, tmp_path):
     _png(good)
     win = ValidationWindow()
     win._bench_panel.set_simple([None, tmp_path / "never_written.png", good], None)
-    assert len(win._bench_panel._strip._labels) == 1
+    assert len(win._bench_panel._strip._items) == 1
     win.close()
 
 

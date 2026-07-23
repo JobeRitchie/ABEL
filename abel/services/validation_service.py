@@ -254,12 +254,18 @@ class ValidationService:
                 row["refined_f1"] = refined.get("refined_f1")
                 row["refined_precision"] = refined.get("refined_precision")
                 row["refined_recall"] = refined.get("refined_recall")
-                # Held-out positive-class (target) counts: window-level raw vs
-                # refined, plus event-level bout-matched counts.
+                # Held-out window-level counts against the reviewer's accepted
+                # labels, raw vs refined.  Event-level ("bout") counts used to be
+                # reported here and were removed: bouts are not identifiable from
+                # a sparse labeled holdout, so they read as extreme FP/FN for
+                # every model.  See refined_eval._refined_bout_counts.
+                row["refined_evaluable"] = refined.get("refined_evaluable", True)
+                row["refined_unsupported_fraction"] = refined.get(
+                    "refined_unsupported_fraction"
+                )
                 for k in (
-                    "raw_tp", "raw_fp", "raw_fn",
-                    "refined_tp", "refined_fp", "refined_fn",
-                    "bout_tp", "bout_fp", "bout_fn",
+                    "raw_tp", "raw_fp", "raw_fn", "raw_tn",
+                    "refined_tp", "refined_fp", "refined_fn", "refined_tn",
                 ):
                     row[k] = refined.get(k)
             rows.append(row)

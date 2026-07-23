@@ -88,14 +88,18 @@ SECTIONS: tuple[SectionSpec, ...] = (
         "Discrimination (pairwise)",
         "Discrimination — can the features tell similar behaviors apart?",
         figures=FigureSpec("discrimination",
-                           ("*__separability_matrix__*.png",
+                           ("discrimination_landscape.png",
+                            "*__separability_matrix__*.png",
                             "*__feature_gain_by_pair.png"), 4),
         table=TableSpec("discrimination", "confusable_pairs.csv", max_rows=10),
         blurb="Ablation asks a DETECTION question (behavior vs. everything else), "
               "where 'everything else' is mostly easy negatives. This asks the "
               "DISCRIMINATION question — for every behavior pair, a binary A-vs-B "
-              "model per feature family on the same clips. Pairs the pose baseline "
-              "already solves are greyed out.",
+              "model per feature family on the same clips. The landscape figure "
+              "leads: every pair of every assay placed by how much error pose "
+              "leaves against the share the best feature family removes, then a "
+              "volcano of effect against reproducibility. The per-project matrices "
+              "behind it are the per-assay detail; hatched cells were never trained.",
     ),
     SectionSpec(
         "Generalization", "Generalization — does it agree with the human scorer?",
@@ -245,7 +249,9 @@ def _table_html(run_dir: Path, spec: TableSpec) -> str:
     if not path.exists():
         return ""
     try:
-        df = pd.read_csv(path)
+        # utf-8-sig, matching store.write_csv: a leftover BOM would rename the
+        # first column and silently drop it from spec.columns below.
+        df = pd.read_csv(path, encoding="utf-8-sig")
     except Exception:  # noqa: BLE001 — a malformed CSV must not sink the report
         return ""
     if df.empty:

@@ -53,6 +53,11 @@ DEFAULT_TEMPORAL_SETTINGS: dict[str, Any] = {
 # good detection into both an FP and an FN.
 BOUT_MATCH_IOU = 0.2
 
+# Refined metrics are suppressed once more than this fraction of held-out positives
+# sit in observed islands too short to hold a min_bout-length prediction — beyond it
+# the score measures label sparsity, not the model.  See refinement_evaluability.
+_REFINE_UNSUPPORTED_MAX = 0.10
+
 # Trailing "_<start>_<end>" in a segment id, e.g. seg_MS2_session_a7623464_6_20.
 _SEG_FRAME_RE = re.compile(r"_(\d+)_(\d+)$")
 
@@ -148,6 +153,41 @@ def _refine_binary_trace(
     return np.asarray(binary), trace_start
 
 
+def observed_islands(
+    sf: np.ndarray, ef: np.ndarray, merge_gap_frames: int
+) -> list[tuple[int, int]]:
+    """Split start-sorted segments into runs of genuinely observed frames.
+
+    Returns inclusive ``[first_index, last_index]`` slices of the *segment* arrays,
+    cut wherever the unobserved gap to the next segment exceeds ``merge_gap_frames``.
+
+    Why this exists: :func:`_refine_binary_trace` needs a probability for every
+    frame and interpolates whatever lies between segments.  At **inference** that
+    is right and costs nothing — windows tile the video densely (measured on a
+    real session: 5513 segments over 22,063 frames, ~375% coverage, *zero* gaps,
+    11-frame overlap), so interpolation only fills tiling seams and this function
+    returns a single island, leaving behavior unchanged.
+
+    On a **held-out labeled subset** it is wrong: only human-labeled windows are
+    present, so coverage collapses (measured: ~34%, 252 gaps, median 36 / max 517
+    frames) and interpolation invents two thirds of the trace.  Those invented
+    stretches cross the onset threshold and manufacture bouts the model never
+    predicted.  Cutting at gaps wider than the merge gap confines refinement to
+    frames that were actually scored; seams up to ``merge_gap_frames`` are still
+    bridged, which is exactly what that setting is for.
+    """
+    sf = np.asarray(sf, dtype=int)
+    ef = np.asarray(ef, dtype=int)
+    n = len(sf)
+    if n == 0:
+        return []
+    gaps = sf[1:] - ef[:-1] - 1
+    cuts = np.where(gaps > int(merge_gap_frames))[0]
+    starts = np.concatenate(([0], cuts + 1))
+    ends = np.concatenate((cuts, [n - 1]))
+    return [(int(a), int(b)) for a, b in zip(starts, ends)]
+
+
 def apply_temporal_refinement(
     probs: np.ndarray,
     target_col: int,
@@ -161,7 +201,8 @@ def apply_temporal_refinement(
 ) -> np.ndarray:
     """Apply the real bout-extraction pipeline and map results back to segments.
 
-    For each session:
+    For each session, and within it each run of contiguously observed frames
+    (see :func:`observed_islands` — one island covering everything at inference):
     1. Build a frame-level probability trace by assigning each segment's
        target-class probability to its ``[start_frame, end_frame]`` range, then
        linearly interpolating gaps between segments.
@@ -175,37 +216,43 @@ def apply_temporal_refinement(
     preds = np.argmax(probs, axis=1).copy()
 
     for sid in np.unique(session_ids):
-        idxs = np.where(session_ids == sid)[0]
-        if len(idxs) < 2:
+        sess_idxs = np.where(session_ids == sid)[0]
+        if len(sess_idxs) < 2:
             continue
 
-        sf = start_frames[idxs].astype(int)
-        ef = end_frames[idxs].astype(int)
-        order = np.argsort(sf)
-        idxs = idxs[order]
-        sf = sf[order]
-        ef = ef[order]
+        sf_all = start_frames[sess_idxs].astype(int)
+        ef_all = end_frames[sess_idxs].astype(int)
+        order = np.argsort(sf_all)
+        sess_idxs = sess_idxs[order]
+        sf_all = sf_all[order]
+        ef_all = ef_all[order]
 
-        clip_probs = probs[idxs, target_col].astype(float)
-        refined = _refine_binary_trace(
-            sf, ef, clip_probs,
-            onset_threshold, min_bout_duration_frames, merge_gap_frames, smooth_window,
-        )
-        if refined is None:
-            continue
-        binary, trace_start = refined
-        n_frames = len(binary)
+        for a, b in observed_islands(sf_all, ef_all, merge_gap_frames):
+            idxs = sess_idxs[a : b + 1]
+            sf = sf_all[a : b + 1]
+            ef = ef_all[a : b + 1]
 
-        for i in range(len(idxs)):
-            local_s = int(sf[i]) - trace_start
-            local_e = min(int(ef[i]) - trace_start, n_frames - 1)
-            clip_span = binary[local_s : local_e + 1]
-            if len(clip_span) > 0 and clip_span.mean() >= 0.5:
-                preds[idxs[i]] = target_col
-            else:
-                p = probs[idxs[i]].copy()
-                p[target_col] = -1.0
-                preds[idxs[i]] = int(np.argmax(p))
+            clip_probs = probs[idxs, target_col].astype(float)
+            refined = _refine_binary_trace(
+                sf, ef, clip_probs,
+                onset_threshold, min_bout_duration_frames, merge_gap_frames,
+                smooth_window,
+            )
+            if refined is None:
+                continue
+            binary, trace_start = refined
+            n_frames = len(binary)
+
+            for i in range(len(idxs)):
+                local_s = int(sf[i]) - trace_start
+                local_e = min(int(ef[i]) - trace_start, n_frames - 1)
+                clip_span = binary[local_s : local_e + 1]
+                if len(clip_span) > 0 and clip_span.mean() >= 0.5:
+                    preds[idxs[i]] = target_col
+                else:
+                    p = probs[idxs[i]].copy()
+                    p[target_col] = -1.0
+                    preds[idxs[i]] = int(np.argmax(p))
 
     return preds
 
@@ -275,12 +322,28 @@ def _refined_bout_counts(
 ) -> tuple[int, int, int]:
     """Event-level TP/FP/FN by matching refined bouts against ground-truth bouts.
 
-    This is what the reviewer perceives in the Temporal Review tab: whole bouts,
-    not individual windows. For each session the refined binary trace supplies
-    the predicted bouts; the ground-truth ``y_true`` labels, laid onto the same
-    frame axis (with the project's merge-gap closing tiling seams), supply the
-    true bouts. Predicted and true bouts are matched by temporal IoU
-    (:data:`BOUT_MATCH_IOU`). Counts are summed across sessions.
+    .. warning::
+       **Not a valid held-out metric — do not report it.**  It is retained only
+       so :mod:`abel.temporal_refinement.auto_settings` can be checked against it,
+       and it keeps the original dense-trace behavior deliberately.
+
+       Bouts are not identifiable from a held-out *labeled* subset.  The evaluated
+       unit is an isolated ~15-frame window, while a bout needs contiguous
+       observation longer than itself, so this systematically reports extreme
+       FP and FN even for well-trained models.  Two independent artifacts:
+       interpolation across unobserved gaps invents predicted bouts (measured:
+       7 of 13 predicted bouts were >50% interpolated frames), and sparse labels
+       fragment one real bout into several true bouts while islands shorter than
+       ``min_bout_duration_frames`` can hold no surviving prediction (87% of
+       islands for a min_bout=30 behavior).  Scoring events properly requires
+       dense inference over the full session, plus knowing which spans were
+       exhaustively labeled.
+
+    For each session the refined binary trace supplies the predicted bouts; the
+    ground-truth ``y_true`` labels, laid onto the same frame axis (with the
+    project's merge-gap closing tiling seams), supply the true bouts. Predicted
+    and true bouts are matched by temporal IoU (:data:`BOUT_MATCH_IOU`). Counts
+    are summed across sessions.
     """
     onset = float(settings["onset_threshold"])
     min_bout = int(settings["min_bout_duration_frames"])
@@ -477,6 +540,58 @@ def refined_holdout_metrics(
     return out
 
 
+def refinement_evaluability(
+    y_true: np.ndarray,
+    session_ids: np.ndarray,
+    start_frames: np.ndarray,
+    end_frames: np.ndarray,
+    settings: dict[str, Any],
+) -> tuple[bool, float]:
+    """Can refinement be scored on this held-out set at all?
+
+    Returns ``(evaluable, unsupported_positive_fraction)``.
+
+    Refinement drops bouts shorter than ``min_bout_duration_frames``.  At
+    inference that removes flicker.  On a held-out *labeled* subset the observed
+    stretches are isolated windows (measured median island: 15 frames), so when
+    ``min_bout`` exceeds the island length **no prediction can survive there no
+    matter how good the model is** — every positive in that island is forced to a
+    false negative.  Measured on a real project: an 87% unsupported fraction for a
+    ``min_bout=30`` behavior, which dragged its refined recall to 0.60 while its
+    raw recall was 0.90.
+
+    Reporting a refined score in that regime is as misleading as the interpolated
+    bout counts this replaced, just pessimistic instead of optimistic, so callers
+    should surface "not evaluable" rather than a number.
+    """
+    y_true = np.asarray(y_true, dtype=int)
+    sess = np.asarray(session_ids)
+    sf_all = np.asarray(start_frames, dtype=np.int64)
+    ef_all = np.asarray(end_frames, dtype=np.int64)
+    min_bout = int(settings["min_bout_duration_frames"])
+    merge_gap = int(settings["merge_gap_frames"])
+
+    n_pos = int((y_true == 1).sum())
+    if n_pos == 0 or min_bout <= 1:
+        return True, 0.0
+
+    unsupported = 0
+    for sid in np.unique(sess):
+        idxs = np.where(sess == sid)[0]
+        if len(idxs) == 0:
+            continue
+        order = np.argsort(sf_all[idxs])
+        idxs = idxs[order]
+        sf, ef = sf_all[idxs], ef_all[idxs]
+        for a, b in observed_islands(sf, ef, merge_gap):
+            span = int(ef[a : b + 1].max()) - int(sf[a]) + 1
+            if span < min_bout:
+                unsupported += int((y_true[idxs[a : b + 1]] == 1).sum())
+
+    frac = unsupported / float(n_pos)
+    return frac <= _REFINE_UNSUPPORTED_MAX, float(frac)
+
+
 def score_raw_and_refined(
     *,
     y_true: np.ndarray,
@@ -491,8 +606,12 @@ def score_raw_and_refined(
     All inputs are aligned 1-D arrays with the positive class as ``1`` and
     ``prob`` = P(target). ``settings`` supplies the temporal-refinement knobs.
     Shared by the single-split path and leave-one-subject-out CV so the two
-    always agree on the math. Returns macro P/R/F1 and positive-class TP/FP/FN
-    for both raw (``prob >= 0.5``) and refined predictions.
+    always agree on the math. Returns macro P/R/F1 and positive-class
+    TP/FP/FN/TN for both raw (``prob >= 0.5``) and refined predictions.
+
+    Refined metrics come back as NaN (with ``refined_evaluable`` False) when the
+    held-out windows are too sparse to support the project's ``min_bout``; see
+    :func:`refinement_evaluability`.
     """
     y_true = np.asarray(y_true, dtype=int)
     p = np.asarray(prob, dtype=float)
@@ -515,25 +634,33 @@ def score_raw_and_refined(
     raw_p, raw_r, raw_f = _macro_prf(y_true, raw_pred)
     ref_p, ref_r, ref_f = _macro_prf(y_true, ref_pred)
 
-    def _counts(pred: np.ndarray) -> tuple[int, int, int]:
+    # Suppress refined scores the held-out sampling cannot support, rather than
+    # publishing a number that reflects label sparsity instead of the model.
+    evaluable, unsupported_frac = refinement_evaluability(
+        y_true, session_ids, start_frames, end_frames, settings
+    )
+    if not evaluable:
+        ref_p = ref_r = ref_f = float("nan")
+
+    def _counts(pred: np.ndarray) -> tuple[int, int, int, int]:
         tp = int(((y_true == 1) & (pred == 1)).sum())
         fp = int(((y_true == 0) & (pred == 1)).sum())
         fn = int(((y_true == 1) & (pred == 0)).sum())
-        return tp, fp, fn
+        tn = int(((y_true == 0) & (pred == 0)).sum())
+        return tp, fp, fn, tn
 
-    raw_tp, raw_fp, raw_fn = _counts(raw_pred)
-    ref_tp, ref_fp, ref_fn = _counts(ref_pred)
+    raw_tp, raw_fp, raw_fn, raw_tn = _counts(raw_pred)
+    ref_tp, ref_fp, ref_fn, ref_tn = _counts(ref_pred)
 
-    # Event-level counts: whole refined bouts matched against ground-truth bouts,
-    # matching what the reviewer judges in the Temporal Review tab (not windows).
-    bout_tp, bout_fp, bout_fn = _refined_bout_counts(
-        prob=p,
-        y_true=y_true,
-        session_ids=np.asarray(session_ids),
-        start_frames=np.asarray(start_frames, dtype=np.int64),
-        end_frames=np.asarray(end_frames, dtype=np.int64),
-        settings=settings,
-    )
+    # NOTE: event-level ("bout") TP/FP/FN used to be reported here and has been
+    # removed — it was not identifiable from a held-out labeled subset.  Bouts
+    # need contiguous observation, but the evaluated unit is an isolated ~15-frame
+    # window; scoring them inflated FP (interpolation across unobserved gaps
+    # manufactured bouts) and FN (sparse labels fragment one real bout into
+    # several, and an island shorter than min_bout can hold no prediction at all —
+    # measured 87% of islands for a min_bout=30 behavior).  The counts below are
+    # window-level against the reviewer's own accepted labels, which is what the
+    # ground truth actually supports.  See `observed_islands`.
 
     return {
         "raw_precision": raw_p,
@@ -545,12 +672,15 @@ def score_raw_and_refined(
         "raw_tp": raw_tp,
         "raw_fp": raw_fp,
         "raw_fn": raw_fn,
+        "raw_tn": raw_tn,
         "refined_tp": ref_tp,
         "refined_fp": ref_fp,
         "refined_fn": ref_fn,
-        "bout_tp": bout_tp,
-        "bout_fp": bout_fp,
-        "bout_fn": bout_fn,
+        "refined_tn": ref_tn,
+        # False when the held-out windows are too sparse to support min_bout, in
+        # which case the refined_* scores above are NaN by design.
+        "refined_evaluable": bool(evaluable),
+        "refined_unsupported_fraction": float(unsupported_frac),
         "n_val": int(len(y_true)),
         "raw_positive_pred": int(raw_pred.sum()),
         "refined_positive_pred": int(ref_pred.sum()),

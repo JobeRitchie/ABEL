@@ -46,6 +46,52 @@ _REFINE_ONLY_EXACT = {"temporal_feedback"}
 _REFINE_ONLY_PREFIX = ("imported:",)
 
 
+def median_clip_frames(project: ProjectRef,
+                       df: pd.DataFrame | None = None) -> float:
+    """Median labeled-clip length in frames, **measured** from the project's rows.
+
+    The evaluated unit is one labeled clip, so any report of the confusion counts
+    has to be able to say how long a clip is.  That must not be read from
+    ``behavior_model.segment_window_frames``: its schema default is 60, but real
+    projects set it from their own clip duration and most use ~0.5 s (~15 frames
+    at 30 fps), so trusting the config default overstates the unit by ~4x.  The
+    labeled rows carry their own frame bounds, so measure them.
+
+    Returns NaN when the training set is missing or carries no frame bounds —
+    callers must fall back to naming the unit without a duration rather than
+    inventing one.
+    """
+    try:
+        if df is None:
+            if not project.training_set_path.exists():
+                return float("nan")
+            df = pd.read_parquet(project.training_set_path,
+                                 columns=["start_frame", "end_frame"])
+        if not {"start_frame", "end_frame"} <= set(df.columns) or df.empty:
+            return float("nan")
+        span = (pd.to_numeric(df["end_frame"], errors="coerce")
+                - pd.to_numeric(df["start_frame"], errors="coerce") + 1).dropna()
+        span = span[span > 0]
+        return float(span.median()) if len(span) else float("nan")
+    except Exception:  # noqa: BLE001 — a label for a figure must never sink a run
+        return float("nan")
+
+
+def clip_unit_label(frames: float, fps: float) -> str:
+    """Human phrase for the evaluated unit, e.g. ``"labeled clips (~0.5 s)"``.
+
+    Degrades to the bare unit when the length could not be measured, because a
+    guessed duration is worse than none — it is the number a reader would quote.
+    """
+    if not np.isfinite(frames) or frames <= 0:
+        return "labeled clips"
+    if not np.isfinite(fps) or fps <= 0:
+        return f"labeled clips (~{int(round(frames))} frames)"
+    sec = float(frames) / float(fps)
+    shown = f"{sec:.1f}" if sec >= 0.1 else f"{sec:.2f}"
+    return f"labeled clips (~{shown} s)"
+
+
 def _group_column(strategy: str) -> str:
     """Column to partition train vs. held-out by (mirrors trainer._split)."""
     return "animal_id" if str(strategy).endswith("subject") else "session_id"

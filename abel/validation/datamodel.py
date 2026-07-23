@@ -37,6 +37,12 @@ class ProjectRef:
     split_strategy: str = "group_shuffle_session"
     use_video_features: bool = True
     allow_co_occurring_behaviors: bool = False
+    # Frame rate, only so a clip count can be reported in seconds. The clip
+    # *length* is deliberately not read from config: ``segment_window_frames``
+    # defaults to 60 but real projects set it from their own clip duration
+    # (most use ~0.5 s), so the honest number is measured from the labeled rows
+    # themselves — see :func:`abel.validation.holdout.median_clip_frames`.
+    fps: float = 30.0
     behavior_names: dict[str, str] = field(default_factory=dict)  # behavior_id -> name on disk
     # behavior_id -> user rename set on the Projects tab.  Display-only: it never
     # touches the project on disk, and disk lookups must not follow it (see
@@ -78,6 +84,7 @@ class ProjectRef:
             split_strategy=str(bm.get("evaluation_split_strategy", "group_shuffle_session")),
             use_video_features=bool(bm.get("use_video_features", True)),
             allow_co_occurring_behaviors=bool(bm.get("allow_co_occurring_behaviors", False)),
+            fps=float(cfg.get("default_fps") or 30.0),
             behavior_names=names,
         )
 

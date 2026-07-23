@@ -241,10 +241,17 @@ def plot_dendrogram(cl: dict, save_path: Path) -> Path | None:
 
 
 def run_feature_roles(shares_df: pd.DataFrame, abl_df: pd.DataFrame, out_dir: str | Path,
-                      *, k: int = DEFAULT_K, scope: str = "assay") -> list[Path]:
-    """Cluster behaviors by modality reliance, then write the dendrogram + Prism-ready
+                      *, k: int = DEFAULT_K, scope: str = "assay",
+                      prism_dir: str | Path | None = None) -> list[Path]:
+    """Cluster behaviors by modality reliance, then write the dendrogram + the tidy
     bar/membership CSVs into ``out_dir``. ``scope`` matches the importance table's key:
-    ``"assay"`` (production, ``project · behavior``) or ``"behavior"`` (pooled names)."""
+    ``"assay"`` (production, ``project · behavior``) or ``"behavior"`` (pooled names).
+
+    ``prism_dir`` additionally receives the pre-pivoted Prism tables.  This analysis
+    runs after :func:`abel.validation.prism.write_all` (it needs the finished
+    ablation frame), so it files its own tables rather than forcing the whole run
+    to be reordered around it.
+    """
     out_dir = Path(out_dir)
     matrix = modality_reliance_matrix(shares_df)
     gain = ablation_gain_by_behavior(abl_df, by=scope)
@@ -262,13 +269,25 @@ def run_feature_roles(shares_df: pd.DataFrame, abl_df: pd.DataFrame, out_dir: st
         bars["kruskal_H_across_clusters"] = kw["H"]
         bars["kruskal_p_across_clusters"] = kw["p_value"]
 
+    from abel.validation import prism
+
     written: list[Path] = []
+    # utf-8-sig throughout: these open in Excel on Windows, which assumes the ANSI
+    # code page without a BOM and renders any non-ASCII behavior name as mojibake.
     bars.round(6).to_csv(out_dir / "feature_role_cluster_bars.csv",
-                         index=False, encoding="utf-8")
+                         index=False, encoding="utf-8-sig")
     memb.round(6).to_csv(out_dir / "feature_role_clusters.csv",
-                         index=False, encoding="utf-8")
+                         index=False, encoding="utf-8-sig")
     written += [out_dir / "feature_role_cluster_bars.csv",
                 out_dir / "feature_role_clusters.csv"]
+    if prism_dir is not None:
+        pd_dir = Path(prism_dir)
+        t = prism.prism_feature_roles(memb)
+        if not t.empty:
+            written.append(prism._write(t, pd_dir / "prism_feature_roles.csv"))
+        b = prism.prism_feature_roles_bars(bars)
+        if not b.empty:
+            written.append(prism._write(b, pd_dir / "prism_feature_roles_bars.csv"))
     fig = plot_dendrogram(cl, out_dir / "feature_role_dendrogram.png")
     if fig is not None:
         written.append(fig)

@@ -217,14 +217,9 @@ def _paired_p(deltas) -> float:
     """Two-sided paired t-test p on the per-seed gains — the number a manuscript
     reports, where ``is_significant`` only gives a boolean.  NaN when there are too
     few seeds or the gain is constant across them."""
-    vals = np.asarray([v for v in deltas if np.isfinite(v)], dtype=float)
-    if len(vals) < 2 or float(np.std(vals, ddof=1)) == 0.0:
-        return float("nan")
-    try:
-        from scipy import stats  # noqa: PLC0415
-    except ImportError:
-        return float("nan")
-    return float(stats.ttest_1samp(vals, 0.0).pvalue)
+    from abel.validation import metrics as vmetrics  # noqa: PLC0415
+
+    return vmetrics.paired_p(deltas)
 
 
 def budget_label(budget: int) -> str:

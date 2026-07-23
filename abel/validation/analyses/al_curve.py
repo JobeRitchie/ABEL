@@ -48,6 +48,13 @@ class ALPoint:
     pr_auc_mean: float
     pr_auc_ci: float
     n_seeds: int
+    # Per-seed values behind the means. Retained so the Prism exports can ship
+    # replicate subcolumns and Prism can draw the error bars / run the test
+    # itself -- a CI half-width is not something it can ingest. Defaulted, so
+    # existing constructions of ALPoint keep working unchanged.
+    f1_seeds: list[float] = field(default_factory=list)
+    pr_auc_seeds: list[float] = field(default_factory=list)
+    n_pos_seeds: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -220,6 +227,12 @@ def _aggregate(seed_trajs: list[list[tuple[int, int, float, float]]]) -> list[AL
             pr_auc_mean=float(np.mean(finite_pr)) if finite_pr else float("nan"),
             pr_auc_ci=_ci95(prs),
             n_seeds=len(finite_f1),
+            # Keep every seed, including the non-finite ones: a seed whose fit
+            # produced no PR-AUC is a blank replicate in Prism, not a dropped
+            # one, and dropping it would silently shift the subcolumns.
+            f1_seeds=[float(v) for v in f1s],
+            pr_auc_seeds=[float(v) for v in prs],
+            n_pos_seeds=[float(v) for v in npos],
         ))
     return points
 

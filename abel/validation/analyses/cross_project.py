@@ -43,17 +43,93 @@ def accuracy_by_project(df: pd.DataFrame, metric: str = "f1") -> pd.DataFrame:
     return summarize_by(src, ["project_id", "project_name"], metric=metric)
 
 
-def accuracy_by_behavior(df: pd.DataFrame, metric: str = "f1") -> pd.DataFrame:
+def _headline_cells(df: pd.DataFrame) -> pd.DataFrame:
+    """The cells that constitute a behavior's *headline* held-out result.
+
+    Generalization cells (the honest held-out split) plus the full-budget
+    all-features ablation cells.  Factored out so the reported confusion counts
+    and the reported F1 can never describe different fits — a table where
+    "caught 191 of 214" sits next to an F1 computed over some other selection of
+    cells is worse than no table.
+    """
     if df.empty:
-        return pd.DataFrame()
+        return df
     src = df[df["analysis"].isin(["generalization", "ablation"])]
     if not src.empty and "config_name" in src.columns:
         abl = _full_budget_only(src[(src["analysis"] == "ablation")
                                     & (src["config_name"] == ALL_FEATURES_CONFIG)])
         src = pd.concat([src[src["analysis"] == "generalization"], abl], ignore_index=True)
-    if src.empty:
-        src = df
-    return summarize_by(src, ["project_id", "behavior_name"], metric=metric)
+    return src if not src.empty else df
+
+
+def accuracy_by_behavior(df: pd.DataFrame, metric: str = "f1") -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    return summarize_by(_headline_cells(df), ["project_id", "behavior_name"], metric=metric)
+
+
+#: Held-out confusion counts, in reporting order.
+CONFUSION_COLS = ["tp", "fp", "fn", "tn"]
+
+_CONFUSION_OUT_COLS = ["project_id", "behavior_name", *CONFUSION_COLS,
+                       "n_val", "n_pos_val", "precision", "recall", "n_cells"]
+
+
+def confusion_by_behavior(df: pd.DataFrame) -> pd.DataFrame:
+    """Held-out confusion counts per (project, behavior) — the tangible table.
+
+    F1 and PR-AUC compress the result past the point a reader can picture it.
+    "Of the 214 held-out windows the reviewer scored as rearing, the model found
+    191 and missed 23, and flagged 17 the reviewer did not" is the same evidence
+    and cannot be misread.  This builds that row.
+
+    Three deliberate choices:
+
+    * Counts are **averaged** across the cells behind a behavior's headline
+      result (seeds × the configs :func:`_headline_cells` keeps), never summed.
+      Every seed scores the same held-out pool, so summing would multiply one
+      body of evidence by the seed count and advertise an ``n`` the study never
+      had.  The mean is the per-fit count, which is what ``n_val`` describes.
+    * ``precision``/``recall`` are recomputed **from these counts**, not copied
+      from the per-cell metric means, so a reader who divides the columns gets
+      the printed rate back.
+    * The unit is one **held-out window scored by the reviewer** — never a bout.
+      Bout-level counts are not identifiable from a sparse labeled subset (see
+      :func:`abel.temporal_refinement.refined_eval._refined_bout_counts`), and
+      count-framing is exactly the presentation that invites a reader to assume
+      otherwise, so every consumer of this table must name the unit.
+
+    ``tn`` is carried so the 2×2 closes, but it is the majority class under heavy
+    imbalance: nothing downstream should derive a headline accuracy from it.
+    """
+    keys = ["project_id", "behavior_name"]
+    empty = pd.DataFrame(columns=_CONFUSION_OUT_COLS)
+    if df.empty or not set(CONFUSION_COLS) <= set(df.columns):
+        return empty
+    src = _headline_cells(df)
+    if "error" in src.columns:
+        src = src[~src["error"].astype(bool)]
+    if src.empty or not set(keys) <= set(src.columns):
+        return empty
+
+    rows = []
+    for key, grp in src.groupby(keys, dropna=False):
+        c = {col: float(pd.to_numeric(grp[col], errors="coerce").mean())
+             for col in CONFUSION_COLS}
+        if not all(np.isfinite(v) for v in c.values()):
+            continue
+        n_pos = c["tp"] + c["fn"]
+        pred_pos = c["tp"] + c["fp"]
+        rows.append({
+            **dict(zip(keys, key if isinstance(key, tuple) else (key,))),
+            **{col: int(round(c[col])) for col in CONFUSION_COLS},
+            "n_val": int(round(sum(c.values()))),
+            "n_pos_val": int(round(n_pos)),
+            "precision": float(c["tp"] / pred_pos) if pred_pos > 0 else float("nan"),
+            "recall": float(c["tp"] / n_pos) if n_pos > 0 else float("nan"),
+            "n_cells": int(len(grp)),
+        })
+    return pd.DataFrame(rows, columns=_CONFUSION_OUT_COLS) if rows else empty
 
 
 #: Imbalance-robust summaries surfaced per project alongside F1 for publication.

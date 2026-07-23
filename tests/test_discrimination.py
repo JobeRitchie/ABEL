@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from abel.validation.analyses import discrimination as disc
 from abel.validation.datamodel import ProjectRef
@@ -244,3 +245,143 @@ def test_confusable_pairs_table_is_hardest_first():
     assert "pose_video_error_reduction" in tbl.columns
     # A feature family that makes a hard pair *worse* shows a negative reduction.
     assert float(tbl.iloc[0]["pose_video_error_reduction"]) < 0
+
+
+# ── Pooled landscape: tidy columns, attribution, and the figure ────────────
+
+
+def _multi_family_pair(name_a, name_b, base, gains, seeds=5, spread=0.001,
+                       project_id="P", project_name="Assay A"):
+    """A PairResult with the full ladder, built the way the runner builds one."""
+    from abel.validation import metrics as vmetrics
+    from abel.validation.datamodel import CellResult
+
+    r = disc.PairResult(project_id=project_id, behavior_a="x", behavior_b="y",
+                        name_a=name_a, name_b=name_b)
+    r.n_train_a = r.n_train_b = 40
+    r.n_hold_a = r.n_hold_b = 25
+    r.cells = [CellResult(project_id=project_id, project_name=project_name,
+                          behavior_id="x|y", behavior_name=f"{name_a} vs {name_b}",
+                          analysis="discrimination", config_name="pose_only",
+                          n_clips=80, seed=1)]
+    for fi, name in enumerate(("pose_only", "pose_context", "pose_video", "all_features")):
+        r.order.append(name)
+        r.labels[name] = disc.FEATURE_SET_LABELS[name]
+        target = base + gains.get(name, 0.0)
+        # Each arm gets its OWN deterministic wobble. A shared ramp would make every
+        # paired difference identical across seeds -- zero variance, an infinite t,
+        # and paired_p correctly returning NaN, which is not the case under test.
+        vals = [target + spread * float(np.sin(1.7 * i + 2.3 * fi)) for i in range(seeds)]
+        r.auc_seeds[name] = vals
+        r.auc[name] = float(np.mean(vals))
+    base_seeds = r.auc_seeds["pose_only"]
+    for name, vals in r.auc_seeds.items():
+        if name == "pose_only":
+            continue
+        paired = [v - b for v, b in zip(vals, base_seeds)]
+        r.gain[name] = float(np.mean(paired))
+        r.gain_ci[name] = disc._ci95(paired)
+        r.gain_n[name] = len(paired)
+        r.gain_p[name] = vmetrics.paired_p(paired)
+    return r
+
+
+def test_best_single_family_never_picks_the_union_rung():
+    # all_features removes the most error, but it is the UNION of the families --
+    # attributing the pair's rescue to it answers the wrong question.
+    r = _multi_family_pair("Freeze", "Groom", 0.70,
+                           {"pose_context": 0.05, "pose_video": 0.20,
+                            "all_features": 0.24})
+    assert r.best_single_family() == "pose_video"
+
+
+def test_best_single_family_empty_when_no_headroom():
+    # error_reduction is NaN for every family, so no family can be "best".
+    r = _multi_family_pair("Locomote", "Freeze", 0.9995,
+                           {"pose_context": 0.0001, "pose_video": 0.0002})
+    assert r.best_single_family() == ""
+
+
+def test_landscape_columns_mark_exactly_one_best_family_per_pair():
+    results = [
+        _multi_family_pair("Freeze", "Groom", 0.70,
+                           {"pose_context": 0.05, "pose_video": 0.20,
+                            "all_features": 0.24}),
+        _multi_family_pair("Approach", "Rear", 0.65,
+                           {"pose_context": 0.22, "pose_video": 0.01,
+                            "all_features": 0.23}, project_name="Assay B"),
+    ]
+    df = disc.discrimination_rows(results)
+    for pair, grp in df.groupby("pair"):
+        assert int(grp["best_family"].sum()) == 1, pair
+    best = df[df["best_family"]]
+    assert set(best["feature_set"]) == {"pose_video", "pose_context"}
+    # Pair-level context is repeated on every row so a row plots on its own.
+    for _, grp in df.groupby("pair"):
+        assert grp["pose_only_auc"].nunique() == 1
+        assert abs(float(grp["headroom"].iloc[0])
+                   - (1.0 - float(grp["pose_only_auc"].iloc[0]))) < 1e-12
+    # project_name comes off the cells, not the id.
+    assert set(df["project_name"]) == {"Assay A", "Assay B"}
+
+
+def test_landscape_rows_carry_p_values_only_for_add_on_families():
+    df = disc.discrimination_rows([
+        _multi_family_pair("Freeze", "Groom", 0.70, {"pose_video": 0.20}),
+    ])
+    assert np.isnan(float(df[df["feature_set"] == "pose_only"]["p_value"].iloc[0]))
+    assert float(df[df["feature_set"] == "pose_video"]["p_value"].iloc[0]) < 0.05
+
+
+def test_seed_rows_are_one_per_pair_family_seed():
+    results = [_multi_family_pair("Freeze", "Groom", 0.70, {"pose_video": 0.2}, seeds=5)]
+    seeds = disc.discrimination_seed_rows(results)
+    assert len(seeds) == 4 * 5          # 4 rungs x 5 seeds
+    assert sorted(seeds["seed_index"].unique().tolist()) == [1, 2, 3, 4, 5]
+    # An unscorable pair contributes no replicates rather than a row of NaN.
+    bad = disc.PairResult(project_id="P", behavior_a="x", behavior_b="y",
+                          name_a="R1", name_b="R2", error="too few clips")
+    assert disc.discrimination_seed_rows([bad]).empty
+
+
+def test_landscape_figure_renders_over_the_full_range_of_pairs(tmp_path):
+    plots = pytest.importorskip("abel.validation.plots")
+    if not plots._HAS_MPL:
+        pytest.skip("matplotlib not installed")
+    results = [
+        # rescued by video, rescued by context, no headroom, and unrescued noise
+        _multi_family_pair("Freeze", "Groom", 0.70,
+                           {"pose_context": 0.05, "pose_video": 0.20,
+                            "all_features": 0.24}),
+        _multi_family_pair("Approach", "Rear", 0.65,
+                           {"pose_context": 0.22, "pose_video": 0.01,
+                            "all_features": 0.23}, project_name="Assay B"),
+        _multi_family_pair("Locomote", "Freeze", 0.9996,
+                           {"pose_context": 0.0001, "pose_video": 0.0001}),
+        _multi_family_pair("Sniff", "Eat", 0.61,
+                           {"pose_context": -0.02, "pose_video": 0.01},
+                           spread=0.09),
+    ]
+    df = disc.discrimination_rows(results)
+    out = tmp_path / "landscape.png"
+    assert plots.discrimination_landscape(df, out) is not None
+    assert out.exists() and out.stat().st_size > 10_000
+    plots.close_all()
+
+    # A no-headroom pair must still reach the figure: the wall of pose-solved pairs
+    # is a result, and silently dropping it overstates what the modalities add.
+    assert (df["pose_only_auc"] > 0.999).any()
+    assert df[df["pose_only_auc"] > 0.999]["best_family"].sum() == 0
+
+
+def test_landscape_declines_empty_and_legacy_frames():
+    plots = pytest.importorskip("abel.validation.plots")
+    if not plots._HAS_MPL:
+        pytest.skip("matplotlib not installed")
+    df = disc.discrimination_rows([
+        _multi_family_pair("Freeze", "Groom", 0.70, {"pose_video": 0.2}),
+    ])
+    assert plots.discrimination_landscape(pd.DataFrame(), None) is None
+    assert plots.discrimination_landscape(None, None) is None
+    # A run written before these columns existed must be declined, not crashed on.
+    assert plots.discrimination_landscape(df.drop(columns=["p_value"]), None) is None

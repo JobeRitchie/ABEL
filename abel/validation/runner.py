@@ -699,7 +699,10 @@ def run_validation(
                                 "n_behaviors_compared": br.n_behaviors,
                                 "rarer_behaviors_not_hunted":
                                     ", ".join(br.rarer_than_target),
+                                "rarity_source": br.source,
                             })
+                    if br.source_caveat():
+                        _emit_msg(f"[{proj.name}] {br.source_caveat()}")
                     break  # one readout per project (all behaviours plotted together)
                 except Exception as exc:  # noqa: BLE001
                     _emit_msg(f"[{proj.name}] behaviour rarity skipped: {exc}")
@@ -779,14 +782,18 @@ def run_validation(
     abl_df: pd.DataFrame | None = None
     gen_df: pd.DataFrame | None = None
     disc_df: pd.DataFrame | None = None
+    disc_seed_df: pd.DataFrame | None = None
     vv_df: pd.DataFrame | None = None
     bench_df: pd.DataFrame | None = None
+    lc_knee_df: pd.DataFrame | None = None
+    lc_points_df: pd.DataFrame | None = None
 
     if lc_results:
-        knee_df = cross_project.data_efficiency_summary(knees)
+        knee_df = lc_knee_df = cross_project.data_efficiency_summary(knees)
         store.write_csv(knee_df, "optimal_clips_summary.csv", subdir="learning_curves")
         combined_rows = [row for lc in lc_results for row in _lc_points_rows(lc)]
-        store.write_csv(pd.DataFrame(combined_rows), "learning_curve_points.csv",
+        lc_points_df = pd.DataFrame(combined_rows)
+        store.write_csv(lc_points_df, "learning_curve_points.csv",
                         subdir="learning_curves")
         # Mean curve across behaviors → recommended general-purpose clip count.
         if len(lc_results) >= 2:
@@ -869,6 +876,7 @@ def run_validation(
         disc_dir = store.sub("discrimination")
         disc_imgs: list[Path] = []
         all_rows = []
+        all_seed_rows = []
         for pid, pair_results in disc_by_project.items():
             if not pair_results:
                 continue
@@ -889,13 +897,26 @@ def run_validation(
             if plots.discrimination_gain_plot(pair_results, g_img) is not None:
                 disc_imgs.append(g_img)
             all_rows.append(discrimination.discrimination_rows(pair_results))
+            all_seed_rows.append(discrimination.discrimination_seed_rows(pair_results))
             base_mat = discrimination.separability_matrix(pair_results)
             store.write_csv(base_mat.reset_index(names="behavior"),
                             f"{tag}__separability_matrix.csv", subdir="discrimination")
-        plots.close_all()
         disc_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
+        # The whole run's discrimination result in one figure, pooled over every
+        # project — the matrices above are one panel per project PER feature family,
+        # which is the archive, not something a reader can draw a conclusion from.
+        # Written FIRST in the figure list so it leads the report and the GUI tab.
+        land_img = disc_dir / "discrimination_landscape.png"
+        if plots.discrimination_landscape(disc_df, land_img) is not None:
+            disc_imgs.insert(0, land_img)
+        plots.close_all()
         if not disc_df.empty:
             store.write_csv(disc_df, "discrimination_results.csv", subdir="discrimination")
+        disc_seed_df = (pd.concat(all_seed_rows, ignore_index=True)
+                        if all_seed_rows else pd.DataFrame())
+        if not disc_seed_df.empty:
+            store.write_csv(disc_seed_df, "discrimination_seed_scores.csv",
+                            subdir="discrimination")
         # Hardest-first ranking: the trained answer to "which behaviors does this
         # project actually conflate, and does any feature family fix them?"
         hard_df = pd.concat(
@@ -1127,10 +1148,22 @@ def run_validation(
         # per-project stem; a single-project run keeps the plain filenames.
         multi = len({r.project_id for r in
                      (rare_reviewed + rare_quality + rare_behavior)}) > 1
+        # A project can hunt more than one behaviour (non-auto target mode), and
+        # every one of its tables would otherwise land on the same filename with
+        # only the last surviving. Add the behaviour to the stem for exactly the
+        # projects that need it, so the common single-behaviour case keeps its
+        # short, stable filenames.
+        _beh_per_proj: dict[str, set[str]] = {}
+        for r in (rare_reviewed + rare_quality):
+            _beh_per_proj.setdefault(r.project_id, set()).add(str(r.behavior_id))
 
         def _prism_stem(res) -> str:
-            return (f"{_tag(proj_names.get(res.project_id, res.project_id))}"
-                    if multi else "")
+            parts = []
+            if multi:
+                parts.append(_tag(proj_names.get(res.project_id, res.project_id)))
+            if len(_beh_per_proj.get(res.project_id, ())) > 1:
+                parts.append(_tag(getattr(res, "behavior_name", "")))
+            return "__".join(p for p in parts if p)
 
         matched_quality = set()
         for r in rare_reviewed:
@@ -1181,6 +1214,9 @@ def run_validation(
                     f"{r.behavior_name}: {why} The figures below compare only the "
                     f"remaining strategies.</p>")
         for br in rare_behavior:
+            if br.source_caveat():
+                rarity_note += (f"<p style='color:#b03030;'><b>{br.project_id}:</b> "
+                                f"{br.source_caveat()}</p>")
             if br.rarer_than_target:
                 rarity_note += (f"<p><b>{br.target_name}</b> is rank {br.target_rank}"
                                 f"/{br.n_behaviors} by {br.measure}; rarer still: "
@@ -1280,11 +1316,40 @@ def run_validation(
         )
         store.write_csv(beh_df, "accuracy_by_behavior.csv", subdir="cross_project")
         plots.close_all()
+    # The counts behind the rates. "Found 191 of 214, 17 false alarms" is the same
+    # evidence as P/R but a reviewer cannot misread it, so it is promoted to a
+    # first-class table + figure rather than staying buried in cells.parquet.
+    # "1_" sorts it directly after the forest plot.
+    conf_df = cross_project.confusion_by_behavior(cells_df)
+    if not conf_df.empty:
+        # How long a clip is decides whether these counts mean anything to a
+        # reader, and it is per-project — measured from the labeled rows, never
+        # taken from segment_window_frames (whose default is 4x what most
+        # projects actually use). See holdout.median_clip_frames.
+        clip_frames = {p.project_id: holdout.median_clip_frames(p) for p in projects}
+        fps_by_proj = {p.project_id: float(p.fps or 0.0) for p in projects}
+        conf_df["clip_frames"] = conf_df["project_id"].map(clip_frames)
+        conf_df["clip_sec"] = [
+            (f / fps_by_proj.get(pid, 0.0)) if (np.isfinite(f) and fps_by_proj.get(pid, 0.0) > 0)
+            else float("nan")
+            for pid, f in zip(conf_df["project_id"], conf_df["clip_frames"])
+        ]
+        store.write_csv(conf_df, "confusion_by_behavior.csv", subdir="cross_project")
+        plots.confusion_counts_by_behavior(
+            conf_df, store.sub("cross_project") / "1_confusion_by_behavior.png")
+        plots.close_all()
     cp_imgs = sorted(store.sub("cross_project").glob("*.png"))
     cp_inner = report.table_section(acc_df)
     if not pub_df.empty:
         cp_inner += ("<h3>Publication metrics by project</h3>"
                      + report.table_section(pub_df))
+    if not conf_df.empty:
+        cp_inner += ("<h3>Held-out confusion counts by behavior</h3>"
+                     "<p>Counts are per fit, averaged over seeds (never summed — "
+                     "every seed scores the same held-out pool). The unit is one "
+                     "reviewer-scored clip (clip_frames / clip_sec below), not a "
+                     "bout.</p>"
+                     + report.table_section(conf_df))
     sections.insert(0, ("Cross-project overview", cp_inner + report.img_section(cp_imgs)))
 
     # ── Prism-ready (pre-pivoted) copies ──
@@ -1298,12 +1363,19 @@ def run_validation(
         bs_shares = (bscape_data.modality_fraction_long_df()
                      if bscape_data is not None else None)
         bs_imp = bscape_data.to_long_df() if bscape_data is not None else None
+        tb_agree = time_budget.time_budget_rows(tb_results) if tb_results else None
         prism_paths = prism.write_all(
             store.run_dir,
             gen_df=gen_df, ablation_df=abl_df, video_df=vv_df, bench_df=bench_df,
             al_df=al_pts, calibration_df=cal_pts, time_budget_df=tb_pts,
             bscape_shares_df=bs_shares, bscape_importance_df=bs_imp,
-            discrimination_df=disc_df, accuracy_by_behavior_df=beh_df,
+            discrimination_df=disc_df, discrimination_seeds_df=disc_seed_df,
+            accuracy_by_behavior_df=beh_df,
+            confusion_df=conf_df,
+            lc_points_df=lc_points_df, lc_knee_df=lc_knee_df,
+            time_budget_agreement_df=tb_agree,
+            publication_metrics_df=pub_df, project_accuracy_df=acc_df,
+            training_speed_df=speed_df,
         )
         if prism_paths and progress_cb:
             progress_cb(f"Prism tables → {store.run_dir / 'prism'}", 0.99)
@@ -1329,7 +1401,8 @@ def run_validation(
         try:
             fr_paths = feature_roles.run_feature_roles(
                 bscape_data.modality_fraction_long_df(), abl_df,
-                store.sub("feature_roles"), k=feature_roles.DEFAULT_K, scope="assay")
+                store.sub("feature_roles"), k=feature_roles.DEFAULT_K, scope="assay",
+                prism_dir=store.run_dir / "prism")
             if fr_paths and progress_cb:
                 progress_cb(f"Feature roles → {store.run_dir / 'feature_roles'}", 0.997)
         except Exception as exc:  # noqa: BLE001 — must not sink the run

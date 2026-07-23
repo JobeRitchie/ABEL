@@ -10,10 +10,13 @@ land inside a spreadsheet cell.
 from __future__ import annotations
 
 import json
+import math
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from abel.validation import metrics as vmetrics
 from abel.validation import prism
 from abel.validation.benchmark import StageTiming
 from abel.validation.video_value import VideoValueResult
@@ -77,7 +80,7 @@ def test_prism_ablation_splits_by_budget_and_pivots_configs():
     t = tables["n50"]
     # Rows = behaviors (one row-title column), columns = configs.
     assert list(t.columns) == ["Behavior", "Baseline (pose only)", "+ Video features"]
-    assert list(t["Behavior"]) == ["P1 · Groom", "P1 · Rear", "P2 · Freeze"]
+    assert list(t["Behavior"]) == ["P1 - Groom", "P1 - Rear", "P2 - Freeze"]
     assert len(t) == 3
 
 
@@ -159,7 +162,7 @@ def test_prism_al_curves_share_one_x_and_split_by_metric():
     assert set(out) == {"prism_al_curve_f1.csv", "prism_al_curve_pr_auc.csv",
                         "prism_al_curve_pos_discovered.csv"}
     f1 = out["prism_al_curve_f1.csv"]
-    assert list(f1.columns) == ["Clips reviewed", "P · Rear — AL", "P · Rear — Random"]
+    assert list(f1.columns) == ["Clips reviewed", "P - Rear - AL", "P - Rear - Random"]
     assert list(f1["Clips reviewed"]) == [20, 50]
 
 
@@ -170,14 +173,14 @@ def test_prism_calibration_and_time_budget_emit_paired_xy():
         "count": [10, 20, 30],
     })
     c = prism.prism_calibration(rel)
-    assert list(c.columns) == ["P · Rear — confidence", "P · Rear — accuracy"]
+    assert list(c.columns) == ["P - Rear - confidence", "P - Rear - accuracy"]
 
     tb = pd.DataFrame({
         "project": ["P", "P"], "behavior": ["Rear", "Rear"], "session": ["s1", "s2"],
         "true_prevalence": [0.09, 0.03], "pred_prevalence": [0.10, 0.08],
     })
     t = prism.prism_time_budget(tb)
-    assert list(t.columns) == ["P · Rear — true", "P · Rear — pred"]
+    assert list(t.columns) == ["P - Rear - true", "P - Rear - pred"]
 
 
 def test_prism_discrimination_drops_zero_baseline_from_error_reduction():
@@ -196,11 +199,135 @@ def test_prism_discrimination_drops_zero_baseline_from_error_reduction():
     assert list(err.columns) == ["Pair", "+ Video"]
 
 
-def test_prism_accuracy_by_behavior_renames_to_prism_headers():
+def _landscape_frame() -> pd.DataFrame:
+    """Two pairs across two assays, as `discrimination_rows` emits them."""
+    rows = []
+    for pair, assay, pose, fam_er in (
+        ("A vs B", "Assay A", 0.70, {"+ Context / ROI": 0.10, "+ Video": 0.72}),
+        ("C vs D", "Assay B", 0.95, {"+ Context / ROI": 0.60, "+ Video": 0.05}),
+    ):
+        rows.append({
+            "project": assay.lower(), "project_name": assay, "pair": pair,
+            "feature_set": "pose_only", "label": "Pose only",
+            "roc_auc": pose, "pose_only_auc": pose, "headroom": 1 - pose,
+            "auc_gain_vs_pose": 0.0, "p_value": float("nan"),
+            "error_reduction": 0.0, "significant": "", "best_family": False,
+            "n_holdout": 200,
+        })
+        best = max(fam_er, key=fam_er.get)
+        for label, er in fam_er.items():
+            fs = "pose_video" if "Video" in label else "pose_context"
+            rows.append({
+                "project": assay.lower(), "project_name": assay, "pair": pair,
+                "feature_set": fs, "label": label,
+                "roc_auc": pose + er * (1 - pose), "pose_only_auc": pose,
+                "headroom": 1 - pose, "auc_gain_vs_pose": er * (1 - pose),
+                "p_value": 0.001 if label == best else 0.4,
+                "error_reduction": er, "significant": label == best,
+                "best_family": label == best, "n_holdout": 200,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_prism_landscape_is_one_row_per_pair_with_plottable_x_and_y():
+    out = prism.prism_discrimination_landscape(_landscape_frame())
+    assert len(out) == 2                       # one row per pair, not per family
+    assert list(out["Pair"]) == ["Assay A - A vs B", "Assay B - C vs D"]
+    # The x Prism plots is pre-computed: it has no calculated columns on a scatter.
+    assert abs(float(out.loc[0, "PoseOnlyError"]) - 0.30) < 1e-12
+    assert set(out["BestFamily"]) == {"Video", "Context / ROI"}
+    # Numeric flag, not TRUE/FALSE text -- Prism groups on numbers.
+    assert list(out["Significant"]) == [1, 1]
+    assert out["Significant"].dtype.kind in "iu"
+    # A CI half-width has no Prism input format and must never be exported.
+    assert not [c for c in out.columns if "ci" in c.lower()]
+
+
+def test_prism_volcano_keeps_every_family_and_drops_the_baseline():
+    out = prism.prism_discrimination_volcano(_landscape_frame())
+    assert len(out) == 4                       # 2 pairs x 2 add-on families
+    assert "Pose only" not in set(out["FeatureFamily"])
+    # The same pair appears once per family -- that is the point of the panel.
+    assert list(out["Pair"]).count("Assay A - A vs B") == 2
+    # y = -log10(p), pre-computed so the scatter is a straight paste.
+    winner = out[(out["Pair"] == "Assay A - A vs B") & (out["FeatureFamily"] == "Video")]
+    assert abs(float(winner["NegLog10P"].iloc[0]) - 3.0) < 1e-9
+    loser = out[(out["Pair"] == "Assay A - A vs B")
+                & (out["FeatureFamily"] == "Context / ROI")]
+    assert float(loser["NegLog10P"].iloc[0]) < 1.0
+
+
+def test_prism_seeds_pad_every_family_to_the_same_subcolumn_count():
+    """Prism assigns replicate subcolumns positionally: a short block shifts
+    every dataset after it one column left."""
+    seed_df = pd.DataFrame([
+        {"project": "p", "project_name": "Assay A", "pair": "A vs B",
+         "feature_set": "pose_only", "label": "Pose only",
+         "seed_index": i + 1, "roc_auc": 0.70 + i * 0.01} for i in range(3)
+    ] + [
+        {"project": "p", "project_name": "Assay A", "pair": "A vs B",
+         "feature_set": "pose_video", "label": "+ Video",
+         "seed_index": i + 1, "roc_auc": 0.90 + i * 0.01} for i in range(2)
+    ])
+    out = prism.prism_discrimination_seeds(seed_df)
+    assert list(out.columns) == ["Pair", "Pose only:1", "Pose only:2", "Pose only:3",
+                                 "Video:1", "Video:2", "Video:3"]
+    assert math.isnan(float(out.loc[0, "Video:3"]))   # padded, not shifted
+    assert prism.prism_discrimination_seeds(pd.DataFrame()).empty
+
+
+def test_tiny_p_values_survive_the_dust_collapse(tmp_path):
+    """_sig zeroes anything under 1e-9 as float dust. That is right for a CI
+    half-width of 1e-17 and wrong for a p of 9e-10, which would export as "0" —
+    a value a p-value can never take."""
+    df = _landscape_frame()
+    df.loc[df["best_family"], "p_value"] = 9.063e-10
+    out = prism.prism_discrimination_landscape(df)
+    path = prism._write(out, tmp_path / "land.csv")
+    text = path.read_text(encoding="utf-8-sig")
+    assert "9.063e-10" in text
+    # The magnitude columns beside it are still dust-collapsed as before.
+    dusty = pd.DataFrame({"Pair": ["A"], "ci95": [1e-17], "PValue": [1e-17]})
+    cleaned = prism._clean(dusty)
+    assert float(cleaned.loc[0, "ci95"]) == 0.0
+    assert float(cleaned.loc[0, "PValue"]) == 1e-17
+
+
+def test_prism_discrimination_scatters_decline_a_legacy_frame():
+    """A run written before these columns existed must yield nothing, not raise."""
+    old = pd.DataFrame({
+        "project": ["P"], "pair": ["A vs B"], "label": ["+ Video"],
+        "roc_auc": [0.9], "error_reduction": [0.5],
+    })
+    assert prism.prism_discrimination_landscape(old).empty
+    assert prism.prism_discrimination_volcano(old).empty
+
+
+def test_prism_accuracy_by_behavior_emits_one_row_title_and_a_plottable_sd():
+    """Prism takes one row-title column and cannot plot a CI half-width.
+
+    So project+behavior merge into a single title, and f1_ci is converted to the
+    SD Prism actually draws error bars from. Pasting the raw CI into an SD
+    subcolumn would overstate every bar by t(n)/sqrt(n).
+    """
     df = pd.DataFrame({"project_id": ["P"], "behavior_name": ["Rear"],
                        "f1_mean": [0.85], "f1_ci": [0.02], "n": [10]})
     out = prism.prism_accuracy_by_behavior(df)
-    assert list(out.columns) == ["Project", "Behavior", "F1", "F1 95% CI", "N"]
+    assert list(out.columns) == ["Behavior", "F1", "SD", "N"]
+    assert out["Behavior"][0] == "P - Rear"
+    # Round-trip: the emitted SD must reproduce the input CI via metrics.ci95.
+    sd = float(out["SD"][0])
+    n = 10
+    assert sd == pytest.approx(0.02 / vmetrics.t_critical_95(n) * math.sqrt(n))
+    assert vmetrics.t_critical_95(n) * sd / math.sqrt(n) == pytest.approx(0.02)
+
+
+def test_prism_sd_is_blank_for_a_single_seed():
+    """One seed has no estimable spread; the SD must stay blank, not read as 0.0."""
+    df = pd.DataFrame({"project_id": ["P"], "behavior_name": ["Rear"],
+                       "f1_mean": [0.85], "f1_ci": [0.0], "n": [1]})
+    out = prism.prism_accuracy_by_behavior(df)
+    assert pd.isna(out["SD"][0])
 
 
 # ── Absent modalities must not appear anywhere ──────────────────────────────
@@ -236,3 +363,55 @@ def test_absent_modality_is_not_reported():
 
     shares = data.modality_fraction_long_df()
     assert "Social (interaction)" not in set(shares["modality_label"])
+
+
+# ── Nothing exported may turn to gibberish in Excel/Prism on Windows ─────────
+
+
+def test_written_files_are_ascii_with_a_bom(tmp_path):
+    """The mojibake guard, end to end.
+
+    Prism and Excel on Windows decode a CSV with the ANSI code page unless it opens
+    with a BOM, so a UTF-8 "≥" arrives as "â‰¥" and a header like "F1≥0.70:1" lands
+    in the data table as gibberish. Two defences are asserted here: the symbols this
+    package chooses are transliterated to ASCII, and the file carries a BOM so any
+    non-ASCII the *user* typed still survives.
+    """
+    df = pd.DataFrame({
+        "Behavior": ["P · Rear"],          # middle dot, from _row_title
+        "F1≥0.80:1": [0.5],                # >=, from the effort-to-quality targets
+        "ΔF1 — video": [0.25],             # delta + em dash
+    })
+    path = prism._write(df, tmp_path / "t.csv")
+
+    raw = path.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf", "missing BOM: Windows will decode as cp1252"
+    text = raw.decode("utf-8-sig")
+    assert text.isascii(), [c for c in text if ord(c) > 127]
+    header = text.splitlines()[0]
+    assert "F1>=0.80:1" in header and "-" in header and "≥" not in header
+
+    # Round-trips through the reader the rest of the suite uses.
+    back = pd.read_csv(path, encoding="utf-8-sig")
+    assert list(back.columns)[0] == "Behavior"
+
+
+def test_user_typed_non_ascii_survives_via_the_bom(tmp_path):
+    """We transliterate OUR symbols, never the user's text.
+
+    A behavior named with an accent must come back intact rather than being
+    mangled into ASCII -- that is what the BOM is for.
+    """
+    df = pd.DataFrame({"Behavior": ["Café approach"], "F1": [0.5]})
+    path = prism._write(df, tmp_path / "u.csv")
+    back = pd.read_csv(path, encoding="utf-8-sig")
+    assert back["Behavior"][0] == "Café approach"
+
+
+def test_readme_keeps_its_indentation_through_transliteration(tmp_path):
+    """_ascii also runs over multi-line README prose; it must not touch whitespace."""
+    text = "Title\n=====\nfile.csv\n    Table: XY — 3 subcolumns.\n"
+    path = prism.write_text(tmp_path / "README.txt", text)
+    out = path.read_text(encoding="utf-8-sig")
+    assert out.splitlines()[3] == "    Table: XY - 3 subcolumns."
+    assert out.isascii()

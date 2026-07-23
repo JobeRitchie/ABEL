@@ -8,10 +8,12 @@ Validation tab show "—" for models trained before the column existed.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import yaml
 
 from abel.temporal_refinement.refined_eval import (
@@ -98,14 +100,112 @@ def test_bout_counts_collapse_window_boundary_slop() -> None:
     assert fp == 1
 
 
-def test_holdout_metrics_expose_bout_counts(tmp_path: Path) -> None:
+def test_holdout_metrics_expose_window_counts(tmp_path: Path) -> None:
     label_true = [0] * 30 + [1] * 90
     prob = [0.85] * 30 + [0.1] * 90
     mdir = _write_val_model(tmp_path, "Appr", label_true, prob, target_index=0)
     res = refined_holdout_metrics(mdir, tmp_path, "Appr", target_behavior_id="appr-id")
     assert res is not None
-    for k in ("bout_tp", "bout_fp", "bout_fn"):
+    for k in ("raw_tp", "raw_fp", "raw_fn", "raw_tn",
+              "refined_tp", "refined_fp", "refined_fn", "refined_tn"):
         assert k in res and isinstance(res[k], int)
+    # Event-level bout counts are deliberately NOT reported: they are not
+    # identifiable from a held-out labeled subset (see _refined_bout_counts).
+    for k in ("bout_tp", "bout_fp", "bout_fn"):
+        assert k not in res
+    # Every scored window lands in exactly one cell of the confusion matrix.
+    assert res["raw_tp"] + res["raw_fp"] + res["raw_fn"] + res["raw_tn"] == res["n_val"]
+
+
+def test_refinement_does_not_bridge_unobserved_gaps() -> None:
+    """A wide unlabeled gap must not be interpolated into a predicted bout.
+
+    Two confidently-positive windows sit ~500 frames apart with nothing observed
+    between them — the shape of a held-out labeled subset. Interpolating across
+    that gap used to raise the whole span above the onset threshold, inventing a
+    detection on frames the model never scored.
+    """
+    from abel.temporal_refinement.refined_eval import (
+        apply_temporal_refinement,
+        observed_islands,
+    )
+
+    starts = np.array([0, 500])
+    ends = np.array([14, 514])
+    sessions = np.array(["s", "s"])
+    p = np.array([0.9, 0.9])
+    probs = np.column_stack([1.0 - p, p])
+
+    assert observed_islands(starts, ends, merge_gap_frames=4) == [(0, 0), (1, 1)]
+
+    preds = apply_temporal_refinement(
+        probs, target_col=1, session_ids=sessions,
+        start_frames=starts, end_frames=ends,
+        onset_threshold=0.5, min_bout_duration_frames=1, merge_gap_frames=4,
+        smooth_window=1,
+    )
+    # Both observed windows stay positive; nothing is asserted about the 485
+    # unobserved frames between them because nothing was predicted there.
+    assert list(preds) == [1, 1]
+
+
+def test_observed_islands_is_a_noop_when_windows_tile() -> None:
+    """At inference, windows tile densely, so refinement is unchanged.
+
+    Real sessions run ~375% coverage with overlapping windows and zero gaps; the
+    splitter must return a single island there or deployment behavior would change.
+    """
+    from abel.temporal_refinement.refined_eval import observed_islands
+
+    starts = np.arange(0, 200, 4)      # 15-frame windows every 4 frames (overlapping)
+    ends = starts + 14
+    assert observed_islands(starts, ends, merge_gap_frames=4) == [(0, len(starts) - 1)]
+    # Abutting windows with no overlap are also one island.
+    starts2 = np.arange(0, 200, 15)
+    assert observed_islands(starts2, starts2 + 14, merge_gap_frames=0) == [(0, len(starts2) - 1)]
+
+
+def test_refined_scores_suppressed_when_windows_cannot_support_min_bout() -> None:
+    """min_bout longer than the observed island makes refinement unmeasurable.
+
+    Isolated 15-frame labeled windows cannot hold a 30-frame bout, so every
+    positive would be forced to a false negative regardless of model quality.
+    That must report as "not evaluable", not as a low score.
+    """
+    from abel.temporal_refinement.refined_eval import (
+        refinement_evaluability,
+        score_raw_and_refined,
+    )
+
+    starts = np.arange(0, 10 * 500, 500)          # 15-frame windows, 485-frame gaps
+    ends = starts + 14
+    sessions = np.array(["s"] * len(starts))
+    y_true = np.ones(len(starts), dtype=int)
+    prob = np.full(len(starts), 0.99)             # a perfect model
+    settings = {"onset_threshold": 0.5, "min_bout_duration_frames": 30,
+                "merge_gap_frames": 4}
+
+    evaluable, frac = refinement_evaluability(y_true, sessions, starts, ends, settings)
+    assert evaluable is False
+    assert frac == 1.0
+
+    out = score_raw_and_refined(
+        y_true=y_true, prob=prob, session_ids=sessions,
+        start_frames=starts, end_frames=ends, settings=settings,
+    )
+    assert out["refined_evaluable"] is False
+    assert math.isnan(out["refined_f1"])
+    # The raw score is unaffected and still shows the model is perfect.
+    assert out["raw_f1"] == pytest.approx(1.0)
+
+    # Same data, a min_bout the windows CAN support -> evaluable again.
+    ok_settings = dict(settings, min_bout_duration_frames=10)
+    out_ok = score_raw_and_refined(
+        y_true=y_true, prob=prob, session_ids=sessions,
+        start_frames=starts, end_frames=ends, settings=ok_settings,
+    )
+    assert out_ok["refined_evaluable"] is True
+    assert not math.isnan(out_ok["refined_f1"])
 
 
 def test_load_settings_resolves_per_behavior_override(tmp_path: Path) -> None:

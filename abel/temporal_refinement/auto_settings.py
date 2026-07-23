@@ -60,6 +60,17 @@ def _session_traces(
     :func:`abel.temporal_refinement.refined_eval._refine_binary_trace` /
     ``_refined_bout_counts`` exactly (segment fill -> gap interpolation ->
     smoothing) so the grid search scores identically to the shipped metric.
+
+    .. warning::
+       **Known issue — this tuner inherits the bout-scoring flaw.**  It tunes
+       against labeled segments, which are sparse (measured ~34% frame coverage,
+       gaps up to 517 frames), so the interpolated stretches it scores on were
+       never predicted by the model.  That biases the search toward large
+       ``min_bout_duration_frames``, and a min_bout longer than the observed
+       island makes refinement unmeasurable on held-out data — one shipped
+       project auto-tuned to ``min_bout=30`` against 15-frame windows, which
+       :func:`refined_eval.refinement_evaluability` now reports as not evaluable.
+       Settings tuned before that gate existed are worth re-checking by hand.
     """
     out: list[tuple[np.ndarray, np.ndarray]] = []
     for sid in np.unique(session_ids):

@@ -208,6 +208,49 @@ def test_ci95_uses_t_not_1p96():
     assert vm.ci95([0.5]) == 0.0
 
 
+def test_paired_p_matches_scipy_and_declines_degenerate_input():
+    """The one paired t-test the suite shares — ablation, video-value and
+    discrimination all call this, so it must not drift between them."""
+    vals = [0.031, 0.028, 0.035, 0.030, 0.033]
+    scipy_stats = __import__("scipy.stats", fromlist=["stats"])
+    assert abs(vm.paired_p(vals)
+               - float(scipy_stats.ttest_1samp(vals, 0.0).pvalue)) < 1e-12
+    # A real, consistent gain is significant; noise straddling zero is not.
+    assert vm.paired_p(vals) < 0.05
+    assert vm.paired_p([0.01, -0.02, 0.03, -0.015, 0.005]) > 0.05
+
+    # Undefined, not zero: one seed has no spread, and a constant difference is an
+    # infinite t that must never be reported as p = 0.
+    assert np.isnan(vm.paired_p([0.05]))
+    assert np.isnan(vm.paired_p([0.05, 0.05, 0.05]))
+    assert np.isnan(vm.paired_p([]))
+    # NaN seeds are dropped, not propagated — a failed fit must not sink the test.
+    assert abs(vm.paired_p([0.031, np.nan, 0.028, 0.035, 0.030, 0.033])
+               - vm.paired_p(vals)) < 1e-12
+
+
+def test_benjamini_hochberg_threshold_controls_the_discovery_rate():
+    """A discrimination run tests ~40-100 pair x family combinations, so a bare
+    p<0.05 line expects a handful of false positives by construction."""
+    # 10 tests, 3 genuinely tiny p's. k=3 is the last rejection, so the critical
+    # value is 3/10 * 0.05 — stricter than a bare 0.05, looser than Bonferroni.
+    ps = [1e-6, 1e-5, 1e-4] + [0.30, 0.44, 0.51, 0.62, 0.73, 0.88, 0.95]
+    thr = vm.benjamini_hochberg_threshold(ps)
+    assert abs(thr - 3 / 10 * 0.05) < 1e-12
+    assert 0.05 / len(ps) <= thr < 0.05      # between Bonferroni and uncorrected
+    # It is a line ABOVE the rejected points, not one drawn through the last of them.
+    rejected = [p for p in ps if p <= thr]
+    assert rejected == [1e-6, 1e-5, 1e-4]
+    assert max(rejected) < thr
+    # Nothing survives → NaN, so the caller draws no line rather than an invented one.
+    assert np.isnan(vm.benjamini_hochberg_threshold([0.4, 0.6, 0.9]))
+    assert np.isnan(vm.benjamini_hochberg_threshold([]))
+    # A single clearly-significant test is rejected, at the full alpha.
+    assert vm.benjamini_hochberg_threshold([0.001]) == 0.05
+    # NaN p-values (an undefined test) are excluded from the correction's m.
+    assert abs(vm.benjamini_hochberg_threshold([0.001, float("nan")]) - 0.05) < 1e-12
+
+
 # ── Calibration analysis wrapper ────────────────────────────────────────────
 
 

@@ -8,10 +8,12 @@ Prism/tidy exporters — without training models or reading a project from disk
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from abel.validation.analyses import rare_discovery as rd
 from abel.validation.datamodel import ProjectRef
@@ -320,11 +322,14 @@ def test_prism_quality_and_effort_tables(tmp_path):
         "Wet dog shake", pool_label="reviewed", k0=20, seed_pos=5,
         f1_targets=(0.80,), pr_auc_targets=(0.90,), frac_targets=(0.90,),
         sec_per_clip_review=4.0)
+    # XY tables carry per-seed replicate subcolumns, not a mean: Prism cannot
+    # ingest a CI half-width, so a mean-only curve could never get error bars.
     xy = rd.prism_quality(res, "f1")
     assert list(xy.columns)[0] == "Clips reviewed"
-    assert "Active Learning" in xy.columns and "Random clips" in xy.columns
+    assert any(c.startswith("Active Learning:") for c in xy.columns)
+    assert any(c.startswith("Random clips:") for c in xy.columns)
     pr = rd.prism_quality(res, "pr_auc")
-    assert "Active Learning" in pr.columns
+    assert any(c.startswith("Active Learning:") for c in pr.columns)
     eff = rd.prism_effort_to_quality(res)
     assert list(eff.columns)[0] == "Strategy"
     assert any(c.startswith("F1≥0.80:") for c in eff.columns)   # per-seed replicates
@@ -382,6 +387,178 @@ def test_rank_behaviors_by_rarity_drops_excluded_and_undetected(tmp_path):
     assert [b for b, _n, _v in rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])] == ["rear"]
     assert rd.rank_behaviors_by_rarity(
         proj, ["wds", "rear"], exclude_behavior_ids=["rear"]) == []
+
+
+def _add_traces(root: Path, per_frame: dict[str, int], *, sessions=("s1",)) -> None:
+    """A competitive temporal-refinement run: per-frame winner + per-behaviour probs."""
+    inf = root / "derived" / "temporal_refinement" / "target_behavior" / "inference_x"
+    (inf / "probability_traces").mkdir(parents=True, exist_ok=True)
+    (inf.parent / "latest.json").write_text(
+        json.dumps({"inference_dir": str(inf)}), encoding="utf-8")
+    pred: list[str] = []
+    for bid, n in per_frame.items():
+        pred += [bid] * n
+    for sid in sessions:
+        frame = {"frame": list(range(len(pred))), "predicted_behavior": pred}
+        for bid in per_frame:
+            frame[f"prob_{bid}"] = [1.0 if p == bid else 0.0 for p in pred]
+        pd.DataFrame(frame).to_parquet(
+            inf / "probability_traces" / f"{sid}_trace.parquet")
+
+
+def test_dense_traces_are_preferred_over_stale_bouts(tmp_path):
+    """A current competitive run outranks the exported bouts, which lose identity.
+
+    Regression: fear conditioning had a complete 69-session run whose bouts were all
+    stamped ``behavior_id = "target_behavior"``, so the only per-behaviour record was
+    the traces.  Reading the stale per-behaviour bouts instead ranked freezing —
+    49 % of frames — as the project's rarest behaviour.
+    """
+    proj = _project_with_bouts(tmp_path, {"wds": 900, "rear": 2})   # stale + inverted
+    _add_traces(tmp_path, {"wds": 10, "rear": 90})
+    assert rd.prevalence_source(proj, ["wds", "rear"]) == rd.PREVALENCE_SOURCE_TRACES
+    ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])
+    assert [bid for bid, _n, _v in ranking] == ["wds", "rear"]
+    assert ranking[0][2] == pytest.approx(0.10)
+    assert ranking[1][2] == pytest.approx(0.90)
+
+
+def test_single_behavior_traces_are_rejected(tmp_path):
+    """``predicted_behavior`` is an argmax — one behaviour wins 100 % of frames.
+
+    A non-competitive run must fall through to the bout detections rather than
+    report the lone behaviour as occupying the whole session.
+    """
+    proj = _project_with_bouts(tmp_path, {"wds": 30, "rear": 900})
+    _add_traces(tmp_path, {"wds": 100})          # single-behaviour inference
+    assert rd.prevalence_source(proj, ["wds", "rear"]) == rd.PREVALENCE_SOURCE_BOUTS
+    ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])
+    assert [bid for bid, _n, _v in ranking] == ["wds", "rear"]
+    assert ranking[0][2] < 1.0
+
+
+def test_session_gated_behavior_is_not_a_hunt_target(tmp_path):
+    """Rare-because-impossible is not rare-because-hard.
+
+    ``shock`` is abundant in a third of sessions and structurally absent from the
+    rest (no shock delivered), so its project-wide mean looks rarest — but hunting
+    it measures finding the shock *sessions*, not rare-behaviour discovery.  ``wds``
+    is uniformly rare and is the real target.
+    """
+    sessions = [f"s{i}" for i in range(12)]
+    proj = _project_with_bouts(tmp_path, {})
+    (tmp_path / "derived" / "representations").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"session_id": sessions, "end_frame": [9000] * len(sessions)}
+                 ).to_parquet(tmp_path / "derived" / "representations"
+                              / "segment_features.parquet")
+    inf = tmp_path / "derived" / "temporal_refinement" / "target_behavior" / "inference_x"
+    (inf / "probability_traces").mkdir(parents=True, exist_ok=True)
+    (inf.parent / "latest.json").write_text(
+        json.dumps({"inference_dir": str(inf)}), encoding="utf-8")
+    for i, sid in enumerate(sessions):
+        # shock: 3% of frames in a third of sessions, none in the rest — so its
+        # project-wide mean (1%) lands BELOW uniformly-rare wds (2%), while its
+        # level where it can occur (3%) is higher.
+        n_shock = 30 if i % 3 == 0 else 0
+        pred = ["shock"] * n_shock + ["wds"] * 20 + ["other"] * (1000 - n_shock - 20)
+        pd.DataFrame({
+            "predicted_behavior": pred,
+            "prob_shock": [0.0] * len(pred), "prob_wds": [0.0] * len(pred),
+        }).to_parquet(inf / "probability_traces" / f"{sid}_trace.parquet")
+
+    raw = rd.rank_behaviors_by_rarity(proj, ["shock", "wds"], skip_gated=False)
+    assert raw[0][0] == "shock"                    # project-wide mean says "rarest"
+
+    msgs: list[str] = []
+    guarded = rd.rank_behaviors_by_rarity(proj, ["shock", "wds"], progress_cb=msgs.append)
+    assert [bid for bid, _n, _v in guarded] == ["wds"]
+    assert any("structurally gated" in m for m in msgs)
+
+
+def test_uniformly_rare_behavior_survives_the_gate(tmp_path):
+    """The guard must not eat a genuinely rare behaviour that occurs everywhere."""
+    sessions = [f"s{i}" for i in range(12)]
+    proj = _project_with_bouts(tmp_path, {})
+    (tmp_path / "derived" / "representations").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"session_id": sessions, "end_frame": [9000] * len(sessions)}
+                 ).to_parquet(tmp_path / "derived" / "representations"
+                              / "segment_features.parquet")
+    inf = tmp_path / "derived" / "temporal_refinement" / "target_behavior" / "inference_x"
+    (inf / "probability_traces").mkdir(parents=True, exist_ok=True)
+    (inf.parent / "latest.json").write_text(
+        json.dumps({"inference_dir": str(inf)}), encoding="utf-8")
+    for i, sid in enumerate(sessions):
+        pred = ["wds"] * (4 + i % 3) + ["other"] * 1000       # rare, but always present
+        pd.DataFrame({
+            "predicted_behavior": pred,
+            "prob_wds": [0.0] * len(pred), "prob_other": [0.0] * len(pred),
+        }).to_parquet(inf / "probability_traces" / f"{sid}_trace.parquet")
+    ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "other"])
+    assert ranking[0][0] == "wds"
+
+
+def test_rank_behaviors_by_rarity_ignores_empty_bouts_file(tmp_path):
+    """An EMPTY bouts file is unmeasurable, not 'rarest at zero'.
+
+    Regression: fear conditioning shipped a zero-row ``Freeze_bouts.parquet``, so
+    freezing averaged a time fraction of exactly 0.0 and won the rarity ranking
+    outright — while being that project's single most abundant behaviour.
+    """
+    proj = _project_with_bouts(tmp_path, {"wds": 30, "rear": 900})
+    empty = pd.DataFrame({"session_id": [], "start_frame": [], "duration_frames": []})
+    empty.to_parquet(tmp_path / "derived" / "behavior_bouts" / "freeze_bouts.parquet")
+    ranking = rd.rank_behaviors_by_rarity(proj, ["freeze", "wds", "rear"])
+    assert [bid for bid, _n, _v in ranking] == ["wds", "rear"]
+
+
+def test_prevalence_averages_only_over_run_covered_sessions(tmp_path):
+    """Sessions no deployment run touched are not sessions with zero behaviour.
+
+    Zero-filling every pool session penalised whichever behaviour happened to be
+    deployed over fewer of them — a property of when the run was launched, not of
+    rarity.  Here both behaviours run on s1 only, so adding an untouched s2 to the
+    pool must not change their prevalence at all.
+    """
+    proj = _project_with_bouts(tmp_path, {})
+    reps = tmp_path / "derived" / "representations"
+    pd.DataFrame({"session_id": ["s1", "s2"], "end_frame": [9000, 9000]}).to_parquet(
+        reps / "segment_features.parquet")
+    bouts = tmp_path / "derived" / "behavior_bouts"
+    for bid, frames in (("wds", 90), ("rear", 900)):
+        pd.DataFrame({"session_id": ["s1"], "start_frame": [100],
+                      "duration_frames": [frames]}).to_parquet(
+            bouts / f"{bid}_bouts.parquet")
+    ranking = dict((n, v) for _b, n, v in rd.rank_behaviors_by_rarity(proj, ["wds", "rear"]))
+    # Measured on s1 alone — NOT halved by the untouched s2.
+    assert ranking["Wet dog shake"] == pytest.approx(90 / 9000)
+    assert ranking["Rear"] == pytest.approx(900 / 9000)
+
+
+def test_stale_eval_bouts_fall_back_to_label_prevalence(tmp_path):
+    """A handful of eval-split bouts is not a deployment read-out — use labels.
+
+    Fear conditioning's ``behavior_bouts/`` held 133 bouts across 69 sessions
+    (0.08 % of frames), written by the *evaluation* pipeline rather than a
+    deployment run.  Ranking on that is meaningless, so the ranker falls back to
+    label prevalence and says so.
+    """
+    proj = _project_with_bouts(tmp_path, {"wds": 2, "rear": 3})   # ~0.03 % of frames
+    ts = tmp_path / "derived" / "training_sets"
+    ts.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({
+        "segment_id": [f"s{i}" for i in range(10)],
+        "session_id": ["s1"] * 10,
+        "start_frame": list(range(0, 300, 30)),
+        "end_frame": list(range(30, 330, 30)),
+        "label": ["rear"] * 8 + ["wds"] * 2,
+    }).to_parquet(ts / "training_set.parquet")
+
+    msgs: list[str] = []
+    ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "rear"], progress_cb=msgs.append)
+    assert rd.prevalence_source(proj, ["wds", "rear"]) == rd.PREVALENCE_SOURCE_LABELS
+    assert [bid for bid, _n, _v in ranking] == ["wds", "rear"]
+    assert any("stale evaluation artifact" in m for m in msgs)
+    assert any(rd.LABEL_SOURCE_CAVEAT in m for m in msgs)
 
 
 # ── preflight: enough examples to hunt, or go label more first? ────────────
@@ -574,7 +751,15 @@ def test_prism_discovery_is_xy_with_one_column_per_strategy(tmp_path):
         effort_targets=(10,), display_budget=200)
     xy = rd.prism_discovery(res)
     assert list(xy.columns)[0] == "Clips reviewed"
-    assert "Essence Miner" in xy.columns and "Random clips" in xy.columns
+    # One replicate subcolumn per seed per strategy, padded to a uniform width so
+    # Prism's positional subcolumn paste lines the datasets up.
+    ess = [c for c in xy.columns if c.startswith("Essence Miner:")]
+    rand = [c for c in xy.columns if c.startswith("Random clips:")]
+    assert ess and len(ess) == len(rand) == res.n_seeds
+    # Replicate means must reproduce the mean the figure is drawn from.
+    pt = next(p for p in res.curves[rd.STRATEGY_ESSENCE].points)
+    row = xy.loc[xy["Clips reviewed"] == pt.n_reviewed, ess].iloc[0]
+    assert row.mean() == pytest.approx(pt.n_found_mean)
 
 
 def test_write_prism_emits_files_and_readme(tmp_path):

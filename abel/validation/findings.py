@@ -204,6 +204,64 @@ def _overview_findings(inp: FindingsInput) -> list[Finding]:
     return out
 
 
+def _confusion_findings(inp: FindingsInput) -> list[Finding]:
+    """Say the result in counts, not rates.
+
+    F1 = 0.91 is a number a reader takes on trust; "found 191 of 214 and raised 17
+    false alarms" is one they can check against their own scoring experience.  Both
+    are emitted, because the counts alone are not comparable across behaviors (the
+    held-out denominators differ) — the rate does the comparing, the count makes it
+    concrete.
+    """
+    from abel.validation.analyses.cross_project import confusion_by_behavior  # noqa: PLC0415
+
+    conf = confusion_by_behavior(inp.cells)
+    if conf.empty:
+        return []
+
+    tp, fn, fp = (int(conf[c].sum()) for c in ("tp", "fn", "fp"))
+    n_pos = tp + fn
+    if n_pos <= 0:
+        return []
+
+    rows = conf.sort_values("recall", na_position="last")
+    worst = rows.iloc[0]
+    best = rows.iloc[-1]
+
+    def _row(r) -> str:
+        return (f"{r['project_id']} · {r['behavior_name']}: {int(r['tp'])} of "
+                f"{int(r['n_pos_val'])} found, {int(r['fp'])} false "
+                f"{_plural(int(r['fp']), 'alarm')}")
+
+    out = [Finding(
+        "Held-out counts",
+        f"Across {len(conf)} (assay × behavior) "
+        f"{_plural(len(conf), 'model')}, the model recovered {tp} of the {n_pos} "
+        f"held-out clips the reviewer marked positive ({_pct(tp / n_pos)}) and "
+        f"raised {fp} false {_plural(fp, 'alarm')}.",
+        f"Best recall — {_row(best)}. Weakest — {_row(worst)}. Counts are per fit, "
+        f"averaged over seeds (each seed re-scores the same held-out pool, so they "
+        f"are not additive) and totalled across behaviors, each of which brings its "
+        f"own positives. Per-behavior counts: cross_project/confusion_by_behavior.csv.",
+    )]
+
+    # The single most misreadable thing about a count table, stated up front.
+    out.append(Finding(
+        "Held-out counts",
+        "These counts are clips the reviewer scored, not bouts — a 'false alarm' "
+        "is one mis-scored clip, not a spurious behavioral event.",
+        "Bout-level counts are not identifiable from a held-out labeled subset: the "
+        "evaluated unit is one short, isolated clip (a fraction of a second in most "
+        "projects — see clip_sec in confusion_by_behavior.csv), while a bout needs "
+        "contiguous observation longer than itself, so event-level FP/FN measure "
+        "label sparsity rather than the model. True negatives are reported in the "
+        "CSV to close the 2×2 but are not summarized here — under this class "
+        "imbalance any accuracy derived from them is ~0.99 regardless of the model.",
+        kind=KIND_CAVEAT,
+    ))
+    return out
+
+
 def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
     if not inp.lc_results:
         return []
@@ -711,6 +769,7 @@ def _throughput_findings(inp: FindingsInput) -> list[Finding]:
 
 _DERIVERS = (
     _overview_findings,
+    _confusion_findings,
     _learning_curve_findings,
     _ablation_findings,
     _discrimination_findings,

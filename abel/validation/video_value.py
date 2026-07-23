@@ -112,14 +112,9 @@ def _paired_p(deltas) -> float:
     A boolean ``significant`` is not something a manuscript can report; the exact p
     is.  Returns NaN when there are too few seeds or the differences are constant.
     """
-    vals = np.asarray([v for v in deltas if np.isfinite(v)], dtype=float)
-    if len(vals) < 2 or float(np.std(vals, ddof=1)) == 0.0:
-        return float("nan")
-    try:
-        from scipy import stats  # noqa: PLC0415
-    except ImportError:
-        return float("nan")
-    return float(stats.ttest_1samp(vals, 0.0).pvalue)
+    from abel.validation import metrics as vmetrics  # noqa: PLC0415
+
+    return vmetrics.paired_p(deltas)
 
 
 def _mean(values) -> float:

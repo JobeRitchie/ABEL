@@ -78,6 +78,66 @@ def ci95(values) -> float:
     return float(t_critical_95(n) * sem)
 
 
+def paired_p(deltas) -> float:
+    """Two-sided paired t-test p on per-seed differences (H0: mean difference = 0).
+
+    The companion to :func:`ci95`: every seeded analysis in the suite reports a
+    *difference* (with-feature minus without), and a boolean "significant" is not
+    something a manuscript can print — the exact p is.  Because both arms saw the
+    same clips under the same seed, the paired form is the correct test.
+
+    Returns NaN, never 0, when the test is undefined: fewer than 2 seeds, or
+    differences that are constant across seeds (zero variance ⇒ an infinite t).
+    NaN also comes back if scipy is absent, since the t survival function has no
+    small table equivalent — callers must treat p as optional and fall back on
+    ``|mean| > ci95`` (which needs no scipy) for the significance decision.
+
+    The zero-variance guard is a *tolerance*, not ``sd == 0``.  ``np.std`` of three
+    identical floats leaves ~1e-18 of dust, which sails past an exact comparison and
+    lets scipy return p ≈ 1e-33 — a fabricated "overwhelming" result manufactured
+    out of no variance at all, which then dominates any volcano it is plotted on.
+    """
+    vals = np.asarray([v for v in deltas if np.isfinite(v)], dtype=float)
+    if vals.size < 2:
+        return float("nan")
+    sd = float(np.std(vals, ddof=1))
+    if not np.isfinite(sd) or sd <= 1e-12 * max(1.0, float(np.abs(vals).max())):
+        return float("nan")
+    try:
+        from scipy import stats  # noqa: PLC0415
+    except ImportError:
+        return float("nan")
+    return float(stats.ttest_1samp(vals, 0.0).pvalue)
+
+
+def benjamini_hochberg_threshold(pvalues, alpha: float = 0.05) -> float:
+    """Benjamini-Hochberg critical value at ``alpha``: reject every p at or below it.
+
+    A full discrimination run tests ~40-100 pair × feature-family combinations, so a
+    bare p<0.05 line on a volcano expects a handful of false positives by
+    construction.  This returns a second, honest reference line — NaN when nothing
+    survives, so the caller draws no line rather than an invented one.
+
+    Returns the critical value ``k/m · alpha`` of the last rejection, NOT the largest
+    rejected p.  The two reject exactly the same tests (no observed p can fall
+    between them — one there would itself have been rejected, contradicting ``k``),
+    but a line drawn at the largest rejected p lands *on top of* that point, leaving
+    a reader unable to tell whether it passed.  The critical value sits cleanly above
+    every point it rejects.
+
+    Deliberately dependency-free (BH is a sort and a scan), so the figure keeps its
+    multiple-comparison line even where :func:`paired_p` had to fall back to NaN.
+    """
+    vals = np.sort(np.asarray([v for v in pvalues if np.isfinite(v)], dtype=float))
+    m = vals.size
+    if m == 0:
+        return float("nan")
+    # Largest k with p_(k) <= k/m * alpha; every p at or below p_(k) is rejected.
+    critical = (np.arange(1, m + 1) / m) * float(alpha)
+    passing = np.nonzero(vals <= critical)[0]
+    return float(critical[passing[-1]]) if passing.size else float("nan")
+
+
 # ── Imbalanced-classification summaries ────────────────────────────────────
 
 

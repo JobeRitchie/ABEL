@@ -67,6 +67,10 @@ class ResultsStore:
         return self.cells_path
 
     def write_csv(self, df: pd.DataFrame, name: str, subdir: str = "") -> Path:
+        # utf-8-sig: these CSVs get opened in Excel on Windows, which assumes the
+        # ANSI code page unless the file leads with a BOM -- without it a behavior
+        # name carrying any non-ASCII character arrives as mojibake. Readers must
+        # use encoding="utf-8-sig" to match (see meta_summary._read).
         target = (self.sub(subdir) if subdir else self.run_dir) / name
-        df.to_csv(target, index=False)
+        df.to_csv(target, index=False, encoding="utf-8-sig")
         return target

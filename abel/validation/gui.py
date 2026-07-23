@@ -19,14 +19,14 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
     QLineEdit,
     QListView, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
-    QPushButton, QScrollArea, QSpinBox, QSplitter, QStatusBar, QTableWidget,
+    QMenu, QPushButton, QScrollArea, QSpinBox, QSplitter, QStatusBar, QTableWidget,
     QTableWidgetItem, QTabWidget, QTextEdit, QTreeView, QVBoxLayout, QWidget,
 )
 
@@ -269,6 +269,7 @@ class _BehaviorscapeWorker(QRunnable):
             self.signals.progress.emit("Behaviorscape complete.", 1.0)
             self.signals.finished.emit({
                 "images": images, "tables": tables, "summary": summary,
+                "out_dir": self.out_dir,
             })
         except Exception:
             self.signals.error.emit(traceback.format_exc())
@@ -344,7 +345,7 @@ class _VideoValueWorker(QRunnable):
             self.signals.progress.emit("Video-feature comparison complete.", 1.0)
             self.signals.finished.emit({
                 "images": [png], "tables": {"Video-feature value": csv_path},
-                "summary": summary})
+                "summary": summary, "out_dir": self.out_dir})
         except Exception:
             self.signals.error.emit(traceback.format_exc())
 
@@ -403,7 +404,7 @@ class _BenchmarkWorker(QRunnable):
             self.signals.progress.emit("Benchmark complete.", 1.0)
             self.signals.finished.emit({
                 "images": [png], "tables": {"Throughput": csv_path},
-                "summary": summary})
+                "summary": summary, "out_dir": self.out_dir})
         except Exception:
             self.signals.error.emit(traceback.format_exc())
 
@@ -500,6 +501,8 @@ class _FigurePopout(QMainWindow):
 class _ClickableThumbnail(QLabel):
     """A figure thumbnail that opens a full-size :class:`_FigurePopout` on click."""
 
+    BORDER_PX = 2   # widest border state (hover); callers pad the widget for it
+
     def __init__(self, path: Path) -> None:
         super().__init__()
         self._path = Path(path)
@@ -517,32 +520,38 @@ class _ClickableThumbnail(QLabel):
 
 
 class _ImageStrip(QScrollArea):
-    """Scrollable wrapping grid of small figure thumbnails.
+    """Scrollable wrapping grid of figure thumbnails that fill the pane.
 
-    Figures render at a fixed thumbnail width (capped at native size) and wrap
-    into as many columns as fit, so several plots sit side-by-side for comparison
-    instead of one giant figure filling the pane.  Click any thumbnail to open it
-    full size in a separate window; use Export Figure for the original file.
+    Figures wrap into as many columns as fit at ``_MIN_THUMB_W``, then each
+    thumbnail is *grown* to divide the available width evenly (capped at the
+    figure's native resolution, so nothing is ever upscaled into blur).  A wide
+    results pane therefore renders one or two figures big enough to actually
+    read, instead of leaving a fixed-width thumbnail marooned in white space.
+    Click any thumbnail to open it full size in a separate window; use Export
+    Figure for the original file.
     """
 
-    _THUMB_W = 430  # px per figure thumbnail
+    _MIN_THUMB_W = 380   # never wrap to a column narrower than this
+    _MAX_THUMB_W = 1600  # sanity cap on very wide panes
 
     def __init__(self) -> None:
         super().__init__()
         self.setWidgetResizable(True)
+        # Thumbnails are sized to the pane, so a horizontal scrollbar would only
+        # ever mean the sizing was wrong — never let one appear.
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._host = QWidget()
         self._grid = QGridLayout(self._host)
         self._grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self._grid.setSpacing(10)
         self.setWidget(self._host)
-        self._labels: list[QLabel] = []
+        # Source pixmaps are kept so a resize can re-scale from the original
+        # rather than repeatedly re-scaling an already-scaled copy.
+        self._items: list[tuple[Path, QPixmap]] = []
+        self._last_w = -1
 
     def show_images(self, paths: list[Path]) -> None:
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._labels = []
+        self._items = []
         for p in paths:
             # A plot helper that bailed out returns None; skip rather than raise.
             if p is None or not Path(p).exists():
@@ -550,30 +559,68 @@ class _ImageStrip(QScrollArea):
             pix = QPixmap(str(p))
             if pix.isNull():
                 continue
-            w = min(self._THUMB_W, pix.width())
-            scaled = pix.scaledToWidth(w, Qt.TransformationMode.SmoothTransformation)
-            lab = _ClickableThumbnail(p)
-            lab.setPixmap(scaled)
-            lab.setFixedSize(scaled.size())
-            lab.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
-            self._labels.append(lab)
-        if not self._labels:
-            self._grid.addWidget(QLabel("No figures produced yet."), 0, 0)
-        self._relayout()
+            self._items.append((Path(p), pix))
+        self._last_w = -1
+        self._rebuild()
 
-    def _relayout(self) -> None:
-        if not self._labels:
+    def _clear(self) -> None:
+        while self._grid.count():
+            item = self._grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _rebuild(self) -> None:
+        self._clear()
+        if not self._items:
+            empty = QLabel("No figures yet — run this analysis to populate the panel.")
+            empty.setStyleSheet("color:#6c7086; padding: 24px;")
+            self._grid.addWidget(empty, 0, 0)
             return
-        avail = self.viewport().width()
-        cols = max(1, avail // (self._THUMB_W + self._grid.spacing()))
-        for lab in self._labels:
-            self._grid.removeWidget(lab)
-        for i, lab in enumerate(self._labels):
+        sp = self._grid.spacing()
+        # Reserve the vertical scrollbar unconditionally: laying out to the full
+        # viewport makes the content tall enough to summon the scrollbar, which
+        # then narrows the viewport and clips the right-hand column.
+        margins = self._grid.contentsMargins()
+        reserve = (self.verticalScrollBar().sizeHint().width() + 4
+                   + margins.left() + margins.right())
+        avail = max(240, self.viewport().width() - reserve)
+        self._last_w = self.viewport().width()
+        # The label's border is drawn *inside* the widget, so each thumbnail
+        # occupies its pixmap plus the frame — budget for it when dividing the
+        # width, or the last column overflows by exactly the border.
+        pad = 2 * _ClickableThumbnail.BORDER_PX
+        cols = max(1, (avail + sp) // (self._MIN_THUMB_W + pad + sp))
+        cols = int(min(cols, len(self._items)))
+        thumb_w = int((avail - sp * (cols - 1)) / cols) - pad
+        thumb_w = max(200, min(self._MAX_THUMB_W, thumb_w))
+        for i, (path, pix) in enumerate(self._items):
+            w = min(thumb_w, pix.width())   # never upscale past native resolution
+            scaled = pix.scaledToWidth(int(w), Qt.TransformationMode.SmoothTransformation)
+            lab = _ClickableThumbnail(path)
+            lab.setPixmap(scaled)
+            lab.setFixedSize(scaled.width() + pad, scaled.height() + pad)
+            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._grid.addWidget(lab, i // cols, i % cols)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._relayout()
+        # Re-scaling every pixmap on every pixel of a drag is wasteful; only
+        # redo the layout once the width has moved appreciably.
+        if abs(self.viewport().width() - self._last_w) > 12:
+            self._rebuild()
+
+
+def _open_in_file_manager(path: Path) -> None:
+    """Open ``path`` in the OS file manager (or its parent, if it is a file)."""
+    target = Path(path)
+    if target.is_file():
+        target = target.parent
+    if sys.platform.startswith("win"):
+        os.startfile(str(target))  # noqa: S606
+    elif sys.platform == "darwin":
+        subprocess.run(["open", str(target)], check=False)
+    else:
+        subprocess.run(["xdg-open", str(target)], check=False)
 
 
 # ── Result panel: figures + optional view dropdown + export buttons ──────────
@@ -582,14 +629,27 @@ class _ResultPanel(QWidget):
     """An image strip with Export-figure / Export-data buttons and an optional
     view dropdown (used by the learning-curve tab to switch metric views)."""
 
-    def __init__(self, views: dict[str, str] | None = None) -> None:
+    def __init__(self, views: dict[str, str] | None = None,
+                 title: str = "Results") -> None:
         super().__init__()
         self._view_labels = dict(views or {})   # view key -> display label
         self._images_by_view: dict[str | None, list[Path]] = {}
         self._csv_tables: dict[str, Path] = {}
+        self._folders: dict[str, Path] = {}     # label -> on-disk folder for this run
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        head = QHBoxLayout()
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet("color:#89b4fa; font-weight:bold; font-size:14px;")
+        hint = QLabel("Click a figure to open it full size")
+        hint.setStyleSheet("color:#6c7086; font-size:11px;")
+        head.addWidget(title_lbl)
+        head.addStretch(1)
+        head.addWidget(hint)
+        lay.addLayout(head)
 
         # The view row is always built, even when no views are known up front:
         # analyses whose views depend on what the run produced (discrimination's
@@ -623,6 +683,13 @@ class _ResultPanel(QWidget):
         lay.addLayout(data_row)
 
         btn_row = QHBoxLayout()
+        # Straight to the files this tab was built from: every figure, CSV and
+        # intermediate the run wrote for THIS analysis lives in that folder, and
+        # hunting for it under the timestamped run directory is a chore.
+        self._folder_btn = QPushButton("Open Data Folder")
+        self._folder_btn.setToolTip("Open the folder holding this tab's run output.")
+        self._folder_btn.clicked.connect(self._open_folder)
+        self._folder_btn.setEnabled(False)
         self._png_btn = QPushButton("Export Figure (PNG)…")
         self._png_btn.clicked.connect(self._export_figure)
         self._csv_btn = QPushButton("Export Data (CSV)…")
@@ -635,6 +702,7 @@ class _ResultPanel(QWidget):
         self._png_btn.setEnabled(False)
         self._csv_btn.setEnabled(False)
         self._copy_btn.setEnabled(False)
+        btn_row.addWidget(self._folder_btn)
         btn_row.addStretch()
         btn_row.addWidget(self._png_btn)
         btn_row.addWidget(self._copy_btn)
@@ -652,18 +720,62 @@ class _ResultPanel(QWidget):
         return {"data": Path(csv_path)}
 
     def set_simple(self, images: list[Path],
-                   csv_path: "Path | dict[str, Path] | None") -> None:
+                   csv_path: "Path | dict[str, Path] | None",
+                   folder: "Path | dict[str, Path] | None" = None) -> None:
         self._images_by_view = {None: list(images)}
         self._set_view_items([])
         self._set_tables(csv_path)
+        self.set_folder(folder)
         self._show_current()
 
     def set_views(self, images_by_view: dict[str, list[Path]],
-                  csv_path: "Path | dict[str, Path] | None") -> None:
+                  csv_path: "Path | dict[str, Path] | None",
+                  folder: "Path | dict[str, Path] | None" = None) -> None:
         self._images_by_view = dict(images_by_view)
         self._set_view_items(list(images_by_view))
         self._set_tables(csv_path)
+        self.set_folder(folder)
         self._show_current()
+
+    def set_folder(self, folder: "Path | dict[str, Path] | None") -> None:
+        """Point "Open Data Folder" at this tab's run output.
+
+        Passing ``None`` falls back to the folders the figures and tables
+        themselves live in, so a panel populated straight from a worker still
+        gets a working button without every caller repeating the path.
+        """
+        folders: dict[str, Path] = {}
+        if isinstance(folder, dict):
+            folders = {str(k): Path(v) for k, v in folder.items()}
+        elif folder is not None:
+            folders = {Path(folder).name: Path(folder)}
+        else:
+            for p in [*self._all_images(), *self._csv_tables.values()]:
+                d = Path(p).parent
+                folders.setdefault(d.name, d)
+        self._folders = {k: v for k, v in folders.items() if v.is_dir()}
+        self._folder_btn.setEnabled(bool(self._folders))
+        self._folder_btn.setToolTip(
+            "\n".join(str(v) for v in self._folders.values())
+            if self._folders else "Run this analysis to produce output files.")
+
+    def _all_images(self) -> list[Path]:
+        return [p for imgs in self._images_by_view.values() for p in imgs if p]
+
+    def _open_folder(self) -> None:
+        """One folder opens directly; several offer a menu (e.g. Generalization
+        writes its agreement, time-budget and calibration output side by side)."""
+        if not self._folders:
+            return
+        if len(self._folders) == 1:
+            _open_in_file_manager(next(iter(self._folders.values())))
+            return
+        menu = QMenu(self)
+        for label, path in self._folders.items():
+            act = menu.addAction(label)
+            act.setToolTip(str(path))
+            act.triggered.connect(lambda _checked=False, p=path: _open_in_file_manager(p))
+        menu.exec(self._folder_btn.mapToGlobal(self._folder_btn.rect().bottomLeft()))
 
     def _set_view_items(self, keys: list[str]) -> None:
         """Rebuild the view dropdown, keeping the current selection when it survives."""
@@ -768,13 +880,136 @@ class _ResultPanel(QWidget):
             win.statusBar().showMessage(msg, 6000)
 
 
+# ── Standard analysis-tab layout: settings left, figures right ───────────────
+
+def _explain(text: str) -> QLabel:
+    """A wrapped explanatory paragraph for the left settings column.
+
+    Explanations were written for a full-width tab, so hard line breaks are
+    stripped: in a ~380 px column they would wrap twice and waste vertical
+    space.  Blank lines (paragraph breaks) and bullet indents are preserved.
+    """
+    out: list[str] = []
+    for para in text.split("\n\n"):
+        lines = [ln.rstrip() for ln in para.split("\n")]
+        joined = ""
+        for ln in lines:
+            stripped = ln.strip()
+            if not joined:
+                joined = stripped
+            elif ln.startswith(("  ", "\t", "•", "  •")) or stripped.startswith("•"):
+                joined += "\n" + ln
+            else:
+                joined += " " + stripped
+        out.append(joined)
+    lab = QLabel("\n\n".join(out))
+    lab.setWordWrap(True)
+    lab.setStyleSheet("color:#a6adc8; font-size:12px;")
+    return lab
+
+
+def _relax_forms(obj) -> None:
+    """Let every QFormLayout under ``obj`` survive a narrow column.
+
+    The settings forms were written for a full-width tab, so labels like
+    "Seed exemplars (define the behavior):" set a minimum width the ~390 px
+    column cannot honour and the row gets clipped.  WrapLongRows drops the
+    field onto its own line instead whenever the row will not fit — which is
+    also the only display-scaling-safe behaviour here, since the label width
+    grows with the user's DPI setting.
+    """
+    layout = obj.layout() if isinstance(obj, QWidget) else obj
+    if layout is None:
+        return
+    if isinstance(layout, QFormLayout):
+        layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        if item.widget() is not None:
+            _relax_forms(item.widget())
+        elif item.layout() is not None:
+            _relax_forms(item.layout())
+
+
+def _split_tab(left_items: list, panel: QWidget, *, left_chars: int = 64) -> QWidget:
+    """Build an analysis tab as *settings/explanation left, results right*.
+
+    The left column is scrollable and stays narrow; the results panel takes
+    every remaining pixel, which is the whole point — figures are the output,
+    the settings are read once.  The splitter is user-draggable and the left
+    side is collapsible, so the figures can be given the entire tab.
+
+    ``left_chars`` sizes that column in characters rather than pixels, and the
+    result is floored at whatever the widgets actually need, so the settings
+    stay readable under Windows display scaling instead of clipping.
+
+    ``left_items`` accepts widgets, layouts, or ``(item, stretch)`` tuples for
+    anything that should grow with the column (tables, findings boxes).
+    """
+    host = QWidget()
+    ll = QVBoxLayout(host)
+    ll.setContentsMargins(2, 2, 8, 2)
+    ll.setSpacing(8)
+    stretched = False
+    for entry in left_items:
+        item, stretch = entry if isinstance(entry, tuple) else (entry, 0)
+        stretched = stretched or bool(stretch)
+        if isinstance(item, QWidget):
+            ll.addWidget(item, stretch)
+        else:
+            ll.addLayout(item, stretch)
+    if not stretched:
+        ll.addStretch(1)
+    _relax_forms(host)
+
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(host)
+    # AsNeeded, not AlwaysOff: a wrapped form still has a floor, and clipping a
+    # setting the user cannot reach is worse than a scrollbar.
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    scroll.setMinimumWidth(300)
+
+    split = QSplitter(Qt.Orientation.Horizontal)
+    split.addWidget(scroll)
+    split.addWidget(panel)
+    split.setStretchFactor(0, 0)
+    split.setStretchFactor(1, 1)
+    split.setCollapsible(0, True)
+    split.setCollapsible(1, False)
+
+    def _size_left() -> None:
+        # Measured, not hard-coded: character width tracks the font, which
+        # tracks the display-scaling factor, and the floor guarantees the
+        # settings are never clipped.  Deferred to the event loop because the
+        # window's stylesheet — which changes every widget's padding, and so
+        # its minimum width — is applied after the tabs are built.
+        fm = host.fontMetrics()
+        sb = scroll.verticalScrollBar().sizeHint().width()
+        wanted = max(fm.averageCharWidth() * left_chars,
+                     host.minimumSizeHint().width() + sb + 12)
+        split.setSizes([wanted, max(3 * wanted, split.width() - wanted)])
+
+    _size_left()
+    QTimer.singleShot(0, _size_left)
+
+    w = QWidget()
+    lay = QVBoxLayout(w)
+    lay.setContentsMargins(8, 8, 8, 8)
+    lay.addWidget(split)
+    return w
+
+
 # ── Main window ─────────────────────────────────────────────────────────────
 
 class ValidationWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ABEL — Validation & Meta-Analysis Suite")
-        self.resize(1180, 820)
+        # Sized for the split layout: ~390 px of settings plus a results pane
+        # wide enough for two side-by-side figures.
+        self.resize(1560, 900)
         self._projects: dict[str, ProjectRef] = {}
         self._selected: dict[str, set[str]] = {}     # project_id -> behavior_ids
         self._output_dir: Path | None = None
@@ -797,6 +1032,7 @@ class ValidationWindow(QMainWindow):
         self._demo_cancel: list[bool] = [False]
         self._demo_worker = None
         self._demo_preview_dialog = None      # live preview window (kept alive)
+        self._demo_out_dir: Path | None = None  # folder of the last exported demo clip
 
         self._build_ui()
         self.setStyleSheet(_DARK_STYLE)
@@ -942,7 +1178,7 @@ class ValidationWindow(QMainWindow):
              lambda: self._save_session(as_new=True)),
             ("Load…", "Reload a saved setup: projects, checked behaviors and renames.",
              self._load_session),
-            ("Open folder", "Open this session's folder (setup + all its runs).",
+            ("Open Data Folder", "Open this session's folder (setup + all its runs).",
              self._open_session_folder),
         ):
             b = QPushButton(text)
@@ -976,25 +1212,16 @@ class ValidationWindow(QMainWindow):
 
     # ── Run All: one button, publication settings, one consolidated report ──
     def _build_run_all_tab(self) -> QWidget:
-        w = QWidget()
-        outer = QVBoxLayout(w)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        host = QWidget()
-        lay = QVBoxLayout(host)
-        scroll.setWidget(host)
-        outer.addWidget(scroll, 1)
+        left: list = []
 
-        intro = QLabel(
+        intro = _explain(
             "Run the whole validation suite in one go, at fixed publication settings.\n"
             "Pick your projects and behaviors on the Projects tab, tick the analyses you\n"
             "want below, and click Run. Every analysis shares ONE held-out split, so the\n"
             "numbers are directly comparable across sections. When it finishes you get a\n"
             "consolidated report (findings in plain language + the headline figures), and\n"
             "Export Everything writes all figures and data CSVs to a folder of your choice.")
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color:#a6adc8;")
-        lay.addWidget(intro)
+        left.append(intro)
 
         abox = QGroupBox("Analyses to include")
         av = QVBoxLayout(abox)
@@ -1028,7 +1255,7 @@ class ValidationWindow(QMainWindow):
             lambda: [cb.setChecked(False) for cb in self._suite_checks.values()])
         row.addWidget(all_btn); row.addWidget(none_btn); row.addStretch()
         av.addLayout(row)
-        lay.addWidget(abox)
+        left.append(abox)
 
         pbox = QGroupBox("Publication settings (fixed)")
         pv = QVBoxLayout(pbox)
@@ -1046,26 +1273,28 @@ class ValidationWindow(QMainWindow):
         note.setWordWrap(True)
         note.setStyleSheet("color:#6c7086; font-size:11px;")
         pv.addWidget(note)
-        lay.addWidget(pbox)
+        left.append(pbox)
 
         run = QPushButton("Run Full Validation Suite")
         run.setObjectName("runBtn")
         run.clicked.connect(self._run_full_suite)
-        lay.addWidget(run)
+        left.append(run)
         self._suite_run_btn = run
 
         self._suite_status = QLabel("")
         self._suite_status.setWordWrap(True)
         self._suite_status.setStyleSheet("color:#a6adc8;")
-        lay.addWidget(self._suite_status)
+        left.append(self._suite_status)
 
-        lay.addWidget(QLabel("Key findings"))
+        find_lbl = QLabel("Key findings")
+        find_lbl.setStyleSheet("color:#89b4fa; font-weight:bold;")
+        left.append(find_lbl)
         self._suite_findings = QTextEdit()
         self._suite_findings.setReadOnly(True)
-        self._suite_findings.setMinimumHeight(220)
+        self._suite_findings.setMinimumHeight(180)
         self._suite_findings.setPlaceholderText(
             "Findings appear here once the run completes.")
-        lay.addWidget(self._suite_findings)
+        left.append((self._suite_findings, 1))
 
         btn_row = QHBoxLayout()
         self._suite_pdf_btn = QPushButton("Open Report (PDF)…")
@@ -1080,15 +1309,12 @@ class ValidationWindow(QMainWindow):
         self._suite_export_btn.clicked.connect(self._export_bundle)
         for b in (self._suite_pdf_btn, self._suite_export_btn):
             b.setEnabled(False)
-        btn_row.addStretch()
         btn_row.addWidget(self._suite_pdf_btn)
         btn_row.addWidget(self._suite_export_btn)
-        lay.addLayout(btn_row)
+        left.append(btn_row)
 
-        lay.addWidget(QLabel("Headline figures"))
-        self._suite_panel = _ResultPanel()
-        lay.addWidget(self._suite_panel, 1)
-        return w
+        self._suite_panel = _ResultPanel(title="Headline figures")
+        return _split_tab(left, self._suite_panel, left_chars=70)
 
     def _selected_suite_analyses(self) -> list[str]:
         return [k for k in FULL_SUITE if self._suite_checks[k].isChecked()]
@@ -1162,7 +1388,13 @@ class ValidationWindow(QMainWindow):
         """Findings + headline figures + the export buttons, after a run."""
         self._suite_findings.setHtml(self._findings_to_html(out.findings))
         headline = pdf_report.headline_figures(out.run_dir)
-        self._suite_panel.set_simple(headline, out.run_dir / "findings.csv")
+        # The whole run, plus the two folders people actually go looking for:
+        # the Prism-ready pivots and the meta summary tables.
+        self._suite_panel.set_simple(headline, out.run_dir / "findings.csv", folder={
+            "Run folder": out.run_dir,
+            "Prism tables": out.run_dir / "prism",
+            "Meta summaries": out.run_dir / "summary",
+        })
         self._suite_export_btn.setEnabled(True)
         self._suite_pdf_btn.setEnabled(out.summary_html is not None)
         self._report_figures("Full suite", headline)
@@ -1244,7 +1476,6 @@ class ValidationWindow(QMainWindow):
             subprocess.run(["xdg-open", str(path)], check=False)
 
     def _build_learning_curve_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
         box = QGroupBox("Optimal-clips learning curve settings")
         form = QFormLayout(box)
         self._lc_sizes = QLineEdit("10, 25, 50, 100, 200, all")
@@ -1255,17 +1486,14 @@ class ValidationWindow(QMainWindow):
         form.addRow("Negatives policy:", self._lc_negpolicy)
         self._lc_negratio = QDoubleSpinBox(); self._lc_negratio.setRange(0.5, 20.0); self._lc_negratio.setValue(3.0)
         form.addRow("Negatives per positive (ratio mode):", self._lc_negratio)
-        lay.addWidget(box)
         run = QPushButton("Run Learning Curves"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_LEARNING_CURVE]))
-        lay.addWidget(run)
-        self._lc_panel = _ResultPanel(views=LEARNING_CURVE_VIEWS)
-        lay.addWidget(self._lc_panel, 1)
+        self._lc_panel = _ResultPanel(views=LEARNING_CURVE_VIEWS,
+                                      title="Learning curves")
         self._lc_run_btn = run
-        return w
+        return _split_tab([box, run], self._lc_panel)
 
     def _build_ablation_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
         box = QGroupBox("Ablation settings")
         form = QFormLayout(box)
         self._abl_seeds = QSpinBox(); self._abl_seeds.setRange(1, 20); self._abl_seeds.setValue(5)
@@ -1277,7 +1505,7 @@ class ValidationWindow(QMainWindow):
             "Comparing them shows where each enhancement adds the most value — regularizers\n"
             "like adaptive complexity and augmentation pay off most in the low-data regime.")
         form.addRow("Clip budget(s):", self._abl_budgets)
-        info = QLabel(
+        info = _explain(
             "How to read this: the comparison point is a pose-only Baseline with every\n"
             "enhancement off. Each bar adds ONE enhancement on its own — video features,\n"
             "probability calibration, adaptive model complexity, feature augmentation, and\n"
@@ -1285,20 +1513,14 @@ class ValidationWindow(QMainWindow):
             "of them together. Bars show ΔF1 vs. the baseline; positive ⇒ that feature helps.\n"
             "Error bars are 95% CIs across seeds; FADED bars overlap 0 (not distinguishable\n"
             "from baseline — a small ± there is noise, not harm). One chart per clip budget.")
-        info.setWordWrap(True)
-        info.setStyleSheet("color:#a6adc8;")
         form.addRow(info)
-        lay.addWidget(box)
         run = QPushButton("Run Ablation"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_ABLATION]))
-        lay.addWidget(run)
-        self._abl_panel = _ResultPanel()
-        lay.addWidget(self._abl_panel, 1)
+        self._abl_panel = _ResultPanel(title="Ablation")
         self._abl_run_btn = run
-        return w
+        return _split_tab([box, run], self._abl_panel)
 
     def _build_discrimination_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
         box = QGroupBox("Behavior discrimination settings")
         form = QFormLayout(box)
         self._disc_seeds = QSpinBox(); self._disc_seeds.setRange(1, 20); self._disc_seeds.setValue(3)
@@ -1311,7 +1533,7 @@ class ValidationWindow(QMainWindow):
             "as n(n-1)/2. When the cap bites, the pairs whose feature-space centroids sit\n"
             "closest together (the ones most likely to be confused) are kept.")
         form.addRow("Max behavior pairs:", self._disc_max_pairs)
-        info = QLabel(
+        info = _explain(
             "How this differs from Ablation: Ablation asks a DETECTION question — can we\n"
             "find behavior X against everything else? Because 'everything else' is mostly\n"
             "easy negatives, a feature family can look useless there while doing the job\n"
@@ -1320,29 +1542,31 @@ class ValidationWindow(QMainWindow):
             "binary A-vs-B model on just those clips, once per feature family (pose only →\n"
             "+ video → + social), all sharing the same clips and seed, and scores separability\n"
             "with ROC-AUC.\n\n"
-            "Read the matrix figure: LEFT = pose-only separability (dark = the model confuses\n"
-            "that pair). RIGHT = the share of the pose baseline's REMAINING error each feature\n"
-            "family removes (red = it disambiguates the pair). Pairs pose already solves are\n"
-            "greyed out — there is no discrimination question left to ask there.")
-        info.setWordWrap(True)
-        info.setStyleSheet("color:#a6adc8;")
+            "Read the LANDSCAPE figure first — it is the whole run, every pair of every\n"
+            "assay, in two panels. LEFT: each point is one behavior pair, placed by how much\n"
+            "error pose alone leaves (x, right = pose confuses it) against the share of that\n"
+            "error the best feature family removes (y), coloured by WHICH family. Pairs in\n"
+            "the shaded band are already solved by pose. Hollow points mean no family\n"
+            "measurably helps. RIGHT: a volcano over every pair × family — how big the gain\n"
+            "was (x) against how reproducible it was across seeds (y), so a large-but-noisy\n"
+            "gain is visibly different from a small-but-rock-solid one.\n\n"
+            "The per-project matrix views behind it are the per-assay detail: LEFT = pose-only\n"
+            "separability (dark = the model confuses that pair). RIGHT = the share of the pose\n"
+            "baseline's REMAINING error each family removes (red = it disambiguates the pair).\n"
+            "Hatched cells were never trained — past the max-pairs cap, or too few clips.")
         form.addRow(info)
-        lay.addWidget(box)
         run = QPushButton("Run Discrimination"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_DISCRIMINATION]))
-        lay.addWidget(run)
-        self._disc_panel = _ResultPanel()
-        lay.addWidget(self._disc_panel, 1)
+        self._disc_panel = _ResultPanel(title="Discrimination")
         self._disc_run_btn = run
-        return w
+        return _split_tab([box, run], self._disc_panel)
 
     def _build_generalization_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
         box = QGroupBox("Generalization / human-agreement settings")
         form = QFormLayout(box)
         self._gen_seeds = QSpinBox(); self._gen_seeds.setRange(1, 20); self._gen_seeds.setValue(3)
         form.addRow("Seeds:", self._gen_seeds)
-        info = QLabel(
+        info = _explain(
             "Trains on training-pool subjects, evaluates on held-out subjects.\n"
             "Reports F1 + Cohen's κ vs. held-out reviewed labels.\n\n"
             "This run also produces two further analyses from the SAME held-out predictions\n"
@@ -1352,20 +1576,14 @@ class ValidationWindow(QMainWindow):
             "    with Pearson r, Lin's CCC, R² and Bland-Altman bias / limits of agreement.\n"
             "  • Calibration — a reliability diagram with ECE and Brier score, i.e. whether\n"
             "    a predicted probability of 0.8 really means right 80% of the time.")
-        info.setWordWrap(True)
-        info.setStyleSheet("color:#a6adc8;")
         form.addRow(info)
-        lay.addWidget(box)
         run = QPushButton("Run Generalization"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_GENERALIZATION]))
-        lay.addWidget(run)
-        self._gen_panel = _ResultPanel()
-        lay.addWidget(self._gen_panel, 1)
+        self._gen_panel = _ResultPanel(title="Generalization")
         self._gen_run_btn = run
-        return w
+        return _split_tab([box, run], self._gen_panel)
 
     def _build_al_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
         box = QGroupBox("Active learning vs. random selection settings")
         form = QFormLayout(box)
         self._al_seeds = QSpinBox(); self._al_seeds.setRange(1, 20); self._al_seeds.setValue(3)
@@ -1380,29 +1598,28 @@ class ValidationWindow(QMainWindow):
         form.addRow("Max clips reviewed (budget):", self._al_max)
         self._al_acq = QComboBox(); self._al_acq.addItems(["probability", "uncertainty"])
         form.addRow("AL acquisition rule:", self._al_acq)
-        info = QLabel("Compares ABEL's candidate-ranked review (acquire likely positives) against\n"
-                      "random clip review, on the same held-out set. Both warm-start identically.\n"
-                      "Headline: positive clips discovered per labeling effort.")
-        info.setStyleSheet("color:#a6adc8;")
+        info = _explain(
+            "Compares ABEL's candidate-ranked review (acquire likely positives) against\n"
+            "random clip review, on the same held-out set. Both warm-start identically.\n"
+            "Headline: positive clips discovered per labeling effort.")
         form.addRow(info)
-        lay.addWidget(box)
         run = QPushButton("Run Active Learning vs. Random"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_AL_CURVE]))
-        lay.addWidget(run)
-        self._al_panel = _ResultPanel()
-        lay.addWidget(self._al_panel, 1)
+        self._al_panel = _ResultPanel(title="Active learning vs. random")
         self._al_run_btn = run
-        return w
+        return _split_tab([box, run], self._al_panel)
 
     def _build_rare_discovery_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
         box = QGroupBox("Rare-behavior discovery (clip hunting) settings")
         form = QFormLayout(box)
-        self._rare_auto = QCheckBox(
-            "Auto-target: per project, rank behaviors by rarity first (cheap) and "
-            "hunt only the rarest one")
+        # Checkbox text cannot word-wrap, so a long label sets a minimum width the
+        # settings column cannot honour — keep the labels terse and put the
+        # explanation in the tooltip.
+        self._rare_auto = QCheckBox("Auto-target the rarest behavior per project")
         self._rare_auto.setChecked(True)
         self._rare_auto.setToolTip(
+            "Per project, rank behaviors by rarity first (cheap) and hunt only "
+            "the rarest one.\n"
             "With several projects checked, the rarity pass runs first for each "
             "project — it reads the dense bout detections only, no model fitting — "
             "and the whole discovery/effort-to-quality budget then goes to that "
@@ -1417,23 +1634,29 @@ class ValidationWindow(QMainWindow):
         form.addRow("Seed exemplars (define the behavior):", self._rare_seed_pos)
         self._rare_budget = QSpinBox(); self._rare_budget.setRange(50, 5000); self._rare_budget.setValue(400)
         form.addRow("Review budget (clips):", self._rare_budget)
-        self._rare_rarity = QCheckBox("Rarity-scaling figure (effort vs prevalence)")
+        self._rare_rarity = QCheckBox("Rarity-scaling figure")
+        self._rare_rarity.setToolTip("Effort vs. prevalence — how the hunt scales as the "
+                                     "target behavior gets rarer.")
         self._rare_rarity.setChecked(True)
         form.addRow(self._rare_rarity)
-        self._rare_fullpool = QCheckBox(
-            "Full segment pool at deployment rarity (recommended — the reviewed pool "
-            "is ~12× enriched for the target)")
+        self._rare_fullpool = QCheckBox("Full segment pool at deployment rarity")
+        self._rare_fullpool.setToolTip(
+            "Recommended — the reviewed pool is ~12× enriched for the target, so "
+            "scoring against it flatters every method equally and understates how "
+            "much work deployment rarity really takes.")
         self._rare_fullpool.setChecked(True)
         form.addRow(self._rare_fullpool)
-        self._rare_quality = QCheckBox(
-            "Effort-to-quality figure (labeling effort → held-out target-class F1 / "
-            "PR-AUC — the primary result; trains a model per step)")
+        self._rare_quality = QCheckBox("Effort-to-quality figure")
+        self._rare_quality.setToolTip(
+            "Labeling effort → held-out target-class F1 / PR-AUC. This is the primary "
+            "result; it trains a model at every step, so it is the expensive part of "
+            "the run.")
         self._rare_quality.setChecked(True)
         form.addRow(self._rare_quality)
         self._rare_exclude = QLineEdit()
         self._rare_exclude.setPlaceholderText("e.g. Freeze, Groom  (comma-separated)")
         form.addRow("Exclude from rarity comparison:", self._rare_exclude)
-        info = QLabel(
+        info = _explain(
             "Compares ABEL's clip-hunting tools (Essence Miner, Active Learning,\n"
             "UMAP selection) against random clips and whole-video scanning for finding\n"
             "a rare behavior. Cross-validated: the definition is built from the seed\n"
@@ -1443,9 +1666,7 @@ class ValidationWindow(QMainWindow):
             "tool needs before the trained model itself is good (held-out F1 / PR-AUC).\n"
             "Check several projects to also get the combined cross-project panels\n"
             "(mean discovery curve, fold-enrichment and effort saved per project).")
-        info.setStyleSheet("color:#a6adc8;")
         form.addRow(info)
-        lay.addWidget(box)
 
         # ── two-phase workflow ──
         # Phase 1 is seconds and tells you whether phase 2 (hours) is worth
@@ -1454,7 +1675,6 @@ class ValidationWindow(QMainWindow):
         # running overnight is the expensive way to learn it.
         phase = QGroupBox("Two-phase run")
         pl = QVBoxLayout(phase)
-        row = QHBoxLayout()
         check = QPushButton("1 · Check rarity + examples (fast)")
         check.setToolTip(
             "Reads the dense bout detections and the training set's label column "
@@ -1465,8 +1685,10 @@ class ValidationWindow(QMainWindow):
         run = QPushButton("2 · Run discovery on the rare behaviors")
         run.setObjectName("runBtn")
         run.clicked.connect(self._run_rare_discovery)
-        row.addWidget(check); row.addWidget(run, 1)
-        pl.addLayout(row)
+        # Stacked, not side-by-side: the settings column is ~390 px wide and
+        # these labels are long enough to be clipped in half of it.
+        pl.addWidget(check)
+        pl.addWidget(run)
         self._rare_preflight_msg = QLabel(
             "Run the fast check first — it tells you if any project needs more "
             "labeled examples before the hunt is worth starting.")
@@ -1480,15 +1702,71 @@ class ValidationWindow(QMainWindow):
         self._rare_preflight_table.setAlternatingRowColors(True)
         self._rare_preflight_table.setMinimumHeight(160)
         self._rare_preflight_table.verticalHeader().setVisible(False)
+        self._rare_preflight_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows)
+        self._rare_preflight_table.itemSelectionChanged.connect(
+            self._sync_rare_swap_btn)
         pl.addWidget(self._rare_preflight_table)
-        lay.addWidget(phase)
+        # The ranking is a heuristic; the user knows things the files do not (that a
+        # behaviour is gated by the design, that the second-rarest is the
+        # interesting one).  Let them say so rather than re-running with different
+        # exclusions until the table agrees.
+        swap_row = QHBoxLayout()
+        self._rare_swap_btn = QPushButton("Hunt the selected behavior instead")
+        self._rare_swap_btn.setEnabled(False)
+        self._rare_swap_btn.setToolTip(
+            "Override the automatic pick for that project. The hunt will target the "
+            "behavior on the selected row.")
+        self._rare_swap_btn.clicked.connect(self._swap_rare_target)
+        swap_row.addWidget(self._rare_swap_btn)
+        swap_row.addStretch(1)
+        pl.addLayout(swap_row)
 
-        self._rare_panel = _ResultPanel()
-        lay.addWidget(self._rare_panel, 1)
+        self._rare_panel = _ResultPanel(title="Rare-behavior discovery")
         self._rare_run_btn = run
         self._rare_check_btn = check
         self._rare_preflight: list = []
-        return w
+        # The preflight table is the one left-column widget worth extra height.
+        return _split_tab([box, (phase, 1)], self._rare_panel, left_chars=72)
+
+    def _selected_preflight_row(self) -> "tuple | None":
+        """(ProjectPreflight, BehaviorPreflight) behind the selected table row."""
+        tbl = self._rare_preflight_table
+        rows = {i.row() for i in tbl.selectedIndexes()}
+        if len(rows) != 1 or not self._rare_preflight:
+            return None
+        row = rows.pop()
+        # The table is the flattened preflight_rows() list, in the same order.
+        flat = [(p, b) for p in self._rare_preflight for b in p.behaviors]
+        return flat[row] if 0 <= row < len(flat) else None
+
+    def _sync_rare_swap_btn(self) -> None:
+        sel = self._selected_preflight_row()
+        self._rare_swap_btn.setEnabled(
+            sel is not None and sel[1].runnable() and not self._busy)
+
+    def _swap_rare_target(self) -> None:
+        from abel.validation.analyses import rare_discovery as rd  # noqa: PLC0415
+        sel = self._selected_preflight_row()
+        if sel is None:
+            return
+        proj, beh = sel
+        if not beh.runnable():
+            QMessageBox.warning(
+                self, "Cannot hunt this behavior",
+                f"{beh.behavior_name} has too few confirmed examples "
+                f"({beh.n_labeled}) to cross-validate.\n\n{beh.note}")
+            return
+        if beh.status == rd.PREFLIGHT_WARN and QMessageBox.question(
+            self, "Thin evidence",
+            f"{beh.behavior_name} leaves only {beh.n_held_out} examples to "
+            f"discover — the curves will be noisy.\n\nHunt it anyway?",
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        proj.target_override = beh.behavior_id
+        self._log_msg(f"Target override — {proj.project_name}: hunting "
+                      f"{beh.behavior_name}")
+        self._on_preflight_done(self._rare_preflight)   # repaint "← will be hunted"
 
     # ── phase 1: the cheap rarity + evidence check ──
     def _run_rare_preflight(self) -> None:
@@ -1619,13 +1897,14 @@ class ValidationWindow(QMainWindow):
         self._run([ANALYSIS_RARE_DISCOVERY], behaviors_override=override)
 
     def _build_cross_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
-        lay.addWidget(QLabel("Cross-project dashboard from the most recent run."))
-        self._cross_panel = _ResultPanel()
-        lay.addWidget(self._cross_panel, 1)
-        openb = QPushButton("Open full HTML report…"); openb.clicked.connect(self._open_report)
-        lay.addWidget(openb)
-        return w
+        intro = _explain(
+            "Cross-project dashboard, assembled from the most recent run. Nothing to "
+            "configure here — it pools whatever the last analysis produced across every "
+            "project you had loaded.")
+        openb = QPushButton("Open full HTML report…")
+        openb.clicked.connect(self._open_report)
+        self._cross_panel = _ResultPanel(title="Cross-project dashboard")
+        return _split_tab([intro, openb], self._cross_panel, left_chars=52)
 
     def _on_tab_changed(self, index: int) -> None:
         # Auto-populate the behaviorscape alias table from the current selection,
@@ -1635,8 +1914,7 @@ class ValidationWindow(QMainWindow):
             self._refresh_bscape_aliases()
 
     def _build_behaviorscape_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
-        intro = QLabel(
+        intro = _explain(
             "The behaviorscape: which feature TYPES drive which behaviors, pooled across all\n"
             "selected projects. Trains one model per checked (project, behavior) on the shared\n"
             "held-out split, captures per-feature importance, classifies each feature into a data\n"
@@ -1645,9 +1923,6 @@ class ValidationWindow(QMainWindow):
             "bars, a PERMANOVA distinctiveness test (do behaviors rely on different features?),\n"
             "a behavior-similarity matrix, and a feature↔behavior network. Behaviors are pooled\n"
             "by name — use the alias table to merge across slight naming differences.")
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color:#a6adc8;")
-        lay.addWidget(intro)
 
         box = QGroupBox("Settings")
         form = QFormLayout(box)
@@ -1667,7 +1942,6 @@ class ValidationWindow(QMainWindow):
             "fraction: each model's importances divided by their sum (comparable across\n"
             "behaviors regardless of scale). max: divided by the model's largest importance.")
         form.addRow("Per-model normalization:", self._bscape_norm)
-        lay.addWidget(box)
 
         alias_box = QGroupBox("Behavior pooling (edit 'Pooled name' to merge behaviors)")
         av = QVBoxLayout(alias_box)
@@ -1681,7 +1955,7 @@ class ValidationWindow(QMainWindow):
             ["Project", "Behavior", "Pooled name"])
         self._bscape_alias_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
-        self._bscape_alias_table.setMaximumHeight(190)
+        self._bscape_alias_table.setMinimumHeight(140)
         # Click a column header to sort — handy for spotting replicates / variants.
         self._bscape_alias_table.setSortingEnabled(True)
         self._bscape_alias_table.horizontalHeader().setSortIndicatorShown(True)
@@ -1689,32 +1963,21 @@ class ValidationWindow(QMainWindow):
             "Click a column header to sort (e.g. by Behavior to group replicates "
             "and near-duplicate names).")
         av.addWidget(self._bscape_alias_table)
-        lay.addWidget(alias_box)
 
         run = QPushButton("Build Behaviorscape"); run.setObjectName("runBtn")
         run.clicked.connect(self._run_behaviorscape)
-        lay.addWidget(run)
         self._bscape_run_btn = run
 
-        # Status (incl. the long pooled-behaviors list) goes in a height-capped
-        # scroll area so it never crowds out the figure panel below it.
+        # Status (incl. the long pooled-behaviors list) sits at the foot of the
+        # settings column; it scrolls with the column rather than being capped.
         self._bscape_status = QLabel("")
         self._bscape_status.setWordWrap(True)
         self._bscape_status.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._bscape_status.setStyleSheet("color:#a6adc8;")
-        status_scroll = QScrollArea()
-        status_scroll.setWidgetResizable(True)
-        status_scroll.setWidget(self._bscape_status)
-        status_scroll.setMaximumHeight(110)
-        lay.addWidget(status_scroll)
+        self._bscape_status.setStyleSheet("color:#a6adc8; font-size:11px;")
 
-        hint = QLabel("Click any figure below to open it full size in its own window.")
-        hint.setStyleSheet("color:#89b4fa; font-size:11px;")
-        lay.addWidget(hint)
-
-        self._bscape_panel = _ResultPanel()
-        lay.addWidget(self._bscape_panel, 2)
-        return w
+        self._bscape_panel = _ResultPanel(title="Behaviorscape")
+        return _split_tab([intro, box, (alias_box, 1), run, self._bscape_status],
+                          self._bscape_panel, left_chars=70)
 
     def _refresh_bscape_aliases(self) -> None:
         behaviors = self._collect_behaviors()
@@ -1801,7 +2064,8 @@ class ValidationWindow(QMainWindow):
         if not isinstance(result, dict):
             return
         images = result.get("images") or []
-        self._bscape_panel.set_simple(images, result.get("tables"))
+        self._bscape_panel.set_simple(images, result.get("tables"),
+                                      folder=result.get("out_dir"))
         self._bscape_status.setText(str(result.get("summary", "")))
         self._log_msg(f"Behaviorscape complete: {len(images)} figure(s).")
         self.statusBar().showMessage("Behaviorscape figures ready.", 8000)
@@ -1815,8 +2079,7 @@ class ValidationWindow(QMainWindow):
 
     # ── Video-feature value tab ──────────────────────────────────────────
     def _build_video_value_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
-        intro = QLabel(
+        intro = _explain(
             "Video-motion-feature value: how much do the video features (optical flow,\n"
             "surface motion, R3D appearance) improve detection? For each checked (project,\n"
             "behavior) this trains ABEL's real classifier twice on the SAME held-out split and\n"
@@ -1825,31 +2088,23 @@ class ValidationWindow(QMainWindow):
             "add. Great for the Groom-vs-Freeze case: both are low-locomotion and confusable by\n"
             "pose alone, so the rhythmic-motion signal is where video features pay off.\n"
             "Check the behaviors to compare (e.g. Groom and Freeze) on the Projects tab.")
-        intro.setWordWrap(True); intro.setStyleSheet("color:#a6adc8;")
-        lay.addWidget(intro)
 
         box = QGroupBox("Settings"); form = QFormLayout(box)
         self._vv_seeds = QSpinBox(); self._vv_seeds.setRange(1, 20); self._vv_seeds.setValue(5)
         self._vv_seeds.setToolTip("Paired train/eval repeats per behavior; more seeds → tighter "
                                   "confidence interval on the gain.")
         form.addRow("Seeds per behavior:", self._vv_seeds)
-        lay.addWidget(box)
 
         run = QPushButton("Run Video-Feature Comparison"); run.setObjectName("runBtn")
         run.clicked.connect(self._run_video_value)
-        lay.addWidget(run)
         self._vv_run_btn = run
 
         self._vv_status = QLabel(""); self._vv_status.setWordWrap(True)
         self._vv_status.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._vv_status.setStyleSheet("color:#a6adc8;")
-        sc = QScrollArea(); sc.setWidgetResizable(True); sc.setWidget(self._vv_status)
-        sc.setMaximumHeight(120); lay.addWidget(sc)
+        self._vv_status.setStyleSheet("color:#a6adc8; font-size:11px;")
 
-        hint = QLabel("Click any figure below to open it full size in its own window.")
-        hint.setStyleSheet("color:#89b4fa; font-size:11px;"); lay.addWidget(hint)
-        self._vv_panel = _ResultPanel(); lay.addWidget(self._vv_panel, 2)
-        return w
+        self._vv_panel = _ResultPanel(title="Video-feature value")
+        return _split_tab([intro, box, run, self._vv_status], self._vv_panel)
 
     def _run_video_value(self) -> None:
         if self._busy:
@@ -1885,15 +2140,15 @@ class ValidationWindow(QMainWindow):
         self._set_busy(False); self._progress.setValue(100)
         if not isinstance(result, dict):
             return
-        self._vv_panel.set_simple(result.get("images") or [], result.get("tables"))
+        self._vv_panel.set_simple(result.get("images") or [], result.get("tables"),
+                                  folder=result.get("out_dir"))
         self._vv_status.setText(str(result.get("summary", "")))
         self._log_msg("Video-feature comparison complete.")
         self.statusBar().showMessage("Video-feature comparison ready.", 8000)
 
     # ── Throughput benchmark tab ─────────────────────────────────────────
     def _build_throughput_tab(self) -> QWidget:
-        w = QWidget(); lay = QVBoxLayout(w)
-        intro = QLabel(
+        intro = _explain(
             "Pipeline throughput: how fast is ABEL's data processing? Times the three stages\n"
             "on one representative session per added project, normalized by the video's real\n"
             "duration (× real-time; higher = faster). Runs on ALL projects added on the Projects\n"
@@ -1902,35 +2157,30 @@ class ValidationWindow(QMainWindow):
             "• Training — time to fit one classifier once features exist.\n"
             "• Dense inference — running the models over every window of the session. This\n"
             "  recomputes that one session's temporal-refinement traces on the real project.")
-        intro.setWordWrap(True); intro.setStyleSheet("color:#a6adc8;")
-        lay.addWidget(intro)
 
         box = QGroupBox("Stages to benchmark"); form = QVBoxLayout(box)
-        self._bench_extract = QCheckBox("Feature extraction / session (slow — full rebuild)")
+        self._bench_extract = QCheckBox("Feature extraction / session")
+        self._bench_extract.setToolTip("Slow — a full pose+video+representation rebuild.")
         self._bench_extract.setChecked(True)
         self._bench_train = QCheckBox("Model training (given features)")
         self._bench_train.setChecked(True)
-        self._bench_infer = QCheckBox("Dense inference / video (recomputes session traces)")
+        self._bench_infer = QCheckBox("Dense inference / video")
+        self._bench_infer.setToolTip(
+            "Recomputes that session's temporal-refinement traces on the real project.")
         self._bench_infer.setChecked(False)
         for cb in (self._bench_extract, self._bench_train, self._bench_infer):
             form.addWidget(cb)
-        lay.addWidget(box)
 
         run = QPushButton("Run Throughput Benchmark"); run.setObjectName("runBtn")
         run.clicked.connect(self._run_benchmark)
-        lay.addWidget(run)
         self._bench_run_btn = run
 
         self._bench_status = QLabel(""); self._bench_status.setWordWrap(True)
         self._bench_status.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._bench_status.setStyleSheet("color:#a6adc8;")
-        sc = QScrollArea(); sc.setWidgetResizable(True); sc.setWidget(self._bench_status)
-        sc.setMaximumHeight(140); lay.addWidget(sc)
+        self._bench_status.setStyleSheet("color:#a6adc8; font-size:11px;")
 
-        hint = QLabel("Click any figure below to open it full size in its own window.")
-        hint.setStyleSheet("color:#89b4fa; font-size:11px;"); lay.addWidget(hint)
-        self._bench_panel = _ResultPanel(); lay.addWidget(self._bench_panel, 2)
-        return w
+        self._bench_panel = _ResultPanel(title="Pipeline throughput")
+        return _split_tab([intro, box, run, self._bench_status], self._bench_panel)
 
     def _run_benchmark(self) -> None:
         if self._busy:
@@ -1970,7 +2220,8 @@ class ValidationWindow(QMainWindow):
         self._set_busy(False); self._progress.setValue(100)
         if not isinstance(result, dict):
             return
-        self._bench_panel.set_simple(result.get("images") or [], result.get("tables"))
+        self._bench_panel.set_simple(result.get("images") or [], result.get("tables"),
+                                     folder=result.get("out_dir"))
         self._bench_status.setText(str(result.get("summary", "")))
         self._log_msg("Throughput benchmark complete.")
         self.statusBar().showMessage("Throughput benchmark ready.", 8000)
@@ -2029,6 +2280,12 @@ class ValidationWindow(QMainWindow):
         lay.addWidget(tbox)
 
         demo_btn_row = QHBoxLayout()
+        self._demo_folder_btn = QPushButton("Open Data Folder")
+        self._demo_folder_btn.setToolTip("Open the folder the last demo clip was written to.")
+        self._demo_folder_btn.setEnabled(False)
+        self._demo_folder_btn.clicked.connect(
+            lambda: self._open_folder_or_warn(self._demo_out_dir, "demo clip"))
+        demo_btn_row.addWidget(self._demo_folder_btn)
         self._demo_preview_btn = QPushButton("Preview…")
         self._demo_preview_btn.setToolTip(
             "Play a live ~10 s sample with the current settings (raw vs. smoothed tracking +\n"
@@ -2196,6 +2453,8 @@ class ValidationWindow(QMainWindow):
 
     def _on_demo_finished(self, out_path: str) -> None:
         self._demo_btn.setEnabled(True)
+        self._demo_out_dir = Path(out_path).parent
+        self._demo_folder_btn.setEnabled(True)
         self._progress.setValue(100)
         self._demo_status.setText(f"Saved → {out_path}")
         self._log_msg(f"Feature demo exported → {out_path}")
@@ -2211,7 +2470,35 @@ class ValidationWindow(QMainWindow):
         w = QWidget(); lay = QVBoxLayout(w)
         self._log = QTextEdit(); self._log.setReadOnly(True)
         lay.addWidget(self._log)
+        row = QHBoxLayout()
+        self._log_folder_btn = QPushButton("Open Data Folder")
+        self._log_folder_btn.setToolTip(
+            "Open the run folder this log describes (the output folder until a run finishes).")
+        self._log_folder_btn.clicked.connect(
+            lambda: self._open_folder_or_warn(
+                self._last_run.run_dir if self._last_run else self._current_output_dir(),
+                "run"))
+        row.addWidget(self._log_folder_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
         return w
+
+    def _current_output_dir(self) -> "Path | None":
+        """Where a run launched right now would write (label text is the source of
+        truth: it tracks both the session's runs/ folder and a hand-picked one)."""
+        if self._output_dir:
+            return Path(self._output_dir)
+        text = self._out_lbl.text().strip()
+        return Path(text) if text else None
+
+    def _open_folder_or_warn(self, path: "Path | None", what: str) -> None:
+        if path is None or not Path(path).is_dir():
+            QMessageBox.information(
+                self, "No folder yet",
+                f"There is no {what} folder on disk yet"
+                + (f":\n\n{path}" if path else "."))
+            return
+        _open_in_file_manager(Path(path))
 
     @staticmethod
     def _wrap(layout) -> QWidget:
@@ -2835,12 +3122,14 @@ class ValidationWindow(QMainWindow):
             images_by_view = {
                 view: sorted(lc_dir.glob(f"*__{view}.png")) for view in LEARNING_CURVE_VIEWS
             }
-            self._lc_panel.set_views(images_by_view, lc_dir / "learning_curve_points.csv")
+            self._lc_panel.set_views(images_by_view, lc_dir / "learning_curve_points.csv",
+                                     folder=lc_dir)
             self._report_figures("Learning curves", images_by_view)
         if ANALYSIS_ABLATION in analyses:
             abl_dir = out.run_dir / "ablation"
             abl_imgs = sorted(abl_dir.glob("*.png"))
-            self._abl_panel.set_simple(abl_imgs, abl_dir / "ablation_results.csv")
+            self._abl_panel.set_simple(abl_imgs, abl_dir / "ablation_results.csv",
+                                       folder=abl_dir)
             self._report_figures("Ablation", abl_imgs)
         if ANALYSIS_DISCRIMINATION in analyses:
             disc_dir = out.run_dir / "discrimination"
@@ -2849,6 +3138,12 @@ class ValidationWindow(QMainWindow):
             # known from what the run produced — a fixed view list silently showed
             # an empty panel.
             views: dict[str, list[Path]] = {}
+            # First = the tab's default view. The pooled landscape answers the whole
+            # analysis in one figure; the per-project matrices behind it are the
+            # per-assay detail, and opening on one of those buried the result.
+            landscape = disc_dir / "discrimination_landscape.png"
+            if landscape.exists():
+                views["Discrimination landscape (all projects)"] = [landscape]
             for png in sorted(disc_dir.glob("*__separability_matrix__*.png")):
                 fs = png.stem.split("__separability_matrix__", 1)[-1]
                 label = FEATURE_SET_LABELS.get(fs, fs).lstrip("+ ").strip()
@@ -2861,7 +3156,10 @@ class ValidationWindow(QMainWindow):
                 {
                     "Hardest pairs (ranked)": disc_dir / "confusable_pairs.csv",
                     "Per-pair × feature set": disc_dir / "discrimination_results.csv",
+                    "Per-seed ROC-AUC (replicates)":
+                        disc_dir / "discrimination_seed_scores.csv",
                 },
+                folder=disc_dir,
             )
             self._report_figures("Discrimination", views, hint=(
                 "Discrimination needs at least 2 behaviors checked in the SAME project, "
@@ -2887,6 +3185,8 @@ class ValidationWindow(QMainWindow):
                     "Time budget per session": tb_dir / "time_budget_points.csv",
                     "Calibration (ECE / Brier)": cal_dir / "calibration.csv",
                 },
+                folder={"Generalization": gen_dir, "Time budget": tb_dir,
+                        "Calibration": cal_dir},
             )
             self._report_figures("Generalization", gen_views)
         if ANALYSIS_AL_CURVE in analyses:
@@ -2895,7 +3195,7 @@ class ValidationWindow(QMainWindow):
             self._al_panel.set_simple(al_imgs, {
                 "Curves (F1 & positives vs clips)": al_dir / "al_vs_random_points.csv",
                 "Summary (clips-to-target)": al_dir / "al_vs_random_summary.csv",
-            })
+            }, folder=al_dir)
             self._report_figures("Active learning", al_imgs)
         if ANALYSIS_RARE_DISCOVERY in analyses:
             rd_dir = out.run_dir / "rare_discovery"
@@ -2927,7 +3227,9 @@ class ValidationWindow(QMainWindow):
                     "Discovery & effort": rd_dir / "discovery.csv",
                     "Rarity scaling": rd_dir / "rarity_scaling.csv",
                 }
-            self._rare_panel.set_simple(rd_imgs, rare_tables)
+            self._rare_panel.set_simple(
+                rd_imgs, rare_tables,
+                folder={"Rare discovery": rd_dir, "Prism tables": prism_dir})
             self._report_figures("Rare-behavior discovery", rd_imgs, hint=(
                 "Needs a project with dense bout detections and enough confirmed "
                 "positives of the target behavior to cross-validate."))
@@ -2936,7 +3238,7 @@ class ValidationWindow(QMainWindow):
         self._cross_panel.set_simple(cross_imgs, {
             "Accuracy by project": cross_dir / "dashboard.csv",
             "Training speed by project": cross_dir / "training_speed.csv",
-        })
+        }, folder=cross_dir)
         self._report_figures("Cross-project", cross_imgs)
         if ANALYSIS_BEHAVIORSCAPE in analyses:
             bs_dir = out.run_dir / "behaviorscape"
@@ -2946,17 +3248,19 @@ class ValidationWindow(QMainWindow):
                 "Modality shares per behavior": bs_dir / "behaviorscape_modality_shares.csv",
                 "Behavior distinctiveness": bs_dir / "behaviorscape_distinctiveness.csv",
                 "Behavior similarity matrix": bs_dir / "behaviorscape_similarity_matrix.csv",
-            })
+            }, folder=bs_dir)
             self._report_figures("Behaviorscape", bs_imgs)
         if ANALYSIS_VIDEO_VALUE in analyses:
             vv_dir = out.run_dir / "video_value"
             vv_imgs = sorted(vv_dir.glob("*.png"))
-            self._vv_panel.set_simple(vv_imgs, {"Video-feature value": vv_dir / "video_value.csv"})
+            self._vv_panel.set_simple(vv_imgs, {"Video-feature value": vv_dir / "video_value.csv"},
+                                      folder=vv_dir)
             self._report_figures("Video features", vv_imgs)
         if ANALYSIS_THROUGHPUT in analyses:
             th_dir = out.run_dir / "throughput"
             th_imgs = sorted(th_dir.glob("*.png"))
-            self._bench_panel.set_simple(th_imgs, {"Throughput": th_dir / "benchmark.csv"})
+            self._bench_panel.set_simple(th_imgs, {"Throughput": th_dir / "benchmark.csv"},
+                                         folder=th_dir)
             self._report_figures("Throughput", th_imgs)
 
         # The consolidated summary. Findings are cheap and always shown; the PDF
