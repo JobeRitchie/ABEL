@@ -48,3 +48,19 @@ Thumbs.db
 abel_validation_runs/
 unfiled_runs/
 NSF.behaviors.yaml
+
+# --- Manuscript audit reports (kept locally alongside the draft) ---
+_SKEPTIC_*/
+
+# --- One-off diagnostics and migrations (machine-specific paths; kept locally) ---
+generate_readme_docx.py
+scripts/_check_dead_features.py
+scripts/_fix_encoding.py
+scripts/_reextract_pose_features.py
+scripts/debug_bouts.py
+scripts/generate_paper_docs.py
+scripts/strip_bom.py
+scripts/verify_fix.py
+
+# --- Local Claude Code workspace artifacts ---
+.claude/

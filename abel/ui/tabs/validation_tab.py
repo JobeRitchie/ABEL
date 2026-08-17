@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -29,6 +30,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -79,6 +82,129 @@ def _tpfpfn(tp: object, fp: object, fn: object) -> str:
         return f"{int(tp)}/{int(fp)}/{int(fn)}"
     except (TypeError, ValueError):
         return "—"
+
+
+# ===========================================================================
+# Leave-one-mouse-out subject picker
+# ===========================================================================
+class LosoSubjectDialog(QDialog):
+    """Choose which mice enter the LOSO run.
+
+    An unchecked mouse is excluded from the analysis entirely — never held out and
+    never trained on — so the run is a clean LOSO over the chosen cohort (drop a
+    mouse with a broken camera, a mis-tracked session, or an off-protocol subject
+    without it contaminating any fold's training pool).
+    """
+
+    def __init__(
+        self,
+        subjects: list[dict],
+        preselected: list[str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._subjects = subjects or []
+        self.setWindowTitle("Leave-one-mouse-out CV — select mice")
+        # Size from font metrics, not fixed pixels, so display scaling can't clip it.
+        em = max(8, self.fontMetrics().averageCharWidth())
+        self.resize(em * 58, em * 40)
+
+        layout = QVBoxLayout(self)
+
+        intro = QLabel(
+            "Each selected mouse is held out once and its data trains the other folds. "
+            "Unselected mice are excluded from the analysis entirely — neither held out "
+            "nor trained on.\n\n"
+            "Compute-heavy: one model is trained per selected mouse, per behavior."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #B0BEC5;")
+        layout.addWidget(intro)
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        want = None if preselected is None else {str(s) for s in preselected}
+        for s in self._subjects:
+            name = str(s.get("subject", "?"))
+            item = QListWidgetItem(f"{name}   —   {self._detail(s)}")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = True if want is None else name in want
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
+            # A mouse with no labeled behavior windows can never score a fold — it is
+            # shown (so its absence isn't a mystery) but cannot be selected.
+            if not s.get("n_labeled", 0):
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Unchecked)
+                item.setForeground(QColor("#78909C"))
+                item.setToolTip("No labeled behavior windows — nothing to score.")
+            self._list.addItem(item)
+        self._list.itemChanged.connect(lambda _i: self._update_state())
+        layout.addWidget(self._list, 1)
+
+        self._count = QLabel("")
+        self._count.setStyleSheet("color: #90A4AE; font-size: 12px;")
+
+        all_btn = QPushButton("Select all")
+        all_btn.clicked.connect(lambda: self._set_all(True))
+        none_btn = QPushButton("Select none")
+        none_btn.clicked.connect(lambda: self._set_all(False))
+
+        row = QHBoxLayout()
+        row.addWidget(self._count)
+        row.addStretch()
+        row.addWidget(all_btn)
+        row.addWidget(none_btn)
+        layout.addLayout(row)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Run CV")
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+        layout.addWidget(self._buttons)
+
+        self._update_state()
+
+    @staticmethod
+    def _detail(s: dict) -> str:
+        bits = [f"{int(s.get('n_labeled', 0))} labeled", f"{int(s.get('n_windows', 0))} windows"]
+        n_sess = int(s.get("n_sessions", 0) or 0)
+        if n_sess:
+            bits.append(f"{n_sess} session{'s' if n_sess != 1 else ''}")
+        return " • ".join(bits)
+
+    def _items(self):
+        return (self._list.item(i) for i in range(self._list.count()))
+
+    def _set_all(self, checked: bool) -> None:
+        self._list.blockSignals(True)
+        for item in self._items():
+            if item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                item.setCheckState(
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+                )
+        self._list.blockSignals(False)
+        self._update_state()
+
+    def _update_state(self) -> None:
+        n = len(self.selected_subjects())
+        total = self._list.count()
+        self._count.setText(
+            f"{n} of {total} mice selected"
+            + ("" if n >= 2 else "  —  LOSO needs at least 2")
+        )
+        self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(n >= 2)
+
+    def selected_subjects(self) -> list[str]:
+        return [
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self._items()
+            if item.checkState() == Qt.CheckState.Checked
+        ]
 
 
 # ===========================================================================
@@ -161,9 +287,19 @@ class LosoResultsDialog(QDialog):
                 f"<td align='center'>{r.get('n_subjects', 0)}</td>"
                 "</tr>"
             )
+        excluded = sorted({
+            str(s) for r in self._results for s in (r.get("excluded_subjects") or [])
+        })
+        scope = ""
+        if excluded:
+            scope = (
+                "<p style='color:#FFCC80;'>⚠ Restricted run — these mice were excluded "
+                "from both training and evaluation: " + ", ".join(excluded) + "</p>"
+            )
         return (
             "<h3>Leave-one-mouse-out CV</h3>"
-            "<p style='color:#90A4AE;'>Each mouse is held out once (Leave-One-Group-Out "
+            + scope
+            + "<p style='color:#90A4AE;'>Each mouse is held out once (Leave-One-Group-Out "
             "cross-validation). Bars above show per-fold mean ± SEM across held-out "
             "subjects; refinement-only labels (temporal feedback / imported) are excluded "
             "from evaluation. Counts are per scored window, against the reviewer's own "
@@ -223,6 +359,8 @@ class ValidationOverviewPanel(QWidget):
         super().__init__(parent)
         self._service = service
         self._pool = QThreadPool.globalInstance()
+        # Last mouse selection, so re-running LOSO doesn't mean re-ticking the list.
+        self._loso_subjects: list[str] | None = None
 
         header = QLabel("Model Overview")
         header.setStyleSheet("font-size: 16px; font-weight: 700; color: #ECEFF1;")
@@ -240,6 +378,8 @@ class ValidationOverviewPanel(QWidget):
             "subject's held-out predictions, and report ONE stable generalization "
             "score per behavior — raw and after temporal refinement — instead of a "
             "single random holdout that's hostage to which mice land in validation.\n\n"
+            "You choose which mice to include; excluded mice are left out of both "
+            "training and evaluation.\n\n"
             "Compute-heavy: trains one model per subject per behavior."
         )
         self._loso_btn.clicked.connect(self._run_loso)
@@ -380,17 +520,45 @@ class ValidationOverviewPanel(QWidget):
         if root is None:
             QMessageBox.warning(self, "No project", "Open a project first.")
             return
-        if (
-            QMessageBox.question(
+        try:
+            from abel.validation.datamodel import ProjectRef  # noqa: PLC0415
+            from abel.validation.loso import available_subjects  # noqa: PLC0415
+
+            subjects = available_subjects(ProjectRef.load(root))
+        except Exception as exc:
+            logger.exception("Could not list LOSO subjects")
+            QMessageBox.critical(
+                self, "Leave-one-mouse-out CV", f"Could not read the training set:\n{exc}"
+            )
+            return
+        selectable = [s for s in subjects if s.get("n_labeled", 0)]
+        if len(selectable) < 2:
+            QMessageBox.warning(
                 self,
                 "Leave-one-mouse-out CV",
-                "This trains one model per subject for every behavior and can take "
-                "several minutes. Run now?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                "Leave-one-mouse-out CV needs at least 2 mice with labeled windows; "
+                f"this project has {len(selectable)}.",
             )
-            != QMessageBox.StandardButton.Yes
-        ):
             return
+
+        dialog = LosoSubjectDialog(subjects, self._loso_subjects, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = dialog.selected_subjects()
+        self._loso_subjects = chosen
+        # Mice with no labeled behavior windows were never offered as a choice, so
+        # they stay in the training pool as negatives (their own fold is skipped for
+        # lack of positives, exactly as in an unrestricted run).
+        included = chosen + [
+            str(s["subject"]) for s in subjects
+            if not s.get("n_labeled", 0) and str(s["subject"]) not in set(chosen)
+        ]
+        # Pass None when the whole cohort is included so the run is identical to the
+        # unrestricted one (no "excluded mice" caption on the figure).
+        subject_arg = (
+            None if set(included) == {str(s["subject"]) for s in subjects} else included
+        )
+
         self._loso_btn.setEnabled(False)
         self._loso_btn.setText("Running LOSO…")
 
@@ -398,7 +566,7 @@ class ValidationOverviewPanel(QWidget):
             from abel.validation.datamodel import ProjectRef  # noqa: PLC0415
             from abel.validation.loso import leave_one_subject_out_all  # noqa: PLC0415
 
-            return leave_one_subject_out_all(ProjectRef.load(root))
+            return leave_one_subject_out_all(ProjectRef.load(root), subjects=subject_arg)
 
         worker = TaskWorker(_task)
         worker.signals.finished.connect(self._on_loso_done)
@@ -943,10 +1111,7 @@ class ValidationQuizPanel(QWidget):
             self._update_progress()
 
     def _behavior_name(self, bid: str) -> str:
-        for b in self._behaviors.behaviors:
-            if str(b.behavior_id) == bid:
-                return b.name
-        return bid
+        return self._behaviors.display_name(bid)
 
 
 # ===========================================================================

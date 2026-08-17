@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from abel.services.behavior_service import BehaviorService
+from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.import_service import ImportService
 from abel.services.candidate_service import (
     CandidateGenerationConfig,
@@ -580,7 +580,7 @@ class CandidateGenerationTab(QWidget):
             occ_num = occurrence[key]
 
             subject = subject_map.get(cand.session_id, cand.session_id) or cand.session_id or ""
-            bname = behavior_name_map.get(bid, bid) if bid else "—"
+            bname = behavior_label(bid, behavior_name_map)
 
             row = self._result_table.rowCount()
             self._result_table.insertRow(row)

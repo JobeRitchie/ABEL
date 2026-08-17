@@ -156,6 +156,30 @@ class CandidateGenerationService:
             )
         return removed
 
+    def remove_external_window_candidates(self, window_ids: list[str]) -> int:
+        """Remove persisted external window candidates by window id.
+
+        The by-id counterpart to :meth:`remove_external_candidates_by_source`, for
+        cleanups that purge part of an injected batch (e.g. clearing only the
+        *unreviewed* clip-mining windows).  Returns how many were removed.
+        """
+        path = self._external_windows_path()
+        wanted = {str(w) for w in (window_ids or [])}
+        if path is None or not wanted:
+            return 0
+        existing = self.load_external_window_candidates()
+        kept = [c for c in existing if str(c.window_id) not in wanted]
+        removed = len(existing) - len(kept)
+        if removed:
+            write_json(
+                path,
+                {
+                    "updated_at": datetime.utcnow().isoformat(),
+                    "candidates": [c.model_dump(mode="json") for c in kept],
+                },
+            )
+        return removed
+
     def upsert_external_window_candidates(self, candidates: list[CandidateWindow]) -> int:
         """Add or update external window candidates persisted for cross-tab visibility."""
         path = self._external_windows_path()
@@ -437,6 +461,16 @@ class CandidateGenerationService:
         self,
         config: SegmentCandidateGenerationConfig,
     ) -> SegmentCandidateGenerationResult:
+        """Sample random "probably absent" windows for review.
+
+        Samples real rows from the already-extracted segment grid
+        (``segment_features.parquet``) rather than synthesizing arbitrary
+        frame ranges. Reviewed labels then land on the grid's own
+        ``segment_id`` and get every feature the grid has — including R3D —
+        for free, instead of needing on-the-fly enrichment later (see
+        ``_enrich_segment_df_for_reviewed_labels`` in active_learning_tab.py,
+        which cannot compute R3D and used to zero-fill it).
+        """
         result = SegmentCandidateGenerationResult()
         if not self._project_root:
             result.warnings.append("No project loaded.")
@@ -448,85 +482,83 @@ class CandidateGenerationService:
             for s in list(getattr(config, "selected_session_ids", []) or [])
             if str(s).strip()
         }
-        session_meta = self._load_sampling_session_metadata(window, selected_session_ids)
-        if not session_meta:
-            result.warnings.append("No sessions with enough frames for random sampling.")
+
+        repr_path = self._project_root / "derived" / "representations" / "segment_features.parquet"
+        if not repr_path.exists():
+            result.warnings.append(f"Missing segment features: {repr_path}")
+            return result
+        grid = pd.read_parquet(
+            repr_path, columns=["segment_id", "session_id", "start_frame", "end_frame", "animal_id"]
+        )
+        if selected_session_ids:
+            grid = grid[grid["session_id"].astype(str).isin(selected_session_ids)]
+        grid = grid[(grid["end_frame"] - grid["start_frame"] + 1) >= window]
+        if grid.empty:
+            result.warnings.append("No extracted segments with enough frames for random sampling.")
             return result
 
+        session_meta = self._load_sampling_session_metadata(window, selected_session_ids)
+        video_id_by_session = {sid: str(v.get("video_id") or sid) for sid, v in session_meta.items()}
+
         excluded = self._accepted_intervals_from_reviewer_labels()
-        selected: dict[str, list[tuple[int, int]]] = {sid: [] for sid in session_meta.keys()}
+
+        # Drop grid rows overlapping an already-reviewed/accepted interval.
+        # Skips the per-row check entirely for sessions with nothing excluded.
+        if excluded:
+            keep_mask = np.ones(len(grid), dtype=bool)
+            starts = grid["start_frame"].to_numpy(dtype=int)
+            ends = grid["end_frame"].to_numpy(dtype=int)
+            sids = grid["session_id"].astype(str).to_numpy()
+            for i in range(len(grid)):
+                intervals = excluded.get(sids[i])
+                if intervals and self._interval_overlaps_any(int(starts[i]), int(ends[i]), intervals):
+                    keep_mask[i] = False
+            grid = grid[keep_mask]
+        if grid.empty:
+            result.warnings.append("All extracted segments in scope are already reviewed/accepted.")
+            return result
 
         rng = np.random.default_rng(config.random_seed)
-        session_ids = sorted(session_meta.keys())
-        rows: list[dict[str, object]] = []
-
         if int(config.top_k) <= 0:
-            rough_capacity = sum(max(1, int(v["n_frames"]) // window) for v in session_meta.values())
-            target = max(1, int(rough_capacity))
+            target = max(1, int(len(grid)))
         else:
             target = max(1, int(config.top_k))
 
-        # Spread clips across subjects first, then randomize per-subject session choice.
-        subject_to_sessions: dict[str, list[str]] = {}
-        for sid in session_ids:
-            subject = str(session_meta[sid].get("animal_id") or sid)
-            subject_to_sessions.setdefault(subject, []).append(sid)
-
-        subject_ids = sorted(subject_to_sessions.keys())
+        subject_to_pool: dict[str, pd.DataFrame] = {
+            str(subj): grp.reset_index(drop=True) for subj, grp in grid.groupby("animal_id", sort=False)
+        }
+        subject_ids = sorted(subject_to_pool.keys())
         rng.shuffle(subject_ids)
         n_subjects = len(subject_ids)
         base_per_subject = target // n_subjects
         extra = target % n_subjects
         per_subject_quota: dict[str, int] = {
-            subject: base_per_subject + (1 if idx < extra else 0)
+            subject: min(base_per_subject + (1 if idx < extra else 0), len(subject_to_pool[subject]))
             for idx, subject in enumerate(subject_ids)
         }
 
-        selected_by_subject: dict[str, int] = {subject: 0 for subject in subject_ids}
-
-        max_attempts = max(4000, target * 100)
-        attempts = 0
-
-        while len(rows) < target and attempts < max_attempts:
-            attempts += 1
-            # Only pick from subjects that haven't yet met their quota.
-            eligible_subjects = [
-                subject
-                for subject in subject_ids
-                if selected_by_subject.get(subject, 0) < per_subject_quota[subject]
-            ]
-            if not eligible_subjects:
-                break
-
-            subject = str(rng.choice(eligible_subjects))
-            sid = str(rng.choice(subject_to_sessions[subject]))
-            meta = session_meta[sid]
-            n_frames = int(meta["n_frames"])
-
-            max_start = max(0, n_frames - window)
-            start = int(rng.integers(0, max_start + 1)) if max_start > 0 else 0
-            end = min(n_frames - 1, start + window - 1)
-
-            if self._interval_overlaps_any(start, end, excluded.get(sid, [])):
+        rows: list[dict[str, object]] = []
+        for subject in subject_ids:
+            n = per_subject_quota[subject]
+            if n <= 0:
                 continue
-            if self._interval_overlaps_any(start, end, selected.get(sid, [])):
-                continue
-
-            selected.setdefault(sid, []).append((start, end))
-            selected_by_subject[subject] = int(selected_by_subject.get(subject, 0) + 1)
-            rows.append(
-                {
-                    "segment_id": f"rand_{sid}_{start}_{end}",
-                    "start_frame": int(start),
-                    "end_frame": int(end),
-                    "video_id": str(meta["video_id"]),
-                    "animal_id": str(meta["animal_id"]),
-                    "session_id": sid,
-                    "prediction_prob": 0.0,
-                    "uncertainty_score": 0.0,
-                    "rank_score": float(rng.random()),
-                }
-            )
+            pool = subject_to_pool[subject]
+            picks = pool.iloc[rng.choice(len(pool), size=n, replace=False)]
+            for _, row in picks.iterrows():
+                sid = str(row["session_id"])
+                rows.append(
+                    {
+                        "segment_id": str(row["segment_id"]),
+                        "start_frame": int(row["start_frame"]),
+                        "end_frame": int(row["end_frame"]),
+                        "video_id": video_id_by_session.get(sid, sid),
+                        "animal_id": str(row["animal_id"]),
+                        "session_id": sid,
+                        "prediction_prob": 0.0,
+                        "uncertainty_score": 0.0,
+                        "rank_score": float(rng.random()),
+                    }
+                )
 
         ranked = pd.DataFrame(rows)
         per_session_cap = max(0, int(getattr(config, "examples_per_session", 0)))

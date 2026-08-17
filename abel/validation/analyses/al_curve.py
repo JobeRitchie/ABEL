@@ -30,9 +30,10 @@ import pandas as pd
 
 from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
 from abel.utils import xgb_predict
+from abel.validation import metrics as vmetrics
 from abel.validation import subsample
 from abel.validation.datamodel import CellResult, ProjectRef
-from abel.validation.engine import build_config
+from abel.validation.engine import build_config, target_class_prf
 from abel.validation.holdout import HoldoutSplit
 
 STRATEGY_AL = "active_learning"
@@ -161,23 +162,47 @@ def _run_strategy(
         ti = None
         res = None
         err = ""
+        # The confusion counts behind this cell's F1. They used to be computed here,
+        # used, and thrown away, leaving the cell's tp/fp/fn/tn at their structural
+        # zeros — indistinguishable in cells.parquet from a fit that genuinely got
+        # nothing right, and enough to corrupt any consumer that sums counts across
+        # analyses. They are now carried out with the F1 they produced.
+        tp = fp = fn = tn = 0
         try:
             res = _fit(trainer, project, behavior, sub, holdout, seed)
-            f1 = float(res.metrics.get("f1", float("nan")))
             pr = float(res.metrics.get("pr_auc", float("nan")))
             ti = res.target_idx
+            # Target-class F1, not the trainer's macro average — the whole point
+            # of this curve is how fast the model learns the *behavior*, and the
+            # macro number floors near 0.50 no matter how badly it does at that
+            # (see engine.target_class_prf).
+            if ti is not None and 0 <= int(ti) < res.val_probs.shape[1]:
+                _t = (res.y_val == int(ti)).astype(int)
+                _p = (res.val_preds == int(ti)).astype(int)
+                tp = int(np.sum((_t == 1) & (_p == 1)))
+                fp = int(np.sum((_t == 0) & (_p == 1)))
+                fn = int(np.sum((_t == 1) & (_p == 0)))
+                tn = int(np.sum((_t == 0) & (_p == 0)))
+                f1 = target_class_prf(tp, fp, fn)[2]
         except Exception as exc:  # noqa: BLE001 — early tiny sets can be degenerate
             err = f"{type(exc).__name__}: {exc}"
         log(f"{behavior_name}: {strategy} seed {seed} — {len(idx)} clips ({n_pos} pos) F1={f1:.3f}")
 
         traj.append((len(idx), n_pos, f1, pr))
+        scored = (tp + fp + fn + tn) > 0
         cells.append(CellResult(
             project_id=project.project_id, project_name=project.name,
             behavior_id=str(behavior), behavior_name=behavior_name,
             analysis="al_curve", config_name=strategy,
             n_clips=len(idx), seed=int(seed),
             f1=f1, pr_auc=pr, n_pos_train=n_pos, n_neg_train=len(idx) - n_pos,
+            tp=tp, fp=fp, fn=fn, tn=tn,
             degenerate=bool(err), error=err,
+            degenerate_fit=(vmetrics.is_degenerate_fit(tp, fp, fn, tn) if scored
+                            else False),
+            # A cell with no scoreable confusion matrix must not silently read as
+            # "zero errors": say so, so the counts are never mistaken for measured.
+            confusion_measured=scored,
         ))
 
         if len(labeled) >= cap:

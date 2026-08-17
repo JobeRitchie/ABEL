@@ -105,8 +105,28 @@ _OVERRIDABLE = {
     "adaptive_complexity",
     "enable_feature_augmentation",
     "max_train_samples_per_class",
+    "no_behavior_sample_weight",
+    "excluded_feature_cols",
     "drop_zero_variance_features",
 }
+
+
+def target_class_prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
+    """Target-class precision/recall/F1 from held-out confusion counts.
+
+    ABEL's trainer reports precision/recall/f1 MACRO-averaged over its two classes
+    {target, no_behavior}.  On a rare behavior the negative class is ~95% of the
+    holdout and trivially easy, so its ~0.99 F1 is averaged in: macro-F1 carries a
+    ~0.50 floor, a detector that finds nothing still scores ~0.49, and a genuine
+    improvement appears at roughly half its true size.  Every question the
+    validation suite asks is about the behavior, so the target class is what gets
+    scored.  Follows sklearn's ``zero_division=0`` convention.
+    """
+    tp, fp, fn = int(tp), int(fp), int(fn)
+    prec = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    rec = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    f1 = (2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+    return prec, rec, f1
 
 
 def build_config(
@@ -115,16 +135,32 @@ def build_config(
     seed: int,
     overrides: dict[str, Any] | None = None,
 ) -> TrainingConfig:
-    """Build a TrainingConfig mirroring the project, with ablation overrides."""
+    """Build a TrainingConfig mirroring the project, with ablation overrides.
+
+    Every field the shipping UI persists per project has to be read here, or the
+    suite validates a model the project does not train.  ``max_train_samples_per_``
+    ``class``, ``no_behavior_sample_weight`` and ``excluded_feature_cols`` were
+    set by the UI, saved to ``project.yaml``, and then dropped on the floor by this
+    function — harmless while every manuscript project sat at their defaults, and a
+    silent misreport for the first project that did not.
+    """
     overrides = overrides or {}
     cfg = TrainingConfig(
         classifier_family=project.classifier_type,
+        classifier_params=dict(project.classifier_params or {}) or None,
         calibration_method=project.calibration_method,
         split_strategy=project.split_strategy,
         target_label=str(behavior_id),
         random_state=int(seed),
         include_imported=False,  # validation = this project's own labels only
         allow_co_occurring_behaviors=project.allow_co_occurring_behaviors,
+        max_train_samples_per_class=int(project.max_train_samples_per_class or 0),
+        no_behavior_sample_weight=float(project.no_behavior_sample_weight or 0.0),
+        # TrainingConfig declares this a tuple. Note this is the Active Learning
+        # tab's per-run exclusion list, which composes with — does not replace —
+        # the project's config/feature_exclusions.json; the trainer reads that one
+        # off disk itself via project_root, so it was already reaching the engine.
+        excluded_feature_cols=tuple(project.excluded_feature_cols or ()),
         model_version="__validation_tmp__",  # never written to disk by the engine
     )
     for key, val in overrides.items():
@@ -178,10 +214,16 @@ def run_one_config(
         train_pool_df, holdout._group_column(project.split_strategy),
         seed, str(behavior_id),
     )
-    if cal_df.empty and str(cfg.calibration_method) in {"sigmoid", "isotonic"}:
+    calibration_requested = str(cfg.calibration_method) in {"sigmoid", "isotonic"}
+    if cal_df.empty and calibration_requested:
         # No honest slice available — drop calibration for this cell rather than
-        # let the trainer fall back to fitting it on the rows we then score.
+        # let the trainer fall back to fitting it on the rows we then score.  This
+        # is recorded on the result (``calibration_applied``): at the low end of a
+        # learning-curve schedule it fires on every seed, and a curve whose left
+        # end is uncalibrated while its right end is not is a discontinuity in what
+        # is being measured, not a data point.
         cfg.calibration_method = "none"
+    calibration_applied = str(cfg.calibration_method) in {"sigmoid", "isotonic"}
 
     n_fit, n_cal = int(len(fit_df)), int(len(cal_df))
     # The slice came out of the caller's budget, so the reported training counts
@@ -220,6 +262,7 @@ def run_one_config(
 
     metrics = res.metrics
     ti = res.target_idx
+    prec_t = rec_t = f1_t = float("nan")
     # Binary target-vs-rest arrays for PR curves / confusion / kappa.
     y_true = y_score = y_pred = None
     kappa = float("nan")
@@ -233,6 +276,7 @@ def run_one_config(
         fp = int(np.sum((y_true == 0) & (y_pred == 1)))
         fn = int(np.sum((y_true == 1) & (y_pred == 0)))
         tn = int(np.sum((y_true == 0) & (y_pred == 0)))
+        prec_t, rec_t, f1_t = target_class_prf(tp, fp, fn)
         if not res.degenerate_val and len(set(y_true.tolist())) > 1:
             try:
                 kappa = float(cohen_kappa_score(y_true, y_pred))
@@ -251,16 +295,23 @@ def run_one_config(
         n_pos_train=n_pos_train,
         n_neg_train=n_neg_train,
         n_features=int(metrics.get("n_features", 0)),
-        precision=float(metrics.get("precision", float("nan"))),
-        recall=float(metrics.get("recall", float("nan"))),
-        f1=float(metrics.get("f1", float("nan"))),
+        precision=prec_t,
+        recall=rec_t,
+        f1=f1_t,
+        precision_macro=float(metrics.get("precision", float("nan"))),
+        recall_macro=float(metrics.get("recall", float("nan"))),
+        f1_macro=float(metrics.get("f1", float("nan"))),
         pr_auc=float(metrics.get("pr_auc", float("nan"))),
         cohen_kappa=kappa,
         mcc=mcc, balanced_accuracy=bal_acc, specificity=spec, roc_auc=roc,
         tp=tp, fp=fp, fn=fn, tn=tn,
+        confusion_measured=bool((tp + fp + fn + tn) > 0),
         elapsed_sec_fit=float(res.elapsed_sec),
         elapsed_sec_total=total,
         degenerate=bool(res.degenerate_val),
+        degenerate_fit=vmetrics.is_degenerate_fit(tp, fp, fn, tn),
+        calibration_applied=calibration_applied,
+        calibration_method_used=str(cfg.calibration_method),
         y_true=y_true,
         y_score=y_score,
         y_pred=y_pred,

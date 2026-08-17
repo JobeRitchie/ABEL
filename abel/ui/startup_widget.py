@@ -47,7 +47,7 @@ class StartupWidget(QWidget):
             "font-size: 15px; font-weight: 700; letter-spacing: 2px; color: #64B5F6; padding-bottom: 6px;"
         )
 
-        author = QLabel("Jobe Ritchie")
+        author = QLabel("Created by Jobe Ritchie, PhD")
         author.setAlignment(Qt.AlignmentFlag.AlignCenter)
         author.setStyleSheet(
             "font-size: 15px; font-weight: 700; color: #90CAF9; letter-spacing: 1px;"
@@ -78,7 +78,7 @@ class StartupWidget(QWidget):
 
         guidance = QLabel(
             "Core workflows: project setup, Active Learning, clip extraction/review, Direct Use, and exports.\n"
-            "Optional dependencies extend preprocessing, GPU backends, and video fusion.\n"
+            "Optional dependencies extend preprocessing, GPU backends, and video features.\n"
             "Recommended order: create/open project -> install dependencies -> import data -> run workflows."
         )
         guidance.setWordWrap(True)

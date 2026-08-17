@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from abel.core.exceptions import ProjectError
 from abel.models.schemas import ProjectContext
-from abel.services.behavior_service import BehaviorService
+from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.candidate_service import CandidateGenerationService
 from abel.services.dependency_service import DependencyService
 from abel.services.export_service import ExportService
@@ -752,7 +752,7 @@ class MainWindow(QMainWindow):
 
             model_lines: list[str] = []
             for bid, mver in sbm.items():
-                name = beh_lookup.get(bid, bid)
+                name = behavior_label(bid, beh_lookup)
                 if bid not in excluded:
                     model_lines.append(f"  • {name} → {mver}")
 

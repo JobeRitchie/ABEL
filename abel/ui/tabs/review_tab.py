@@ -60,7 +60,7 @@ from abel.models.schemas import (
     ReviewDecisionType,
     ReviewerLabelRecord,
 )
-from abel.services.behavior_service import BehaviorService
+from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.candidate_service import CandidateGenerationService
 from abel.services.import_service import ImportService
 from abel.services.preprocessing_service import ClipExtractionService, regenerate_clips_for_windows
@@ -546,7 +546,7 @@ class ReviewTab(QWidget):
         self._behavior_shortcuts: list[QShortcut] = []
         self._soundboard = None  # lazily-created BehaviorSoundboard window
         # Structured multi-animal labels captured via the soundboard, keyed by
-        # window_id. In-memory for now (Phase 2b: persist to reviewer_labels).
+        # window_id. Held in memory only; not written to reviewer_labels.
         self._structured_labels: dict[str, list[dict]] = {}
         self._pool = QThreadPool.globalInstance()
         self._dissimilarity_scores: dict[str, float] = {}
@@ -1580,9 +1580,9 @@ class ReviewTab(QWidget):
     def _resolve_behavior_display_name(self, behavior_id_str: str) -> str:
         """Resolve a behavior ID string (possibly pipe-separated) to display names."""
         if "|" not in behavior_id_str:
-            return self._display_behavior_name_map.get(behavior_id_str, behavior_id_str)
+            return behavior_label(behavior_id_str, self._display_behavior_name_map)
         parts = sorted(bid.strip() for bid in behavior_id_str.split("|") if bid.strip())
-        names = [self._display_behavior_name_map.get(bid, bid) for bid in parts]
+        names = [behavior_label(bid, self._display_behavior_name_map) for bid in parts]
         return " + ".join(names)
 
     @staticmethod
@@ -1918,6 +1918,9 @@ class ReviewTab(QWidget):
             on_apply=self._apply_mined_ids,
             parent=self,
             on_flag_queue=self._flag_queue_by_essence,
+            # Read live: the dialog is modeless, so clips reviewed while it is open
+            # stop being offered without reopening it.
+            reviewed_provider=lambda: set(self._decision_by_clip_id.keys()),
         )
         # Modeless so the main window (session selection, clip list) stays usable.
         dlg.setModal(False)
@@ -2739,7 +2742,14 @@ class ReviewTab(QWidget):
         )
 
     def _clear_unreviewed_clips(self) -> None:
-        """Delete extracted clip files for candidates without a saved decision."""
+        """Delete extracted clip files for candidates without a saved decision.
+
+        Windows injected by Targeted Clip Mining are also dropped from the queue
+        outright, not just stripped of their clip file: they exist only because a
+        mining batch put them there, so leaving the rows behind would keep the
+        mined clips "surfaced" after the user asked for them to be cleared.
+        Bout candidates keep their rows (their clips can be regenerated).
+        """
         if not self._project_root:
             return
         undecided = [c for c in self._all_candidates if c.window_id not in self._decision_by_clip_id]
@@ -2747,6 +2757,7 @@ class ReviewTab(QWidget):
             QMessageBox.information(self, "Clear Unreviewed Clips", "All candidates already have decisions.")
             return
 
+        mined_ids = [c.window_id for c in undecided if (c.source or "") == "clip_mining"]
         clip_paths: list[Path] = []
         for cand in undecided:
             clip = self._candidate_clip_path(cand)
@@ -2754,7 +2765,7 @@ class ReviewTab(QWidget):
                 clip_paths.append(Path(clip))
 
         existing_paths = [p for p in clip_paths if p.exists()]
-        if not existing_paths:
+        if not existing_paths and not mined_ids:
             QMessageBox.information(
                 self,
                 "Clear Unreviewed Clips",
@@ -2762,11 +2773,19 @@ class ReviewTab(QWidget):
             )
             return
 
+        detail = []
+        if existing_paths:
+            detail.append(f"Delete {len(existing_paths)} extracted clip file(s) for undecided candidates?")
+        if mined_ids:
+            detail.append(
+                f"{len(mined_ids)} unreviewed clip-mining window(s) will also be removed "
+                "from the review queue."
+            )
+        detail.append("Saved decisions are not affected.")
         answer = QMessageBox.question(
             self,
             "Clear Unreviewed Clips",
-            f"Delete {len(existing_paths)} extracted clip file(s) for undecided candidates?\n\n"
-            "This does not remove candidates or decisions.",
+            "\n\n".join(detail),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2791,13 +2810,37 @@ class ReviewTab(QWidget):
             except Exception:
                 pass
 
+        removed_mined = 0
+        if mined_ids:
+            removed_mined = self._candidate_service.remove_external_window_candidates(mined_ids)
+            self._drop_from_mining_filter(mined_ids)
+
         self._refresh_candidates()
         QMessageBox.information(
             self,
             "Clear Unreviewed Clips",
             f"Removed {removed} clip file(s)."
+            + (f" Removed {removed_mined} mined window(s) from the queue." if removed_mined else "")
             + (f" Could not remove {failed} file(s)." if failed else ""),
         )
+
+    def _drop_from_mining_filter(self, window_ids: list[str]) -> None:
+        """Forget *window_ids* in the active mining view, clearing it when empty.
+
+        Without this the mined queue would keep listing windows that no longer
+        exist, and the queue would read as empty rather than returning to the
+        normal candidate list.
+        """
+        if self._mined_ids is None:
+            return
+        gone = {str(w) for w in window_ids}
+        self._mined_ids -= gone
+        for wid in gone:
+            self._mined_scores.pop(wid, None)
+        if not self._mined_ids:
+            self._mined_ids = None
+            self._mined_scores = {}
+            self._clear_mining_btn.setVisible(False)
 
     def _clear_bouts_missing_clips(self) -> None:
         """Remove persisted candidates whose extracted clip files are missing."""

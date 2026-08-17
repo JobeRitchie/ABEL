@@ -154,6 +154,40 @@ def video_only_cols(df: pd.DataFrame) -> list[str]:
     return [c for c in numeric_feature_cols(df) if is_video_feature(c)]
 
 
+#: Column prefix of the R3D-18 appearance embedding.  Canonical definition lives in
+#: :mod:`abel.services.r3d_feature_service`; duplicated here as a bare string so the
+#: taxonomy — imported by every analysis — does not drag in that module's pose/import
+#: service dependencies just to test a prefix.
+R3D_PREFIX = "r3d_"
+
+
+def is_r3d_column(col: str) -> bool:
+    """True for one dimension of the R3D-18 appearance embedding (``r3d_000``…).
+
+    R3D is a *sub-family* of ``video``, not a sixth modality: it dies with the video
+    exactly as optical flow does, and the ablation's "+ Video features" bar is
+    deliberately left as one lump so its numbers stay comparable across releases.
+    This predicate exists for :mod:`abel.validation.r3d_value`, which isolates the
+    family because it is its own user-facing toggle with its own GPU cost.
+    """
+    return str(col).lower().startswith(R3D_PREFIX)
+
+
+def r3d_only_cols(df: pd.DataFrame) -> list[str]:
+    """The R3D embedding dimensions alone (a subset of :func:`video_only_cols`)."""
+    return [c for c in numeric_feature_cols(df) if is_r3d_column(c)]
+
+
+def handcrafted_video_cols(df: pd.DataFrame) -> list[str]:
+    """Video features that are *not* R3D — optical flow, surface/substrate motion.
+
+    The named, interpretable half of the video family: what ABEL computed from
+    pixels before the learned embedding existed.
+    """
+    return [c for c in numeric_feature_cols(df)
+            if is_video_feature(c) and not is_r3d_column(c)]
+
+
 def social_only_cols(df: pd.DataFrame) -> list[str]:
     return [c for c in numeric_feature_cols(df) if is_social_feature(c)]
 
@@ -162,19 +196,60 @@ def context_only_cols(df: pd.DataFrame) -> list[str]:
     return [c for c in numeric_feature_cols(df) if is_context_feature(c)]
 
 
+def informative_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
+    """Of ``cols``, the ones that actually vary on this pool.
+
+    A column that is constant (or entirely NaN) carries no signal: a tree model
+    never splits on it, so adding it produces a bit-identical fit.  That matters
+    for gating an ablation rung, because "present but constant" and "absent" are
+    the same experiment.  The case in the wild is a project with no ROI defined —
+    its environment/ROI columns exist and are all zero, so a "+ Environment /
+    ROI" bar there is not a measurement of "context does not help", it is the
+    absence of a measurement, and pooling it as a zero dilutes the rung's mean
+    across projects where the question could actually be asked.
+    """
+    out: list[str] = []
+    for c in cols:
+        if c not in df.columns:
+            continue
+        s = pd.to_numeric(df[c], errors="coerce")
+        if s.notna().any() and float(s.std(skipna=True) or 0.0) > 0.0:
+            out.append(c)
+    return out
+
+
 def select_feature_cols(
     df: pd.DataFrame,
     *,
     include_video: bool = False,
     include_social: bool = False,
     include_context: bool = False,
+    include_r3d: bool | None = None,
 ) -> list[str]:
-    """Pose baseline plus the requested add-on families, in a stable order."""
+    """Pose baseline plus the requested add-on families, in a stable order.
+
+    ``include_r3d`` defaults to ``None`` = "R3D rides along with ``include_video``",
+    which is the historical behaviour every existing analysis depends on: the
+    ablation's "+ Video features" bar and the discrimination "+ Video" set stay a
+    single video lump, so their numbers remain comparable with runs made before the
+    embedding shipped.  That path also keeps the *original column order* rather than
+    re-grouping handcrafted-then-R3D, since column order breaks ties in XGBoost's
+    split search and a reordering alone would perturb old results.
+
+    Pass ``True``/``False`` explicitly only to isolate the family — see
+    :mod:`abel.validation.r3d_value`, which is the one analysis that does.
+    """
     cols = pose_only_cols(df)
     if include_context:
         cols = cols + context_only_cols(df)
-    if include_video:
-        cols = cols + video_only_cols(df)
+    if include_r3d is None:
+        if include_video:
+            cols = cols + video_only_cols(df)
+    else:
+        if include_video:
+            cols = cols + handcrafted_video_cols(df)
+        if include_r3d:
+            cols = cols + r3d_only_cols(df)
     if include_social:
         cols = cols + social_only_cols(df)
     return cols

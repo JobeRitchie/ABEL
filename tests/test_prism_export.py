@@ -415,3 +415,134 @@ def test_readme_keeps_its_indentation_through_transliteration(tmp_path):
     out = path.read_text(encoding="utf-8-sig")
     assert out.splitlines()[3] == "    Table: XY - 3 subcolumns."
     assert out.isascii()
+
+
+# ── Figure 3 panels: every panel of the figure must fall out of one run ─────
+
+
+def _metrics_frame() -> pd.DataFrame:
+    return pd.DataFrame({
+        "project_id": ["EPM", "EPM", "HC"],
+        "behavior_name": ["Groom", "Head Dip", "Dig"],
+        "n_seeds": [5, 5, 5],
+        "pr_auc_mean": [0.91, 0.84, 0.77],
+        "pr_auc_sd": [0.02, 0.03, 0.05],
+        "cohen_kappa_mean": [0.80, 0.71, 0.65],
+        "cohen_kappa_sd": [0.03, 0.04, 0.06],
+    })
+
+
+def _rarity_frame() -> pd.DataFrame:
+    return pd.DataFrame({
+        "project_id": ["EPM", "EPM", "HC"],
+        "behavior_name": ["Groom", "Head Dip", "Dig"],
+        "prevalence_pct": [12.5, 1.4, 0.4],
+        "prevalence_sd": [3.0, 0.5, 0.2],
+        "n_sessions": [8, 8, 32],
+        "source": ["bouts"] * 3,
+    })
+
+
+def test_rarity_panel_keeps_the_seed_sd_it_was_given():
+    """The metrics frame already carries an SD across seeds. Routing it through
+    sd_from_ci95 (which the CI-based panels need) would divide it by t/sqrt(n)."""
+    out = prism.prism_rarity_vs_performance(_rarity_frame(), _metrics_frame())
+    row = out[out["Behavior"] == "EPM - Groom"].iloc[0]
+    assert row["PR-AUC:SD"] == pytest.approx(0.02)
+    assert row["PR-AUC:N"] == 5
+
+
+def test_rarity_panel_joins_on_assay_and_behavior_not_the_name():
+    """Same behavior name in two assays is two behaviors with two prevalences;
+    joining on the name alone would cross-multiply them into extra points."""
+    metrics = pd.concat([_metrics_frame(),
+                         pd.DataFrame({"project_id": ["HC"],
+                                       "behavior_name": ["Groom"],
+                                       "n_seeds": [5], "pr_auc_mean": [0.5],
+                                       "pr_auc_sd": [0.1]})], ignore_index=True)
+    rarity = pd.concat([_rarity_frame(),
+                        pd.DataFrame({"project_id": ["HC"],
+                                      "behavior_name": ["Groom"],
+                                      "prevalence_pct": [30.0],
+                                      "prevalence_sd": [1.0], "n_sessions": [32],
+                                      "source": ["bouts"]})], ignore_index=True)
+    out = prism.prism_rarity_vs_performance(rarity, metrics)
+    assert len(out) == 4
+    assert sorted(out["Behavior"]) == ["EPM - Groom", "EPM - Head Dip",
+                                       "HC - Dig", "HC - Groom"]
+
+
+def test_rarity_panel_names_the_behaviors_it_dropped():
+    """A behavior with no measured prevalence vanishes from the scatter. Silent
+    attrition lets a reader count points and believe it is the whole set."""
+    metrics = pd.concat([_metrics_frame(),
+                         pd.DataFrame({"project_id": ["EPM"],
+                                       "behavior_name": ["Stretch Attend"],
+                                       "n_seeds": [5], "pr_auc_mean": [0.6],
+                                       "pr_auc_sd": [0.1]})], ignore_index=True)
+    out = prism.prism_rarity_vs_performance(_rarity_frame(), metrics)
+    assert len(out) == 3
+    assert out.attrs["dropped"] == ["EPM - Stretch Attend"]
+
+
+def test_kappa_by_assay_pads_ragged_columns_with_blanks():
+    """Assays have different behavior counts. A padded 0 would read as a real
+    measurement of total disagreement and drag the assay's mean down."""
+    out = prism.prism_metric_by_assay(_metrics_frame())
+    assert list(out.columns) == ["EPM", "HC"]
+    assert len(out) == 2
+    assert math.isnan(out["HC"].iloc[1])
+
+
+def test_video_gain_panel_sorts_and_carries_the_test_result():
+    vv = pd.DataFrame({
+        "project_id": ["HC", "HC"], "behavior_name": ["Dig", "Rear"],
+        "n_seeds": [5, 5], "gain": [0.30, 0.01],
+        "gain_ci95": [0.05, 0.02], "p_value": [0.001, 0.4],
+        "significant": [True, False],
+    })
+    out = prism.prism_video_gain(vv)
+    assert list(out["Behavior"]) == ["HC - Rear", "HC - Dig"]
+    assert list(out["Significant"]) == [0, 1]
+
+
+def test_figure_panels_cover_every_panel_of_the_figure(tmp_path):
+    """Run All must leave nothing to assemble by hand: each Figure 3 panel is a
+    file, and each file is named in INDEX.txt with its Prism table type."""
+    written = prism.write_figure_panels(
+        tmp_path,
+        gen_df=pd.DataFrame({"project": ["EPM"], "behavior": ["Groom"],
+                             "f1": [0.8], "cohen_kappa": [0.75]}),
+        behavior_metrics_df=_metrics_frame(), rarity_df=_rarity_frame(),
+        video_df=pd.DataFrame({"project_id": ["HC"], "behavior_name": ["Dig"],
+                               "n_seeds": [5], "gain": [0.3],
+                               "gain_ci95": [0.05], "p_value": [0.01],
+                               "significant": [True]}),
+        bscape_shares_df=pd.DataFrame({
+            "behavior": ["EPM · Groom"] * 2, "modality": ["pose", "video"],
+            "modality_label": ["Pose geometry", "Video"], "percent": [40.0, 60.0]}),
+    )
+    names = {p.name for p in written}
+    assert {"fig3_generalization_kappa.csv", "fig3_kappa_by_assay.csv",
+            "fig3_rarity_vs_performance.csv", "fig3_video_value.csv",
+            "fig3_modality_shares.csv"} <= names
+    index = (tmp_path / "prism" / "FIGURES" / "INDEX.txt").read_text(
+        encoding="utf-8-sig")
+    for name in names:
+        assert name in index
+
+
+def test_effort_panel_row_unit_is_the_behavior_not_the_project():
+    """With every checked behavior hunted, a project row averages its behaviors
+    away -- n becomes the project count and the paired arms lose their pairing."""
+    from abel.validation.analyses import rare_discovery
+
+    long = pd.DataFrame([
+        {"project": "HC", "behavior": "Dig", "strategy": "Random clips",
+         "minutes": 10.0},
+        {"project": "HC", "behavior": "Groom", "strategy": "Random clips",
+         "minutes": 20.0},
+    ])
+    out = rare_discovery.prism_effort_pooled_minutes(long)
+    assert list(out["Behavior"]) == ["HC - Dig", "HC - Groom"]
+    assert list(out["Random clips"]) == [10.0, 20.0]

@@ -27,7 +27,10 @@ from typing import Any, Callable
 
 import numpy as np
 
-from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
+from abel.services.active_learning_trainer_service import (
+    ActiveLearningTrainerService,
+    TrainingConfig,
+)
 from abel.validation import features, subsample
 from abel.validation.datamodel import CellResult, ProjectRef
 from abel.validation.engine import run_one_config
@@ -125,7 +128,9 @@ def build_ablation_configs(
         name="add_adaptive_complexity",
         label="+ Adaptive model complexity",
         description="Lets the trainer scale model capacity to the amount of labeled "
-                    "data instead of a fixed configuration.",
+                    "data instead of a fixed configuration. Evaluated but NOT "
+                    "shipped on by default — it is absent from the shipped-pipeline "
+                    "bar for that reason.",
         feature_set="pose",
         overrides=ov,
     ))
@@ -148,18 +153,39 @@ def build_ablation_configs(
             feature_set="pose",
             overrides=ov,
         ))
-    # Everything on = ABEL's full production pipeline for this project.
+    # The shipped pipeline for this project.  This bar is read as "what ABEL
+    # actually gives you", and `cross_project` keys its per-project accuracy on it,
+    # so it mirrors the product's own *training* defaults rather than the union of
+    # every rung above.
+    #
+    # One deliberate departure, which this bar's label does not imply and so is
+    # stated here: `include_imported` is forced False for every validation config
+    # (see `engine.build_config`), while all eight manuscript projects ship with it
+    # True. On DG_FearConditioning that removes 2878 of 5680 pool rows, and 481 of
+    # 954 positives for "Shocked". The exclusion is correct and stays — imported
+    # rows inflate `n_pos_train` and corrupt the learning curve's x-axis, which is
+    # argued at length in `holdout.py` — but it means this bar measures the product
+    # *trained on this project's own labels only*, not the product exactly as a user
+    # would configure it. Read the bar as the former.
+    #
+    # ``adaptive_complexity`` in particular is deliberately NOT on:
+    # the product turned it off (``TrainingConfig.adaptive_complexity = False``)
+    # after this very suite measured no benefit across 43 behaviors.  Turning it on
+    # here would report a configuration ABEL does not ship.  The rung above still
+    # measures it — that is the honest place for a feature that was evaluated and
+    # not adopted.
     all_ov = {
         "calibration_method": project.calibration_method,
-        "adaptive_complexity": True,
-        "enable_feature_augmentation": True,
+        "adaptive_complexity": TrainingConfig.adaptive_complexity,
+        "enable_feature_augmentation": TrainingConfig.enable_feature_augmentation,
         "allow_co_occurring_behaviors": project.allow_co_occurring_behaviors,
     }
     configs.append(AblationConfig(
         name=ALL_FEATURES_CONFIG,
-        label="All enhancements",
-        description="Every ABEL enhancement enabled together — the full production "
-                    "pipeline.",
+        label="Shipped pipeline",
+        description="Every feature family plus the enhancements ABEL ships enabled "
+                    "by default, trained on this project's own labels only "
+                    "(imported rows are excluded from every validation config).",
         feature_set=("all" if (project.use_video_features or has_social or has_context)
                      else "pose"),
         overrides=all_ov,
@@ -182,6 +208,12 @@ class AblationResult:
     gain_p: dict[str, float] = field(default_factory=dict)    # config -> paired t-test p vs. baseline
     labels: dict[str, str] = field(default_factory=dict)      # config -> bar label
     descriptions: dict[str, str] = field(default_factory=dict)
+    # config -> the rung could not differ from the baseline here, because it resolved
+    # to the identical feature columns AND the identical overrides. Its gain is a
+    # structural zero, not a measured one. Detected from the configs themselves
+    # rather than by noticing the F1 vectors came out equal, so it cannot be confused
+    # with a real effect that happened to measure zero.
+    untestable: dict[str, bool] = field(default_factory=dict)
     cells: list[CellResult] = field(default_factory=list)
 
     @property
@@ -222,6 +254,153 @@ def _paired_p(deltas) -> float:
     return vmetrics.paired_p(deltas)
 
 
+def pooled_gain_by_behavior(abl_df) -> "pd.DataFrame":
+    """Pool each enhancement's ΔF1 **across behaviors**, one row per (enhancement,
+    budget) — the manuscript-level test.
+
+    The per-result ``gain_p`` in :class:`AblationResult` pairs across random
+    *seeds*.  That answers "is this gain reproducible for this one behavior under
+    reseeding", with n = the seed count and no biological content: adding seeds
+    shrinks the p-value without adding evidence, and a reviewer will say so.  The
+    claim a manuscript actually makes — "this feature family helps behaviors in
+    general" — has the *behavior* as its unit of analysis.
+
+    So seeds are averaged within a behavior first, collapsing the nuisance
+    dimension.  **But behaviors are not independent either.**  Behaviors within a
+    project share animals, sessions, the holdout split and the negative pool, and
+    measured on the manuscript runs their intra-class correlation is 0.30-0.42.  A
+    plain t-test over 43 behaviors therefore treats ~18 behaviors' worth of
+    information as 43, and on the shipped-pipeline rung it turns p = 0.049 into
+    p = 0.0002 — two orders of magnitude of significance conjured out of repeated
+    measurement of the same eight projects.
+
+    The reported test is therefore a **random-intercept model with project as the
+    grouping factor** (:func:`metrics.clustered_mean_test`), which keeps every
+    behavior's resolution while pricing the shared variance into the standard
+    error, and takes its denominator df from Satterthwaite rather than the
+    infinite-df Wald z that mixed-model packages report by default.  ``p_naive_``
+    ``behavior``, ``p_project_mean`` and ``p_sign_flip`` ride alongside so a reader
+    can see the whole sensitivity range instead of trusting one modelling choice.
+
+    Multiplicity (``p_value_bh``) follows a pre-specified hierarchy rather than one
+    flat family.  ``all_features`` is the primary endpoint — it is the shipped
+    configuration, the one bar the manuscript leads with, and a single pre-specified
+    test needs no correction.  The remaining rungs are secondary, screened together
+    within each clip budget under Benjamini-Hochberg.  Flattening all six into one
+    family instead would penalise the primary claim for the existence of the
+    exploratory rungs beside it.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    from abel.validation import metrics as vmetrics  # noqa: PLC0415
+
+    if abl_df is None or len(abl_df) == 0 or "gain_over_baseline" not in abl_df.columns:
+        return pd.DataFrame()
+    df = abl_df[abl_df["config"].astype(str) != BASELINE_CONFIG].copy()
+    if df.empty:
+        return pd.DataFrame()
+    df["_gain"] = pd.to_numeric(df["gain_over_baseline"], errors="coerce")
+    # Rungs that could not have differed from the baseline (identical resolved
+    # features and settings — see AblationResult.untestable) contribute a structural
+    # 0.0, not a measured one. Counting them as observations of "no effect" both
+    # dilutes the mean toward zero and inflates n with rows that carry no
+    # information; on the manuscript run that is 13 of 43 context rows.
+    if "untestable" in df.columns:
+        untest = df["untestable"].astype(str).str.strip().str.lower() == "true"
+    else:
+        untest = pd.Series(False, index=df.index)
+    df["_untestable"] = untest
+    # Guard against two projects that spell a behavior the same way being pooled
+    # into one row (see the behavior-name-collision failure mode): the unit key is
+    # (project, behavior), never the name alone.
+    keys = [c for c in ("project", "behavior") if c in df.columns]
+    has_project = "project" in df.columns
+    rows = []
+    for (cfg_name, budget), grp in df.groupby(["config", "clip_budget"], sort=False):
+        testable = grp[~grp["_untestable"]]
+        n_untestable = int(grp["_untestable"].sum())
+        per_beh = (testable.groupby(keys, sort=False)["_gain"].mean().dropna()
+                   if keys else testable["_gain"].dropna())
+        vals = per_beh.to_numpy(dtype=float)
+        if vals.size == 0:
+            continue
+        # Cluster = project. Without a project column every behavior is its own
+        # cluster, which degrades to the naive test — correctly, since there is then
+        # no information about what shares subjects with what.
+        if has_project and keys and keys[0] == "project":
+            clusters = [k[0] for k in per_beh.index]
+        else:
+            clusters = list(range(vals.size))
+        mm = vmetrics.clustered_mean_test(vals, clusters)
+        rows.append({
+            "config": str(cfg_name),
+            "label": str(grp["label"].iloc[0]) if "label" in grp.columns else str(cfg_name),
+            "clip_budget": str(budget),
+            "n_behaviors": int(vals.size),
+            "n_projects": int(mm.n_clusters),
+            # Behaviors where this rung was structurally unable to differ from the
+            # baseline, and so was never tested at all. Excluded from n_behaviors.
+            "n_untestable": n_untestable,
+            # Descriptive, unweighted — what the bar height is.
+            "mean_gain": float(np.mean(vals)),
+            "median_gain": float(np.median(vals)),
+            "n_helped": int(np.sum(vals > 0)),
+            "n_projects_helped": int(mm.n_clusters_positive),
+            # Inferential: the random-intercept model's estimate and its own CI.
+            "estimate": float(mm.estimate),
+            "ci95": float(mm.ci95),
+            "se": float(mm.se),
+            "t_stat": float(mm.t_stat),
+            "df": float(mm.df),
+            "df_method": str(mm.df_method),
+            "p_value": float(mm.p_value),
+            "icc_project": float(mm.icc),
+            "design_effect": float(mm.design_effect),
+            "n_effective": float(mm.n_effective),
+            # Sensitivity of the conclusion to the inferential model.
+            "p_naive_behavior": float(mm.p_naive),
+            "p_project_mean": float(mm.p_cluster_mean),
+            "p_sign_flip": float(mm.p_sign_flip),
+            "endpoint": ("primary" if str(cfg_name) == ALL_FEATURES_CONFIG
+                         else "secondary"),
+        })
+    out = pd.DataFrame(rows)
+    return _add_bh(out, group_cols=["clip_budget"])
+
+
+def _add_bh(out, *, group_cols: list[str]):
+    """Add ``q_value``/``significant_bh``, correcting the secondary endpoints only.
+
+    The primary endpoint keeps its uncorrected p (q = p) and is judged on the plain
+    α = 0.05 line; correcting a single pre-specified test against the exploratory
+    rungs beside it would be a penalty with no multiplicity to justify it.  The
+    secondary rungs are a genuine screening family and are BH-corrected within each
+    clip budget — budgets are separate questions, not more tests of the same one.
+    """
+    import pandas as pd  # noqa: PLC0415
+
+    from abel.validation import metrics as vmetrics  # noqa: PLC0415
+
+    if out is None or out.empty:
+        return out
+    out = out.copy()
+    out["q_value"] = float("nan")
+    out["significant_bh"] = False
+    is_primary = out["endpoint"].astype(str) == "primary"
+    out.loc[is_primary, "q_value"] = out.loc[is_primary, "p_value"]
+
+    secondary = out[out["endpoint"].astype(str) == "secondary"]
+    groups = (secondary.groupby(group_cols, sort=False) if group_cols
+              else ([((), secondary)] if not secondary.empty else []))
+    for _, grp in groups:
+        ps = pd.to_numeric(grp["p_value"], errors="coerce")
+        out.loc[grp.index, "q_value"] = vmetrics.benjamini_hochberg_adjust(ps.tolist())
+    out["significant_bh"] = (
+        pd.to_numeric(out["q_value"], errors="coerce") <= 0.05
+    ).fillna(False)
+    return out
+
+
 def budget_label(budget: int) -> str:
     """Short tag for a clip budget: ``all`` or ``n50``."""
     return "all" if budget == subsample.ALL_CLIPS else f"n{int(budget)}"
@@ -252,8 +431,14 @@ def run_ablation(
     group_col = holdout_split.group_col
     total_pos = subsample.count_positives(pool, behavior_id)
 
-    has_social = bool(features.social_only_cols(pool))
-    has_context = bool(features.context_only_cols(pool))
+    # Gate a family's rung on whether it has any *informative* column here, not
+    # merely a present one. A project with no ROI defined still carries all-zero
+    # environment columns; building a "+ Environment / ROI" bar from them yields a
+    # bit-identical fit and a structural 0.0 that dilutes the pooled mean. This
+    # mirrors how social has always been gated for solo-animal projects: the rung
+    # simply is not built.
+    has_social = bool(features.informative_cols(pool, features.social_only_cols(pool)))
+    has_context = bool(features.informative_cols(pool, features.context_only_cols(pool)))
 
     def _resolve_feature_cols(feature_set: str) -> list[str] | None:
         """Map a config's feature-family tag to explicit override columns.
@@ -297,12 +482,31 @@ def run_ablation(
             seed_subsets[rep] = (sub, int(n_pos), int(n_neg))
 
     blabel = budget_label(clip_budget)
-    for cfg in build_ablation_configs(project, has_social=has_social,
-                                      has_context=has_context):
+    configs = build_ablation_configs(project, has_social=has_social,
+                                     has_context=has_context)
+    # The baseline's resolved columns/overrides, to detect rungs that cannot move.
+    # A project whose pool carries no usable context columns for this behavior gets a
+    # "+ Environment / ROI" rung that resolves to the pose-only column list: same
+    # features, same settings, same seed, therefore a bit-identical F1 and a gain of
+    # exactly 0.0. Pooled as an ordinary observation it is a real measurement of "no
+    # effect", which it is not — it is the absence of a measurement, and on the
+    # manuscript run 13 of 43 context rows are exactly this.
+    base_cfg = next((c for c in configs if c.name == BASELINE_CONFIG), None)
+    base_cols = _resolve_feature_cols(base_cfg.feature_set) if base_cfg else None
+    base_ov = dict(base_cfg.overrides) if base_cfg else {}
+
+    for cfg in configs:
         result.order.append(cfg.name)
         result.labels[cfg.name] = cfg.label
         result.descriptions[cfg.name] = cfg.description
         fco = _resolve_feature_cols(cfg.feature_set)
+        result.untestable[cfg.name] = bool(
+            cfg.name != BASELINE_CONFIG
+            and base_cfg is not None
+            and dict(cfg.overrides) == base_ov
+            and (fco if fco is None else sorted(fco))
+            == (base_cols if base_cols is None else sorted(base_cols))
+        )
         f1s: list[float] = []
         for rep in range(n_seeds):
             seed = 1000 + rep
@@ -324,15 +528,21 @@ def run_ablation(
                     n_clips=int(n_pos),
                     seed=int(seed),
                     precision=res.precision, recall=res.recall, f1=res.f1,
+                    precision_macro=res.precision_macro,
+                    recall_macro=res.recall_macro, f1_macro=res.f1_macro,
                     pr_auc=res.pr_auc, cohen_kappa=res.cohen_kappa,
                     mcc=res.mcc, balanced_accuracy=res.balanced_accuracy,
                     specificity=res.specificity, roc_auc=res.roc_auc,
                     tp=res.tp, fp=res.fp, fn=res.fn, tn=res.tn,
+                    confusion_measured=res.confusion_measured,
                     n_pos_train=res.n_pos_train, n_neg_train=res.n_neg_train,
                     n_features=res.n_features,
                     elapsed_sec_fit=res.elapsed_sec_fit,
                     elapsed_sec_total=res.elapsed_sec_total,
-                    degenerate=res.degenerate, error=res.error,
+                    degenerate=res.degenerate, degenerate_fit=res.degenerate_fit,
+                    calibration_applied=res.calibration_applied,
+                    calibration_method_used=res.calibration_method_used,
+                    error=res.error,
                 )
             )
             # Use NaN for failed seeds so the per-seed lists stay aligned for pairing.

@@ -110,7 +110,7 @@ class DependencyService:
             ),
             DependencySpec(
                 package="torchvision",
-                purpose="Pretrained video models for fusion inference",
+                purpose="Pretrained video models for R3D appearance features",
                 required_version=">=0.19",
                 tier="tier2_acceleration",
             ),
@@ -216,7 +216,7 @@ class DependencyService:
     def recommended_gpu_modeling(self) -> list[str]:
         return ["xgboost"]
 
-    def recommended_windows_cuda_fusion(self) -> list[str]:
+    def recommended_windows_cuda_r3d(self) -> list[str]:
         if platform.system().lower().startswith("win"):
             return [
                 "torch",
@@ -230,7 +230,7 @@ class DependencyService:
         return [
             *self.recommended_preprocessing(),
             *self.recommended_gpu_modeling(),
-            *self.recommended_windows_cuda_fusion(),
+            *self.recommended_windows_cuda_r3d(),
             "scikit-learn>=1.5",
             "python-docx",
             "openpyxl",

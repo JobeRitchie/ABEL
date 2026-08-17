@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from abel.validation import subsample
-from abel.validation.analyses import ablation, discrimination
+from abel.validation.analyses import ablation, discrimination, learning_curve
 
 KIND_RESULT = "result"
 KIND_CAVEAT = "caveat"
@@ -273,15 +273,19 @@ def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
         median_knee = float(np.median(vals))
         worst_lc, worst_k = max(valid, key=lambda kv: kv[1])
         best_lc, best_k = min(valid, key=lambda kv: kv[1])
+        # Quote the threshold the detector actually uses. This read "95%" twice while
+        # the shipped knee was computed at 98% (learning_curve.KNEE_EPS = 0.02);
+        # deriving the number here means the prose cannot drift from the code again.
+        knee_pct = f"{(1.0 - learning_curve.KNEE_EPS) * 100:g}%"
         out.append(Finding(
             "Learning curves",
-            f"A median of ~{_clips(median_knee)} labeled clips per behavior reaches 95% "
-            f"of that behavior's peak held-out F1 — this is the recommended labeling "
-            f"budget.",
+            f"A median of ~{_clips(median_knee)} labeled clips per behavior reaches "
+            f"{knee_pct} of that behavior's peak held-out F1 — this is the recommended "
+            f"labeling budget.",
             f"Per-behavior knee ranges from {_clips(best_k)} clips "
             f"({best_lc.behavior_name}) to {_clips(worst_k)} clips "
             f"({worst_lc.behavior_name}). The knee is the smallest clip count whose mean "
-            f"F1 reaches 95% of the curve's maximum, averaged over seeds.",
+            f"F1 reaches {knee_pct} of the curve's maximum, averaged over seeds.",
         ))
         out.append(Finding(
             "Learning curves",
@@ -372,6 +376,35 @@ def _ablation_findings(inp: FindingsInput) -> list[Finding]:
             f"{n_beh}) — "
             + "; ".join(f"{labels.get(c, c).lstrip('+ ')}: {sig_count.get(c, 0)}"
                         for c, _ in singles)
+            + ".",
+        ))
+    # The statistic a manuscript should quote. `sig_count` above pairs across
+    # random SEEDS, so its n is the seed count and it only says "this behavior's
+    # gain reproduces under reseeding" — adding seeds shrinks that p without adding
+    # evidence. The claim being made is "this family helps behaviors in general",
+    # whose unit is the behavior. `by_config[cfg]` is already one seed-averaged
+    # value per behavior, so it is exactly the right vector to test.
+    from abel.validation import metrics as vmetrics  # noqa: PLC0415
+
+    pooled = []
+    for cfg, gains in singles:
+        if len(gains) >= 2:
+            pooled.append((cfg, float(np.mean(gains)), vmetrics.paired_p(gains),
+                           len(gains)))
+    sig_pooled = [t for t in pooled if math.isfinite(t[2]) and t[2] < 0.05]
+    if pooled:
+        out.append(Finding(
+            "Ablation (detection)",
+            f"Across behaviors, {len(sig_pooled)} of {len(pooled)} single "
+            f"enhancements improved detection significantly (n = {pooled[0][3]} "
+            f"behaviors).",
+            "Unit of analysis = the behavior, not the random seed: seeds are "
+            "averaged within a behavior first, then a two-sided paired t-test runs "
+            "across behaviors. This is the test to report; the per-behavior "
+            "significance counts above answer the narrower question of whether one "
+            "behavior's gain reproduces under reseeding. Mean ΔF1 (p) — "
+            + "; ".join(f"{labels.get(c, c).lstrip('+ ')} {_f(m, 3)} (p={p:.3g})"
+                        for c, m, p, _ in pooled)
             + ".",
         ))
     dead = [labels.get(c, c).lstrip("+ ") for c, g in singles

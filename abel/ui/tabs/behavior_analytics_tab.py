@@ -109,7 +109,7 @@ from PySide6.QtWidgets import (
 )
 
 from abel.core.project_manager import ProjectManager
-from abel.services.behavior_service import BehaviorService
+from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.behavioral_motif_service import (
     MotifSettings,
     load_motif_settings,
@@ -2320,7 +2320,7 @@ class BehaviorAnalyticsTab(QWidget):
                     sid_str = str(sid)
                     if (bid, sid_str) in loaded_keys:
                         continue
-                    summary_rows.append(_stats(grp, sid_str, bid, bid_name_map.get(bid, bid)))
+                    summary_rows.append(_stats(grp, sid_str, bid, behavior_label(bid, bid_name_map)))
                     loaded_keys.add((bid, sid_str))
 
         # ── (removed) Source 3: behavior_bouts parquet fallback ────────────
@@ -2889,7 +2889,7 @@ class BehaviorAnalyticsTab(QWidget):
                     "session_label": session_label,
                     "session_type": session_type,
                     "behavior_id": bid,
-                    "behavior": bid_name_map.get(bid, bid),
+                    "behavior": behavior_label(bid, bid_name_map),
                     "n_bouts": float(n_bouts),
                     "time_spent_s": time_s,
                     "mean_bout_s": mean_dur,
@@ -6163,13 +6163,40 @@ class _GraphsWidget(QWidget):
 
     # -- chart types --------------------------------------------------
 
+    def _session_aggregate(self, dfc: pd.DataFrame, metric: str,
+                           agg_fn: str) -> pd.DataFrame:
+        """Per-session aggregate covering every checked subject.
+
+        A subject that scored zero for all of the selected behaviors has no
+        rows in ``dfc`` at all; it is appended here at its missing value so
+        group means, error bars and N count it instead of skipping it.
+        """
+        sess_agg = dfc.groupby(["session_label", "group"])[metric].agg(agg_fn).reset_index()
+        groups_map = self._host._session_groups
+        seen = set(sess_agg["session_label"])
+        missing = [
+            {
+                "session_label": sess, "group": groups_map.get(sess, ""),
+                metric: self._missing_value_for_metric(metric, sess),
+            }
+            for sess in self._export_sessions()
+            if sess not in seen and groups_map.get(sess, "")
+        ]
+        if missing:
+            sess_agg = pd.concat(
+                [sess_agg, pd.DataFrame(missing)], ignore_index=True,
+            )
+        return sess_agg.dropna(subset=[metric])
+
     def _bar_individual(self, df: pd.DataFrame, metric: str, ylabel: str,
                         agg_fn: str) -> None:
         """Clustered bar chart — one group of bars per session, one bar per behavior."""
         ax = self._figure.add_subplot(111)
         gs = self._gs()
         behaviors = sorted(df["behavior"].unique())
-        sessions = sorted(df["session_label"].unique())
+        # Roster-driven so subjects that scored zero for every selected
+        # behavior still get a (zero-height) bar instead of vanishing.
+        sessions = self._export_sessions() or sorted(df["session_label"].unique())
         n_b = len(behaviors)
         x = np.arange(len(sessions))
         width = 0.75 / max(n_b, 1)
@@ -6212,7 +6239,7 @@ class _GraphsWidget(QWidget):
             ax.text(0.5, 0.5, "No sessions with group assignments.",
                     ha="center", va="center", transform=ax.transAxes)
             return
-        sess_agg = dfc.groupby(["session_label", "group"])[metric].agg(agg_fn).reset_index()
+        sess_agg = self._session_aggregate(dfc, metric, agg_fn)
         group_names = self._host._ordered_group_list(sess_agg["group"].unique())
         error_style = gs.get("error_style", "SEM")
         bar_spacing  = float(gs.get("bar_spacing", 1.0))
@@ -6275,6 +6302,9 @@ class _GraphsWidget(QWidget):
     def _stacked_bar(self, df: pd.DataFrame, col: str, ylabel: str, title: str) -> None:
         pivot = df.pivot_table(index="session_label", columns="behavior", values=col,
                                aggfunc="sum", fill_value=0)
+        sessions = self._export_sessions()
+        if sessions:
+            pivot = pivot.reindex(sessions, fill_value=0)
         ax = self._figure.add_subplot(111)
         pivot.plot.bar(stacked=True, ax=ax)
         self._apply(ax, title=title, ylabel=ylabel)
@@ -6317,10 +6347,18 @@ class _GraphsWidget(QWidget):
                 ax.text(0.5, 0.5, "No grouped data", ha="center", va="center",
                         transform=ax.transAxes)
                 return
-            if metric == "mean_bout_s":
-                sess_bin = binned.groupby(["group", "session_label", "time_bin_s"])[col].mean().reset_index()
-            else:
-                sess_bin = binned.groupby(["group", "session_label", "time_bin_s"])[col].sum().reset_index()
+            # Grid over the full roster so subjects with no bouts (and empty
+            # bins) count as zero rather than dropping out of the group mean.
+            all_bins = list(range(0, int(binned["time_bin_s"].max()) + bin_seconds, bin_seconds))
+            roster = [s for s in self._export_sessions() if groups.get(s, "")]
+            sess_bin = self._binned_session_grid(
+                binned, col, all_bins, roster or sorted(binned["session_label"].unique()),
+            )
+            sess_bin = sess_bin.groupby(
+                ["session_label", "time_bin_s"], as_index=False,
+            )[col].agg("mean" if metric == "mean_bout_s" else "sum")
+            sess_bin["group"] = sess_bin["session_label"].map(groups)
+            sess_bin = sess_bin.dropna(subset=["group"])
             group_list = self._host._ordered_group_list(sess_bin["group"].unique())
             error_style = gs.get("error_style", "SEM")
             for gi, g in enumerate(group_list):
@@ -6349,11 +6387,13 @@ class _GraphsWidget(QWidget):
                         xlabel=f"Time (s, bin={bin_seconds}s)")
             ax.legend(fontsize=gs["legend_fontsize"], loc=gs["legend_loc"])
         else:
-            # Collapse across all sessions → mean ± SEM
-            if metric == "mean_bout_s":
-                sess_bin = binned.groupby(["session_label", "behavior", "time_bin_s"])[col].mean().reset_index()
-            else:
-                sess_bin = binned.groupby(["session_label", "behavior", "time_bin_s"])[col].sum().reset_index()
+            # Collapse across all sessions → mean ± SEM.  Gridded over the
+            # full roster so subjects with no bouts count as zero.
+            all_bins = list(range(0, int(binned["time_bin_s"].max()) + bin_seconds, bin_seconds))
+            sess_bin = self._binned_session_grid(
+                binned, col, all_bins,
+                self._export_sessions() or sorted(binned["session_label"].unique()),
+            )
             error_style = gs.get("error_style", "SEM")
             for bi, bname in enumerate(sorted(sess_bin["behavior"].unique())):
                 bdf = sess_bin[sess_bin["behavior"] == bname]
@@ -6391,7 +6431,7 @@ class _GraphsWidget(QWidget):
             ax.text(0.5, 0.5, "No grouped data", ha="center", va="center",
                     transform=ax.transAxes)
             return
-        sess_agg = dfc.groupby(["session_label", "group"])[metric].agg(agg_fn).reset_index()
+        sess_agg = self._session_aggregate(dfc, metric, agg_fn)
         group_names = self._host._ordered_group_list(sess_agg["group"].unique())
         data = [sess_agg.loc[sess_agg["group"] == g, metric].tolist() for g in group_names]
         bp = ax.boxplot(data, labels=group_names, patch_artist=True, widths=0.5,
@@ -6508,7 +6548,7 @@ class _GraphsWidget(QWidget):
 
         for bid, sess_bouts in self._ethogram_cache.items():
             color = bid_to_color.get(bid, _PALETTE[0])
-            label = bid_to_name.get(bid, bid)
+            label = behavior_label(bid, bid_to_name)
             label_used = False
             for sess_label, bouts in sess_bouts.items():
                 if sess_label not in session_idx or not bouts:
@@ -6759,10 +6799,19 @@ class _GraphsWidget(QWidget):
         if binned.empty:
             ax.text(0.5, 0.5, "No grouped data", ha="center", va="center", transform=ax.transAxes)
             return
-        if metric == "mean_bout_s":
-            sess_bin = binned.groupby(["group", "session_label", "time_bin_s"])[col].mean().reset_index()
-        else:
-            sess_bin = binned.groupby(["group", "session_label", "time_bin_s"])[col].sum().reset_index()
+        # Grid over the full roster: subjects with no bouts (and empty bins)
+        # are absent from _bin_bouts and would otherwise be left out of the
+        # group mean entirely, inflating it.
+        all_bins = list(range(0, int(binned["time_bin_s"].max()) + bin_seconds, bin_seconds))
+        roster = [s for s in self._export_sessions() if groups.get(s, "")]
+        sess_bin = self._binned_session_grid(
+            binned, col, all_bins, roster or sorted(binned["session_label"].unique()),
+        )
+        sess_bin = sess_bin.groupby(
+            ["session_label", "time_bin_s"], as_index=False,
+        )[col].agg("mean" if metric == "mean_bout_s" else "sum")
+        sess_bin["group"] = sess_bin["session_label"].map(groups)
+        sess_bin = sess_bin.dropna(subset=["group"])
         group_list = self._host._ordered_group_list(sess_bin["group"].unique())
         error_style = self._gs().get("error_style", "SEM")
         for gi, g in enumerate(group_list):
@@ -6785,19 +6834,21 @@ class _GraphsWidget(QWidget):
     def _combined_overview(self, df: pd.DataFrame) -> None:
         ax1 = self._figure.add_subplot(111)
         gs = self._gs()
-        count_df = df.groupby("session_label", sort=True)["n_bouts"].sum().reset_index()
-        dur_df = df.groupby("session_label", sort=True)["mean_bout_s"].mean().reset_index()
-        sessions = count_df["session_label"].tolist()
+        sessions = self._export_sessions() or sorted(df["session_label"].unique())
+        counts = df.groupby("session_label")["n_bouts"].sum().reindex(sessions, fill_value=0)
+        durations = df.groupby("session_label")["mean_bout_s"].mean().reindex(
+            sessions, fill_value=0,
+        )
         x = np.arange(len(sessions))
         width = 0.35
-        ax1.bar(x - width / 2, count_df["n_bouts"], width, color="#5b9bd5",
+        ax1.bar(x - width / 2, counts.to_numpy(), width, color="#5b9bd5",
                 label="Bout Count", alpha=0.85)
         ax1.set_ylabel("Bout Count", fontsize=gs["axis_fontsize"], color="#5b9bd5")
         ax1.tick_params(axis="y", labelcolor="#5b9bd5", labelsize=gs["tick_fontsize"])
         ax1.set_xticks(x)
         ax1.set_xticklabels(sessions, rotation=45, ha="right", fontsize=gs["tick_fontsize"])
         ax2 = ax1.twinx()
-        ax2.bar(x + width / 2, dur_df["mean_bout_s"], width, color="#ed7d31",
+        ax2.bar(x + width / 2, durations.to_numpy(), width, color="#ed7d31",
                 label="Mean Bout Duration (s)", alpha=0.85)
         ax2.set_ylabel("Mean Bout Duration (s)", fontsize=gs["axis_fontsize"], color="#ed7d31")
         ax2.tick_params(axis="y", labelcolor="#ed7d31", labelsize=gs["tick_fontsize"])
@@ -6823,7 +6874,7 @@ class _GraphsWidget(QWidget):
         if dfc.empty:
             ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
             return
-        sess_agg = dfc.groupby(["session_label", "group"])[metric].agg(agg_fn).reset_index()
+        sess_agg = self._session_aggregate(dfc, metric, agg_fn)
         group_names = self._host._ordered_group_list(sess_agg["group"].unique())
         error_style = gs.get("error_style", "SEM")
         bar_spacing  = float(gs.get("bar_spacing", 1.0))
@@ -6966,7 +7017,7 @@ class _GraphsWidget(QWidget):
         if dfc.empty:
             ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
             return
-        sess_agg = dfc.groupby(["session_label", "group"])[metric].agg(agg_fn).reset_index()
+        sess_agg = self._session_aggregate(dfc, metric, agg_fn)
         group_names = self._host._ordered_group_list(sess_agg["group"].unique())
         data = [sess_agg.loc[sess_agg["group"] == g, metric].tolist() for g in group_names]
         bp = ax.boxplot(data, labels=group_names, patch_artist=True, widths=0.5,
@@ -6985,18 +7036,20 @@ class _GraphsWidget(QWidget):
     def _overview_on_ax(self, ax: Any, df: pd.DataFrame, title: str) -> None:
         """Overview chart for a single behavior on a given axes."""
         gs = self._gs()
-        count_df = df.groupby("session_label", sort=True)["n_bouts"].sum().reset_index()
-        dur_df = df.groupby("session_label", sort=True)["mean_bout_s"].mean().reset_index()
-        sessions = count_df["session_label"].tolist()
+        sessions = self._export_sessions() or sorted(df["session_label"].unique())
+        counts = df.groupby("session_label")["n_bouts"].sum().reindex(sessions, fill_value=0)
+        durations = df.groupby("session_label")["mean_bout_s"].mean().reindex(
+            sessions, fill_value=0,
+        )
         x = np.arange(len(sessions))
         width = 0.35
-        ax.bar(x - width / 2, count_df["n_bouts"], width, color="#5b9bd5",
+        ax.bar(x - width / 2, counts.to_numpy(), width, color="#5b9bd5",
                label="Bouts", alpha=0.85)
         ax.set_ylabel("Bout Count", fontsize=max(7, gs["axis_fontsize"] - 2), color="#5b9bd5")
         ax.set_xticks(x)
         ax.set_xticklabels(sessions, rotation=45, ha="right", fontsize=max(6, gs["tick_fontsize"] - 1))
         ax2 = ax.twinx()
-        ax2.bar(x + width / 2, dur_df["mean_bout_s"], width, color="#ed7d31",
+        ax2.bar(x + width / 2, durations.to_numpy(), width, color="#ed7d31",
                 label="Duration", alpha=0.85)
         ax2.set_ylabel("Mean Duration (s)", fontsize=max(7, gs["axis_fontsize"] - 2), color="#ed7d31")
         ax.set_title(title, fontsize=max(8, gs["title_fontsize"] - 2))
@@ -7207,6 +7260,92 @@ class _GraphsWidget(QWidget):
 
     # -- data export --------------------------------------------------
 
+    # ── Export roster helpers ─────────────────────────────────────────
+
+    def _export_sessions(self) -> list[str]:
+        """Return every checked session in display order.
+
+        A subject that scores zero for all of the currently selected
+        behaviors produces no summary rows and no bout rows, so any export
+        that derives its subject list from the data itself drops that subject
+        entirely.  Exports build their rows from this roster instead and fill
+        in the absent values via :meth:`_missing_value_for_metric`.
+        """
+        checked = self._host._summary_tab._checked_subjects()
+        groups_map = self._host._session_groups
+        ordered = [s for s in self._host.ordered_session_labels() if s in checked]
+        if self._get_mode() == "group":
+            checked_groups = self._checked_groups()
+            if checked_groups:
+                ordered = [
+                    s for s in ordered
+                    if groups_map.get(s, "") in checked_groups
+                ]
+            if groups_map:
+                # Keep subjects ordered by group first, then by the
+                # user-defined/alphabetical session order.
+                ordered_groups = self._host._ordered_group_list(
+                    [groups_map.get(s, "") for s in ordered if groups_map.get(s, "")]
+                )
+                by_group: list[str] = []
+                for g in ordered_groups:
+                    by_group.extend([s for s in ordered if groups_map.get(s, "") == g])
+                by_group.extend([s for s in ordered if not groups_map.get(s, "")])
+                ordered = by_group
+        return ordered
+
+    def _missing_value_for_metric(self, metric: str, session: str) -> float:
+        """Value to record for a session with no bouts of a behavior."""
+        if metric == "latency_s":
+            lo_s, hi_s = self._get_data_range_seconds()
+            sid_candidates = self._host._sessions_by_label.get(session, [])
+            if sid_candidates:
+                # If multiple session_ids map to one label, use the largest
+                # fallback latency.
+                return max(
+                    self._latency_fallback_seconds(str(sid), lo_s, hi_s)
+                    for sid in sid_candidates
+                )
+            return float(hi_s) if hi_s is not None else 0.0
+        if metric == "mean_bout_s":
+            # Undefined without bouts — NaN so mean/SEM skip it rather than
+            # being dragged toward zero by a subject that never performed it.
+            return float("nan")
+        return 0.0
+
+    def _binned_session_grid(
+        self,
+        binned: pd.DataFrame,
+        col: str,
+        all_bins: list[int],
+        sessions: list[str],
+    ) -> pd.DataFrame:
+        """Complete session x behavior x bin frame from ``_bin_bouts`` output.
+
+        ``_bin_bouts`` only emits rows where a bout actually occurred, so both
+        empty bins and subjects with no bouts at all are simply absent.  Any
+        across-subject aggregate built straight off it therefore averages over
+        fewer subjects than were selected.  This fills the grid back in.
+        """
+        agg_fn = "mean" if col == "mean_bout_s" else "sum"
+        parts: list[pd.DataFrame] = []
+        for beh in sorted(binned["behavior"].unique()):
+            pivot = binned[binned["behavior"] == beh].pivot_table(
+                index="session_label", columns="time_bin_s",
+                values=col, aggfunc=agg_fn,
+            ).reindex(index=sessions, columns=all_bins)
+            if col != "mean_bout_s":
+                pivot = pivot.fillna(0)
+            long = pivot.reset_index().melt(
+                id_vars="session_label", var_name="time_bin_s", value_name=col,
+            )
+            long["time_bin_s"] = long["time_bin_s"].astype(int)
+            long["behavior"] = beh
+            parts.append(long)
+        if not parts:
+            return pd.DataFrame(columns=["session_label", "behavior", "time_bin_s", col])
+        return pd.concat(parts, ignore_index=True)
+
     def _collect_graph_data(self, export_individual_sessions: bool = False) -> pd.DataFrame | None:
         """Collect the data underlying the current graph as a DataFrame.
 
@@ -7264,6 +7403,7 @@ class _GraphsWidget(QWidget):
             max_bin = int(binned["time_bin_s"].max())
             all_bins = list(range(0, max_bin + bin_seconds, bin_seconds))
 
+            export_sessions = self._export_sessions()
             if mode == "group" and groups_map:
                 binned = binned.copy()
                 binned["group"] = binned["session_label"].map(groups_map)
@@ -7272,10 +7412,17 @@ class _GraphsWidget(QWidget):
                     binned = binned[binned["group"].isin(checked_groups)]
                 if binned.empty:
                     return None
-                if metric == "mean_bout_s":
-                    sess_bin = binned.groupby(["group", "session_label", "time_bin_s"])[col].mean().reset_index()
-                else:
-                    sess_bin = binned.groupby(["group", "session_label", "time_bin_s"])[col].sum().reset_index()
+                grouped_sessions = [s for s in export_sessions if groups_map.get(s, "")]
+                sess_bin = self._binned_session_grid(
+                    binned, col, all_bins, grouped_sessions or sorted(binned["session_label"].unique()),
+                )
+                # Collapse behaviors back into a single per-session series, as
+                # the un-gridded groupby used to do.
+                sess_bin = sess_bin.groupby(
+                    ["session_label", "time_bin_s"], as_index=False,
+                )[col].agg("mean" if metric == "mean_bout_s" else "sum")
+                sess_bin["group"] = sess_bin["session_label"].map(groups_map)
+                sess_bin = sess_bin.dropna(subset=["group"])
                 group_list = self._host._ordered_group_list(sess_bin["group"].unique())
                 out_rows = []
                 for g in group_list:
@@ -7290,10 +7437,10 @@ class _GraphsWidget(QWidget):
                     out_rows.append(stats[["group", "time_min", "time_bin_s", metric_label, "SEM", "N"]])
                 return pd.concat(out_rows, ignore_index=True) if out_rows else None
             else:
-                if metric == "mean_bout_s":
-                    sess_bin = binned.groupby(["session_label", "behavior", "time_bin_s"])[col].mean().reset_index()
-                else:
-                    sess_bin = binned.groupby(["session_label", "behavior", "time_bin_s"])[col].sum().reset_index()
+                sess_bin = self._binned_session_grid(
+                    binned, col, all_bins,
+                    export_sessions or sorted(binned["session_label"].unique()),
+                )
                 stats = sess_bin.groupby(["behavior", "time_bin_s"])[col].agg(["mean", "sem", "count"]).reset_index()
                 # Reindex each behavior to include all bins
                 parts = []
@@ -7319,13 +7466,32 @@ class _GraphsWidget(QWidget):
                 # (e.g. latencies summed across every behavior → one inflated
                 # number per group with no behavior breakdown).
                 sess_agg = dfc.groupby(["session_label", "behavior", "group"])[metric].agg(agg_fn).reset_index()
-                group_names = self._host._ordered_group_list(sess_agg["group"].unique())
                 behaviors_out = sorted(sess_agg["behavior"].unique())
+                # Subjects that never performed a behavior contribute no rows,
+                # which would quietly drop them from that behavior's group
+                # mean/SEM/N.  Add them back at their missing-value level.
+                present = set(zip(sess_agg["session_label"], sess_agg["behavior"]))
+                filler = [
+                    {
+                        "session_label": sess, "behavior": bname,
+                        "group": groups_map.get(sess, ""),
+                        metric: self._missing_value_for_metric(metric, sess),
+                    }
+                    for sess in self._export_sessions()
+                    if groups_map.get(sess, "")
+                    for bname in behaviors_out
+                    if (sess, bname) not in present
+                ]
+                if filler:
+                    sess_agg = pd.concat(
+                        [sess_agg, pd.DataFrame(filler)], ignore_index=True,
+                    )
+                group_names = self._host._ordered_group_list(sess_agg["group"].unique())
                 out_rows = []
                 for bname in behaviors_out:
                     for g in group_names:
                         mask = (sess_agg["behavior"] == bname) & (sess_agg["group"] == g)
-                        gvals = sess_agg.loc[mask, metric]
+                        gvals = sess_agg.loc[mask, metric].dropna()
                         if gvals.empty:
                             continue
                         out_rows.append({
@@ -7335,34 +7501,9 @@ class _GraphsWidget(QWidget):
                 return pd.DataFrame(out_rows)
             else:
                 behaviors = sorted(df["behavior"].unique())
-                ordered_checked = [
-                    s for s in self._host.ordered_session_labels()
-                    if s in checked
-                ]
-                if mode == "group" and checked_groups:
-                    ordered_checked = [
-                        s for s in ordered_checked
-                        if groups_map.get(s, "") in checked_groups
-                    ]
-
-                # In group mode, keep subjects ordered by group first,
-                # then by the user-defined/alphabetical session order.
-                if mode == "group" and groups_map:
-                    nonempty_groups = [groups_map.get(s, "") for s in ordered_checked if groups_map.get(s, "")]
-                    ordered_groups = self._host._ordered_group_list(nonempty_groups)
-                    sessions: list[str] = []
-                    for g in ordered_groups:
-                        sessions.extend([s for s in ordered_checked if groups_map.get(s, "") == g])
-                    sessions.extend([s for s in ordered_checked if not groups_map.get(s, "")])
-                else:
-                    sessions = list(ordered_checked)
-
-                # Fallback if ordered list is empty for any reason.
-                if not sessions:
-                    sessions = sorted(df["session_label"].unique())
-
+                # Fallback if the roster is empty for any reason.
+                sessions = self._export_sessions() or sorted(df["session_label"].unique())
                 groups_by_session = {sess: groups_map.get(sess, "") for sess in sessions}
-                lo_s, hi_s = self._get_data_range_seconds()
                 out_rows = []
                 for bname in behaviors:
                     bdf = df[df["behavior"] == bname]
@@ -7370,18 +7511,8 @@ class _GraphsWidget(QWidget):
                     for sess in sessions:
                         if sess in vals_by_session:
                             v = vals_by_session[sess]
-                        elif metric == "latency_s":
-                            sid_candidates = self._host._sessions_by_label.get(sess, [])
-                            if sid_candidates:
-                                # If multiple session_ids map to one label, use the largest fallback latency.
-                                v = max(
-                                    self._latency_fallback_seconds(str(sid), lo_s, hi_s)
-                                    for sid in sid_candidates
-                                )
-                            else:
-                                v = float(hi_s) if hi_s is not None else 0.0
                         else:
-                            v = 0
+                            v = self._missing_value_for_metric(metric, sess)
                         out_rows.append({
                             "Session": sess,
                             "Group": groups_by_session.get(sess, ""),
@@ -7395,7 +7526,7 @@ class _GraphsWidget(QWidget):
                 dfc = df.copy()
                 dfc["group"] = dfc["session_label"].map(groups_map)
                 dfc = dfc.dropna(subset=["group"])
-                sess_agg = dfc.groupby(["session_label", "group"])[metric].agg(agg_fn).reset_index()
+                sess_agg = self._session_aggregate(dfc, metric, agg_fn)
                 sess_agg.rename(columns={metric: metric_label}, inplace=True)
                 return sess_agg[["session_label", "group", metric_label]]
             return None
@@ -7403,6 +7534,9 @@ class _GraphsWidget(QWidget):
         elif style == "stacked":
             pivot = df.pivot_table(index="session_label", columns="behavior",
                                    values=metric, aggfunc="sum", fill_value=0)
+            sessions = self._export_sessions()
+            if sessions:
+                pivot = pivot.reindex(sessions, fill_value=0)
             pivot.index.name = "Session"
             return pivot.reset_index()
 
@@ -7438,11 +7572,15 @@ class _GraphsWidget(QWidget):
             return pd.DataFrame(out_rows) if out_rows else None
 
         elif style == "overview":
-            count_df = df.groupby("session_label")["n_bouts"].sum().reset_index()
-            dur_df = df.groupby("session_label")["mean_bout_s"].mean().reset_index()
-            merged = count_df.merge(dur_df, on="session_label")
-            merged.columns = ["Session", "Bout Count", "Mean Bout Duration (s)"]
-            return merged
+            sessions = self._export_sessions() or sorted(df["session_label"].unique())
+            counts = df.groupby("session_label")["n_bouts"].sum().reindex(sessions, fill_value=0)
+            # Mean bout duration is undefined without bouts — left blank.
+            durations = df.groupby("session_label")["mean_bout_s"].mean().reindex(sessions)
+            return pd.DataFrame({
+                "Session": sessions,
+                "Bout Count": counts.to_numpy(),
+                "Mean Bout Duration (s)": durations.to_numpy(),
+            })
 
         # Fallback: summary rows
         return df
@@ -7494,7 +7632,14 @@ class _GraphsWidget(QWidget):
             idx = ordered.index(grp) if grp in ordered else len(ordered)
             return (idx, label)
 
-        sessions = sorted(agg["session_label"].unique(), key=_sort_key)
+        # Build the row list from the checked-subject roster, not from the
+        # sessions present in ``agg``: a subject with zero bouts of every
+        # selected behavior has no binned rows at all and would otherwise be
+        # missing from the export instead of appearing as a row of zeros.
+        roster = self._export_sessions()
+        sessions = sorted(
+            set(agg["session_label"].unique()) | set(roster), key=_sort_key,
+        )
 
         parts = []
         for beh in behaviors:
@@ -7703,7 +7848,7 @@ class _GraphsWidget(QWidget):
         for bid, bdf in raw.items():
             if bid not in selected_bids:
                 continue
-            bname = bid_to_name.get(bid, bid)
+            bname = behavior_label(bid, bid_to_name)
             if bname not in beh_sess_bouts:
                 beh_sess_bouts[bname] = {}
             for _, bout in bdf.iterrows():
@@ -7966,6 +8111,10 @@ class _HeatmapWidget(QWidget):
         self._bg_plate_cache: np.ndarray | None = None
         self._bg_plate_key: Any = None
         self._bg_force_regen: bool = False
+        # Per-session native video resolution (session_id → (w, h)), used to
+        # normalise pose coordinates onto the reference frame when pooling
+        # subjects recorded at different resolutions.  Probed lazily.
+        self._hm_dims_cache: dict[str, tuple[int, int]] = {}
 
         # -- subject / behavior selectors -----------------------------
         self._select_subjects_btn = QPushButton("Select Subjects…")
@@ -8746,6 +8895,22 @@ class _HeatmapWidget(QWidget):
         all_y_parts: list[np.ndarray] = []
         per_bid_xy: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
+        # Reference frame for pooling: the resolution the background plate and
+        # axes are drawn in (the first target video).  Every session's pose
+        # coordinates are normalised onto it so subjects recorded at different
+        # resolutions overlay correctly instead of collapsing into a corner.
+        ref_w = _orig_video_w if _orig_video_w > 0 else (bg_image.shape[1] if bg_image is not None else 0)
+        ref_h = _orig_video_h if _orig_video_h > 0 else (bg_image.shape[0] if bg_image is not None else 0)
+
+        def _sess_dims(sid: str) -> tuple[int, int]:
+            if sid in self._hm_dims_cache:
+                return self._hm_dims_cache[sid]
+            sess = session_by_id.get(sid)
+            va = video_by_id.get(sess.video_asset_id) if sess else None
+            dims = _video_dims_from_asset(va)
+            self._hm_dims_cache[sid] = dims
+            return dims
+
         for bid, bdf in behavior_bouts.items():
             xs_parts: list[np.ndarray] = []
             ys_parts: list[np.ndarray] = []
@@ -8758,9 +8923,20 @@ class _HeatmapWidget(QWidget):
                 starts = np.clip(grp["start_frame"].to_numpy(dtype=np.int64), 0, n_frames - 1)
                 ends = np.clip(grp["end_frame"].to_numpy(dtype=np.int64), 0, n_frames - 1)
                 ends = np.maximum(starts, ends)
+                sxs: list[np.ndarray] = []
+                sys: list[np.ndarray] = []
                 for s, e in zip(starts, ends):
-                    xs_parts.append(p.centroid_x[s:e + 1])
-                    ys_parts.append(p.centroid_y[s:e + 1])
+                    sxs.append(p.centroid_x[s:e + 1])
+                    sys.append(p.centroid_y[s:e + 1])
+                if not sxs:
+                    continue
+                sx = np.concatenate(sxs).astype(np.float64)
+                sy = np.concatenate(sys).astype(np.float64)
+                if ref_w > 0 and ref_h > 0:
+                    sw, sh = _sess_dims(str(sid_val))
+                    sx, sy = _scale_xy_to_reference(sx, sy, sw, sh, ref_w, ref_h)
+                xs_parts.append(sx)
+                ys_parts.append(sy)
             if xs_parts:
                 xs_arr = np.concatenate(xs_parts)
                 ys_arr = np.concatenate(ys_parts)
@@ -8783,7 +8959,7 @@ class _HeatmapWidget(QWidget):
             for bid, (bxs, bys) in per_bid_xy.items():
                 kw: dict[str, Any] = {
                     "s": pt_size, "alpha": pt_alpha, "edgecolors": "none",
-                    "label": bid_to_name.get(bid, bid),
+                    "label": behavior_label(bid, bid_to_name),
                 }
                 if is_per_beh:
                     kw["color"] = bid_to_color.get(bid, _PALETTE[0])
@@ -8901,6 +9077,16 @@ class _HeatmapWidget(QWidget):
         if _ax_w > 0 and _ax_h > 0:
             ax.set_xlim(0, _ax_w)
             ax.set_ylim(_ax_h, 0)  # y=0 at top, matching pose/image pixel coords
+            # Render the arena at its TRUE aspect ratio.  Every imshow() above
+            # used aspect="auto", which stretches the arena to fill the axes box
+            # and makes a wide, narrow enclosure look almost square.  Locking the
+            # data aspect to "equal" keeps pixels square, and sizing the figure to
+            # the arena aspect (width fixed to the user's max-width setting) keeps
+            # the axes filling the canvas with minimal letterboxing.
+            ax.set_aspect("equal")
+            arena_aspect = float(_ax_h) / float(_ax_w)
+            fig_w_in = float(self._heatmap_graph_settings.get("max_w", 700)) / 100.0
+            self._figure.set_size_inches(fig_w_in, max(1.0, fig_w_in * arena_aspect))
 
         # Behavior legend
         if self._show_legend.isChecked() and per_bid_xy:
@@ -8908,7 +9094,7 @@ class _HeatmapWidget(QWidget):
             legend_handles = []
             for bid in per_bid_xy:
                 color = bid_to_color.get(bid, _PALETTE[0])
-                label = bid_to_name.get(bid, bid)
+                label = behavior_label(bid, bid_to_name)
                 legend_handles.append(Patch(facecolor=color, edgecolor="none", label=label))
             if legend_handles:
                 ax.legend(
@@ -9103,6 +9289,66 @@ def _make_diverging_transparent_center_cmap(base_cmap_name: str) -> Any:
             return None
 
 
+def _video_dims_from_asset(video_asset: Any) -> tuple[int, int]:
+    """Return ``(width, height)`` in pixels for a video *asset*.
+
+    Prefers the dimensions cached on the manifest; when those are missing
+    (older imports store ``None``) it probes the actual file with OpenCV.
+    Returns ``(0, 0)`` when the resolution cannot be determined.
+    """
+    if video_asset is None:
+        return (0, 0)
+    w = int(getattr(video_asset, "width", 0) or 0)
+    h = int(getattr(video_asset, "height", 0) or 0)
+    if w > 0 and h > 0:
+        return (w, h)
+    if not _ensure_cv2():
+        return (0, 0)
+    for attr in ("local_path", "source_path"):
+        p = str(getattr(video_asset, attr, "") or "").strip()
+        if not p:
+            continue
+        vp = Path(p)
+        if not vp.exists():
+            continue
+        cap = cv2.VideoCapture(str(vp))
+        try:
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        finally:
+            cap.release()
+        if w > 0 and h > 0:
+            return (w, h)
+    return (0, 0)
+
+
+def _scale_xy_to_reference(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    sess_w: int,
+    sess_h: int,
+    ref_w: int,
+    ref_h: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rescale a session's pose pixel coordinates into a common *reference* frame.
+
+    Pose coordinates live in the pixel space of the video they were tracked on.
+    When pooling subjects recorded at different resolutions onto one spatial map
+    (heatmap / density grid), raw pooling squeezes lower-resolution subjects into
+    the top-left corner and lets higher-resolution subjects overflow the arena.
+    Mapping every session onto the reference resolution (the frame the background
+    plate and axes use) aligns them.  Assumes the arena fills each frame the same
+    way, differing only in pixel sampling — the standard case for a fixed camera.
+
+    Coordinates are returned unchanged when either resolution is unknown or the
+    session already matches the reference.
+    """
+    if (ref_w > 0 and ref_h > 0 and sess_w > 0 and sess_h > 0
+            and (sess_w != ref_w or sess_h != ref_h)):
+        return xs * (float(ref_w) / sess_w), ys * (float(ref_h) / sess_h)
+    return xs, ys
+
+
 def _compute_auto_bandwidth(
     video_w: int,
     video_h: int,
@@ -9225,6 +9471,10 @@ class _DensityAnalysisWidget(QWidget):
         self._dm_cache_meta: dict[str, Any] = {}
         self._density_manifest_cache: dict[str, Any] = {}
         self._density_session_source_cache: dict[str, dict[str, Any] | None] = {}
+        # Per-session native video resolution, used to normalise pose
+        # coordinates onto a common reference frame when pooling subjects
+        # recorded at different resolutions.  Probed lazily, cached here.
+        self._density_dims_cache: dict[str, tuple[int, int]] = {}
 
         # ── shared background adjustment state (both sub-panels) ──────────
         # One set of contrast/brightness/sharpness/blur controls + custom image,
@@ -10245,6 +10495,32 @@ class _DensityAnalysisWidget(QWidget):
         self._density_session_source_cache[sid] = out
         return out
 
+    def _session_video_dims(self, session_id: str) -> tuple[int, int]:
+        """Return the native ``(width, height)`` of a session's video in pixels.
+
+        Uses the manifest dimensions when present, else probes the file with
+        OpenCV.  Result is cached.  Returns ``(0, 0)`` when unknown, in which
+        case the caller leaves that session's coordinates unscaled.
+        """
+        sid = str(session_id)
+        if sid in self._density_dims_cache:
+            return self._density_dims_cache[sid]
+        source = self._resolve_density_session_source(sid) or {}
+        w = int(source.get("video_w") or 0)
+        h = int(source.get("video_h") or 0)
+        if (w <= 0 or h <= 0):
+            vp = source.get("video_path")
+            if vp is not None and vp.exists() and _ensure_cv2():
+                cap = cv2.VideoCapture(str(vp))
+                try:
+                    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                finally:
+                    cap.release()
+        dims = (w, h)
+        self._density_dims_cache[sid] = dims
+        return dims
+
     def _get_density_pose_for_session(self, session_id: str) -> Any:
         sid = str(session_id)
         if sid in self._host._pose_cache:
@@ -10265,11 +10541,18 @@ class _DensityAnalysisWidget(QWidget):
         behavior_id: str | None,
         group_name: str | None,
         factor: str | None,
+        ref_w: int = 0,
+        ref_h: int = 0,
     ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
         """Return {behavior_id: (xs, ys)} pooled across all sessions in *group_name*.
 
         When *behavior_id* is None, return data for all behaviors.
         When *group_name* is None / empty, use all sessions.
+
+        When *ref_w*/*ref_h* are given, each session's pose coordinates are
+        rescaled from its own native video resolution onto that reference frame
+        before pooling, so subjects recorded at different resolutions land on the
+        same arena instead of being squeezed into a corner.
         """
         host = self._host
         if host._project_root is None:
@@ -10344,9 +10627,20 @@ class _DensityAnalysisWidget(QWidget):
                 starts = np.clip(grp["start_frame"].to_numpy(np.int64), 0, n_frames - 1)
                 ends = np.clip(grp["end_frame"].to_numpy(np.int64), 0, n_frames - 1)
                 ends = np.maximum(starts, ends)
+                sxs: list[np.ndarray] = []
+                sys: list[np.ndarray] = []
                 for s, e in zip(starts, ends):
-                    xs_all.append(p.centroid_x[s:e + 1])
-                    ys_all.append(p.centroid_y[s:e + 1])
+                    sxs.append(p.centroid_x[s:e + 1])
+                    sys.append(p.centroid_y[s:e + 1])
+                if not sxs:
+                    continue
+                sx = np.concatenate(sxs).astype(np.float64)
+                sy = np.concatenate(sys).astype(np.float64)
+                if ref_w > 0 and ref_h > 0:
+                    sw, sh = self._session_video_dims(str(sid_val))
+                    sx, sy = _scale_xy_to_reference(sx, sy, sw, sh, ref_w, ref_h)
+                xs_all.append(sx)
+                ys_all.append(sy)
 
             if xs_all:
                 result[bid] = (np.concatenate(xs_all), np.concatenate(ys_all))
@@ -10635,7 +10929,8 @@ class _DensityAnalysisWidget(QWidget):
             for b in behaviors:
                 bid = str(b.behavior_id)
                 for (grp_name, grp_label) in groups_to_render:
-                    xy_data       = self._collect_xy_for_group(bid, grp_name, factor or None)
+                    xy_data       = self._collect_xy_for_group(bid, grp_name, factor or None,
+                                                               ref_w=video_w, ref_h=video_h)
                     xs_arr, ys_arr = xy_data.get(bid, (np.empty(0), np.empty(0)))
                     n_pts  = xs_arr.size
                     n_sess = len(self._get_session_ids_for_group(grp_name, factor or None))
@@ -10846,8 +11141,10 @@ class _DensityAnalysisWidget(QWidget):
             new_cache: dict[str, Any] = {}
             for b in behaviors:
                 bid = str(b.behavior_id)
-                xy_a = self._collect_xy_for_group(bid, grp_a, factor or None)
-                xy_b = self._collect_xy_for_group(bid, grp_b, factor or None)
+                xy_a = self._collect_xy_for_group(bid, grp_a, factor or None,
+                                                  ref_w=video_w, ref_h=video_h)
+                xy_b = self._collect_xy_for_group(bid, grp_b, factor or None,
+                                                  ref_w=video_w, ref_h=video_h)
                 xs_a, ys_a = xy_a.get(bid, (np.empty(0), np.empty(0)))
                 xs_b, ys_b = xy_b.get(bid, (np.empty(0), np.empty(0)))
                 n_a, n_b   = xs_a.size, xs_b.size
@@ -13151,7 +13448,7 @@ class _BehaviorMotifWidget(QWidget):
                     facecolor=color, edgecolor="none", alpha=0.9,
                 )
                 ax_block.add_patch(rect)
-                label_txt = bid_to_name.get(bid, bid)[:10]
+                label_txt = behavior_label(bid, bid_to_name)[:10]
                 ax_block.text(
                     (col_i + 0.5) * block_w, 0.5, label_txt,
                     ha="center", va="center",
@@ -16502,7 +16799,7 @@ class _SessionSectionsWidget(QWidget):
             self._figure.set_facecolor(fig_bg)
 
             for beh_idx, bid in enumerate(checked_bids):
-                beh_name = bid_to_name.get(bid, bid)
+                beh_name = behavior_label(bid, bid_to_name)
                 ax = self._figure.add_subplot(nrows, ncols, beh_idx + 1)
                 sessions_here = [s for s in sess_order if s in session_labels]
                 if not sessions_here:
@@ -16563,7 +16860,7 @@ class _SessionSectionsWidget(QWidget):
             self._figure.set_facecolor(fig_bg)
 
             for beh_idx, bid in enumerate(checked_bids):
-                beh_name = bid_to_name.get(bid, bid)
+                beh_name = behavior_label(bid, bid_to_name)
                 ax = self._figure.add_subplot(nrows, ncols, beh_idx + 1)
 
                 row_labels = list(groups)

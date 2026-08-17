@@ -472,6 +472,33 @@ class WorkflowSnapshotService:
         return None
 
     @staticmethod
+    def _trained_use_r3d_features(
+        project_root: Path, model_version: str,
+    ) -> bool | None:
+        """Read ``use_r3d_features`` from the model's ``run_settings.json``.
+
+        Same ground-truth role as :meth:`_trained_use_video_features`: a model
+        trained without appearance embeddings must not make Direct Use spend GPU
+        time producing 512 columns it never reads, and a model trained *with*
+        them must never be fed a segment table that lacks them.  Returns None
+        when nothing could be read (including models predating the feature).
+        """
+        if not model_version:
+            return None
+        rs_path = (
+            project_root / "derived" / "models" / model_version / "run_settings.json"
+        )
+        if not rs_path.exists():
+            return None
+        rs = read_json(rs_path, {})
+        bm = rs.get("behavior_model") or {}
+        if "use_r3d_features" in bm:
+            return bool(bm["use_r3d_features"])
+        if "use_r3d_features" in rs:
+            return bool(rs["use_r3d_features"])
+        return None
+
+    @staticmethod
     def _read_pose_keypoints(project_root: Path) -> list[str]:
         """Recover the trained keypoint names from the project's frame_pose.
 

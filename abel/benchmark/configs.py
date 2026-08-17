@@ -22,12 +22,12 @@ class AblationToggle:
 
 # ── Canonical toggle definitions ──────────────────────────────────────────
 
-TOGGLE_VIDEO_FUSION = AblationToggle(
-    key="video_fusion",
+TOGGLE_VIDEO_FEATURES = AblationToggle(
+    key="video_features",
     label="Video-Derived Features",
     description=(
         "Include video-derived features (optical flow, surface motion, "
-        "and R3D18 embeddings when available) in the training feature set."
+        "and R3D-18 appearance embeddings) in the training feature set."
     ),
     overrides=[
         ("use_video_features", True, False),
@@ -86,7 +86,7 @@ TOGGLE_TEMPORAL_REFINEMENT = AblationToggle(
 )
 
 ALL_TOGGLES: list[AblationToggle] = [
-    TOGGLE_VIDEO_FUSION,
+    TOGGLE_VIDEO_FEATURES,
     TOGGLE_MULTI_BEHAVIOR,
     TOGGLE_CALIBRATION,
     TOGGLE_ADAPTIVE_COMPLEXITY,
@@ -142,7 +142,7 @@ class AblationSuite:
 
         # Video-only standalone: trains with ONLY video-derived features
         # to show their independent predictive power.
-        if any(t.key == "video_fusion" for t in self.toggles):
+        if any(t.key == "video_features" for t in self.toggles):
             vid_only: dict[str, Any] = dict(baseline)
             vid_only["_run_name"] = "video_only"
             vid_only["video_features_only"] = True

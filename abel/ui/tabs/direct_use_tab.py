@@ -39,6 +39,7 @@ from abel.services.direct_run_service import (
     DirectRunProgress,
     DirectRunService,
 )
+from abel.services.behavior_service import behavior_label
 from abel.services.import_service import ImportService
 from abel.services import keypoint_mapping
 from abel.services.pose_processing_service import PoseProcessingService
@@ -899,7 +900,7 @@ class DirectUseTab(QWidget):
             bid = b.get("behavior_id", b.get("name", ""))
             btab[bid] = b.get("name", b.get("short_name", bid))
 
-        active_names = [btab.get(bid, bid) for bid in sbm if bid not in excluded]
+        active_names = [behavior_label(bid, btab) for bid in sbm if bid not in excluded]
         win = snapshot.segment_window_frames
         stride = snapshot.segment_stride_frames
         fps = snapshot.fps or "auto"
@@ -1926,7 +1927,7 @@ class DirectUseTab(QWidget):
         for b in (self._snapshot.behavior_definitions or []):
             bid = b.get("behavior_id", b.get("name", ""))
             btab[bid] = b.get("name", b.get("short_name", bid))
-        active = [btab.get(bid, bid) for bid in sbm if bid not in excluded]
+        active = [behavior_label(bid, btab) for bid in sbm if bid not in excluded]
 
         # Context features: report whether they will run, and warn when the
         # model needs them but no px/mm calibration was supplied.

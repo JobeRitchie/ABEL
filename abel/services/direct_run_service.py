@@ -21,6 +21,7 @@ from abel.services.behavior_representation_service import (
     BehaviorRepresentationService,
     RepresentationConfig,
 )
+from abel.services.behavior_service import behavior_label
 from abel.services.context_feature_service import ContextFeatureService
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
@@ -212,6 +213,9 @@ class DirectRunService:
             # resolved value so the checkbox + Run Models both stay correct.
             feature_extraction = dict(feature_extraction_src)
             feature_extraction["use_video_features"] = bool(use_video)
+            feature_extraction["use_r3d_features"] = bool(
+                use_video and self._resolve_use_r3d_features(snapshot, source_project_root)
+            )
             feature_extraction.pop("context_padding_frames", None)  # feature removed
             write_yaml(project_yaml_path, {
                 "schema_version": "0.3.0",
@@ -438,10 +442,16 @@ class DirectRunService:
             if self._cancelled:
                 return {"status": "cancelled"}
             _emit("representation", 3, 0.0, "Building segment representations…")
+            # Appearance embeddings must match how the model was trained, and
+            # are meaningless without the pixel features they belong to.
+            _use_r3d = _use_video and self._resolve_use_r3d_features(
+                snapshot, source_project_root,
+            )
             repr_cfg = RepresentationConfig(
                 window_size_frames=snapshot.segment_window_frames,
                 window_stride_frames=snapshot.segment_stride_frames,
                 excluded_feature_cols=frozenset(snapshot.excluded_feature_cols),
+                use_r3d_features=_use_r3d,
             )
             pose_feat_path = target_project_root / "derived" / "pose_features" / "frame_pose.parquet"
             ctx_feat_path = (
@@ -782,7 +792,7 @@ class DirectRunService:
             b_id = b.get("behavior_id", b.get("name", ""))
             if b_id == bid:
                 return b.get("name", b.get("short_name", bid))
-        return bid
+        return behavior_label(bid)
 
     @staticmethod
     def _resolve_use_video_features(
@@ -826,6 +836,42 @@ class DirectRunService:
             source_project_root / "derived" / "context_features"
             / "frame_context.parquet"
         ).exists()
+
+    @staticmethod
+    def _resolve_use_r3d_features(
+        snapshot: WorkflowSnapshot, source_project_root: Path,
+    ) -> bool:
+        """Decide whether to recompute R3D appearance embeddings.
+
+        Caller must already have decided that video features are on; appearance
+        embeddings are a sub-family of those.  Getting this wrong is costly in
+        both directions — ``False`` for a model trained with the embeddings
+        feeds inference a segment table missing 512 of its columns, and ``True``
+        for a model trained without them spends GPU minutes per session on
+        columns nothing reads — so prefer an explicit record over a guess.
+        """
+        fx = getattr(snapshot, "feature_extraction_settings", None) or {}
+        if "use_r3d_features" in fx:
+            return bool(fx["use_r3d_features"])
+        rs = getattr(snapshot, "run_settings", None) or {}
+        if "use_r3d_features" in rs:
+            return bool(rs["use_r3d_features"])
+        trained = WorkflowSnapshotService()._trained_use_r3d_features(
+            source_project_root, snapshot.model_version,
+        )
+        if trained is not None:
+            return trained
+        try:
+            src_proj = read_yaml(source_project_root / "project.yaml", {}) or {}
+            for block in ("feature_extraction", "behavior_model"):
+                cfg = src_proj.get(block) or {}
+                if "use_r3d_features" in cfg:
+                    return bool(cfg["use_r3d_features"])
+        except Exception:
+            pass
+        # Last resort: models predating the feature carry no record anywhere, so
+        # fall back to whether the source project ever embedded a session.
+        return (source_project_root / "derived" / "r3d_features").exists()
 
     @staticmethod
     def _build_context_config(snapshot: WorkflowSnapshot):

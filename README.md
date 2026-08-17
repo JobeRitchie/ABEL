@@ -2,7 +2,7 @@
 
 **ABEL — Active-learning Behavior Estimation and Labeling**
 
-Version 0.10.0 · Python ≥ 3.10 · UNC Non-Commercial License
+Version 0.11.0 · Python ≥ 3.10 · UNC Non-Commercial License
 
 ABEL is a local-first desktop application for reproducible, human-in-the-loop
 behavior modeling from DLC-tracked videos. It is built around a pose-first
@@ -39,9 +39,9 @@ in-app **Dependencies** tab:
 
 ```bash
 pip install -e ".[preprocessing]"   # video features: opencv, scipy, imageio
-pip install -e ".[gpu]"             # torch (GPU fusion backend)
+pip install -e ".[gpu]"             # torch (GPU backend for R3D appearance features)
 pip install -e ".[benchmarks]"      # xgboost
-pip install -e ".[syllables]"       # keypoint-moseq, umap-learn, hdbscan
+pip install -e ".[clustering]"      # umap-learn, hdbscan: UMAP + motif clustering
 pip install -e ".[dev]"             # pytest
 pip install -e ".[all]"             # everything above
 ```
@@ -114,7 +114,7 @@ trust the results:
 - Pose-only or pose+video feature modes selectable at project setup
 - Overlap-aware negative learning rule for behavior interactions
 - Uncertainty components: entropy, ensemble variance, density outlier, optional margin term
-- Optional selective fusion for uncertain segments (3D CNN backend when available with robust fallback)
+- R3D-18 appearance features (512-d per segment, per-animal centered crops) computed before training as part of the video feature family, toggleable on the Feature Extraction tab
 - Group-aware splitting by subject/session
 - Interactive ROI definition with drag-to-draw for both Target Zone and Subject Crop, plus Copy to All Subjects
 - Validation suite: model-quality overview, a blind labeling quiz (subject-centered clips, hotkeys, looping,

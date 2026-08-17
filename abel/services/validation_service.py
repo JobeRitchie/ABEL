@@ -43,7 +43,7 @@ from abel.models.schemas import (
     ValidationRun,
     ValidationSettings,
 )
-from abel.services.behavior_service import BehaviorService
+from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.candidate_service import CandidateGenerationService
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
@@ -2036,7 +2036,7 @@ class ValidationService:
         for b, name in self._active_behaviors():
             if b == bid:
                 return name
-        return bid
+        return behavior_label(bid)
 
     def _label_display(self, label: str) -> str:
         """Human-readable name for a label id (``no_behavior`` -> 'No Behavior')."""

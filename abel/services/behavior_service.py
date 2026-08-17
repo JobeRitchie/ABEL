@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import uuid
 from datetime import datetime
@@ -15,6 +16,34 @@ from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 logger = logging.getLogger(__name__)
 
 NO_BEHAVIOR_ID = "no_behavior"
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    return bool(_UUID_RE.match(str(value).strip()))
+
+
+def behavior_label(behavior_id: str | None, name_map: dict[str, str] | None = None) -> str:
+    """Resolve a behavior ID to text safe to show the user.
+
+    Behavior IDs are UUIDs and must never surface in the interface. Callers that
+    already hold a ``{behavior_id: name}`` map pass it as *name_map*; anything the
+    map cannot resolve degrades to a labelled short prefix instead of the full
+    opaque token, so distinct unknowns stay distinguishable in a plot or table.
+    """
+    bid = str(behavior_id or "").strip()
+    if not bid:
+        return "—"
+    if name_map:
+        name = str(name_map.get(bid, "") or "").strip()
+        if name:
+            return name
+    if _looks_like_uuid(bid):
+        return f"Unknown behavior ({bid[:8]})"
+    return bid
 
 # ---------------------------------------------------------------------------
 # Built-in behavior templates
@@ -177,6 +206,20 @@ class BehaviorService:
     def is_social(self, behavior_id: str) -> bool:
         b = self.get(behavior_id)
         return bool(b and b.is_social)
+
+    def display_name(self, behavior_id: str | None, *, short: bool = False) -> str:
+        """Return the human-readable name for ``behavior_id``.
+
+        Behavior IDs are UUIDs, which must never reach the user. Anything the
+        user reads — status text, run logs, dialogs, plot labels — goes through
+        here. Unresolvable UUIDs degrade to a labelled short prefix rather than
+        the full opaque token, so two unknowns stay distinguishable.
+        """
+        bid = str(behavior_id or "").strip()
+        b = self.get(bid) if bid else None
+        if b is not None:
+            return str(b.short_name or b.name) if short else str(b.name)
+        return behavior_label(bid)
 
     def label_animal_fields(
         self,

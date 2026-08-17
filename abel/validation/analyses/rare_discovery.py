@@ -9,14 +9,13 @@ far rarer in the full 43k-window pool).
 We compare four acquisition strategies, each faithful to a shipped ABEL tool:
 
 - **essence**   — the contrastive Essence Miner (:mod:`clip_metrics_service`),
-  reproduced exactly as the shipped Clip Mining dialog runs it: build a definition
-  from a handful of exemplars — BOTH a hard AND-box of distinguishing feature
-  ranges (``extract_similar_essence``) AND a graded likeness ranker
-  (``build_essence_scorer``) — surface criteria-matched clips first (best-first
-  within the match), and **re-extract** the definition as newly confirmed
-  positives join the exemplars.  (The AND-box is the half that makes essence sharp
-  for a rare behaviour; ranking the whole pool by the continuous score alone
-  collapses toward random.)
+  reproduced exactly as the shipped Clip Mining dialog runs it: build a sparse
+  contrastive ranker from a handful of exemplars (``build_essence_scorer``), order
+  the whole pool by exemplar-likeness, and **re-fit** as newly confirmed positives
+  join the exemplars and newly rejected clips join the background as hard
+  negatives.  (The dialog also displays an AND-box of distinguishing ranges, but it
+  no longer gates what gets loaded — as a filter it discarded 50–96% of a
+  behaviour's real instances, so the hunt is ordered, not cut off.)
 - **active_learning** — warm-start a model on the seeds, then reveal the highest
   predicted-probability clips and retrain (ABEL's candidate loop).
 - **umap**      — lasso the region of the embedding densest in the exemplars
@@ -27,12 +26,13 @@ We compare four acquisition strategies, each faithful to a shipped ABEL tool:
 
 All three ABEL arms are **iterated identically** for a fair comparison: each grows
 its exemplar/label set in equal ``batch`` steps, and every clip a strategy surfaces
-that the (simulated) human confirms as a positive is folded back into that
-strategy's definition — the essence is re-extracted, the UMAP region re-lassoed,
-the model retrained — before the next batch is ranked.  This is what a real user
-does (nobody freezes their essence at the first eight exemplars while an AL model
-keeps learning), so the only thing that differs between arms is the *acquisition
-signal*, not whether the tool is allowed to improve as evidence accrues.
+the (simulated) human judges is folded back into that strategy's definition — the
+essence re-fitted (positives as exemplars, rejections as hard negatives), the UMAP
+region re-lassoed, the model retrained — before the next batch is ranked.  This is
+what a real user does (nobody freezes their essence at the first eight exemplars
+while an AL model keeps learning), so the only thing that differs between arms is
+the *acquisition signal*, not whether the tool is allowed to improve as evidence
+accrues.
 
 Whole-video scanning is added to the *effort* figure only, expressed in minutes
 a human must watch, because it lives on a different axis than "clips reviewed".
@@ -77,7 +77,10 @@ import pandas as pd
 from sklearn.metrics import average_precision_score
 
 from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
-from abel.services.clip_metrics_service import ClipMetricsService
+from abel.services.clip_metrics_service import (
+    ESSENCE_RANKER_MAX_FEATURES,
+    ClipMetricsService,
+)
 from abel.utils import xgb_predict
 from abel.validation import metrics as vmetrics
 from abel.validation import prism as _prism
@@ -242,19 +245,19 @@ def _rank_by_score(score: np.ndarray, descending: bool = True) -> np.ndarray:
 
 
 # Essence-Miner settings — mirror the shipped Clip Mining dialog's "Extract
-# essence" defaults so the validation measures the tool the user actually uses:
-# k distinguishing features in the AND-box, "Balanced" breadth (0.80 exemplar
-# recall).  See :meth:`ClipMetricsService.extract_similar_essence`.
-_ESSENCE_CRITERIA_K = 5
-_ESSENCE_RECALL_TARGET = 0.80
-# The shipped feature set is ~1100 columns; the greedy criteria search is
-# O(features) per re-extraction round, so ranking every column every batch is
-# prohibitively slow.  Pre-restrict to the best-separated handful (the essence
-# only ever commits ~5–8 of them anyway) and contrast against a bounded
-# background sample — both keep the result within noise of the full search while
-# making the iterated hunt tractable.
-_ESSENCE_MAX_FEATURES = 40
+# essence" so the validation measures the tool the user actually uses.  The
+# feature cap and the background sample are the dialog's own
+# (:data:`ESSENCE_RANKER_MAX_FEATURES`): an L1 fit prunes what it doesn't need, so
+# it is handed a wide pool of the best-separated columns and left to keep ~35.
 _ESSENCE_BG_SAMPLE = 1200
+
+# Hard negatives: a clip the user reviewed and rejected says far more about the
+# boundary than a random unreviewed row does, but there are only a handful of them
+# against a 1200-row background sample, so they are repeated to carry real weight
+# — up to a quarter of the background, and no more than 8 copies each.  Measured
+# in the pilot as +25% discovery on its own, independent of which ranker is used.
+_HARD_NEG_BG_SHARE = 4      # negatives may occupy 1/4 of the background sample
+_HARD_NEG_MAX_REPEAT = 8
 
 # Random clips revealed before active learning's first model, so that model is not
 # trained on positives alone.  Measured: 10 is enough to make the fit non-degenerate,
@@ -262,84 +265,73 @@ _ESSENCE_BG_SAMPLE = 1200
 _AL_WARM_FILL = 10
 
 
-def _criteria_match_mask(df: pd.DataFrame, crits: list) -> np.ndarray:
-    """Boolean mask of rows passing every active essence criterion (the AND-box).
+def _essence_background(
+    background_df: pd.DataFrame,
+    negative_df: "pd.DataFrame | None" = None,
+) -> pd.DataFrame:
+    """The background an essence is contrasted against, with hard negatives folded in.
 
-    Same semantics as :meth:`ClipMetricsService.mine` with ``match_all=True`` — a
-    row must clear every enabled bound — reproduced here as a positional mask so
-    the discovery order can put matches first without round-tripping through the
-    string-indexed ``mine`` result.  Returns all-False when no criterion is active.
+    A bounded random sample of the pool (the dialog's own cost control), plus every
+    clip the user has reviewed and *rejected*, repeated so a handful of them can
+    still shift a fit against 1200 random rows.  Rejections are the most
+    informative rows available — they are, by construction, the clips the current
+    definition ranked highest and got wrong — and recycling them instead of
+    discarding them was worth +25% discovery in the pilot on its own.
     """
-    keep = np.ones(len(df), dtype=bool)
-    any_active = False
-    for c in crits or []:
-        if not getattr(c, "enabled", True):
-            continue
-        mid = getattr(c, "metric_id", None)
-        low, high = getattr(c, "low", None), getattr(c, "high", None)
-        if mid is None or mid not in df.columns or (low is None and high is None):
-            continue
-        any_active = True
-        col = pd.to_numeric(df[mid], errors="coerce").to_numpy(dtype=float)
-        ok = np.isfinite(col)
-        if low is not None:
-            ok &= col >= float(low)
-        if high is not None:
-            ok &= col <= float(high)
-        keep &= ok
-    return keep if any_active else np.zeros(len(df), dtype=bool)
+    bg = background_df
+    if len(bg) > _ESSENCE_BG_SAMPLE:
+        rs = np.random.default_rng(0)
+        bg = bg.iloc[np.sort(rs.choice(len(bg), _ESSENCE_BG_SAMPLE, replace=False))]
+    if negative_df is None or negative_df.empty:
+        return bg
+    rep = max(1, min(_HARD_NEG_MAX_REPEAT,
+                     len(bg) // (_HARD_NEG_BG_SHARE * len(negative_df)) or 1))
+    return pd.concat([bg] + [negative_df] * rep)
 
 
 def _essence_ranked_order(
     exemplar_df: pd.DataFrame,
     background_df: pd.DataFrame,
     cand_df: pd.DataFrame,
+    negative_df: "pd.DataFrame | None" = None,
 ) -> "np.ndarray | None":
     """Order ``cand_df`` rows the way the shipped Clip Mining dialog does.
 
-    The dialog's "Extract essence" builds BOTH a hard AND-box of distinguishing
-    feature ranges (:meth:`~ClipMetricsService.extract_similar_essence`) AND a
-    graded likeness ranker (:meth:`~ClipMetricsService.build_essence_scorer`), then
-    loads criteria-matched clips first, best-first within the match
-    (:meth:`~ClipMetricsService.mine`).  The criteria filter is the half that makes
-    essence sharp for a rare behaviour — ranking the whole pool by the continuous
-    score alone (what this analysis used to do) discards it and collapses toward
-    random.  Here we reproduce the dialog exactly: matched rows first (ranked by
-    essence-likeness), then the rest (also by likeness), as one full-length
-    permutation.  Returns positional order into ``cand_df``, or ``None`` when there
-    is no separable essence at all (caller falls back to random).
+    The dialog's "Extract essence" fits a sparse contrastive ranker
+    (:meth:`~ClipMetricsService.build_essence_scorer`) — an L1 logistic
+    exemplars-vs-background model over the best-separated features — and loads the
+    pool best-first by it.  It also displays an AND-box of distinguishing ranges,
+    but that box no longer decides what gets loaded: measured over 8 projects it
+    retained only 4–7% of a behaviour's held-out instances from 3 exemplars and
+    33–50% from 20, and as a gate that loss cannot be recovered by reviewing
+    further.  Ranking has no such cliff, so this ranks and does not filter — which
+    is now also exactly what the dialog does.
+
+    ``negative_df`` are confirmed rejections to fold into the background as hard
+    negatives.  Returns positional order into ``cand_df``, or ``None`` when there is
+    no separable essence at all (caller falls back to random).
     """
-    # Bound the definition-building cost on the wide shipped feature set: contrast
-    # against a capped background sample and keep only the best-separated features
-    # (the candidate set stays full — it is what we rank).
-    bg = background_df
-    if len(bg) > _ESSENCE_BG_SAMPLE:
-        rs = np.random.default_rng(0)
-        bg = bg.iloc[np.sort(rs.choice(len(bg), _ESSENCE_BG_SAMPLE, replace=False))]
-    feats = ClipMetricsService._usable_essence_metrics(exemplar_df, bg)
+    bg = _essence_background(background_df, negative_df)
+    # Bound the definition-building cost on the wide shipped feature set: keep the
+    # best-separated columns (the candidate set stays full — it is what we rank).
+    feats = ClipMetricsService._usable_essence_metrics(
+        exemplar_df, bg, max_features=ESSENCE_RANKER_MAX_FEATURES)
     if not feats:
         return None
-    feats = feats[:_ESSENCE_MAX_FEATURES]
-    ex_f, bg_f, cand_f = exemplar_df[feats], bg[feats], cand_df[feats]
-
-    scorer = ClipMetricsService.build_essence_scorer(ex_f, bg_f, feature_ids=feats)
+    scorer = ClipMetricsService.build_essence_scorer(
+        exemplar_df[feats], bg[feats], feature_ids=feats)
     if scorer is None:
         return None
-    score = scorer.score(cand_f).to_numpy(dtype=float)
-    crits = ClipMetricsService.extract_similar_essence(
-        ex_f, bg_f, k=_ESSENCE_CRITERIA_K, recall_target=_ESSENCE_RECALL_TARGET)
-    matched = _criteria_match_mask(cand_f, crits)
-    s = np.where(np.isfinite(score), score, -np.inf)
-    # Primary key: matched (0) before unmatched (1); secondary: higher score first.
-    return np.lexsort((-s, ~matched))
+    score = scorer.score(cand_df[feats]).to_numpy(dtype=float)
+    return _rank_by_score(score, descending=True)
 
 
 def _rank_essence(metrics_pool: pd.DataFrame, metrics_seed: pd.DataFrame) -> np.ndarray:
     """Rank candidates by Essence-Miner likeness to the seed exemplars.
 
-    Uses the *shipped* essence path (criteria AND-box + graded ranker) with the
-    candidate pool itself as the background — the same signal the Clip Mining
-    dialog computes when you hit "extract essence".
+    Uses the *shipped* essence ranker with the candidate pool itself as the
+    background — the same signal the Clip Mining dialog computes when you hit
+    "extract essence".
     """
     order = _essence_ranked_order(metrics_seed, metrics_pool, metrics_pool)
     if order is not None:
@@ -487,35 +479,42 @@ def _essence_discovery(
     refit_budget: int,
     log: Callable[[str], None],
 ) -> np.ndarray | None:
-    """Iterative Essence-Miner reveal order — re-extracts as positives are confirmed.
+    """Iterative Essence-Miner reveal order — re-fits as clips are judged.
 
     Mirrors what a real user does (and puts essence on equal footing with AL): build
     an essence from the seed exemplars against the pool background, review the top
-    ``batch`` clips, fold any *confirmed* positives into the exemplar set, RE-EXTRACT,
-    and re-rank the unreviewed pool.  Re-extraction runs while fewer than
-    ``refit_budget`` clips have been reviewed — a realistic hunt budget and the
-    window where the arms separate; the leftover pool is then appended in the *final*
-    essence's order so the return stays a full-length permutation (needed so
-    effort-to-N can reach deep targets).  ``metrics_pool``/``is_pos`` are aligned to
-    the candidate set; ``seed_metrics`` are the held-out-excluded seed exemplars.
-    Returns ``None`` if no separable essence exists at all (caller falls back to
-    random).
+    ``batch`` clips, fold any *confirmed* positives into the exemplar set and any
+    *rejections* into the background as hard negatives, RE-FIT, and re-rank the
+    unreviewed pool.  Re-fitting runs while fewer than ``refit_budget`` clips have
+    been reviewed — a realistic hunt budget and the window where the arms separate;
+    the leftover pool is then appended in the *final* essence's order so the return
+    stays a full-length permutation (needed so effort-to-N can reach deep targets).
+    ``metrics_pool``/``is_pos`` are aligned to the candidate set; ``seed_metrics``
+    are the held-out-excluded seed exemplars.  Returns ``None`` if no separable
+    essence exists at all (caller falls back to random).
+
+    Both halves of the human's judgement are used, not just the "yes" half.  Every
+    round hands the user the clips the current definition is most confident about,
+    so the ones they reject are precisely where it is wrong; throwing those away and
+    re-fitting against a fresh random background re-makes the same mistake.
     """
     n = len(metrics_pool)
     cap = min(int(refit_budget), n)
     revealed: list[int] = []
     remaining = list(range(n))
     exemplar_rows = [seed_metrics]          # grows with each confirmed positive
+    negative_idx: list[int] = []            # grows with each rejection (hard negatives)
     any_scored = False
 
     def _order_remaining() -> "np.ndarray | None":
-        # Faithful to the shipped dialog: criteria AND-box + graded ranker, matched
-        # clips first.  Background is the full candidate pool (as in the dialog),
-        # exemplars are the seed + every confirmed positive folded in so far.
+        # Faithful to the shipped dialog: rank the pool by the sparse contrastive
+        # ranker.  Background is the candidate pool (as in the dialog) plus the
+        # rejections so far; exemplars are the seed + every confirmed positive.
         seed_df = pd.concat(exemplar_rows, ignore_index=True)
         rem = np.asarray(remaining, dtype=int)
         order_local = _essence_ranked_order(
-            seed_df, metrics_pool, metrics_pool.iloc[rem])
+            seed_df, metrics_pool, metrics_pool.iloc[rem],
+            metrics_pool.iloc[negative_idx] if negative_idx else None)
         if order_local is None:
             return None
         return rem[order_local]                               # global candidate idx
@@ -530,6 +529,7 @@ def _essence_discovery(
         newly_pos = [c for c in chosen if is_pos[c]]
         if newly_pos:
             exemplar_rows.append(metrics_pool.iloc[newly_pos])
+        negative_idx.extend(c for c in chosen if not is_pos[c])
         revealed.extend(chosen)
         chosen_set = set(chosen)
         remaining = [i for i in remaining if i not in chosen_set]
@@ -540,7 +540,8 @@ def _essence_discovery(
         tail = _order_remaining()
         revealed.extend(int(i) for i in (tail if tail is not None
                                          else np.asarray(remaining, dtype=int)))
-    log(f"essence seed {seed}: revealed {min(cap, len(revealed))} with re-extraction")
+    log(f"essence seed {seed}: revealed {min(cap, len(revealed))} with re-fitting "
+        f"({len(negative_idx)} hard negative(s))")
     return np.asarray(revealed, dtype=int)
 
 
@@ -783,7 +784,7 @@ def run_rare_discovery(
             if strat == STRATEGY_RANDOM:
                 order = _rank_random(len(cand), rng)
             elif strat == STRATEGY_ESSENCE:
-                # Iterated like AL: re-extract the essence as positives are confirmed.
+                # Iterated like AL: re-fit the essence as clips are judged.
                 order = _essence_discovery(
                     metrics_all.iloc[cand_idx], is_pos, metrics_all.iloc[seed_sel],
                     seed=seed, batch=batch, refit_budget=al_max_budget, log=_log)
@@ -885,7 +886,12 @@ def _assemble_result(
                 analysis="rare_discovery", config_name=f"{pool_label}:{strat}",
                 n_clips=pt.n_reviewed, seed=-1,
                 n_pos_train=int(round(pt.n_found_mean)),
-                n_neg_train=pt.n_reviewed - int(round(pt.n_found_mean))))
+                n_neg_train=pt.n_reviewed - int(round(pt.n_found_mean)),
+                # A discovery point is a seed-averaged review trajectory, not a
+                # single fit, so there is no confusion matrix to record. Marked
+                # explicitly so the structural tp/fp/fn zeros are never read as
+                # measured counts.
+                confusion_measured=False))
 
     result.total_video_minutes = whole_video_minutes(project)
     return result
@@ -898,7 +904,7 @@ def _assemble_result(
 # from the SAME warm seed in equal batches, differing only in which clips it
 # surfaces to label next; at every checkpoint a model is trained on the
 # labels-so-far and scored on the fixed high-confidence holdout.  All ABEL arms
-# iterate identically (essence re-extracted, UMAP re-lassoed, AL retrained), so
+# iterate identically (essence re-fitted, UMAP re-lassoed, AL retrained), so
 # the axis is real human effort and the win is reaching the target with fewer clips.
 
 
@@ -1010,20 +1016,22 @@ def _acquire_next(
     metrics_all: "pd.DataFrame | None",
     umap_emb: "np.ndarray | None",
     rng: np.random.Generator,
+    labeled_neg: "list[int] | None" = None,
 ) -> np.ndarray:
     """Best-first order over ``remaining`` (positions into that list) for one batch.
 
-    essence → re-extract from the *currently labeled* positives (background = pool),
-    rank by likeness; umap → distance to the labeled-positive centroid; al → highest
-    predicted target probability from the just-trained model; random / any fallback
-    → shuffle.  Re-derives from the labels acquired so far, so every ABEL arm gets
-    the same compounding AL enjoys.
+    essence → re-fit from the *currently labeled* positives, against the pool plus
+    the labeled negatives, and rank by likeness; umap → distance to the
+    labeled-positive centroid; al → highest predicted target probability from the
+    just-trained model; random / any fallback → shuffle.  Re-derives from the labels
+    acquired so far, so every ABEL arm gets the same compounding AL enjoys.
     """
     if strategy == STRATEGY_ESSENCE and metrics_all is not None and labeled_pos:
-        # Shipped essence path (criteria AND-box + ranker), matched clips first —
-        # same as discovery, so both effort axes measure the tool as it ships.
+        # Shipped essence path (sparse contrastive ranker + hard negatives) — the
+        # same call discovery makes, so both effort axes measure one tool.
         order = _essence_ranked_order(
-            metrics_all.iloc[labeled_pos], metrics_all, metrics_all.iloc[remaining])
+            metrics_all.iloc[labeled_pos], metrics_all, metrics_all.iloc[remaining],
+            metrics_all.iloc[labeled_neg] if labeled_neg else None)
         if order is not None:
             return order
     elif strategy == STRATEGY_UMAP and umap_emb is not None and labeled_pos:
@@ -1108,9 +1116,11 @@ def _run_quality_strategy(
             break
         n_choose = min(batch, len(remaining), cap - len(labeled))
         labeled_pos = [i for i in labeled if pos_arr[i]]
+        labeled_neg = [i for i in labeled if not pos_arr[i]]
         order = _acquire_next(
             strategy, remaining, pool, labeled_pos, res,
-            metrics_all=metrics_all, umap_emb=umap_emb, rng=rng)
+            metrics_all=metrics_all, umap_emb=umap_emb, rng=rng,
+            labeled_neg=labeled_neg)
         labeled.update(int(remaining[k]) for k in order[:n_choose])
 
     return traj
@@ -1199,7 +1209,11 @@ def _assemble_quality(
                 analysis="effort_to_quality", config_name=f"{pool_label}:{strat}",
                 n_clips=pt.n_clips, seed=-1, f1=pt.f1_mean, pr_auc=pt.pr_auc_mean,
                 n_pos_train=int(round(pt.n_pos_mean)),
-                n_neg_train=pt.n_clips - int(round(pt.n_pos_mean))))
+                n_neg_train=pt.n_clips - int(round(pt.n_pos_mean)),
+                # f1/pr_auc here are means over seeds; the per-seed confusion
+                # matrices they came from are not reducible to one, so the counts
+                # stay unmeasured rather than zero. See CellResult.confusion_measured.
+                confusion_measured=False))
     return result
 
 
@@ -1651,16 +1665,20 @@ class BehaviorRarityResult:
     rarer_than_target: list[str] = field(default_factory=list)  # honesty: anything rarer
     excluded: list[str] = field(default_factory=list)  # behaviours left out (e.g. under-scored)
     # Where the prevalence came from: "bouts" (unbiased deployment detections) or
-    # "labels" (the flagged fallback).  Never silently mixed — see
-    # :func:`_prevalence_table`.
+    # one of the two flagged fallbacks, "traces" / "labels".  Never silently
+    # mixed — see :func:`_prevalence_table`.
     source: str = "bouts"
 
     def target_mean(self) -> float:
         return float(self.means.get(self.target_name, float("nan")))
 
     def source_caveat(self) -> str:
-        """Empty for the unbiased source; the loud caveat for the label fallback."""
-        return LABEL_SOURCE_CAVEAT if self.source == PREVALENCE_SOURCE_LABELS else ""
+        """Empty for the unbiased source; the loud caveat for either fallback."""
+        if self.source == PREVALENCE_SOURCE_LABELS:
+            return LABEL_SOURCE_CAVEAT
+        if self.source == PREVALENCE_SOURCE_TRACES:
+            return TRACE_SOURCE_CAVEAT
+        return ""
 
 
 def _session_frame_extents(project: ProjectRef) -> "pd.Series":
@@ -1693,6 +1711,22 @@ _MIN_POOLED_DETECTED_FRACTION = 0.005
 PREVALENCE_SOURCE_TRACES = "traces"
 PREVALENCE_SOURCE_BOUTS = "bouts"
 PREVALENCE_SOURCE_LABELS = "labels"
+
+# Stamped on anything built from the trace fallback.  The traces' winning-behaviour
+# column is a plain argmax over the per-behaviour probabilities with no background
+# class, so every frame is charged to some behaviour and a project's prevalences
+# sum to 100% by construction: it is a share of the competition, not a share of
+# session time.  That makes it uncomparable across projects (the ceiling is set by
+# how many behaviours happened to compete) and it moves whenever a behaviour is
+# added or retrained.  Measured 2026-08-16: HomeCage Dig read 43.1% from traces and
+# 33.0% from bouts, and every one of the eight manuscript projects summed to
+# exactly 100.0%.
+TRACE_SOURCE_CAVEAT = (
+    "Prevalence came from the dense-trace winning-behaviour column, which is a "
+    "winner-take-all share of the competing behaviours (sums to 100% per project), "
+    "NOT the fraction of session time. Not comparable across projects. Regenerate "
+    "derived/behavior_bouts/ to get a thresholded deployment read-out."
+)
 
 # Stamped on every figure/report built from the fallback, because a label share is
 # NOT an unbiased prevalence: active learning deliberately over-samples the clips
@@ -2017,20 +2051,46 @@ def _prevalence_table(
 ) -> tuple[pd.DataFrame, str]:
     """Best available prevalence table, with the source it came from.
 
-    In preference order: the dense temporal-refinement traces a current run leaves
-    behind (:func:`_trace_prevalence_table`), then the exported per-behaviour bout
-    detections (:func:`_bout_prevalence_table`, which rejects stale evaluation
-    artifacts), then — flagged — the active-learning-selected labels.  Traces come
-    first because they are the only per-behaviour record a competitive multi-
-    behaviour run writes: its *bouts* are stamped ``target_behavior``, so a project
-    can have a complete current run and stale per-behaviour bouts at the same time.
+    In preference order: the exported per-behaviour bout detections
+    (:func:`_bout_prevalence_table`, which rejects stale evaluation artifacts),
+    then — flagged — the dense temporal-refinement traces, then — flagged — the
+    active-learning-selected labels.
+
+    Bouts come first because they are the only source that answers the question
+    the rarity axis asks. Bouts are thresholded, so a frame can belong to no
+    behaviour and a project's prevalences are free to sum to less than 100%. The
+    traces' winning-behaviour column is an argmax with no background competitor,
+    so it charges every frame to some behaviour and always sums to exactly 100%
+    (:data:`TRACE_SOURCE_CAVEAT`) — a share of the competition rather than a share
+    of session time, and therefore uncomparable across projects.
+
+    Traces were tried first until 2026-08-16, because a competitive multi-behaviour
+    run stamps its bouts ``target_behavior`` and so can leave a project with a
+    current run and stale per-behaviour bouts simultaneously — which once ranked
+    fear conditioning's *freezing*, 49% of its frames, as its rarest behaviour.
+    That specific regression is already prevented without trace preference: a run
+    whose bouts are stamped ``target_behavior`` writes no ``<id>_bouts.parquet``
+    at all, so :func:`_bout_prevalence_table` finds nothing and falls through here
+    anyway. Blanket trace preference traded a
+    *detectable* staleness problem for a silent wrong-quantity one, since whether a
+    project got a competition share or a real time fraction depended on how many
+    behaviours happened to be in its last dense run — so one figure mixed the two
+    units across projects.
+
+    To regenerate per-behaviour bouts for a competitive run, postprocess each
+    behaviour under its own ``concept_id`` (as ``DirectRunService`` does) rather
+    than once under ``target_behavior``, which thresholds the max-over-behaviours
+    probability and measures "any behaviour active".
     """
-    per = _trace_prevalence_table(project, behavior_ids, fps=fps, log=log)
-    if not per.empty:
-        return per, PREVALENCE_SOURCE_TRACES
     per = _bout_prevalence_table(project, behavior_ids, fps=fps, log=log)
     if not per.empty:
         return per, PREVALENCE_SOURCE_BOUTS
+    per = _trace_prevalence_table(project, behavior_ids, fps=fps, log=log)
+    if not per.empty:
+        log("rarity: no usable bouts — falling back to TRACE prevalence, which is "
+            "a competition share summing to 100%, NOT fraction of session time; "
+            "not comparable across projects")
+        return per, PREVALENCE_SOURCE_TRACES
     log("rarity: falling back to LABEL prevalence — biased, not deployment rarity")
     return (_label_prevalence_table(project, behavior_ids, fps=fps, log=log),
             PREVALENCE_SOURCE_LABELS)
@@ -3251,6 +3311,269 @@ def prism_effort_to_quality_reached(result: EffortToQualityResult) -> pd.DataFra
         if n_rep:
             row["Seeds run"] = int(n_rep)
         rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# Seconds of HUMAN REVIEW per clip used to convert clip effort into scoring time.
+# Deliberately not the clip's video duration (~0.5 s): a reviewer must watch and
+# judge each clip, so the labor rate is several seconds per clip. This is an
+# assumption, not a measurement — change it here (or pass sec_per_clip) to match
+# your own scoring rate, and state the rate in any figure legend built from it.
+REVIEW_SEC_PER_CLIP = 4.0  # matches the effort figure's sec_per_clip_review default
+
+# Canonical target order for the pooled effort tables. The tidy CSVs carry the
+# display label, so these are matched by string; anything unrecognised is appended
+# in first-seen order rather than dropped.
+_QUALITY_TARGET_ORDER = [
+    "F1>=0.70", "F1≥0.70", "F1>=0.80", "F1≥0.80",
+    "F1≥90%max", "F1≥95%max",
+    "PR-AUC≥0.80", "PR-AUC≥0.90", "PR-AUC≥90%max", "PR-AUC≥95%max",
+]
+
+
+def _ordered_strategy_names(names) -> list[str]:
+    """Strategy *display labels* in canonical arm order (see :func:`_ordered_curves`).
+
+    The tidy CSVs store the label, not the key, so the arm order is applied by
+    mapping ``_ARM_ORDER`` through ``STRATEGY_LABELS`` — keeping every project's
+    columns in the same positions when several files are pasted into one table.
+    """
+    present = list(dict.fromkeys(str(n) for n in names))
+    canonical = [STRATEGY_LABELS[s] for s in _ARM_ORDER if s in STRATEGY_LABELS]
+    out = [n for n in canonical if n in present]
+    return out + [n for n in present if n not in out]
+
+
+def _pooled_block(out: pd.DataFrame, name: str, g: pd.DataFrame, xs, value: str) -> None:
+    """Append a ``<name>:Mean``/``:SD``/``:N`` triple pooled ACROSS projects.
+
+    The SD here is the real spread across models, not a CI half-width, so it is
+    written straight into the SD subcolumn (no ``sd_from_ci95`` inversion).
+    """
+    st = g.groupby("clips_reviewed")[value].agg(["mean", "std", "count"]).reindex(xs)
+    out[f"{name}:Mean"] = st["mean"].to_numpy()
+    out[f"{name}:SD"] = st["std"].to_numpy()
+    out[f"{name}:N"] = st["count"].to_numpy()
+
+
+def prism_discovery_pooled(disc_df: pd.DataFrame, pool: str = "reviewed") -> pd.DataFrame:
+    """XY table: X = clips reviewed, one dataset per strategy, pooled over projects.
+
+    The across-model version of :func:`prism_discovery` — the line graph of rare
+    clips found as the review budget grows, averaged across every project that
+    hunted a rare behavior.  Mean/SD/N are computed across PROJECTS at each
+    budget (N = how many models contributed), so Prism draws the error bars.
+
+    Prism table type: XY, "Enter and plot error values" -> Mean, SD, N.
+    """
+    df = disc_df[disc_df["pool"].astype(str) == pool] if "pool" in disc_df else disc_df
+    if df.empty:
+        return pd.DataFrame()
+    xs = sorted(df["clips_reviewed"].dropna().unique())
+    out = pd.DataFrame({"Clips reviewed": xs})
+    for strat in _ordered_strategy_names(df["strategy"].unique()):
+        _pooled_block(out, strat, df[df["strategy"] == strat], xs, "confirmed_found_mean")
+    return out
+
+
+def prism_effort_to_quality_time(
+    eq_df: pd.DataFrame, clip_sec_by_project: dict, pool: str = "reviewed",
+    sec_per_clip: float | None = None,
+) -> pd.DataFrame:
+    """Grouped table: rows = strategy, columns = quality target, cell = MINUTES.
+
+    "How long does a human have to sit and score before this hunting strategy
+    yields a strong model?"  ``clips_to_target`` is converted to scoring time with
+    each project's own median clip length (clip_sec, from
+    ``cross_project/confusion_by_behavior.csv``) — projects genuinely differ — then
+    pooled across projects as Mean/SD/N minutes.
+
+    A project only contributes where it actually reached the target; N is the
+    number of projects that did, so read it beside the mean (an arm that reached a
+    target in 2 of 8 projects looks fast for the same reason as in
+    :func:`prism_effort_to_quality_reached`).
+    """
+    df = eq_df[eq_df["pool"].astype(str) == pool] if "pool" in eq_df else eq_df
+    df = df[df["quality_target"].notna() & df["clips_to_target"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame()
+    # NOTE ON THE UNIT. Passing nothing charges each clip its own *video duration*
+    # (clip_sec, ~0.5 s), which is the amount of footage watched — NOT human
+    # scoring time: a reviewer needs several seconds to watch and judge a 0.5 s
+    # clip. Pass ``sec_per_clip`` (a measured/assumed seconds-per-clip review rate)
+    # for a real labor estimate, and state the rate in the figure legend.
+    sec = (df["project"].map(lambda p: float(clip_sec_by_project.get(p, float("nan"))))
+           if sec_per_clip is None else float(sec_per_clip))
+    df["minutes"] = pd.to_numeric(df["clips_to_target"], errors="coerce") * sec / 60.0
+    targets = [t for t in _QUALITY_TARGET_ORDER if t in set(df["quality_target"])]
+    targets += [t for t in dict.fromkeys(df["quality_target"]) if t not in targets]
+    rows = []
+    for strat in _ordered_strategy_names(df["strategy"].unique()):
+        g = df[df["strategy"] == strat]
+        row = {"Strategy": strat}
+        for t in targets:
+            v = g.loc[g["quality_target"] == t, "minutes"]
+            row[f"{t}:Mean"] = float(v.mean()) if len(v) else np.nan
+            row[f"{t}:SD"] = float(v.std()) if len(v) > 1 else np.nan
+            row[f"{t}:N"] = int(v.notna().sum())
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def prism_effort_pooled_minutes(long_df: pd.DataFrame) -> pd.DataFrame:
+    """Column table: rows = behavior, columns = strategy, cell = MINUTES to target.
+
+    Recreates the "Effort to target" bar chart (incl. the Whole-video scan bar) but
+    pooled: every hunted behavior is one row = one paired observation of all five
+    arms.  In Prism this is a Column table — paste it, plot the mean/SD bar per
+    strategy with the individual points on top, and the paired test across rows.
+
+    **The row unit is one behavior, not one project.**  It used to be the project,
+    which was harmless only while the run hunted a single behavior per project;
+    with the whole checked set hunted, a project row silently averaged its
+    behaviors, so n was the project count and the within-project spread vanished.
+    Behaviors are the unit every other pooled panel in the suite uses.
+
+    ``long_df`` is one row per project x behavior x strategy with a numeric
+    ``minutes`` column (the caller charges each strategy its human-review time and
+    adds a ``Whole-video scan`` strategy).  Strategy columns come out in canonical
+    arm order with Whole-video scan last.
+    """
+    if long_df.empty:
+        return pd.DataFrame()
+    keys = [k for k in ("project", "behavior") if k in long_df.columns]
+    if not keys:
+        return pd.DataFrame()
+    wide = long_df.pivot_table(index=keys, columns="strategy",
+                               values="minutes", aggfunc="mean")
+    order = _ordered_strategy_names(wide.columns)
+    wv = STRATEGY_LABELS[STRATEGY_WHOLE_VIDEO]
+    cols = [c for c in order if c != wv] + ([wv] if wv in wide.columns else [])
+    wide = wide.reindex(columns=cols).reset_index()
+    if "behavior" in wide.columns:
+        title = (wide["project"].astype(str) + " - " + wide["behavior"].astype(str)
+                 if "project" in wide.columns else wide["behavior"].astype(str))
+        wide = wide.drop(columns=[c for c in ("project", "behavior") if c in wide.columns])
+        wide.insert(0, "Behavior", title)
+        return wide
+    return wide.rename(columns={"project": "Project"})
+
+
+def effort_pooled_long(
+    results: list[RareDiscoveryResult], target: int, sec_per_clip: float,
+) -> pd.DataFrame:
+    """Per-project minutes to find ``target`` confirmed positives, every arm +
+    the whole-video bar — the long form :func:`prism_effort_pooled_minutes` pivots.
+
+    Model arms: ``clips_to_target(target) * sec_per_clip / 60``.  Whole-video:
+    ``total_video_minutes * target / n_pos_pool`` (watch until the N-th positive).
+    """
+    rows = []
+    for res in results:
+        proj, beh = res.project_id, res.behavior_name
+        for _strat, cur in res.curves.items():
+            clips = cur.effort_to_n.get(int(target))
+            if clips is not None and np.isfinite(clips):
+                rows.append({"project": proj, "behavior": beh, "strategy": cur.label(),
+                             "minutes": float(clips) * sec_per_clip / 60.0})
+        if np.isfinite(res.total_video_minutes) and res.n_pos_pool > 0:
+            rows.append({"project": proj, "behavior": beh,
+                         "strategy": STRATEGY_LABELS[STRATEGY_WHOLE_VIDEO],
+                         "minutes": res.total_video_minutes * float(target) / res.n_pos_pool})
+    return pd.DataFrame(rows)
+
+
+def prevalence_by_behavior(results: list["BehaviorRarityResult"]) -> pd.DataFrame:
+    """Deployment prevalence per (project, behavior): % of session time, mean ± SD.
+
+    This is the X axis of the rarity-vs-performance panel, and it is a different
+    quantity from the ``prevalence`` in ``combined_across_projects.csv`` — that one
+    is the positive share of a *candidate pool*, which is enriched by construction.
+    Here prevalence is measured from dense bout detections over whole sessions, so
+    it is what the behavior actually costs a reviewer in deployment.
+
+    One row per behavior, one observation per session.  ``source`` is carried
+    through: "bouts" is the unbiased measurement, "labels" the flagged fallback,
+    and a panel mixing the two would put two different quantities on one axis.
+    """
+    frames = []
+    for br in results or []:
+        per = getattr(br, "per_session", None)
+        if per is None or per.empty or "time_fraction" not in per.columns:
+            continue
+        g = per.groupby("behavior", dropna=False)["time_fraction"]
+        out = pd.DataFrame({
+            "prevalence_pct": g.mean() * 100.0,
+            "prevalence_sd": g.std(ddof=1) * 100.0,
+            "n_sessions": g.size(),
+        }).reset_index().rename(columns={"behavior": "behavior_name"})
+        if "bout_rate" in per.columns:
+            rate = per.groupby("behavior", dropna=False)["bout_rate"].mean()
+            out["bouts_per_min"] = out["behavior_name"].map(rate).to_numpy()
+        out.insert(0, "project_id", br.project_id)
+        out["source"] = getattr(br, "source", "bouts")
+        frames.append(out)
+    if not frames:
+        return pd.DataFrame()
+    return (pd.concat(frames, ignore_index=True)
+            .sort_values(["project_id", "behavior_name"], ignore_index=True))
+
+
+def _clips_to_find(points: list, n_target: float) -> float:
+    """Invert a discovery curve: clips to review to reach ``n_target`` confirmed.
+
+    Interpolates within the observed curve; if the target is past the last point,
+    extrapolates at the final marginal rate (falling back to the average rate),
+    since the tail of a front-loaded curve keeps slowing.  NaN if no positive was
+    ever found (no rate to project).
+    """
+    pts = sorted(((p.n_reviewed, p.n_found_mean) for p in points), key=lambda t: t[0])
+    if not pts:
+        return float("nan")
+    prev_x = prev_y = 0.0
+    for x, y in pts:
+        if y >= n_target:
+            span = y - prev_y
+            frac = 0.0 if span <= 0 else (n_target - prev_y) / span
+            return prev_x + frac * (x - prev_x)
+        prev_x, prev_y = x, y
+    last_x, last_y = pts[-1]
+    if last_y <= 0:
+        return float("nan")
+    rate = last_y / last_x  # average rate fallback
+    if len(pts) >= 2:
+        dx, dy = last_x - pts[-2][0], last_y - pts[-2][1]
+        if dx > 0 and dy > 0:
+            rate = dy / dx  # final marginal rate — the tail keeps slowing
+    return last_x + (n_target - last_y) / rate
+
+
+def effort_to_strong_model_long(
+    results: list[RareDiscoveryResult], knee_by_behavior: dict, sec_per_clip: float,
+) -> pd.DataFrame:
+    """Per-project minutes to review enough clips for a STRONG model, per arm.
+
+    N (positives a strong model needs) is the learning-curve knee for that
+    project's hunted behavior; each strategy's discovery curve is inverted to the
+    clips it must review to surface N confirmed positives, then charged
+    ``sec_per_clip``.  Whole-video watches until the N-th positive.  Projects whose
+    hunted behavior has no learning-curve knee are skipped.  Long form for
+    :func:`prism_effort_pooled_minutes`.
+    """
+    rows = []
+    for res in results:
+        n = knee_by_behavior.get((str(res.project_id), str(res.behavior_name)))
+        if n is None or not np.isfinite(n) or n <= 0:
+            continue
+        for _strat, cur in res.curves.items():
+            clips = _clips_to_find(cur.points, float(n))
+            if np.isfinite(clips):
+                rows.append({"project": res.project_id, "strategy": cur.label(),
+                             "minutes": clips * sec_per_clip / 60.0})
+        if np.isfinite(res.total_video_minutes) and res.n_pos_pool > 0:
+            rows.append({"project": res.project_id,
+                         "strategy": STRATEGY_LABELS[STRATEGY_WHOLE_VIDEO],
+                         "minutes": res.total_video_minutes * float(n) / res.n_pos_pool})
     return pd.DataFrame(rows)
 
 

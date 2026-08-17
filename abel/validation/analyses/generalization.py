@@ -121,15 +121,21 @@ def run_generalization(
                 n_clips=int(n_pos),
                 seed=int(seed),
                 precision=res.precision, recall=res.recall, f1=res.f1,
+                precision_macro=res.precision_macro,
+                recall_macro=res.recall_macro, f1_macro=res.f1_macro,
                 pr_auc=res.pr_auc, cohen_kappa=res.cohen_kappa,
                 mcc=res.mcc, balanced_accuracy=res.balanced_accuracy,
                 specificity=res.specificity, roc_auc=res.roc_auc,
                 tp=res.tp, fp=res.fp, fn=res.fn, tn=res.tn,
+                confusion_measured=res.confusion_measured,
                 n_pos_train=res.n_pos_train, n_neg_train=res.n_neg_train,
                 n_features=res.n_features,
                 elapsed_sec_fit=res.elapsed_sec_fit,
                 elapsed_sec_total=res.elapsed_sec_total,
-                degenerate=res.degenerate, error=res.error,
+                degenerate=res.degenerate, degenerate_fit=res.degenerate_fit,
+                calibration_applied=res.calibration_applied,
+                calibration_method_used=res.calibration_method_used,
+                error=res.error,
             )
         )
         if not res.error and np.isfinite(res.f1):

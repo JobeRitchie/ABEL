@@ -101,6 +101,7 @@ class SessionJob:
 @dataclass
 class PrepConfig:
     use_video_features: bool = False
+    use_r3d_features: bool = True
     flow_temporal_stride: int = 10
     segment_window_frames: int = 60
     segment_stride_frames: int = 15
@@ -590,6 +591,7 @@ class FeaturePrepService:
                 window_size_frames=int(config.segment_window_frames),
                 window_stride_frames=int(config.segment_stride_frames),
                 excluded_feature_cols=frozenset(config.excluded_feature_cols),
+                use_r3d_features=bool(config.use_r3d_features),
             ),
             session_ids=None,
             progress_cb=lambda msg: obs.log(msg),

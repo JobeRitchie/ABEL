@@ -481,7 +481,7 @@ class _ROICanvas(QWidget):
 # ---------------------------------------------------------------------------
 
 class ROIDefinitionTab(QWidget):
-    """Define project/subject ROIs used by context and fusion features.
+    """Define project/subject ROIs used by context features.
 
     Left panel: visual video-frame canvas — drag to draw the Target Zone ROI.
     Right panel: subject list with quick navigation, spinboxes, and save controls.
@@ -704,7 +704,7 @@ class ROIDefinitionTab(QWidget):
         self._crop_h = QSpinBox()
         self._crop_h.setRange(0, 10000)
 
-        crop_box = QGroupBox("Subject Crop ROI (for fusion)")
+        crop_box = QGroupBox("Subject Crop ROI")
         crop_form = QFormLayout(crop_box)
         crop_form.addRow("x:", self._crop_x)
         crop_form.addRow("y:", self._crop_y)

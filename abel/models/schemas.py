@@ -163,10 +163,16 @@ class BehaviorModelConfig(BaseModel):
     allow_co_occurring_behaviors: bool = False
     """When True, multiple behaviors can be assigned to the same frame window."""
     use_video_features: bool = True
-    """When True, video-derived features (optical flow, motion) and fusion are included.
+    """When True, video-derived features (optical flow, motion, R3D appearance) are included.
     When False, only pose-derived features are used — faster, but blind to local
     micro-motion (e.g. grooming paw movement over the face), which makes spatially
     stationary behaviors like freezing and grooming hard to tell apart."""
+    use_r3d_features: bool = True
+    """When True, per-segment R3D-18 appearance embeddings (512 dims) are computed
+    before training and added to the feature set as a *video* feature family.
+    Requires torch/torchvision plus a reachable video and pose for each session;
+    sessions that can't be resolved are simply left without the columns.
+    Gated by ``use_video_features`` — pixel features off means these are off too."""
     advanced_roi_features: bool = True
     """When True, every ROI contributes shape-aware features (inside flag, signed
     distance to the boundary, nearest-corner distance, normalized axial/lateral
@@ -209,8 +215,6 @@ class BehaviorModelConfig(BaseModel):
             "margin": 0.0,
         }
     )
-    fusion_threshold: float = 0.35
-    fusion_thresholds: dict[str, float] = Field(default_factory=dict)
     active_learning_query_size: int = 50
     bout_merge_gap: int = 10
     min_bout_duration: int = 15

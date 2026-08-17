@@ -45,7 +45,7 @@ class DependenciesTab(QWidget):
 
         self.explanation = QLabel(
             "Tier 1 packages are required to run the core app.\n"
-            "Tier 2 packages enable preprocessing, modeling acceleration, and video fusion.\n"
+            "Tier 2 packages enable preprocessing, modeling acceleration, and video features.\n"
             "On Windows, the app prefers GPU for XGBoost/PyTorch paths when available and falls back to CPU.\n"
             "Report export tools (Word/Excel) require python-docx and openpyxl."
         )

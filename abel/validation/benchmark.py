@@ -201,6 +201,7 @@ def time_extraction(
         pose_path=pick.pose_path, video_path=pick.video_path, fps=pick.fps)
     cfg = PrepConfig(
         use_video_features=project.use_video_features,
+        use_r3d_features=project.use_video_features and project.use_r3d_features,
         segment_window_frames=win, segment_stride_frames=stride,
         reuse_cached=False)
 

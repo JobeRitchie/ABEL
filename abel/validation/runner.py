@@ -43,13 +43,36 @@ ALL_ANALYSES = [
     ANALYSIS_DISCRIMINATION,
 ]
 
-# Everything the "Run Full Suite" button offers, in report order.  This is a
-# superset of ALL_ANALYSES: the last three used to live only as their own GUI
-# workers, outside the runner and outside the shared holdout split.
+# Everything the "Run All" tab offers, in report order.  This is a superset of
+# ALL_ANALYSES: behaviorscape/video_value/throughput used to live only as their own
+# GUI workers, outside the runner and outside the shared holdout split.
 FULL_SUITE = [
     ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_DISCRIMINATION,
-    ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE, ANALYSIS_BEHAVIORSCAPE,
-    ANALYSIS_VIDEO_VALUE, ANALYSIS_THROUGHPUT,
+    ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE, ANALYSIS_RARE_DISCOVERY,
+    ANALYSIS_BEHAVIORSCAPE, ANALYSIS_VIDEO_VALUE, ANALYSIS_THROUGHPUT,
+]
+
+# The analyses behind the manuscript's Figure 3.  Ticked by default on the Run All
+# tab so the headline figure is one button, with the remaining suite analyses
+# available but off — they answer other questions and cost real time.
+#
+# Derived from the panels the figure actually contains, not from habit:
+#   learning curve   -> F1/PR-AUC vs clip budget
+#   ablation         -> the all-features held-out cells behind the per-behavior
+#                       metrics panels (rarity-vs-PR-AUC, kappa by assay)
+#   discrimination   -> the volcano
+#   generalization   -> Cohen's kappa per behavior
+#   rare_discovery   -> clip hunting, minutes-to-find-N, and the deployment
+#                       prevalence (% of session time) the rarity panel plots on X
+#   behaviorscape    -> feature-importance heatmap + modality shares
+#   video_value      -> pose vs pose+video dF1
+# ``al_curve`` is deliberately NOT here: no Figure 3 panel uses it and it is the
+# most expensive analysis in the suite (it retrains at every acquisition step, for
+# two arms, for every seed).  Tick it when you want the AL-vs-random panels.
+FIGURE3_ANALYSES = [
+    ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_DISCRIMINATION,
+    ANALYSIS_GENERALIZATION, ANALYSIS_RARE_DISCOVERY, ANALYSIS_BEHAVIORSCAPE,
+    ANALYSIS_VIDEO_VALUE,
 ]
 
 ANALYSIS_LABELS = {
@@ -70,20 +93,23 @@ ProgressCB = Callable[[str, float], None]
 @dataclass
 class ValidationRunConfig:
     analyses: list[str] = field(default_factory=lambda: list(ALL_ANALYSES))
+    # Defaults throughout are the settings the manuscript figures were produced at
+    # (see the MANUSCRIPT_* constants below), so a headless re-run reproduces them
+    # without restating every field.
     # learning curve
-    sizes: list[int] = field(default_factory=lambda: list(learning_curve.DEFAULT_SIZES))
+    sizes: list[int] = field(default_factory=lambda: list(MANUSCRIPT_LC_SIZES))
     n_seeds_lc: int = 5
-    neg_policy: str = "all"
-    neg_per_pos: float = 3.0
+    neg_policy: str = "ratio"
+    neg_per_pos: float = 5.0
     # ablation / generalization
-    n_seeds_ablation: int = 3
+    n_seeds_ablation: int = 5
     ablation_budgets: list[int] = field(default_factory=lambda: [subsample.ALL_CLIPS])
-    n_seeds_generalization: int = 3
+    n_seeds_generalization: int = 5
     # pairwise discrimination (which features separate similar behaviors)
-    n_seeds_discrimination: int = 3
-    discrimination_max_pairs: int = 15
+    n_seeds_discrimination: int = 5
+    discrimination_max_pairs: int = 99
     # active-learning vs random
-    n_seeds_al: int = 3
+    n_seeds_al: int = 5
     al_k0: int = 20
     al_batch: int = 15
     al_max_budget: int = 200
@@ -95,7 +121,11 @@ class ValidationRunConfig:
     # rarity pass first (dense bout detections, no fitting), then spends the whole
     # discovery/quality budget on that project's rarest behaviour — the one the
     # analysis is actually about — before moving to the next project.
-    rare_auto_target: bool = True
+    #
+    # OFF by default: the manuscript comparison covers every checked behavior.
+    # Auto-target collapses it to one behavior per project (43 -> 8), which is a
+    # much weaker pooled test.  Turn it on when you want a cheap exploratory pass.
+    rare_auto_target: bool = False
     n_seeds_rare: int = 5
     # 20 exemplars, matching the real workflow: a user reaches the clip-hunting
     # tools after an initial random-hunting phase, not from a cold 8-clip start.
@@ -201,6 +231,23 @@ class ValidationRunConfig:
 # (ablation, discrimination, active learning, video value) gets 5.
 PUBLICATION_SEEDS = 5
 
+# Settings the published Figure 3 runs were made at, kept as named constants so a
+# re-run reproduces them without anyone re-deriving them from a run manifest.
+MANUSCRIPT_LC_SIZES = [0, 5, 10, 20, 50, 100, 150, 200, 250, 300, 350, 400]
+MANUSCRIPT_NEG_PER_POS = 5.0
+MANUSCRIPT_MAX_PAIRS = 99
+# Rare-behavior discovery covers EVERY checked behavior. Auto-target instead spends
+# the budget on one auto-picked rarest behavior per project, which shrinks the
+# comparison from 43 behaviors to 8 and makes the pooled test far weaker.
+MANUSCRIPT_RARE_AUTO_TARGET = False
+# Exemplars the clip-hunting arms warm-start from.  The DELIBERATE exception to
+# "match the published run": that run used 5, but 20 was adopted afterwards on
+# measurement (essence's effort-to-50 on the full pool fell from 486 to 336 clips)
+# and it matches the real workflow, where a user reaches the clip-hunting tools
+# after a random-hunting phase rather than from a cold start.  The re-derived
+# figure supersedes the published one, so the better setting wins.
+MANUSCRIPT_RARE_SEED_POS = 20
+
 
 def publication_config(
     analyses: list[str] | None = None,
@@ -210,19 +257,28 @@ def publication_config(
     """The settings the suite should be run at for a publication-grade result."""
     cfg = ValidationRunConfig(
         analyses=list(analyses if analyses is not None else FULL_SUITE),
-        # Data efficiency: a dense low-end schedule is what resolves the knee —
-        # the interesting curvature is all below ~100 clips.
-        sizes=[10, 25, 50, 75, 100, 150, 200, subsample.ALL_CLIPS],
+        # The learning-curve schedule the manuscript figure was built on: dense at
+        # the low end, where all the curvature is, and extended to 400 so the
+        # plateau is visible. It deliberately omits ALL_CLIPS — an "all" point sits
+        # at a different x per behavior, so it cannot be averaged across behaviors
+        # into the pooled curve.
+        sizes=MANUSCRIPT_LC_SIZES,
         n_seeds_lc=PUBLICATION_SEEDS,
-        neg_policy="all",
+        # 5:1 negatives, not every negative in the pool. Held fixed across clip
+        # budgets, the ratio keeps class balance constant along the x-axis, so a
+        # rise in the curve is the model learning rather than the imbalance easing.
+        neg_policy="ratio",
+        neg_per_pos=MANUSCRIPT_NEG_PER_POS,
         n_seeds_ablation=PUBLICATION_SEEDS,
-        # Two budgets: regularizers (calibration, augmentation) pay off in the
-        # low-data regime and vanish at full data, so a full-data-only ablation
-        # reports "no effect" for features that genuinely help where it matters.
-        ablation_budgets=[50, subsample.ALL_CLIPS],
+        # Full data only — the shipped-pipeline comparison. A 50-clip budget answers
+        # a different question (do regularizers pay off when labels are scarce); run
+        # it deliberately by adding 50 back, not as part of the headline figure.
+        ablation_budgets=[subsample.ALL_CLIPS],
         n_seeds_generalization=PUBLICATION_SEEDS,
         n_seeds_discrimination=PUBLICATION_SEEDS,
-        discrimination_max_pairs=15,
+        # Every scorable pair. Capping at 15 keeps only the closest-centroid pairs,
+        # which biases the pooled result toward the hard end of the distribution.
+        discrimination_max_pairs=MANUSCRIPT_MAX_PAIRS,
         n_seeds_al=PUBLICATION_SEEDS,
         al_k0=20,
         al_batch=15,
@@ -231,6 +287,9 @@ def publication_config(
         al_acquisition="probability",
         bscape_threshold=0.010,
         bscape_normalize="fraction",
+        n_seeds_rare=PUBLICATION_SEEDS,
+        rare_auto_target=MANUSCRIPT_RARE_AUTO_TARGET,
+        rare_n_seed_pos=MANUSCRIPT_RARE_SEED_POS,
         n_seeds_video_value=PUBLICATION_SEEDS,
         throughput_stages=[benchmark.STAGE_EXTRACT, benchmark.STAGE_TRAIN],
         # Score only against labels the reviewer was certain of.
@@ -254,7 +313,11 @@ def preset_description(cfg: ValidationRunConfig) -> str:
         f"{PUBLICATION_SEEDS} seeds per point (95% CI uses the t quantile — at 3 seeds "
         f"that is 4.30 and real effects miss significance; at 5 it is 2.78)\n"
         f"Learning-curve clip schedule: {sizes}\n"
-        f"Ablation clip budgets: {budgets}  (low-data + full-data)\n"
+        f"Negatives: {cfg.neg_policy}"
+        + (f" ({cfg.neg_per_pos:g} per positive)\n" if cfg.neg_policy == "ratio" else "\n")
+        + f"Ablation clip budgets: {budgets}\n"
+        f"Rare discovery: {'every checked behavior' if not cfg.rare_auto_target else 'rarest behavior per project'}, "
+        f"{cfg.rare_n_seed_pos} warm-start exemplars\n"
         f"Discrimination: up to {cfg.discrimination_max_pairs} behavior pairs, "
         f"closest-centroid pairs kept first\n"
         f"Active learning: seed {cfg.al_k0} clips ({cfg.al_seed_pos} guaranteed "
@@ -780,13 +843,19 @@ def run_validation(
     # Kept in scope for the Prism export at the end of the run (each is only built
     # if its analysis actually ran).
     abl_df: pd.DataFrame | None = None
+    abl_pooled_df: pd.DataFrame | None = None
     gen_df: pd.DataFrame | None = None
     disc_df: pd.DataFrame | None = None
+    disc_pooled_df: pd.DataFrame | None = None
     disc_seed_df: pd.DataFrame | None = None
     vv_df: pd.DataFrame | None = None
     bench_df: pd.DataFrame | None = None
     lc_knee_df: pd.DataFrame | None = None
     lc_points_df: pd.DataFrame | None = None
+    rare_pooled_df: pd.DataFrame | None = None
+    rare_effort_minutes_df: pd.DataFrame | None = None
+    rare_effort_target: int | None = None
+    rarity_df: pd.DataFrame | None = None
 
     if lc_results:
         knee_df = lc_knee_df = cross_project.data_efficiency_summary(knees)
@@ -805,9 +874,33 @@ def run_validation(
                 for view in plots.LEARNING_CURVE_VIEWS:
                     # "0_AVERAGE" prefix sorts the mean curve first in each view.
                     plots.learning_curve_plot(avg, lc_dir / f"0_AVERAGE__{view}.png", view=view)
-                store.write_csv(pd.DataFrame(_lc_points_rows(avg)),
+                avg_rows = _lc_points_rows(avg)
+                store.write_csv(pd.DataFrame(avg_rows),
                                 "learning_curve_average.csv", subdir="learning_curves")
                 plots.close_all()
+                # The pooled curve is the headline line of the Prism export too, so
+                # fold it into the frame handed to prism.write_all (the archival
+                # learning_curve_points.csv above stays per-behavior). Without this
+                # the Prism learning-curve tables carry every behavior *except* the
+                # across-behavior average — the one users actually plot.
+                lc_points_df = pd.concat(
+                    [lc_points_df, pd.DataFrame(avg_rows)], ignore_index=True)
+                # Fixed-composition companion: the same average restricted to the
+                # behaviors present at EVERY budget. The all-available curve above
+                # loses its rare, hard behaviors as the budget grows (43 -> 28 on the
+                # manuscript run), so part of its right-hand flattening is the
+                # denominator changing rather than performance saturating. A plateau
+                # claim has to be read off this one.
+                bal = learning_curve.average_curve(
+                    lc_results, project_label=label, balanced=True)
+                if bal is not None and bal.points:
+                    plots.learning_curve_plot(
+                        bal, lc_dir / "0_AVERAGE_BALANCED__f1_prauc.png",
+                        view="f1_prauc")
+                    store.write_csv(pd.DataFrame(_lc_points_rows(bal)),
+                                    "learning_curve_average_balanced.csv",
+                                    subdir="learning_curves")
+                    plots.close_all()
         # Report shows the headline F1/PR-AUC view; the other views live alongside on disk.
         lc_imgs = sorted((store.sub("learning_curves")).glob("*__f1_prauc.png"))
         sections.append(("Learning curves (optimal clips)",
@@ -847,6 +940,11 @@ def run_validation(
                     "gain_p_value": float("nan") if is_base
                                     else r.gain_p.get(cfgname, float("nan")),
                     "significant": "" if is_base else bool(r.is_significant(cfgname)),
+                    # Structural zero, not a measured one: this rung resolved to the
+                    # baseline's own features and settings, so it could not have
+                    # differed. Excluded from the pooled test's n.
+                    "untestable": "" if is_base else bool(
+                        r.untestable.get(cfgname, False)),
                 }
                 # The per-seed F1 behind every mean/CI, so the paired test can be
                 # re-run downstream (Prism, R, a reviewer) from the CSV alone —
@@ -856,6 +954,13 @@ def run_validation(
                 abl_rows.append(row)
         abl_df = pd.DataFrame(abl_rows)
         store.write_csv(abl_df, "ablation_results.csv", subdir="ablation")
+        # The manuscript-level statistic: behaviors, not seeds, as the unit of
+        # analysis (see ablation.pooled_gain_by_behavior). The per-row gain_p_value
+        # above stays as the per-behavior reproducibility check.
+        abl_pooled_df = ablation.pooled_gain_by_behavior(abl_df)
+        if not abl_pooled_df.empty:
+            store.write_csv(abl_pooled_df, "ablation_pooled_by_behavior.csv",
+                            subdir="ablation")
         # The config descriptions are 7 unique sentences; inlining them on all ~900
         # rows bloats the CSV and puts quoted, comma-laden prose in a numeric table.
         # They belong in a lookup the figure legend is written from.
@@ -869,8 +974,13 @@ def run_validation(
                 })
         store.write_csv(pd.DataFrame(list(desc_seen.values())),
                         "ablation_config_legend.csv", subdir="ablation")
+        abl_inner = ""
+        if abl_pooled_df is not None and not abl_pooled_df.empty:
+            abl_inner += ("<h3>Pooled across behaviors (unit of analysis = behavior)</h3>"
+                          + report.table_section(abl_pooled_df))
+        abl_inner += report.table_section(abl_df) + report.img_section(budget_imgs)
         sections.append(("Feature / pipeline ablation impact (detection: behavior vs. rest)",
-                         report.table_section(abl_df) + report.img_section(budget_imgs)))
+                         abl_inner))
 
     if disc_by_project:
         disc_dir = store.sub("discrimination")
@@ -912,6 +1022,12 @@ def run_validation(
         plots.close_all()
         if not disc_df.empty:
             store.write_csv(disc_df, "discrimination_results.csv", subdir="discrimination")
+        # Pairs, not seeds, as the unit of analysis — and only pairs the pose
+        # baseline has not already solved (see discrimination.pooled_gain_by_pair).
+        disc_pooled_df = discrimination.pooled_gain_by_pair(disc_df)
+        if not disc_pooled_df.empty:
+            store.write_csv(disc_pooled_df, "discrimination_pooled_by_pair.csv",
+                            subdir="discrimination")
         disc_seed_df = (pd.concat(all_seed_rows, ignore_index=True)
                         if all_seed_rows else pd.DataFrame())
         if not disc_seed_df.empty:
@@ -926,6 +1042,10 @@ def run_validation(
         if not hard_df.empty:
             store.write_csv(hard_df, "confusable_pairs.csv", subdir="discrimination")
         inner = ""
+        if disc_pooled_df is not None and not disc_pooled_df.empty:
+            inner += ("<h3>Pooled across behavior pairs with headroom "
+                      "(unit of analysis = pair)</h3>"
+                      + report.table_section(disc_pooled_df))
         if not hard_df.empty:
             inner += ("<h3>Hardest behavior pairs (lowest pose-only separability)</h3>"
                       + report.table_section(hard_df))
@@ -1051,6 +1171,13 @@ def run_validation(
             rd_imgs.append(img)
             br.per_session.to_csv(
                 rd_dir / f"behavior_rarity__{_tag(br.project_id)}.csv", index=False)
+        # Deployment prevalence rolled up per behavior — the X axis of the
+        # rarity-vs-performance panel. Written as its own table so the panel and
+        # the caption's "spans X% to Y% of session time" come from one number.
+        rarity_df = rare_discovery.prevalence_by_behavior(rare_behavior)
+        if rarity_df is not None and not rarity_df.empty:
+            store.write_csv(rarity_df, "prevalence_by_behavior.csv",
+                            subdir="rare_discovery")
         # Discovery curves + effort bars (reviewed pool, all four arms).
         rd_rows: list[dict] = []
         for r in rare_reviewed:
@@ -1141,6 +1268,72 @@ def run_validation(
         if q_rows:
             store.write_csv(pd.DataFrame(q_rows), "effort_to_quality.csv",
                             subdir="rare_discovery")
+        # ── Pooled-across-models Prism tables ──
+        # The per-project tables below answer "how did THIS model hunt?"; these two
+        # answer the manuscript questions: the discovery curve averaged over every
+        # model, and how many MINUTES of human scoring each strategy costs before
+        # the model is strong. Clip length is per-project (see the cross_project
+        # block) so effort converts to time with each project's own median clip.
+        try:
+            clip_sec_map = {}
+            for p in projects:
+                cf = holdout.median_clip_frames(p)
+                fps = float(p.fps or 0.0)
+                if np.isfinite(cf) and fps > 0:
+                    clip_sec_map[p.name] = clip_sec_map[p.project_id] = cf / fps
+            if rd_rows:
+                pooled = rare_pooled_df = rare_discovery.prism_discovery_pooled(
+                    pd.DataFrame(rd_rows))
+                if not pooled.empty:
+                    prism._write(pooled,
+                                 store.run_dir / "prism" / "prism_discovery_pooled.csv")
+            if q_rows:
+                # Human review rate, NOT clip duration — see the note in
+                # prism_effort_to_quality_time. Quote this rate in the legend.
+                tmin = rare_discovery.prism_effort_to_quality_time(
+                    pd.DataFrame(q_rows), clip_sec_map,
+                    sec_per_clip=rare_discovery.REVIEW_SEC_PER_CLIP)
+                if not tmin.empty:
+                    prism._write(tmin, store.run_dir / "prism"
+                                 / "prism_effort_to_quality_minutes.csv")
+            # Pooled "effort to target" bar chart (incl. Whole-video scan): rows =
+            # projects, cols = strategies, cell = minutes to find N confirmed.
+            spc = rare_discovery.REVIEW_SEC_PER_CLIP
+            # One table per configured target, not just the auto-picked one. The
+            # auto-pick is "the largest target every arm reached in every project",
+            # which moves with the behaviors in the run — so the panel silently
+            # changed its N between runs and two figures could not be compared.
+            # Every target is now on disk; the FIGURES copy is the auto-picked one,
+            # named in INDEX.txt, and swapping panels is a file rename.
+            eff_target = rare_discovery.combined_effort_target(rare_reviewed)
+            targets = sorted({int(t) for t in (config.rare_effort_targets or [])
+                              if t} | ({int(eff_target)} if eff_target else set()))
+            for tgt in targets:
+                el = rare_discovery.effort_pooled_long(rare_reviewed, tgt, spc)
+                ew = rare_discovery.prism_effort_pooled_minutes(el)
+                if ew.empty:
+                    continue
+                prism._write(ew, store.run_dir / "prism" /
+                             f"prism_effort_to_find{tgt}_minutes_pooled.csv")
+                if eff_target and tgt == int(eff_target):
+                    rare_effort_minutes_df = ew
+                    rare_effort_target = tgt
+            # "Time to review enough clips for a STRONG model": N per project = its
+            # learning-curve knee (positives for a strong model), converted through
+            # each strategy's discovery rate. Only possible when this run also did
+            # the learning-curve analysis, so the knee exists to join on.
+            if rare_reviewed and lc_results:
+                knee_by_beh = {(str(lc.project_id), str(lc.behavior_name)): lc.knee_clips
+                               for lc in lc_results}
+                sl = rare_discovery.effort_to_strong_model_long(
+                    rare_reviewed, knee_by_beh, spc)
+                sw = rare_discovery.prism_effort_pooled_minutes(sl)
+                if not sw.empty:
+                    prism._write(sw, store.run_dir / "prism" /
+                                 "prism_time_to_strong_model_minutes_pooled.csv")
+        except Exception as exc:  # noqa: BLE001 — pooled extras must not sink the run
+            _emit_msg(f"Pooled rare-discovery Prism tables skipped: "
+                      f"{type(exc).__name__}: {exc}")
         # Prism-ready copies (one behaviour-rarity table, plus discovery/effort/
         # rarity/quality).  Quality results are matched to their discovery run by
         # behaviour so both land in the same Prism bundle.
@@ -1316,6 +1509,14 @@ def run_validation(
         )
         store.write_csv(beh_df, "accuracy_by_behavior.csv", subdir="cross_project")
         plots.close_all()
+    # Every headline metric per behavior, from the same held-out cells as the F1
+    # above. This is what the rarity-vs-performance and per-assay-kappa panels
+    # plot; building it once here is what keeps those panels agreeing with the
+    # accuracy and confusion tables.
+    beh_metrics_df = cross_project.metrics_by_behavior(cells_df)
+    if not beh_metrics_df.empty:
+        store.write_csv(beh_metrics_df, "metrics_by_behavior.csv",
+                        subdir="cross_project")
     # The counts behind the rates. "Found 191 of 214, 17 false alarms" is the same
     # evidence as P/R but a reviewer cannot misread it, so it is promoted to a
     # first-class table + figure rather than staying buried in cells.parquet.
@@ -1377,8 +1578,23 @@ def run_validation(
             publication_metrics_df=pub_df, project_accuracy_df=acc_df,
             training_speed_df=speed_df,
         )
+        panel_paths = prism.write_figure_panels(
+            store.run_dir,
+            gen_df=gen_df, ablation_df=abl_df, ablation_pooled_df=abl_pooled_df,
+            al_df=al_pts, discrimination_df=disc_df,
+            discrimination_pooled_df=disc_pooled_df,
+            lc_points_df=lc_points_df, lc_knee_df=lc_knee_df,
+            rare_pooled_df=rare_pooled_df,
+            rare_effort_minutes_df=rare_effort_minutes_df,
+            rare_effort_target=rare_effort_target,
+            rarity_df=rarity_df, behavior_metrics_df=beh_metrics_df,
+            video_df=vv_df, bscape_shares_df=bs_shares,
+            bscape_importance_df=bs_imp,
+        )
         if prism_paths and progress_cb:
-            progress_cb(f"Prism tables → {store.run_dir / 'prism'}", 0.99)
+            progress_cb(
+                f"Prism tables → {store.run_dir / 'prism'} "
+                f"({len(panel_paths)} figure panels in prism/FIGURES)", 0.99)
     except Exception as exc:  # noqa: BLE001 — a bad pivot must not sink the run
         if progress_cb:
             progress_cb(f"Prism export skipped: {type(exc).__name__}: {exc}", 0.99)
@@ -1507,6 +1723,120 @@ def _lc_points_rows(lc) -> list[dict]:
             "pr_auc_mean": p.pr_auc_mean, "pr_auc_ci": p.pr_auc_ci,
             "precision_mean": p.precision_mean, "recall_mean": p.recall_mean,
             "tp_mean": p.tp_mean, "fp_mean": p.fp_mean, "fn_mean": p.fn_mean,
+            # Confusion counts as a percent of the held-out set (fair across
+            # behaviors; averages are macro over behaviors). Prism-ready.
+            "tp_pct": p.tp_pct, "fp_pct": p.fp_pct, "fn_pct": p.fn_pct,
+            "tp_pct_ci": p.tp_pct_ci, "fp_pct_ci": p.fp_pct_ci, "fn_pct_ci": p.fn_pct_ci,
             "kappa_mean": p.kappa_mean,
+            # Imbalance-robust companions to F1 — target-class F1 alone cannot tell a
+            # good detector from an always-predict-target one.
+            "mcc_mean": p.mcc_mean, "specificity_mean": p.specificity_mean,
+            # Composition and health of this point: how many behaviors are behind it
+            # (NOT constant across x on an average curve), how many seeds collapsed,
+            # and how many actually had calibration applied.
+            "n_behaviors": p.n_behaviors,
+            "n_degenerate": p.n_degenerate,
+            "degenerate": p.is_degenerate,
+            "n_calibrated": p.n_calibrated,
         })
     return rows
+
+
+def _row_float(row, col: str) -> float:
+    """A tidy-row cell as float, tolerating missing columns / blanks → NaN."""
+    try:
+        return float(row.get(col, float("nan")))
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _lc_result_from_rows(rows: pd.DataFrame) -> "learning_curve.LearningCurveResult":
+    """Reconstruct a LearningCurveResult from saved tidy rows (inverse of
+    :func:`_lc_points_rows`) — enough to redraw the figures without retraining.
+
+    ``behavior_id`` is not persisted (the plots don't use it) and the knee is
+    recomputed from ``f1_mean`` with the same detector used at run time, so a
+    re-rendered figure carries an identical knee marker.
+    """
+    pts: list[learning_curve.LearningCurvePoint] = []
+    for _, r in rows.iterrows():
+        n_clips = _row_float(r, "n_clips_mean")
+        n_seeds = _row_float(r, "n_seeds")
+        pts.append(learning_curve.LearningCurvePoint(
+            requested_size=int(round(n_clips)) if np.isfinite(n_clips) else 0,
+            n_clips_mean=n_clips,
+            f1_mean=_row_float(r, "f1_mean"), f1_ci=_row_float(r, "f1_ci"),
+            pr_auc_mean=_row_float(r, "pr_auc_mean"), pr_auc_ci=_row_float(r, "pr_auc_ci"),
+            kappa_mean=_row_float(r, "kappa_mean"),
+            n_seeds=int(n_seeds) if np.isfinite(n_seeds) else 0,
+            precision_mean=_row_float(r, "precision_mean"),
+            recall_mean=_row_float(r, "recall_mean"),
+            tp_mean=_row_float(r, "tp_mean"), fp_mean=_row_float(r, "fp_mean"),
+            fn_mean=_row_float(r, "fn_mean"),
+            tp_pct=_row_float(r, "tp_pct"), fp_pct=_row_float(r, "fp_pct"),
+            fn_pct=_row_float(r, "fn_pct"),
+            tp_pct_ci=_row_float(r, "tp_pct_ci"), fp_pct_ci=_row_float(r, "fp_pct_ci"),
+            fn_pct_ci=_row_float(r, "fn_pct_ci"),
+            mcc_mean=_row_float(r, "mcc_mean"),
+            specificity_mean=_row_float(r, "specificity_mean"),
+            # Must round-trip: without them a re-rendered figure would silently lose
+            # the degenerate-fit exclusion and redraw the inflated curve and knee.
+            n_degenerate=int(_row_float(r, "n_degenerate"))
+            if np.isfinite(_row_float(r, "n_degenerate")) else 0,
+            n_calibrated=int(_row_float(r, "n_calibrated"))
+            if np.isfinite(_row_float(r, "n_calibrated")) else 0,
+            n_behaviors=int(_row_float(r, "n_behaviors"))
+            if np.isfinite(_row_float(r, "n_behaviors")) else 1,
+        ))
+    pts.sort(key=lambda p: p.n_clips_mean)
+    first = rows.iloc[0]
+    res = learning_curve.LearningCurveResult(
+        project_id=str(first.get("project_id", "")),
+        behavior_id="",
+        behavior_name=str(first.get("behavior_name", "")),
+        points=pts,
+    )
+    finite_f1 = [p.f1_mean for p in pts if np.isfinite(p.f1_mean)]
+    res.f1_max = float(max(finite_f1)) if finite_f1 else float("nan")
+    res.knee_clips = learning_curve.detect_knee(pts)
+    return res
+
+
+def rerender_learning_curves(lc_dir: "str | Path") -> int:
+    """Redraw every learning-curve figure from a run's saved point CSVs — no
+    retraining.
+
+    Reads ``learning_curve_points.csv`` (one block per behavior) and, when
+    present, ``learning_curve_average.csv`` (the mean-across-behaviors curve),
+    and rewrites the ``{stem}__{view}.png`` / ``0_AVERAGE__{view}.png`` files in
+    place using the current plotting code.  Use after a plotting change to
+    refresh an existing run without re-running the analysis.  Returns the number
+    of PNGs written.
+    """
+    lc_dir = Path(lc_dir)
+    points_csv = lc_dir / "learning_curve_points.csv"
+    if not points_csv.is_file():
+        raise FileNotFoundError(
+            f"No learning_curve_points.csv in {lc_dir} — nothing to re-render.")
+    df = pd.read_csv(points_csv)
+    written = 0
+    # Per-behavior figures, grouped exactly as they were written at run time.
+    for (pid, bname), grp in df.groupby(["project_id", "behavior_name"], sort=False):
+        lc = _lc_result_from_rows(grp)
+        stem = f"{_tag(pid)}__{_tag(bname)}"
+        for view in plots.LEARNING_CURVE_VIEWS:
+            if plots.learning_curve_plot(lc, lc_dir / f"{stem}__{view}.png", view=view) is not None:
+                written += 1
+        plots.close_all()
+    # The mean-across-behaviors curve, if this run produced one (≥2 behaviors).
+    avg_csv = lc_dir / "learning_curve_average.csv"
+    if avg_csv.is_file():
+        adf = pd.read_csv(avg_csv)
+        if not adf.empty:
+            avg = _lc_result_from_rows(adf)
+            for view in plots.LEARNING_CURVE_VIEWS:
+                if plots.learning_curve_plot(avg, lc_dir / f"0_AVERAGE__{view}.png",
+                                             view=view) is not None:
+                    written += 1
+            plots.close_all()
+    return written

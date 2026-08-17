@@ -157,31 +157,54 @@ def test_essence_feature_frame_uses_shipped_features_not_clip_metrics():
     assert "label" not in frame.columns and "segment_id" not in frame.columns
 
 
-def test_criteria_match_mask_is_and_of_active_bounds():
-    """The AND-box: a row must clear every enabled bound (mirrors mine match_all)."""
-    from abel.services.clip_metrics_service import Criterion
-    df = pd.DataFrame({"a": [0.0, 5.0, 5.0, 9.0], "b": [0.0, 1.0, 9.0, 9.0]})
-    crits = [Criterion(metric_id="a", low=4.0, high=6.0),
-             Criterion(metric_id="b", low=None, high=2.0)]
-    mask = rd._criteria_match_mask(df, crits)
-    assert mask.tolist() == [False, True, False, False]   # only row 1 clears both
-    # No active bounds → nothing is "matched" (so ordering falls back to score).
-    assert not rd._criteria_match_mask(df, []).any()
+def test_essence_background_folds_in_repeated_hard_negatives():
+    """Rejections rejoin the background, repeated enough to outweigh random rows."""
+    bg = pd.DataFrame({"a": np.arange(400.0)})
+    neg = pd.DataFrame({"a": np.arange(5.0)})
+    out = rd._essence_background(bg, neg)
+    n_rep = (len(out) - len(bg)) // len(neg)
+    assert n_rep > 1                                   # a handful must be amplified
+    assert n_rep <= rd._HARD_NEG_MAX_REPEAT
+    # ...but never past their share of the background.
+    assert len(out) - len(bg) <= len(bg) / rd._HARD_NEG_BG_SHARE
+    # No negatives → the sampled background, untouched.
+    assert len(rd._essence_background(bg, None)) == len(bg)
 
 
-def test_essence_ranked_order_puts_criteria_matches_first():
-    """The fix: criteria-matched clips lead the ranking, not just high-score ones.
+def test_essence_ranked_order_is_a_continuous_ranking():
+    """Essence ranks the whole pool; it does not gate on the criteria AND-box.
 
-    Reproduces the shipped dialog (AND-box + ranker); ranking by the continuous
-    score alone was collapsing essence toward random on the real WDS pool.
+    The box discarded 50–96% of a behaviour's real instances when used as a filter,
+    so a poor fit must be ordered late, never excluded.
     """
     metrics, is_pos = _separable_metrics(n_pos=40, n_neg=400)
     seed = metrics.iloc[np.where(is_pos)[0][:8]]
     order = rd._essence_ranked_order(seed, metrics, metrics)
     assert order is not None
     assert sorted(order.tolist()) == list(range(len(metrics)))   # full permutation
-    # The AND-box front-loads positives harder than the base rate.
-    assert is_pos[order[:40]].mean() > 0.6
+    assert is_pos[order[:40]].mean() > 0.6                       # front-loaded
+    # And no row jumped the queue for clearing the box: the AND-box the dialog
+    # displays rejects rows that still outrank rows it accepts.
+    crits = rd.ClipMetricsService.extract_contrastive_essence(seed, metrics, k=5)
+    inside = rd.ClipMetricsService.mine(
+        metrics.set_index(metrics.index.astype(str)), crits, match_all=True)
+    inside = {int(w) for w in inside.matched_ids}
+    assert inside and len(inside) < len(metrics)     # the box does exclude rows
+    rank = {int(i): r for r, i in enumerate(order)}
+    assert min(rank[i] for i in range(len(metrics)) if i not in inside) \
+        < max(rank[i] for i in inside)
+
+
+def test_essence_ranked_order_uses_hard_negatives():
+    """Passing rejections changes the ranking (they are not silently dropped)."""
+    metrics, is_pos = _separable_metrics(n_pos=40, n_neg=400)
+    seed = metrics.iloc[np.where(is_pos)[0][:8]]
+    neg = metrics.iloc[np.where(~is_pos)[0][:20]]
+    plain = rd._essence_ranked_order(seed, metrics, metrics)
+    with_neg = rd._essence_ranked_order(seed, metrics, metrics, neg)
+    assert with_neg is not None
+    assert sorted(with_neg.tolist()) == list(range(len(metrics)))
+    assert not np.array_equal(plain, with_neg)
 
 
 def test_essence_discovery_returns_none_without_separable_signal():
@@ -406,15 +429,33 @@ def _add_traces(root: Path, per_frame: dict[str, int], *, sessions=("s1",)) -> N
             inf / "probability_traces" / f"{sid}_trace.parquet")
 
 
-def test_dense_traces_are_preferred_over_stale_bouts(tmp_path):
-    """A current competitive run outranks the exported bouts, which lose identity.
+def test_bouts_are_preferred_over_dense_traces(tmp_path):
+    """Thresholded bouts outrank the traces even when a current run exists.
 
-    Regression: fear conditioning had a complete 69-session run whose bouts were all
-    stamped ``behavior_id = "target_behavior"``, so the only per-behaviour record was
-    the traces.  Reading the stale per-behaviour bouts instead ranked freezing —
-    49 % of frames — as the project's rarest behaviour.
+    Reversed 2026-08-16.  ``predicted_behavior`` is an argmax with no background
+    competitor, so trace prevalences sum to 100 % per project by construction: a
+    share of the competition, not of session time, and uncomparable across
+    projects (measured: HomeCage Dig 43.1 % from traces vs 33.0 % from bouts, and
+    all eight manuscript projects summing to exactly 100.0 %).  Bouts are
+    thresholded, so frames may belong to no behaviour.
     """
-    proj = _project_with_bouts(tmp_path, {"wds": 900, "rear": 2})   # stale + inverted
+    proj = _project_with_bouts(tmp_path, {"wds": 30, "rear": 900})
+    _add_traces(tmp_path, {"wds": 10, "rear": 90})
+    assert rd.prevalence_source(proj, ["wds", "rear"]) == rd.PREVALENCE_SOURCE_BOUTS
+    ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])
+    assert [bid for bid, _n, _v in ranking] == ["wds", "rear"]
+
+
+def test_traces_used_when_bouts_lose_per_behavior_identity(tmp_path):
+    """The original fear-conditioning regression, guarded without trace preference.
+
+    That run's bouts were all stamped ``behavior_id = "target_behavior"``, so no
+    ``<id>_bouts.parquet`` existed and reading them ranked freezing — 49 % of
+    frames — as the rarest behaviour.  With no per-behaviour bout files,
+    :func:`_bout_prevalence_table` finds nothing and the traces are used, so the
+    bouts-first order does not reintroduce the bug.
+    """
+    proj = _project_with_bouts(tmp_path, {})        # run wrote no per-behaviour bouts
     _add_traces(tmp_path, {"wds": 10, "rear": 90})
     assert rd.prevalence_source(proj, ["wds", "rear"]) == rd.PREVALENCE_SOURCE_TRACES
     ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])

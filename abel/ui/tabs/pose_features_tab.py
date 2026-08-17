@@ -302,12 +302,34 @@ class PoseFeaturesTab(QWidget):
         self._p_use_video.setChecked(False)
         self._p_use_video.setToolTip(
             "When enabled, context features (optical flow, gradient magnitude, substrate motion) "
-            "are extracted from raw video and fusion re-scoring is available.\n\n"
+            "are extracted from raw video.\n\n"
             "When disabled, only pose-derived kinematic features are used. "
             "This is faster and sufficient for many behaviors like freezing or rearing."
         )
         param_form.addRow("", self._p_use_video)
         self._p_use_video.stateChanged.connect(self._save_extraction_settings)
+
+        # ── R3D appearance embeddings toggle (a video sub-family) ───────
+        self._p_use_r3d = QCheckBox("R3D appearance embeddings (512 dims per segment)")
+        self._p_use_r3d.setChecked(True)
+        self._p_use_r3d.setToolTip(
+            "Runs a pretrained R3D-18 video network over a pose-centred crop of each "
+            "segment and adds its 512-dimensional embedding (r3d_000…r3d_511) to the "
+            "feature set before training, so the classifier learns from appearance "
+            "directly.\n\n"
+            "Helps most for behaviors defined by how the animal or the substrate looks "
+            "rather than by keypoint geometry — digging, grooming, bedding displacement.\n\n"
+            "Cost: roughly a minute of GPU time per 1000 segments (much slower on CPU), "
+            "cached per session so repeat runs are a parquet read. Needs a reachable "
+            "video and pose file per session, and requires video features above."
+        )
+        param_form.addRow("", self._p_use_r3d)
+        self._p_use_r3d.stateChanged.connect(self._save_extraction_settings)
+        # Appearance embeddings are pixel-derived, so they cannot outlive the
+        # video-feature toggle: grey the row out rather than letting it claim a
+        # state the extraction run would ignore.
+        self._p_use_video.toggled.connect(self._p_use_r3d.setEnabled)
+        self._p_use_r3d.setEnabled(self._p_use_video.isChecked())
 
         # ── Advanced ROI features toggle ────────────────────────────────
         self._p_advanced_roi = QCheckBox("Advanced ROI features (edge, corner, position within zone)")
@@ -748,6 +770,7 @@ class PoseFeaturesTab(QWidget):
                 "interpolate_dropouts": self._p_interp.isChecked(),
                 "smoothing_window": self._p_smooth.value(),
                 "use_video_features": self._p_use_video.isChecked(),
+                "use_r3d_features": self._p_use_r3d.isChecked(),
                 "advanced_roi_features": self._p_advanced_roi.isChecked(),
             }
             write_yaml(path, raw)
@@ -760,19 +783,32 @@ class PoseFeaturesTab(QWidget):
             return
         try:
             raw = read_yaml(self._project_root / "project.yaml", {})
-            cfg = raw.get(self._SETTINGS_KEY)
-            if not cfg:
+            cfg = raw.get(self._SETTINGS_KEY) or {}
+            # Key off a parameter only this tab writes, not on the block merely
+            # existing: the Active Learning tab write-throughs its copy of
+            # ``use_r3d_features`` here, so a legacy project can end up with a
+            # one-key block whose absent parameters must NOT read as "default"
+            # — that would silently reset the project's extraction settings.
+            if "window_duration_sec" not in cfg:
                 # Fall back to legacy keys in behavior_model
                 model = raw.get("behavior_model") or {}
-                self._p_use_video.setChecked(bool(model.get("use_video_features", False)))
-                self._p_advanced_roi.setChecked(bool(model.get("advanced_roi_features", True)))
+                self._p_use_video.setChecked(bool(
+                    cfg.get("use_video_features", model.get("use_video_features", False))
+                ))
+                self._p_use_r3d.setChecked(bool(
+                    cfg.get("use_r3d_features", model.get("use_r3d_features", True))
+                ))
+                self._p_advanced_roi.setChecked(bool(
+                    cfg.get("advanced_roi_features", model.get("advanced_roi_features", True))
+                ))
+                self._p_use_r3d.setEnabled(self._p_use_video.isChecked())
                 return
 
             # Block signals while bulk-loading to avoid N redundant writes
             widgets = [
                 self._p_win_dur, self._p_stride, self._p_fps,
                 self._p_likelihood, self._p_interp, self._p_smooth,
-                self._p_use_video, self._p_advanced_roi,
+                self._p_use_video, self._p_use_r3d, self._p_advanced_roi,
             ]
             for w in widgets:
                 w.blockSignals(True)
@@ -784,12 +820,14 @@ class PoseFeaturesTab(QWidget):
             self._p_interp.setChecked(bool(cfg.get("interpolate_dropouts", True)))
             self._p_smooth.setValue(int(cfg.get("smoothing_window", 5)))
             self._p_use_video.setChecked(bool(cfg.get("use_video_features", False)))
+            self._p_use_r3d.setChecked(bool(cfg.get("use_r3d_features", True)))
             # Default on: projects saved before this setting existed should gain
             # the advanced ROI features rather than silently stay on centre-only.
             self._p_advanced_roi.setChecked(bool(cfg.get("advanced_roi_features", True)))
 
             for w in widgets:
                 w.blockSignals(False)
+            self._p_use_r3d.setEnabled(self._p_use_video.isChecked())
         except Exception:
             logger.debug("Failed to load extraction settings", exc_info=True)
 
@@ -1364,6 +1402,8 @@ class PoseFeaturesTab(QWidget):
             return
         cfg = PrepConfig(
             use_video_features=self._p_use_video.isChecked(),
+            # Pixel-derived, so gated on the video family as well as its own box.
+            use_r3d_features=self._p_use_video.isChecked() and self._p_use_r3d.isChecked(),
             advanced_roi_features=self._p_advanced_roi.isChecked(),
             segment_window_frames=max(8, int(round(
                 float(self._last_run_preset.window_duration_sec) * float(self._last_run_preset.source_fps)))),
@@ -1560,6 +1600,7 @@ class PoseFeaturesTab(QWidget):
         model["segment_window_frames"] = int(window_frames)
         model["segment_stride_frames"] = int(stride_frames)
         model["use_video_features"] = self._p_use_video.isChecked()
+        model["use_r3d_features"] = self._p_use_r3d.isChecked()
         model["advanced_roi_features"] = self._p_advanced_roi.isChecked()
         raw["behavior_model"] = model
         write_yaml(path, raw)

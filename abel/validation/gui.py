@@ -41,9 +41,11 @@ from abel.validation.runner import (
     ANALYSIS_ABLATION, ANALYSIS_AL_CURVE, ANALYSIS_BEHAVIORSCAPE,
     ANALYSIS_DISCRIMINATION, ANALYSIS_GENERALIZATION, ANALYSIS_LABELS,
     ANALYSIS_LEARNING_CURVE, ANALYSIS_RARE_DISCOVERY, ANALYSIS_THROUGHPUT,
-    ANALYSIS_VIDEO_VALUE, FULL_SUITE,
+    ANALYSIS_VIDEO_VALUE, FIGURE3_ANALYSES, FULL_SUITE,
+    MANUSCRIPT_LC_SIZES, MANUSCRIPT_MAX_PAIRS, MANUSCRIPT_NEG_PER_POS,
+    MANUSCRIPT_RARE_SEED_POS,
     RunOutputs, ValidationRunConfig, preset_description, publication_config,
-    run_rarity_preflight, run_validation,
+    rerender_learning_curves, run_rarity_preflight, run_validation,
 )
 from abel.validation.workspace import (
     RUNS_DIRNAME, SessionRecord, SessionStore, workspace_root,
@@ -345,6 +347,77 @@ class _VideoValueWorker(QRunnable):
             self.signals.progress.emit("Video-feature comparison complete.", 1.0)
             self.signals.finished.emit({
                 "images": [png], "tables": {"Video-feature value": csv_path},
+                "summary": summary, "out_dir": self.out_dir})
+        except Exception:
+            self.signals.error.emit(traceback.format_exc())
+
+
+class _R3DValueWorker(QRunnable):
+    """Paired with/without-R3D comparison, off the UI thread."""
+
+    def __init__(self, projects, behaviors, holdout_kwargs, n_seeds, decompose,
+                 out_dir) -> None:
+        super().__init__()
+        self.projects = projects
+        self.behaviors = behaviors
+        self.holdout_kwargs = holdout_kwargs
+        self.n_seeds = int(n_seeds)
+        self.decompose = bool(decompose)
+        self.out_dir = Path(out_dir)
+        self.signals = _JobSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from abel.services.active_learning_trainer_service import (  # noqa: PLC0415
+                ActiveLearningTrainerService,
+            )
+            from abel.validation import holdout, r3d_value  # noqa: PLC0415
+
+            trainer = ActiveLearningTrainerService()
+            total = sum(len(self.behaviors.get(p.project_id, [])) for p in self.projects) or 1
+            done = 0
+            results: list = []
+            for project in self.projects:
+                bids = self.behaviors.get(project.project_id, [])
+                if not bids:
+                    continue
+                hsplit = holdout.split(
+                    project,
+                    min_confidence=self.holdout_kwargs["min_confidence"],
+                    test_size=self.holdout_kwargs["holdout_test_size"],
+                    seed=self.holdout_kwargs["holdout_seed"])
+                for bid in bids:
+                    name = project.behavior_label(bid)
+                    self.signals.progress.emit(
+                        f"R3D comparison — {project.project_id}: {name}", done / total)
+                    results.append(r3d_value.run_r3d_value(
+                        trainer, project, str(bid), hsplit, n_seeds=self.n_seeds,
+                        decompose=self.decompose,
+                        progress_cb=lambda m: self.signals.progress.emit(m, done / total)))
+                    done += 1
+
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            df = r3d_value.results_to_frame(results)
+            csv_path = self.out_dir / "r3d_value.csv"
+            df.to_csv(csv_path, index=False)
+            images = [r3d_value.plot_r3d_value(results, self.out_dir / "r3d_value.png")]
+            if self.decompose:
+                images.append(r3d_value.plot_r3d_decomposition(
+                    results, self.out_dir / "r3d_decomposition.png"))
+
+            usable = [r for r in results if not r.error]
+            lines = [f"  • {r.project_id} · {r.behavior_name}: "
+                     f"F1 {r.f1_no_r3d:.3f} → {r.f1_with_r3d:.3f}  "
+                     f"(d{r.gain:+.3f}{' *' if r.significant else ''})"
+                     for r in usable]
+            errs = [f"  • {r.project_id} · {r.behavior_name}: {r.error}"
+                    for r in results if r.error]
+            summary = (r3d_value.summarize(results) + "\n" + "\n".join(lines)
+                       + ("\nSkipped:\n" + "\n".join(errs) if errs else ""))
+            self.signals.progress.emit("R3D comparison complete.", 1.0)
+            self.signals.finished.emit({
+                "images": images, "tables": {"R3D value": csv_path},
                 "summary": summary, "out_dir": self.out_dir})
         except Exception:
             self.signals.error.emit(traceback.format_exc())
@@ -690,6 +763,16 @@ class _ResultPanel(QWidget):
         self._folder_btn.setToolTip("Open the folder holding this tab's run output.")
         self._folder_btn.clicked.connect(self._open_folder)
         self._folder_btn.setEnabled(False)
+        # Opt-in (learning-curve tab only): redraw this tab's figures from the
+        # saved point CSVs using the current plotting code — no retraining. Wired
+        # by enable_rerender(); hidden otherwise.
+        self._rerender_fn = None
+        self._rerender_btn = QPushButton("Re-render Figures")
+        self._rerender_btn.setToolTip(
+            "Redraw these figures from the saved data (no retraining) — use after a "
+            "plotting change to refresh an existing run.")
+        self._rerender_btn.clicked.connect(self._do_rerender)
+        self._rerender_btn.setVisible(False)
         self._png_btn = QPushButton("Export Figure (PNG)…")
         self._png_btn.clicked.connect(self._export_figure)
         self._csv_btn = QPushButton("Export Data (CSV)…")
@@ -703,6 +786,7 @@ class _ResultPanel(QWidget):
         self._csv_btn.setEnabled(False)
         self._copy_btn.setEnabled(False)
         btn_row.addWidget(self._folder_btn)
+        btn_row.addWidget(self._rerender_btn)
         btn_row.addStretch()
         btn_row.addWidget(self._png_btn)
         btn_row.addWidget(self._copy_btn)
@@ -776,6 +860,55 @@ class _ResultPanel(QWidget):
             act.setToolTip(str(path))
             act.triggered.connect(lambda _checked=False, p=path: _open_in_file_manager(p))
         menu.exec(self._folder_btn.mapToGlobal(self._folder_btn.rect().bottomLeft()))
+
+    def enable_rerender(self, fn) -> None:
+        """Show the "Re-render Figures" button, wired to ``fn(dir) -> int``.
+
+        ``fn`` redraws this tab's figures from the saved CSVs in a directory and
+        returns how many were written (see ``runner.rerender_learning_curves``).
+        """
+        self._rerender_fn = fn
+        self._rerender_btn.setVisible(True)
+
+    def _rerender_dir(self) -> "Path | None":
+        """The folder holding this tab's saved points CSV (parent of the CSV)."""
+        data = self._csv_tables.get("data")
+        if data is not None and Path(data).is_file():
+            return Path(data).parent
+        for d in self._folders.values():
+            if Path(d).is_dir():
+                return Path(d)
+        return None
+
+    def _do_rerender(self) -> None:
+        if self._rerender_fn is None:
+            return
+        lc_dir = self._rerender_dir()
+        if lc_dir is None:
+            QMessageBox.information(
+                self, "Re-render figures",
+                "No saved figure data for this tab yet. Run the analysis first, "
+                "then re-render redraws its figures without retraining.")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        err = None
+        try:
+            n = int(self._rerender_fn(lc_dir))
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the tab
+            err = exc
+        finally:
+            QApplication.restoreOverrideCursor()  # single restore (see err below)
+        if err is not None:
+            QMessageBox.warning(self, "Re-render figures",
+                                f"Could not re-render the figures:\n{err}")
+            return
+        # Reload the freshly written PNGs into the strip, keeping the current view.
+        images_by_view = {
+            view: sorted(lc_dir.glob(f"*__{view}.png")) for view in self._view_labels
+        }
+        self.set_views(images_by_view, lc_dir / "learning_curve_points.csv", folder=lc_dir)
+        QMessageBox.information(self, "Re-render figures",
+                                f"Redrew {n} figure(s) from the saved data.")
 
     def _set_view_items(self, keys: list[str]) -> None:
         """Rebuild the view dropdown, keeping the current selection when it survives."""
@@ -1053,6 +1186,7 @@ class ValidationWindow(QMainWindow):
         self._tabs.addTab(self._build_cross_tab(), "Cross-Project")
         self._tabs.addTab(self._bscape_tab, "Behaviorscape")
         self._tabs.addTab(self._build_video_value_tab(), "Video Features")
+        self._tabs.addTab(self._build_r3d_value_tab(), "R3D Value")
         self._tabs.addTab(self._build_throughput_tab(), "Throughput")
         self._tabs.addTab(self._build_feature_demo_tab(), "Feature Demo")
         self._tabs.addTab(self._build_log_tab(), "Log")
@@ -1220,7 +1354,12 @@ class ValidationWindow(QMainWindow):
             "want below, and click Run. Every analysis shares ONE held-out split, so the\n"
             "numbers are directly comparable across sections. When it finishes you get a\n"
             "consolidated report (findings in plain language + the headline figures), and\n"
-            "Export Everything writes all figures and data CSVs to a folder of your choice.")
+            "Export Everything writes all figures and data CSVs to a folder of your choice.\n"
+            "\n"
+            "The default tick set is the manuscript's Figure 3. Every panel of it is written\n"
+            "pre-pivoted to prism/FIGURES/ — one file per panel, paste-ready, with INDEX.txt\n"
+            "naming the Prism table type for each. Nothing there is hand-assembled, so\n"
+            "adding behaviors or a new rarest behavior needs no reformatting.")
         left.append(intro)
 
         abox = QGroupBox("Analyses to include")
@@ -1235,25 +1374,50 @@ class ValidationWindow(QMainWindow):
             ANALYSIS_AL_CURVE:
                 "The most expensive analysis: it retrains at every acquisition step, "
                 "for two arms, for every seed.",
+            ANALYSIS_RARE_DISCOVERY:
+                "Clip hunting: essence / active learning / UMAP vs random and a "
+                "whole-video scan. Expensive — it trains a model at every effort "
+                "checkpoint, for every arm, for every behavior.",
             ANALYSIS_BEHAVIORSCAPE:
                 "Pools feature importance across every project, so it is most "
-                "informative with 2+ projects loaded.",
+                "informative with 2+ projects loaded. Also required, alongside the "
+                "ablation, for the feature-roles clustering.",
         }
         for key in FULL_SUITE:
-            cb = QCheckBox(ANALYSIS_LABELS.get(key, key))
-            cb.setChecked(True)
+            label = ANALYSIS_LABELS.get(key, key)
+            if key in FIGURE3_ANALYSES:
+                label += "   [Fig. 3]"
+            cb = QCheckBox(label)
+            # Only the manuscript figure's analyses start ticked. Ticking everything
+            # by default made a single click commit to the slow extras (throughput
+            # rebuilds features from scratch) without anyone choosing them.
+            cb.setChecked(key in FIGURE3_ANALYSES)
             if key in _tips:
                 cb.setToolTip(_tips[key])
             self._suite_checks[key] = cb
             av.addWidget(cb)
         row = QHBoxLayout()
+        fig3_btn = QPushButton("Figure 3 set")
+        fig3_btn.setToolTip(
+            "Tick exactly the analyses behind the manuscript's Figure 3: learning "
+            "curves, ablation, discrimination, generalization, rare-behavior "
+            "discovery, behaviorscape and video value. Every panel of the figure "
+            "then lands pre-pivoted in prism/FIGURES — paste each file into the "
+            "Prism table type its INDEX.txt names.\n\n"
+            "Active learning is NOT in this set: no Figure 3 panel uses it and it "
+            "is the slowest analysis in the suite. Tick it separately if you want "
+            "the AL-vs-random panels.")
+        fig3_btn.clicked.connect(lambda: [
+            cb.setChecked(k in FIGURE3_ANALYSES)
+            for k, cb in self._suite_checks.items()])
         all_btn = QPushButton("Select all")
         all_btn.clicked.connect(
             lambda: [cb.setChecked(True) for cb in self._suite_checks.values()])
         none_btn = QPushButton("Select none")
         none_btn.clicked.connect(
             lambda: [cb.setChecked(False) for cb in self._suite_checks.values()])
-        row.addWidget(all_btn); row.addWidget(none_btn); row.addStretch()
+        row.addWidget(fig3_btn); row.addWidget(all_btn); row.addWidget(none_btn)
+        row.addStretch()
         av.addLayout(row)
         left.append(abox)
 
@@ -1352,6 +1516,10 @@ class ValidationWindow(QMainWindow):
             holdout_seed=self._holdout_seed.value(),
             # Reuse any behavior-pooling aliases the user set up for behaviorscape.
             bscape_alias_map=self._bscape_alias_map(),
+            # A behavior the user marked as not validly scored must stay excluded
+            # from the rarity comparison here too, or it pollutes "the rest".
+            rare_exclude_behaviors=[
+                s.strip() for s in self._rare_exclude.text().split(",") if s.strip()],
         )
         self._pending_pdf = True
         self._suite_findings.clear()
@@ -1478,18 +1646,21 @@ class ValidationWindow(QMainWindow):
     def _build_learning_curve_tab(self) -> QWidget:
         box = QGroupBox("Optimal-clips learning curve settings")
         form = QFormLayout(box)
-        self._lc_sizes = QLineEdit("10, 25, 50, 100, 200, all")
+        self._lc_sizes = QLineEdit(", ".join(str(s) for s in MANUSCRIPT_LC_SIZES))
         form.addRow("Clip-size schedule (per step):", self._lc_sizes)
         self._lc_seeds = QSpinBox(); self._lc_seeds.setRange(1, 20); self._lc_seeds.setValue(5)
         form.addRow("Seeds per point:", self._lc_seeds)
         self._lc_negpolicy = QComboBox(); self._lc_negpolicy.addItems(["all", "ratio"])
+        self._lc_negpolicy.setCurrentText("ratio")
         form.addRow("Negatives policy:", self._lc_negpolicy)
-        self._lc_negratio = QDoubleSpinBox(); self._lc_negratio.setRange(0.5, 20.0); self._lc_negratio.setValue(3.0)
+        self._lc_negratio = QDoubleSpinBox(); self._lc_negratio.setRange(0.5, 20.0)
+        self._lc_negratio.setValue(MANUSCRIPT_NEG_PER_POS)
         form.addRow("Negatives per positive (ratio mode):", self._lc_negratio)
         run = QPushButton("Run Learning Curves"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_LEARNING_CURVE]))
         self._lc_panel = _ResultPanel(views=LEARNING_CURVE_VIEWS,
                                       title="Learning curves")
+        self._lc_panel.enable_rerender(rerender_learning_curves)
         self._lc_run_btn = run
         return _split_tab([box, run], self._lc_panel)
 
@@ -1498,12 +1669,13 @@ class ValidationWindow(QMainWindow):
         form = QFormLayout(box)
         self._abl_seeds = QSpinBox(); self._abl_seeds.setRange(1, 20); self._abl_seeds.setValue(5)
         form.addRow("Seeds per config:", self._abl_seeds)
-        self._abl_budgets = QLineEdit("50, all")
+        self._abl_budgets = QLineEdit("all")
         self._abl_budgets.setToolTip(
             "Clip budget(s) to run the ablation at. A low budget (e.g. 50) trains every\n"
             "config on only that many labeled positives, then 'all' uses the full pool.\n"
-            "Comparing them shows where each enhancement adds the most value — regularizers\n"
-            "like adaptive complexity and augmentation pay off most in the low-data regime.")
+            "Comparing them shows where each enhancement adds the most value. Augmentation\n"
+            "pays off most in the low-data regime; adaptive complexity did not help at any\n"
+            "budget in our validation (mean ΔF1 −0.005 across 43 behaviors) and ships off.")
         form.addRow("Clip budget(s):", self._abl_budgets)
         info = _explain(
             "How to read this: the comparison point is a pose-only Baseline with every\n"
@@ -1523,10 +1695,10 @@ class ValidationWindow(QMainWindow):
     def _build_discrimination_tab(self) -> QWidget:
         box = QGroupBox("Behavior discrimination settings")
         form = QFormLayout(box)
-        self._disc_seeds = QSpinBox(); self._disc_seeds.setRange(1, 20); self._disc_seeds.setValue(3)
+        self._disc_seeds = QSpinBox(); self._disc_seeds.setRange(1, 20); self._disc_seeds.setValue(5)
         form.addRow("Seeds per feature set:", self._disc_seeds)
         self._disc_max_pairs = QSpinBox(); self._disc_max_pairs.setRange(1, 100)
-        self._disc_max_pairs.setValue(15)
+        self._disc_max_pairs.setValue(MANUSCRIPT_MAX_PAIRS)
         self._disc_max_pairs.setToolTip(
             "Cap on how many behavior pairs to test. Every pair of the behaviors you\n"
             "checked on the Projects tab is a separate A-vs-B model, so the count grows\n"
@@ -1564,7 +1736,7 @@ class ValidationWindow(QMainWindow):
     def _build_generalization_tab(self) -> QWidget:
         box = QGroupBox("Generalization / human-agreement settings")
         form = QFormLayout(box)
-        self._gen_seeds = QSpinBox(); self._gen_seeds.setRange(1, 20); self._gen_seeds.setValue(3)
+        self._gen_seeds = QSpinBox(); self._gen_seeds.setRange(1, 20); self._gen_seeds.setValue(5)
         form.addRow("Seeds:", self._gen_seeds)
         info = _explain(
             "Trains on training-pool subjects, evaluates on held-out subjects.\n"
@@ -1586,7 +1758,7 @@ class ValidationWindow(QMainWindow):
     def _build_al_tab(self) -> QWidget:
         box = QGroupBox("Active learning vs. random selection settings")
         form = QFormLayout(box)
-        self._al_seeds = QSpinBox(); self._al_seeds.setRange(1, 20); self._al_seeds.setValue(3)
+        self._al_seeds = QSpinBox(); self._al_seeds.setRange(1, 20); self._al_seeds.setValue(5)
         form.addRow("Seeds:", self._al_seeds)
         self._al_seed_pos = QSpinBox(); self._al_seed_pos.setRange(1, 50); self._al_seed_pos.setValue(5)
         form.addRow("Seed-example positives (warm start):", self._al_seed_pos)
@@ -1616,7 +1788,7 @@ class ValidationWindow(QMainWindow):
         # settings column cannot honour — keep the labels terse and put the
         # explanation in the tooltip.
         self._rare_auto = QCheckBox("Auto-target the rarest behavior per project")
-        self._rare_auto.setChecked(True)
+        self._rare_auto.setChecked(False)
         self._rare_auto.setToolTip(
             "Per project, rank behaviors by rarity first (cheap) and hunt only "
             "the rarest one.\n"
@@ -1630,7 +1802,8 @@ class ValidationWindow(QMainWindow):
         form.addRow(self._rare_auto)
         self._rare_seeds = QSpinBox(); self._rare_seeds.setRange(1, 20); self._rare_seeds.setValue(5)
         form.addRow("Seeds (cross-validation folds):", self._rare_seeds)
-        self._rare_seed_pos = QSpinBox(); self._rare_seed_pos.setRange(2, 100); self._rare_seed_pos.setValue(8)
+        self._rare_seed_pos = QSpinBox(); self._rare_seed_pos.setRange(2, 100)
+        self._rare_seed_pos.setValue(MANUSCRIPT_RARE_SEED_POS)
         form.addRow("Seed exemplars (define the behavior):", self._rare_seed_pos)
         self._rare_budget = QSpinBox(); self._rare_budget.setRange(50, 5000); self._rare_budget.setValue(400)
         form.addRow("Review budget (clips):", self._rare_budget)
@@ -2135,6 +2308,92 @@ class ValidationWindow(QMainWindow):
         worker.signals.error.connect(self._on_job_error)
         self._vv_worker = worker
         QThreadPool.globalInstance().start(worker)
+
+    # ── R3D-embedding value tab ──────────────────────────────────────────
+    def _build_r3d_value_tab(self) -> QWidget:
+        intro = _explain(
+            "Does the R3D appearance embedding earn its cost? R3D-18 is its own toggle on\n"
+            "the Features tab, under 'use video features': it runs a pretrained 3-D CNN over\n"
+            "a pose-centred crop of every segment and adds 512 dense columns. It is the most\n"
+            "expensive family ABEL extracts — it wants a GPU, caches per session, and needs\n"
+            "the video still reachable — so it deserves its own test.\n\n"
+            "For each checked (project, behavior) this trains ABEL's real classifier twice on\n"
+            "the SAME held-out split and the SAME training pool: once with EVERY feature\n"
+            "except the r3d_* columns, once with them. The paired ΔF1 is exactly what\n"
+            "flipping the toggle buys.\n\n"
+            "Note this is deliberately NOT the Ablation tab's '+ Video features' bar, which\n"
+            "keeps flow + surface + R3D as one lump so its numbers stay comparable with runs\n"
+            "made before the embedding shipped.\n\n"
+            "Projects extracted with the toggle off have no r3d_* columns and are skipped\n"
+            "with a note rather than silently scoring zero.")
+
+        box = QGroupBox("Settings"); form = QFormLayout(box)
+        self._r3d_seeds = QSpinBox(); self._r3d_seeds.setRange(1, 20)
+        self._r3d_seeds.setValue(5)
+        self._r3d_seeds.setToolTip("Paired train/eval repeats per behavior; more seeds → "
+                                   "tighter confidence interval on the gain.")
+        form.addRow("Seeds per behavior:", self._r3d_seeds)
+
+        self._r3d_decompose = QCheckBox("Also decompose R3D vs. handcrafted video")
+        self._r3d_decompose.setChecked(False)
+        self._r3d_decompose.setToolTip(
+            "Adds three arms over the same pose baseline — pose only, pose + flow/surface,\n"
+            "pose + R3D — so you can see whether R3D is REDUNDANT with the handcrafted\n"
+            "video features or complementary to them. The paired gain alone cannot tell\n"
+            "you which. Costs 2.5x the training time (5 arms per seed instead of 2).")
+        form.addRow("", self._r3d_decompose)
+
+        run = QPushButton("Run R3D-Embedding Comparison"); run.setObjectName("runBtn")
+        run.clicked.connect(self._run_r3d_value)
+        self._r3d_run_btn = run
+
+        self._r3d_status = QLabel(""); self._r3d_status.setWordWrap(True)
+        self._r3d_status.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._r3d_status.setStyleSheet("color:#a6adc8; font-size:11px;")
+
+        self._r3d_panel = _ResultPanel(title="R3D-embedding value")
+        return _split_tab([intro, box, run, self._r3d_status], self._r3d_panel)
+
+    def _run_r3d_value(self) -> None:
+        if self._busy:
+            QMessageBox.information(self, "Busy", "A run is already in progress.")
+            return
+        behaviors = self._collect_behaviors()
+        if not behaviors:
+            QMessageBox.warning(self, "Nothing selected",
+                                "Check the behaviors to compare on the Projects tab first.")
+            return
+        projects = [self._projects[pid] for pid in behaviors]
+        holdout_kwargs = dict(
+            min_confidence=self._min_conf.value(),
+            holdout_test_size=self._test_size.value(),
+            holdout_seed=self._holdout_seed.value())
+        base = self._output_dir or Path(tempfile.gettempdir()) / "abel_r3d_value"
+        out_dir = Path(base) / f"r3d_value_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        self._set_busy(True)
+        self._r3d_status.setText("Training with vs. without R3D embeddings…")
+        self._log_msg(f"R3D comparison: projects={[p.name for p in projects]}, "
+                      f"seeds={self._r3d_seeds.value()}, "
+                      f"decompose={self._r3d_decompose.isChecked()}, out={out_dir}")
+        worker = _R3DValueWorker(projects, behaviors, holdout_kwargs,
+                                 self._r3d_seeds.value(),
+                                 self._r3d_decompose.isChecked(), out_dir)
+        worker.signals.progress.connect(self._on_progress)
+        worker.signals.finished.connect(self._on_r3d_value_finished)
+        worker.signals.error.connect(self._on_job_error)
+        self._r3d_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_r3d_value_finished(self, result: object) -> None:
+        self._set_busy(False); self._progress.setValue(100)
+        if not isinstance(result, dict):
+            return
+        self._r3d_panel.set_simple(result.get("images") or [], result.get("tables"),
+                                   folder=result.get("out_dir"))
+        self._r3d_status.setText(str(result.get("summary", "")))
+        self._log_msg("R3D comparison complete.")
+        self.statusBar().showMessage("R3D comparison ready.", 8000)
 
     def _on_video_value_finished(self, result: object) -> None:
         self._set_busy(False); self._progress.setValue(100)
@@ -3324,8 +3583,8 @@ class ValidationWindow(QMainWindow):
         self._busy = busy
         buttons = [self._lc_run_btn, self._abl_run_btn, self._disc_run_btn,
                    self._gen_run_btn, self._al_run_btn, self._rare_run_btn]
-        for attr in ("_bscape_run_btn", "_vv_run_btn", "_bench_run_btn",
-                     "_suite_run_btn", "_rare_check_btn"):
+        for attr in ("_bscape_run_btn", "_vv_run_btn", "_r3d_run_btn",
+                     "_bench_run_btn", "_suite_run_btn", "_rare_check_btn"):
             if hasattr(self, attr):
                 buttons.append(getattr(self, attr))
         for b in buttons:

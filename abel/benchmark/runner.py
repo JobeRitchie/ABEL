@@ -225,7 +225,7 @@ class AblationRunner:
         )
         motion_keys = ("velocity", "acceleration", "jerk", "speed", "flow", "motion")
         visual_keys = (
-            "visual", "image", "clip", "embed", "r3d18", "video_", "cnn",
+            "visual", "image", "clip", "embed", "r3d18", "r3d_", "video_", "cnn",
             "flow_mag", "flow_dir", "flow_entropy", "local_surface",
         )
 
@@ -517,7 +517,7 @@ class AblationRunner:
         # Video-derived feature keywords (optical flow, surface motion,
         # and CNN/embedding columns when present).
         video_kw = {
-            "r3d18", "video_", "embedding", "cnn", "clip_emb", "visual_",
+            "r3d18", "r3d_", "video_", "embedding", "cnn", "clip_emb", "visual_",
             "flow_mag", "flow_dir", "flow_entropy",
             "local_surface",
         }

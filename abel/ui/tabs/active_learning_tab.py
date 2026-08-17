@@ -63,13 +63,12 @@ from abel.services.behavior_representation_service import (
     align_model_feature_columns,
     resolve_target_class_index,
 )
-from abel.services.behavior_service import BehaviorService
+from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.behavior_representation_service import BehaviorRepresentationService, RepresentationConfig
 from abel.services.candidate_service import CandidateGenerationService, SegmentCandidateGenerationConfig
 from abel.services.representation_reuse import reuse_or_build_representation
 from abel.services.context_feature_service import ContextFeatureConfig, ContextFeatureService
 from abel.services.evaluation_service import BoutMergeConfig, EvaluationService
-from abel.services.fusion_inference_service import FusionConfig, FusionInferenceService
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.roi_service import ROIService
@@ -107,6 +106,13 @@ logger = logging.getLogger("abel")
 
 NO_BEHAVIOR_ID = "no_behavior"
 
+# Bar units per whole step reported by _run_existing_model_task. Its steps are few
+# and very unequal (scoring every segment dwarfs candidate selection), so it
+# reports sub-step fractions and the bar counter is divided by this scale for
+# display (self._pipeline_step_scale). The batch run-models wrapper reads the same
+# constant so it can map the inner task's scaled values back onto whole stages.
+_RUN_MODEL_CHUNK_SCALE = 100
+
 # Prediction/uncertainty columns a scoring pass legitimately adds to the segment
 # frame. Everything else it grows is a placeholder that must not be written back
 # into segment_features.parquet (see _infer_with_uncertainty).
@@ -132,7 +138,6 @@ class _RunSummary:
     f1: float = float("nan")
     pr_auc: float = float("nan")
     model_device_used: str = "cpu"
-    fusion_device_used: str = "cpu"
     fallback_reason: str = ""
 
 
@@ -169,7 +174,6 @@ class ActiveLearningTab(QWidget):
         self._pose = PoseProcessingService()
         self._repr = BehaviorRepresentationService()
         self._uncertainty = UncertaintyScoringService()
-        self._fusion = FusionInferenceService()
         self._rois = ROIService()
         self._evaluation = EvaluationService()
         self._scheduler = ActiveLearningScheduler()
@@ -245,7 +249,7 @@ class ActiveLearningTab(QWidget):
         self._balanced_sampling.setToolTip(
             "Sample a random time window from each session to reduce processing time\n"
             "while maintaining temporal coverage. Unlike quick mode, all pipeline stages\n"
-            "(training, evaluation, fusion) still run at full quality.\n\n"
+            "(training, evaluation, feature extraction) still run at full quality.\n\n"
             "Use the 'Sampling minutes/session' and 'Sampling seed' controls below to\n"
             "configure sampling duration and reproducibility."
         )
@@ -355,8 +359,9 @@ class ActiveLearningTab(QWidget):
             "Random seed for selecting quick-test time windows."
         )
 
-        self._skip_fusion = QCheckBox("Skip video fusion (faster)")
-        self._skip_fusion.setChecked(False)
+
+        self._use_r3d_features = QCheckBox("R3D appearance features")
+        self._use_r3d_features.setChecked(True)
 
         self._skip_evaluation = QCheckBox("Skip evaluation reports + UMAP (faster)")
         self._skip_evaluation.setChecked(False)
@@ -1015,7 +1020,6 @@ class ActiveLearningTab(QWidget):
         if idx_profile >= 0:
             self._quick_profile.setCurrentIndex(idx_profile)
         self._include_imported.setChecked(True)
-        self._skip_fusion.setChecked(False)
         self._skip_evaluation.setChecked(False)
         self._enable_umap.setChecked(True)
         self._reuse_cached_features.setChecked(True)
@@ -1062,7 +1066,7 @@ class ActiveLearningTab(QWidget):
         self._quick_ident_seed.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._quick_profile.currentIndexChanged.connect(lambda _i: self._persist_ui_settings_to_project())
         self._include_imported.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._skip_fusion.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
+        self._use_r3d_features.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._skip_evaluation.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._enable_umap.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._reuse_cached_features.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
@@ -1094,14 +1098,12 @@ class ActiveLearningTab(QWidget):
         self._max_train_samples_per_class.valueChanged.connect(lambda _v: self._refresh_quick_mode_summary())
         self._quick_ident_minutes.valueChanged.connect(lambda _v: self._refresh_quick_mode_summary())
         self._quick_ident_seed.valueChanged.connect(lambda _v: self._refresh_quick_mode_summary())
-        self._skip_fusion.toggled.connect(lambda _v: self._refresh_quick_mode_summary())
         self._skip_evaluation.toggled.connect(lambda _v: self._refresh_quick_mode_summary())
         self._enable_umap.toggled.connect(lambda _v: self._refresh_quick_mode_summary())
         self._quick_test.toggled.connect(lambda _v: self._mark_quick_profile_custom())
         self._examples_per_session.valueChanged.connect(lambda _v: self._mark_quick_profile_custom())
         self._max_segments.valueChanged.connect(lambda _v: self._mark_quick_profile_custom())
         self._quick_ident_minutes.valueChanged.connect(lambda _v: self._mark_quick_profile_custom())
-        self._skip_fusion.toggled.connect(lambda _v: self._mark_quick_profile_custom())
         self._skip_evaluation.toggled.connect(lambda _v: self._mark_quick_profile_custom())
         self._enable_umap.toggled.connect(lambda _v: self._mark_quick_profile_custom())
         self._query_size.valueChanged.connect(lambda _v: self._mark_quick_profile_custom())
@@ -1124,7 +1126,6 @@ class ActiveLearningTab(QWidget):
                 "examples_per_session": 8,
                 "quick_ident_minutes": 2,
                 "max_segments": 4000,
-                "skip_fusion": True,
                 "skip_evaluation": True,
                 "enable_umap": False,
                 "query_size": 40,
@@ -1135,7 +1136,6 @@ class ActiveLearningTab(QWidget):
                 "examples_per_session": 20,
                 "quick_ident_minutes": 5,
                 "max_segments": 12000,
-                "skip_fusion": True,
                 "skip_evaluation": False,
                 "enable_umap": True,
                 "query_size": 80,
@@ -1146,7 +1146,6 @@ class ActiveLearningTab(QWidget):
                 "examples_per_session": 40,
                 "quick_ident_minutes": 8,
                 "max_segments": 25000,
-                "skip_fusion": False,
                 "skip_evaluation": False,
                 "enable_umap": True,
                 "query_size": 120,
@@ -1157,7 +1156,6 @@ class ActiveLearningTab(QWidget):
                 "examples_per_session": 0,
                 "quick_ident_minutes": 15,
                 "max_segments": 0,
-                "skip_fusion": False,
                 "skip_evaluation": False,
                 "enable_umap": True,
                 "query_size": 180,
@@ -1168,7 +1166,6 @@ class ActiveLearningTab(QWidget):
                 "examples_per_session": 15,
                 "quick_ident_minutes": 10,
                 "max_segments": 50000,
-                "skip_fusion": True,
                 "skip_evaluation": False,
                 "query_size": 100,
                 "validation_pct": 25,
@@ -1193,7 +1190,7 @@ class ActiveLearningTab(QWidget):
             self._quick_ident_minutes.setValue(int(cfg.get("quick_ident_minutes", self._quick_ident_minutes.value())))
             self._max_segments.setValue(int(cfg.get("max_segments", self._max_segments.value())))
             self._max_train_samples_per_class.setValue(int(cfg.get("max_train_samples_per_class", self._max_train_samples_per_class.value())))
-            self._skip_fusion.setChecked(bool(cfg.get("skip_fusion", self._skip_fusion.isChecked())))
+            self._use_r3d_features.setChecked(bool(cfg.get("use_r3d_features", self._use_r3d_features.isChecked())))
             self._skip_evaluation.setChecked(bool(cfg.get("skip_evaluation", self._skip_evaluation.isChecked())))
             self._enable_umap.setChecked(bool(cfg.get("enable_umap", self._enable_umap.isChecked())))
             self._query_size.setValue(int(cfg.get("query_size", self._query_size.value())))
@@ -1240,11 +1237,8 @@ class ActiveLearningTab(QWidget):
         seg_cap = int(self._max_segments.value())
         seg_cap_text = "All" if seg_cap <= 0 else str(seg_cap)
         skip_eval = self._skip_evaluation.isChecked()
-        skip_fus = self._skip_fusion.isChecked()
         umap_on = self._enable_umap.isChecked()
         skips: list[str] = []
-        if skip_fus:
-            skips.append("fusion")
         if skip_eval:
             skips.append("evaluation/UMAP")
         if not umap_on:
@@ -1277,7 +1271,6 @@ class ActiveLearningTab(QWidget):
                 "quick_ident_minutes": 3,
                 "max_segments": 8000,
                 "max_train_samples_per_class": 0,
-                "skip_fusion": True,
                 "skip_evaluation": True,
                 "query_size": 60,
                 "validation_pct": 20,
@@ -1290,7 +1283,6 @@ class ActiveLearningTab(QWidget):
                 "quick_ident_minutes": 8,
                 "max_segments": 25000,
                 "max_train_samples_per_class": 0,
-                "skip_fusion": True,
                 "skip_evaluation": False,
                 "query_size": 120,
                 "validation_pct": 25,
@@ -1303,7 +1295,6 @@ class ActiveLearningTab(QWidget):
                 "quick_ident_minutes": 15,
                 "max_segments": 0,
                 "max_train_samples_per_class": 0,
-                "skip_fusion": False,
                 "skip_evaluation": False,
                 "query_size": 200,
                 "validation_pct": 30,
@@ -1329,7 +1320,7 @@ class ActiveLearningTab(QWidget):
             self._quick_ident_minutes.setValue(int(cfg.get("quick_ident_minutes", 5)))
             self._max_segments.setValue(int(cfg.get("max_segments", 0)))
             self._max_train_samples_per_class.setValue(int(cfg.get("max_train_samples_per_class", 0)))
-            self._skip_fusion.setChecked(bool(cfg.get("skip_fusion", False)))
+            self._use_r3d_features.setChecked(bool(cfg.get("use_r3d_features", True)))
             self._skip_evaluation.setChecked(bool(cfg.get("skip_evaluation", False)))
             self._enable_umap.setChecked(bool(cfg.get("enable_umap", True)))
             self._query_size.setValue(int(cfg.get("query_size", 100)))
@@ -1529,8 +1520,6 @@ class ActiveLearningTab(QWidget):
         val_pct = int(self._validation_pct.value())
         parts.append(f"Val: <b>{val_pct}%</b>")
 
-        if self._skip_fusion.isChecked():
-            parts.append("Fusion: <b>OFF</b>")
         if self._skip_evaluation.isChecked():
             parts.append("Eval: <b>OFF</b>")
         if self._all_behavior_aware.isChecked():
@@ -1601,7 +1590,7 @@ class ActiveLearningTab(QWidget):
             "quick_ident_minutes": int(self._quick_ident_minutes.value()),
             "quick_ident_seed": int(self._quick_ident_seed.value()),
             "quick_profile": str(self._quick_profile.currentData() or "custom"),
-            "skip_fusion": bool(self._skip_fusion.isChecked()),
+            "use_r3d_features": bool(self._use_r3d_features.isChecked()),
             "skip_evaluation": bool(self._skip_evaluation.isChecked()),
             "enable_umap": bool(self._enable_umap.isChecked()),
             "reuse_cached_features": bool(self._reuse_cached_features.isChecked()),
@@ -1660,7 +1649,15 @@ class ActiveLearningTab(QWidget):
         model["active_learning_query_size"] = int(payload["query_size"])
         model["query_strategy"] = str(payload["mode"])
         model["evaluation_split_strategy"] = str(payload["split_strategy"])
+        model["use_r3d_features"] = bool(payload["use_r3d_features"])
         raw["behavior_model"] = model
+
+        # R3D appearance embeddings are an extraction setting owned by the
+        # Features tab's checkbox; the Advanced-settings copy here writes back to
+        # the same key so the two can't drift into contradicting each other.
+        fx = dict(raw.get("feature_extraction") or {})
+        fx["use_r3d_features"] = bool(payload["use_r3d_features"])
+        raw["feature_extraction"] = fx
 
         write_yaml(path, raw)
         self._persist_phase1_settings_to_config(payload)
@@ -1714,7 +1711,12 @@ class ActiveLearningTab(QWidget):
             if idx_profile >= 0:
                 self._quick_profile.setCurrentIndex(idx_profile)
             self._include_imported.setChecked(bool(ui.get("include_imported", True)))
-            self._skip_fusion.setChecked(bool(ui.get("skip_fusion", False)))
+            # The Features tab owns this setting, so its block wins when present.
+            _fx = dict(raw.get("feature_extraction") or {})
+            self._use_r3d_features.setChecked(bool(
+                _fx["use_r3d_features"] if "use_r3d_features" in _fx
+                else ui.get("use_r3d_features", True)
+            ))
             self._skip_evaluation.setChecked(bool(ui.get("skip_evaluation", False)))
             self._enable_umap.setChecked(bool(ui.get("enable_umap", True)))
             self._reuse_cached_features.setChecked(bool(ui.get("reuse_cached_features", True)))
@@ -2083,11 +2085,8 @@ class ActiveLearningTab(QWidget):
         return "target_behavior"
 
     def _behavior_display_name(self, bid: str) -> str:
-        """Return the human-readable name for a behavior ID, falling back to the ID itself."""
-        for b in self._behaviors.behaviors:
-            if str(b.behavior_id).strip() == str(bid).strip():
-                return str(b.name)
-        return bid
+        """Return the human-readable name for a behavior ID."""
+        return self._behaviors.display_name(bid)
 
     def _resolved_query_size_limit(self) -> int:
         value = int(self._query_size.value())
@@ -2251,17 +2250,14 @@ class ActiveLearningTab(QWidget):
         if speed == "Fast turnaround":
             query_size = 60
             max_segments = 12000
-            skip_fusion = True
             skip_eval = True
         elif speed == "Thorough":
             query_size = 180
             max_segments = 0
-            skip_fusion = False
             skip_eval = False
         else:
             query_size = 100
             max_segments = 0
-            skip_fusion = False
             skip_eval = False
 
         split_data = "group_shuffle_subject" if subjects >= 3 else "group_shuffle_session"
@@ -2277,7 +2273,6 @@ class ActiveLearningTab(QWidget):
         self._query_size.setValue(int(query_size))
         self._validation_pct.setValue(int(validation_pct))
         self._max_segments.setValue(int(max_segments))
-        self._skip_fusion.setChecked(bool(skip_fusion))
         self._skip_evaluation.setChecked(bool(skip_eval))
         self._reuse_cached_features.setChecked(True)
         self._remap_reviewed_windows.setChecked(True)
@@ -2296,13 +2291,13 @@ class ActiveLearningTab(QWidget):
         self._persist_ui_settings_to_project()
 
         summary = (
-            f"Applied guided settings for '{target_behavior}'.\n\n"
+            f"Applied guided settings for '{self._behavior_display_name(target_behavior)}'.\n\n"
             f"Observed labels: positive={pos}, negative={neg}, ambiguous={int(stats.get('ambiguous', 0))}, "
             f"other={int(stats.get('other', 0))}.\n"
             f"Observed groups: sessions={sessions}, subjects={subjects}.\n\n"
             f"Applied: mode=uncertainty, split={split_data}, validation={validation_pct}%, "
             f"query_size={query_size}, hard_negative_ratio={hard_neg_ratio:.2f}, "
-            f"skip_fusion={skip_fusion}, skip_evaluation={skip_eval}."
+            f"skip_evaluation={skip_eval}."
         )
         self._append_log(summary)
         self._status.setText("Guided active-learning settings applied.")
@@ -2574,13 +2569,15 @@ class ActiveLearningTab(QWidget):
         # ── Pipeline Stages ──
         form.addRow(_section("Pipeline Stages"))
 
-        skip_fusion = QCheckBox("Skip video fusion", dlg)
-        skip_fusion.setChecked(bool(self._skip_fusion.isChecked()))
-        _info(skip_fusion,
-              "Fusion refines predictions using video-based re-scoring. Skip it for faster iteration "
-              "during early rounds when model quality is low.",
-              "Moderate — saves 2-10 min depending on dataset size.")
-        form.addRow(skip_fusion)
+        use_r3d_features = QCheckBox("R3D appearance features (video)", dlg)
+        use_r3d_features.setChecked(bool(self._use_r3d_features.isChecked()))
+        _info(use_r3d_features,
+              "Adds 512 per-segment R3D-18 appearance features to the video feature family, "
+              "computed before training so the classifier learns from them directly. Helps most "
+              "for behaviors defined by appearance or substrate change (digging, grooming). "
+              "Needs a reachable video + pose per session; requires video features to be on.",
+              "Moderate — roughly 1 min of GPU time per 1000 segments, cached per session.")
+        form.addRow(use_r3d_features)
 
         skip_evaluation = QCheckBox("Skip evaluation reports", dlg)
         skip_evaluation.setChecked(bool(self._skip_evaluation.isChecked()))
@@ -2824,7 +2821,7 @@ class ActiveLearningTab(QWidget):
             self._reuse_cached_features.setChecked(bool(reuse_cached_features.isChecked()))
             self._remap_reviewed_windows.setChecked(bool(remap_reviewed_windows.isChecked()))
             self._auto_generate_reviewed_windows.setChecked(bool(auto_gen_windows.isChecked()))
-            self._skip_fusion.setChecked(bool(skip_fusion.isChecked()))
+            self._use_r3d_features.setChecked(bool(use_r3d_features.isChecked()))
             self._skip_evaluation.setChecked(bool(skip_evaluation.isChecked()))
             self._enable_umap.setChecked(bool(enable_umap.isChecked()))
             self._strict_gpu.setChecked(bool(strict_gpu.isChecked()))
@@ -3104,7 +3101,9 @@ class ActiveLearningTab(QWidget):
 
         if run_settings:
             lines.append("Run settings (saved at model creation):")
-            lines.append(f"- target_behavior: {run_settings.get('target_behavior', '')}")
+            lines.append(
+                f"- target_behavior: {self._behavior_display_name(str(run_settings.get('target_behavior', '')))}"
+            )
             lines.append(f"- segment_window_frames: {run_settings.get('segment_window_frames', '')}")
             lines.append(f"- segment_stride_frames: {run_settings.get('segment_stride_frames', '')}")
             lines.append(f"- quick_test: {run_settings.get('quick_test', '')}")
@@ -3114,7 +3113,6 @@ class ActiveLearningTab(QWidget):
             lines.append(f"- query_size: {run_settings.get('query_size', '')}")
             lines.append(f"- split_strategy: {run_settings.get('split_strategy', '')}")
             lines.append(f"- validation_pct: {run_settings.get('validation_pct', '')}")
-            lines.append(f"- skip_fusion: {run_settings.get('skip_fusion', '')}")
             lines.append(f"- skip_evaluation: {run_settings.get('skip_evaluation', '')}")
             lines.append("")
         else:
@@ -3205,8 +3203,8 @@ class ActiveLearningTab(QWidget):
                     "max_segments": int(run_settings.get("max_segments", self._max_segments.value())),
                     "quick_ident_minutes": int(run_settings.get("quick_ident_minutes", self._quick_ident_minutes.value())),
                     "quick_ident_seed": int(run_settings.get("quick_ident_seed", self._quick_ident_seed.value())),
-                    "skip_fusion": bool(run_settings.get("skip_fusion", self._skip_fusion.isChecked())),
                     "skip_evaluation": bool(run_settings.get("skip_evaluation", self._skip_evaluation.isChecked())),
+                    "use_r3d_features": bool(run_settings.get("use_r3d_features", self._use_r3d_features.isChecked())),
                     "validation_pct": int(
                         run_settings.get(
                             "validation_pct",
@@ -3253,8 +3251,12 @@ class ActiveLearningTab(QWidget):
             self._max_segments.setValue(int(ui.get("max_segments", self._max_segments.value())))
             self._quick_ident_minutes.setValue(int(ui.get("quick_ident_minutes", self._quick_ident_minutes.value())))
             self._quick_ident_seed.setValue(int(ui.get("quick_ident_seed", self._quick_ident_seed.value())))
-            self._skip_fusion.setChecked(bool(ui.get("skip_fusion", self._skip_fusion.isChecked())))
             self._skip_evaluation.setChecked(bool(ui.get("skip_evaluation", self._skip_evaluation.isChecked())))
+            # Loading a saved model should reproduce the feature space it was
+            # trained on, appearance embeddings included.
+            self._use_r3d_features.setChecked(
+                bool(ui.get("use_r3d_features", self._use_r3d_features.isChecked()))
+            )
             self._validation_pct.setValue(int(ui.get("validation_pct", self._validation_pct.value())))
 
             split = str(ui.get("split_strategy") or "").strip()
@@ -3301,7 +3303,7 @@ class ActiveLearningTab(QWidget):
             "quick_test": bool(self._quick_test.isChecked()),
             "quick_ident_minutes": int(self._quick_ident_minutes.value()),
             "quick_ident_seed": int(self._quick_ident_seed.value()),
-            "skip_fusion": bool(self._skip_fusion.isChecked()),
+            "use_r3d_features": bool(self._use_r3d_features.isChecked()),
             "skip_evaluation": bool(self._skip_evaluation.isChecked()),
             "quick_profile": str(self._quick_profile.currentData() or "custom"),
             "ui_settings": self._ui_settings_payload(),
@@ -3506,7 +3508,7 @@ class ActiveLearningTab(QWidget):
         if "umap" in t:
             return "Embedding"
         if any(k in t for k in ("inference", "uncertainty", "prediction", "scored",
-                                "fusion", "ensemble", "temperature")):
+                                "ensemble", "temperature")):
             return "Scoring"
         if any(k in t for k in ("retraining complete", "trained classifier",
                                 "retrain pipeline finished", "fitting", "validation",
@@ -3764,6 +3766,7 @@ class ActiveLearningTab(QWidget):
                             window_size_frames=_seg_w,
                             window_stride_frames=_seg_s,
                             excluded_feature_cols=frozenset(self._excluded_feature_cols),
+                            use_r3d_features=bool(self._use_r3d_features.isChecked()),
                         ),
                         session_ids=None,
                         progress_cb=lambda msg: logger.info(msg),
@@ -3783,11 +3786,6 @@ class ActiveLearningTab(QWidget):
                 except Exception:
                     pass
 
-        # Share one fusion embedding-score cache across all behaviors: the video
-        # crop embedding depends only on (video, frames, ROI), not the behavior,
-        # so each uncertain segment is embedded once for the whole run instead of
-        # once per behavior.
-        self._fusion_score_cache = {}
 
         try:
             for idx, behavior in enumerate(trainable):
@@ -3822,16 +3820,21 @@ class ActiveLearningTab(QWidget):
                         target_behavior_override=bid,
                         skip_candidates=not getattr(self, "_batch_generate_clips", True),
                     )
+                    result["target_behavior_name"] = bname
                 except Exception as exc:
                     logger.error("Retrain-all: failed on behavior '%s': %s", bname, exc)
-                    result = {"retrained": False, "target_behavior": bid, "error": str(exc)}
+                    result = {
+                        "retrained": False,
+                        "target_behavior": bid,
+                        "target_behavior_name": bname,
+                        "error": str(exc),
+                    }
                 results.append(result)
         finally:
             # Clean up the override so subsequent single-behavior runs
             # are not affected.
             self._pipeline_all_model_name_override = None
             # Drop the shared cache so a later standalone retrain starts fresh.
-            self._fusion_score_cache = None
 
         succeeded = sum(1 for r in results if r.get("retrained"))
         _outer_progress(
@@ -3875,18 +3878,21 @@ class ActiveLearningTab(QWidget):
 
         # Log per-behavior summary.
         for r in results:
-            bid = str(r.get("target_behavior", "?"))
+            bname = str(
+                r.get("target_behavior_name")
+                or self._behavior_display_name(str(r.get("target_behavior", "")))
+            )
             if r.get("retrained"):
                 metrics = r.get("metrics", {})
                 self._append_log(
-                    f"  {bid}: F1={float(metrics.get('f1', 0.0)):.3f}, "
+                    f"  {bname}: F1={float(metrics.get('f1', 0.0)):.3f}, "
                     f"PR-AUC={float(metrics.get('pr_auc', 0.0)):.3f}, "
                     f"candidates={int(r.get('n_candidates', 0))}"
                 )
             elif r.get("error"):
-                self._append_log(f"  {bid}: FAILED — {r['error']}")
+                self._append_log(f"  {bname}: FAILED — {r['error']}")
             else:
-                self._append_log(f"  {bid}: skipped (no usable labels)")
+                self._append_log(f"  {bname}: skipped (no usable labels)")
 
         self._append_log(f"Retrain-all summary: {succeeded}/{total} succeeded.")
 
@@ -4012,6 +4018,7 @@ class ActiveLearningTab(QWidget):
                     window_size_frames=segment_window,
                     window_stride_frames=segment_stride,
                     excluded_feature_cols=frozenset(self._excluded_feature_cols),
+                    use_r3d_features=bool(self._use_r3d_features.isChecked()),
                 ),
                 session_ids=selected_session_ids,
                 progress_cb=progress_cb,
@@ -4171,10 +4178,6 @@ class ActiveLearningTab(QWidget):
         # multi-GB segment parquet and re-filtering it on every iteration.
         self._pipeline_all_active = True
         self._pipeline_all_repr_cache = None
-        # Share the fusion embedding-score cache across behaviors: the crop
-        # embedding is behavior-independent, so each uncertain segment is embedded
-        # once for the whole run instead of once per behavior.
-        self._fusion_score_cache = {}
 
         try:
             for idx, behavior in enumerate(behaviors):
@@ -4219,7 +4222,6 @@ class ActiveLearningTab(QWidget):
             self._pipeline_all_skip_candidates = False
             self._pipeline_all_active = False
             self._pipeline_all_repr_cache = None
-            self._fusion_score_cache = None
 
         succeeded = sum(1 for r in results if r.get("summary") is not None)
         _outer_progress(
@@ -4264,7 +4266,10 @@ class ActiveLearningTab(QWidget):
         )
 
         for r in results:
-            bname = str(r.get("target_behavior_name", r.get("target_behavior", "?")))
+            bname = str(
+                r.get("target_behavior_name")
+                or self._behavior_display_name(str(r.get("target_behavior", "")))
+            )
             summary = r.get("summary")
             if summary is not None:
                 metrics = r.get("metrics", {})
@@ -4369,7 +4374,7 @@ class ActiveLearningTab(QWidget):
         }
         # Only offer behaviours that actually have a model.
         entries = [
-            (bid, name_by_id.get(bid, bid), mv)
+            (bid, behavior_label(bid, name_by_id), mv)
             for bid, mv in model_map.items()
         ]
         entries.sort(key=lambda e: e[1].lower())
@@ -4406,9 +4411,9 @@ class ActiveLearningTab(QWidget):
         self._refresh_segment_settings_display()
         self._set_busy(True)
         self._cancel_flag[0] = False
-        # The run-models task emits raw whole-run stage counts (behavior×stage),
-        # not the ×100 chunk scale the pipeline tasks use, so keep scale at 1.
-        self._pipeline_step_scale = 1
+        # The run-models task reports in sub-step units so its long stages still
+        # move the bar; the displayed counter divides back to whole stages.
+        self._pipeline_step_scale = _RUN_MODEL_CHUNK_SCALE
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
         self._progress.setFormat("Initializing…")
@@ -4439,9 +4444,6 @@ class ActiveLearningTab(QWidget):
         # Honor the "Generate Review Clips" toggle — _run_existing_model_task
         # reads this thread-safe flag to decide whether to generate candidates.
         self._pipeline_all_skip_candidates = not getattr(self, "_batch_generate_clips", True)
-        # Share the fusion embedding-score cache across models so each uncertain
-        # segment is embedded once for the whole run (embedding is model-independent).
-        self._fusion_score_cache = {}
 
         # ── Whole-run ETA across ALL selected models ─────────────────────────
         # Previously this loop only printed "Model i/N" separators and let each
@@ -4503,10 +4505,15 @@ class ActiveLearningTab(QWidget):
             def _wrapped(value: int, maximum: int, log_line: str, status: str) -> None:
                 if progress_cb is None:
                     return
-                steps = max(1, int(maximum))
-                stage = min(_steps_per_model - 1, max(0, int(value)))
-                g_val = model_idx * _steps_per_model + stage
-                g_max = n_total * _steps_per_model
+                # The inner task reports in sub-step units (_RUN_MODEL_CHUNK_SCALE
+                # per whole step) so its long steps still move the bar; keep those
+                # units for the bar and divide back to whole stages for the ETA.
+                scaled = max(0, int(value))
+                stage = min(_steps_per_model - 1, scaled // _RUN_MODEL_CHUNK_SCALE)
+                g_val = model_idx * _steps_per_model * _RUN_MODEL_CHUNK_SCALE + min(
+                    scaled, _steps_per_model * _RUN_MODEL_CHUNK_SCALE
+                )
+                g_max = n_total * _steps_per_model * _RUN_MODEL_CHUNK_SCALE
                 # Strip the inner task's own "| step took … | elapsed … | ETA …"
                 # tail and replace it with the whole-run timing line.
                 clean_log = log_line.split(" | step took", 1)[0].split(" | elapsed ", 1)[0]
@@ -4521,7 +4528,8 @@ class ActiveLearningTab(QWidget):
                 _sep = "━" * 18
                 if progress_cb is not None:
                     progress_cb(
-                        idx * _steps_per_model, n_total * _steps_per_model,
+                        idx * _steps_per_model * _RUN_MODEL_CHUNK_SCALE,
+                        n_total * _steps_per_model * _RUN_MODEL_CHUNK_SCALE,
                         f"{_sep} Model {idx + 1}/{n_total}: {bname} {_sep}{_whole_run_timing(idx, 0)}",
                         f"Running {idx + 1}/{n_total}: {bname}…",
                     )
@@ -4530,6 +4538,7 @@ class ActiveLearningTab(QWidget):
                         model_version,
                         progress_cb=_make_model_progress_cb(idx, bname),
                         cancel_flag=cancel_flag,
+                        record_timing=False,  # the batch records one total for all models
                     )
                     result["target_behavior_name"] = bname
                     all_candidates.extend(result.get("candidates", []))
@@ -4539,12 +4548,12 @@ class ActiveLearningTab(QWidget):
                 results.append(result)
         finally:
             self._pipeline_all_skip_candidates = False
-            self._fusion_score_cache = None
 
         succeeded = sum(1 for r in results if not r.get("error"))
         if progress_cb is not None:
+            _final = n_total * _steps_per_model * _RUN_MODEL_CHUNK_SCALE
             progress_cb(
-                n_total * _steps_per_model, n_total * _steps_per_model,
+                _final, _final,
                 f"Run-models complete: {succeeded}/{n_total} behaviors scored.",
                 "Run models complete.",
             )
@@ -4575,7 +4584,10 @@ class ActiveLearningTab(QWidget):
         self._status.setText(f"Run-models complete: {succeeded}/{total} behaviors scored.")
         self._append_log(f"Run-models summary: {succeeded}/{total} succeeded.")
         for r in results:
-            bname = str(r.get("target_behavior_name", r.get("target_behavior", "?")))
+            bname = str(
+                r.get("target_behavior_name")
+                or self._behavior_display_name(str(r.get("target_behavior", "")))
+            )
             if r.get("error"):
                 self._append_log(f"  {bname}: FAILED — {r['error']}")
             else:
@@ -4756,7 +4768,7 @@ class ActiveLearningTab(QWidget):
             metrics = read_json(metrics_path, {})
             settings = read_json(settings_path, {}) if settings_path.exists() else {}
             raw_bid = str(settings.get("target_behavior", model_dir.name))
-            label = behavior_short_names.get(raw_bid, raw_bid)
+            label = behavior_label(raw_bid, behavior_short_names)
             rows.append({
                 "label": str(label),
                 "f1": float(metrics.get("f1", 0)),
@@ -5319,6 +5331,10 @@ class ActiveLearningTab(QWidget):
         self._refresh_segment_settings_display()
         self._set_busy(True)
         self._cancel_flag[0] = False
+        # The task reports at 1/100-of-a-step resolution so the bar keeps moving
+        # through its long steps; _apply_pipeline_progress divides the displayed
+        # step counter by this scale.
+        self._pipeline_step_scale = 100
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
         self._progress.setFormat("Initializing…")
@@ -5335,10 +5351,33 @@ class ActiveLearningTab(QWidget):
         model_version: str,
         progress_cb: Callable[[int, int, str, str], None] | None = None,
         cancel_flag: list[bool] | None = None,
+        record_timing: bool = True,
     ) -> dict[str, Any]:
+        """Score every segment with a saved model.
+
+        ``record_timing`` books this pass's wall time as the "run_model" whole-run
+        ETA anchor. The batch caller records once for the whole batch, so it opts
+        out here rather than folding one sample per behavior.
+        """
         assert self._project_root is not None
 
         started_at = time.monotonic()
+
+        # Sub-step bar resolution: a run-model pass has only 4-5 steps but two of
+        # them (representations, score+enrich) can each run for minutes, so at
+        # whole-step resolution the bar sits frozen for most of the run. Report at
+        # 1/_CHUNK_SCALE-of-a-step granularity; _apply_pipeline_progress divides the
+        # displayed counter by self._pipeline_step_scale, which is set to match.
+        _CHUNK_SCALE = _RUN_MODEL_CHUNK_SCALE
+
+        # Stage-aware ETA. The steps have wildly unequal cost (scoring 75k
+        # segments dwarfs candidate selection), so the old "elapsed / steps done"
+        # average was meaningless — at step 0 it read the whole run as 80 ms.
+        # Learn each stage's real duration, seeded from prior runs of this kind so
+        # step 0 is already calibrated, and blend against the measured whole-run
+        # anchor exactly as the batch run-models path does.
+        _run_kind = "run_model"
+        _eta_holder: dict[str, Any] = {"est": None, "profile": None}
 
         def _fmt_duration(seconds: float) -> str:
             if seconds < 1.0:
@@ -5355,21 +5394,128 @@ class ActiveLearningTab(QWidget):
             log_line: str,
             status: str,
             step_seconds: float | None = None,
+            sub: float = 0.0,
         ) -> None:
-            if progress_cb is not None:
-                elapsed = max(0.0, time.monotonic() - started_at)
-                done_steps = max(1, int(value))
-                avg_per_step = elapsed / done_steps
-                remaining_steps = max(0, int(maximum) - int(value))
-                eta_seconds = remaining_steps * avg_per_step
+            """Emit one progress event.
+
+            ``sub`` is how far through the current step the work is (0..1), used
+            for the bar only — it never advances past the step it belongs to.
+            """
+            if progress_cb is None:
+                return
+            elapsed = max(0.0, time.monotonic() - started_at)
+            steps = max(1, int(maximum))
+            # The closing event reports value == steps; the ETA grid only has
+            # stages 0..steps-1, but the bar must still read as finished.
+            done = int(value) >= steps
+            stage = min(steps - 1, max(0, int(value)))
+
+            est = _eta_holder["est"]
+            if est is None:
+                profile = RunTimingProfile.load(
+                    self._project_root / "derived" / "evaluation" / RunTimingProfile.FILENAME
+                )
+                seed = profile.per_step_seed(steps, _run_kind) if profile.has_data() else None
+                est = StageEtaEstimator(1, steps, seed_stage_seconds=seed)
+                _eta_holder["est"] = est
+                _eta_holder["profile"] = profile
+            profile = _eta_holder["profile"]
+
+            remaining = est.update(0, stage)
+            # Re-cost the step that is running. Its prior expectation is a guess
+            # from history; what it has ALREADY consumed is measured, and a step
+            # cannot turn out shorter than that. When the phase reported a real
+            # counter ("R3D features: session 8/33") that fraction extrapolates
+            # the step's true total — without this, a step running 40× its
+            # expectation still reported "ETA 2 s" for minutes on end.
+            in_step = est.seconds_in_stage()
+            prior = est.expected_stage_seconds(stage)
+            sub_frac = max(0.0, min(1.0, sub))
+            if sub_frac > 0.05 and in_step > 1.0:
+                expected_step = max(prior, in_step / sub_frac)
+            else:
+                expected_step = max(prior, in_step)
+            # Swap the prior cost of the running step for the re-costed one, then
+            # draw down what it has already spent so the ETA counts down inside it.
+            remaining = max(0.0, remaining + (expected_step - prior) - in_step)
+            hist_total = (
+                profile.run_total_seconds(_run_kind, 1)
+                if profile.has_run_total(_run_kind)
+                else None
+            )
+            frac = min(1.0, (stage + max(0.0, min(1.0, sub))) / steps)
+            live_cal = est.is_calibrated()
+            eta_seconds = 0.0 if done else blend_whole_run_eta(
+                hist_total, elapsed, remaining, frac, live_calibrated=live_cal
+            )
+
+            step_text = f" | step took {_fmt_duration(step_seconds)}" if step_seconds is not None else ""
+            if live_cal or hist_total is not None:
                 eta_local = datetime.now() + timedelta(seconds=eta_seconds)
-                step_text = f" | step took {_fmt_duration(step_seconds)}" if step_seconds is not None else ""
                 timing_text = (
                     f"{step_text} | elapsed {_fmt_duration(elapsed)}"
                     f" | ETA {_fmt_duration(eta_seconds)}"
                     f" | finish ~ {eta_local.strftime('%H:%M:%S')}"
                 )
-                progress_cb(value, maximum, f"{log_line}{timing_text}", status)
+            else:
+                # No history and nothing measured yet — a number here would be a guess.
+                timing_text = f"{step_text} | elapsed {_fmt_duration(elapsed)} | ETA calculating…"
+
+            bar_value = (
+                steps * _CHUNK_SCALE
+                if done
+                else int(round((stage + max(0.0, min(0.999, sub))) * _CHUNK_SCALE))
+            )
+            progress_cb(bar_value, steps * _CHUNK_SCALE, f"{log_line}{timing_text}", status)
+
+        def _sub_progress(
+            step: int,
+            total: int,
+            prefix: str,
+            status: str,
+            span: tuple[float, float] = (0.0, 1.0),
+        ) -> Callable[[str], None]:
+            """Relay a service's free-text progress, moving the bar within *step*.
+
+            Services report their own "session 7/33"-style counters; those are real
+            work fractions, so use them when present. Messages without one still
+            advance on an asymptotic ramp so the UI shows the run is alive without
+            ever claiming the step is finished. ``span`` maps this relay onto a
+            slice of the step, so two phases sharing a step (label assembly, then
+            inference) advance the bar in sequence instead of resetting it.
+            """
+            lo, hi = float(span[0]), float(span[1])
+            state = {"n": 0, "frac": 0.0, "counted": False}
+
+            def _relay(msg: str) -> None:
+                text = str(msg)
+                state["n"] += 1
+                counter: float | None = None
+                m = re.search(r"\b(\d+)\s*/\s*(\d+)\b", text)
+                if m:
+                    try:
+                        done, total_n = int(m.group(1)), int(m.group(2))
+                        if total_n > 0:
+                            counter = min(1.0, max(0.0, done / total_n))
+                    except ValueError:
+                        counter = None
+                if counter is not None:
+                    state["counted"] = True
+                    frac = counter
+                elif state["counted"]:
+                    frac = state["frac"]  # a real counter is running the show now
+                else:
+                    # Nothing quantified yet: show the run is alive, but never
+                    # claim more than half the phase from unmeasured messages.
+                    frac = 0.5 * (1.0 - 0.85 ** state["n"])
+                # Never let the reported fraction go backwards within a step.
+                state["frac"] = max(state["frac"], frac)
+                _progress(
+                    step, total, f"{prefix}{text}", f"{status}: {text}",
+                    None, lo + (hi - lo) * state["frac"],
+                )
+
+            return _relay
 
         def _check_cancel() -> None:
             if cancel_flag and cancel_flag[0]:
@@ -5468,6 +5614,8 @@ class ActiveLearningTab(QWidget):
                 0.0,
             )
 
+            if record_timing:
+                self._timing_record_run_total_now("run_model", started_at, 1)
             return {
                 "model_version": str(model_version),
                 "target_behavior": target_behavior,
@@ -5530,14 +5678,9 @@ class ActiveLearningTab(QWidget):
                 segment_df = segment_df[segment_df["session_id"].astype(str).isin(sid_set)].reset_index(drop=True)
                 frame_df = frame_df[frame_df["session_id"].astype(str).isin(sid_set)].reset_index(drop=True)
         else:
-            def _repr_progress(msg: str) -> None:
-                _progress(
-                    current_step,
-                    total_steps,
-                    msg,
-                    "Building behavior representations…",
-                    None,
-                )
+            _repr_progress = _sub_progress(
+                current_step, total_steps, "", "Building behavior representations…"
+            )
 
             frame_df, segment_df = self._repr.build(
                 project_root=self._project_root,
@@ -5547,6 +5690,7 @@ class ActiveLearningTab(QWidget):
                     window_size_frames=segment_window,
                     window_stride_frames=segment_stride,
                     excluded_feature_cols=excluded_features,
+                    use_r3d_features=bool(self._use_r3d_features.isChecked()),
                 ),
                 session_ids=set(selected_session_ids) if selected_session_ids else None,
                 progress_cb=_repr_progress,
@@ -5563,18 +5707,28 @@ class ActiveLearningTab(QWidget):
 
         _check_cancel()
         step_started = time.monotonic()
-        train_df = self._build_training_set(segment_df, target_behavior)
+        # Assembling the training set can be the longest silent stretch of the
+        # whole run — it enriches reviewed windows and backfills their R3D
+        # embeddings, which decodes video (measured at ~2.5 min for 1292 segments
+        # on the 3-chamber project). Relay its progress instead of going quiet.
+        train_df = self._build_training_set(
+            segment_df,
+            target_behavior,
+            progress_cb=_sub_progress(
+                current_step, total_steps, "[Labels] ", "Assembling training labels",
+                span=(0.0, 0.5),
+            ),
+        )
         pred_df = self._infer_with_uncertainty(
             segment_df,
             train_df,
             model_dir,
             behavior_cfg,
             target_behavior,
-            use_fusion=not bool(self._skip_fusion.isChecked()),
             strict_gpu=bool(self._strict_gpu.isChecked()),
-            fusion_diagnostics={},
-            progress_cb=lambda msg: _progress(current_step, total_steps, f"[Inference] {msg}", f"Inference: {msg}", None),
-            score_cache=getattr(self, "_fusion_score_cache", None),
+            progress_cb=_sub_progress(
+                current_step, total_steps, "[Inference] ", "Inference", span=(0.5, 1.0)
+            ),
         )
         pred_df[["segment_id", "prediction_prob"]].to_parquet(model_dir / "segment_predictions.parquet", index=False)
         pred_df[["segment_id", "uncertainty_score", "uncertainty_entropy", "prediction_variance", "density_outlier_score"]].to_parquet(
@@ -5662,6 +5816,9 @@ class ActiveLearningTab(QWidget):
             0.0,
         )
 
+        if record_timing:
+            # Anchor future run-model ETAs to this pass's true end-to-end time.
+            self._timing_record_run_total_now("run_model", started_at, 1)
         return {
             "model_version": str(model_version),
             "target_behavior": target_behavior,
@@ -5795,6 +5952,7 @@ class ActiveLearningTab(QWidget):
                             window_size_frames=segment_window,
                             window_stride_frames=segment_stride,
                             excluded_feature_cols=frozenset(self._excluded_feature_cols),
+                            use_r3d_features=bool(self._use_r3d_features.isChecked()),
                         ),
                         session_ids=scoped_ids,
                     )
@@ -5825,7 +5983,11 @@ class ActiveLearningTab(QWidget):
             progress_cb=lambda msg: _progress(current_step, total_steps, msg, msg),
         )
 
-        train_df = self._build_training_set(segment_df, target_behavior)
+        train_df = self._build_training_set(
+            segment_df,
+            target_behavior,
+            progress_cb=lambda msg: _progress(current_step, total_steps, f"[Labels] {msg}", str(msg)),
+        )
         if train_df.empty:
             result = None
         else:
@@ -5871,8 +6033,11 @@ class ActiveLearningTab(QWidget):
             "Retraining complete; scoring candidates…",
         )
 
-        train_df = self._build_training_set(segment_df, target_behavior)
-        retrain_fusion_diag: dict[str, Any] = {}
+        train_df = self._build_training_set(
+            segment_df,
+            target_behavior,
+            progress_cb=lambda msg: _progress(current_step, total_steps, f"[Labels] {msg}", str(msg)),
+        )
 
         def _retrain_infer_sub_progress(msg: str) -> None:
             _progress(current_step, total_steps, f"[Inference] {msg}", f"Inference: {msg}")
@@ -5904,23 +6069,9 @@ class ActiveLearningTab(QWidget):
             model_dir,
             behavior_cfg,
             target_behavior,
-            use_fusion=not bool(self._skip_fusion.isChecked()),
             strict_gpu=bool(self._strict_gpu.isChecked()),
-            fusion_diagnostics=retrain_fusion_diag,
             progress_cb=_retrain_infer_sub_progress,
-            score_cache=getattr(self, "_fusion_score_cache", None),
         )
-
-        if bool(retrain_fusion_diag.get("fusion_used_cpu_fallback", False)):
-            _progress(
-                current_step,
-                total_steps,
-                (
-                    "Fusion fallback during retrain: "
-                    f"{str(retrain_fusion_diag.get('fusion_fallback_reason', '') or 'no additional details')}"
-                ),
-                "Continuing retrain with fallback fusion behavior…",
-            )
 
         out_model_dir = self._project_root / "derived" / "models" / model_dir.name
         out_model_dir.mkdir(parents=True, exist_ok=True)
@@ -6000,6 +6151,7 @@ class ActiveLearningTab(QWidget):
                                 window_size_frames=_seg_w,
                                 window_stride_frames=_seg_s,
                                 excluded_feature_cols=frozenset(self._excluded_feature_cols),
+                                use_r3d_features=bool(self._use_r3d_features.isChecked()),
                             ),
                             session_ids=None,
                             progress_cb=lambda msg: logger.info(msg),
@@ -6095,11 +6247,7 @@ class ActiveLearningTab(QWidget):
         # Thread-safe override for Pipeline-All: force feature reuse after first behavior.
         if getattr(self, "_pipeline_all_force_reuse", False):
             reuse_cached_features = True
-        use_fusion = not bool(self._skip_fusion.isChecked())
         use_video_features = bool(behavior_cfg.use_video_features)
-        # If video features are disabled, force-disable fusion too
-        if not use_video_features:
-            use_fusion = False
         run_evaluation = not bool(self._skip_evaluation.isChecked())
         run_phase1_after_eval = bool(self._phase1_enable.isChecked() and self._phase1_diagnostics.isChecked())
         strict_gpu = bool(self._strict_gpu.isChecked())
@@ -6257,7 +6405,6 @@ class ActiveLearningTab(QWidget):
                 "summary": summary,
                 "target_behavior": target_behavior,
                 "metrics": {"f1": float("nan"), "pr_auc": float("nan"), "n_train": 0, "n_val": 0},
-                "fusion_diagnostics": {},
                 "candidates": list(rand.candidates),
             }
 
@@ -6273,11 +6420,6 @@ class ActiveLearningTab(QWidget):
             if backend.get("modeling") != "GPU":
                 raise RuntimeError(
                     "Strict GPU mode is enabled, but model training backend is not available on GPU. "
-                    "Disable 'Require GPU (fail if fallback occurs)' to allow automatic CPU fallback."
-                )
-            if use_fusion and backend.get("fusion") != "GPU":
-                raise RuntimeError(
-                    "Strict GPU mode is enabled, but fusion backend is not available on GPU. "
                     "Disable 'Require GPU (fail if fallback occurs)' to allow automatic CPU fallback."
                 )
 
@@ -6803,9 +6945,18 @@ class ActiveLearningTab(QWidget):
         # reviewed labels from all frame ranges can be matched — not just the
         # sparse subset selected by the max_segments stratified sample.
         _training_segment_df = full_segment_df_for_label_fallback if not full_segment_df_for_label_fallback.empty else segment_df
-        train_df = self._build_training_set(_training_segment_df, target_behavior)
+
+        def _label_sub_progress(msg: str) -> None:
+            _progress(current_step, total_steps, f"[Labels] {msg}", str(msg), None)
+
+        train_df = self._build_training_set(
+            _training_segment_df, target_behavior, progress_cb=_label_sub_progress
+        )
         if train_df.empty and quick_test:
-            train_df = self._build_training_set(full_segment_df_for_label_fallback, target_behavior)
+            train_df = self._build_training_set(
+                full_segment_df_for_label_fallback, target_behavior,
+                progress_cb=_label_sub_progress,
+            )
             if not train_df.empty:
                 _progress(
                     current_step,
@@ -6860,7 +7011,6 @@ class ActiveLearningTab(QWidget):
                 "summary": summary,
                 "target_behavior": target_behavior,
                 "metrics": {"f1": float("nan"), "pr_auc": float("nan"), "n_train": 0, "n_val": 0},
-                "fusion_diagnostics": {},
                 "candidates": list(rand.candidates),
             }
         current_step += 1
@@ -6935,7 +7085,6 @@ class ActiveLearningTab(QWidget):
 
         _check_cancel()
         step_started = time.monotonic()
-        fusion_diag: dict[str, Any] = {}
 
         def _infer_sub_progress(msg: str) -> None:
             _progress(current_step, total_steps, f"[Inference] {msg}", f"Inference: {msg}", None)
@@ -6946,25 +7095,9 @@ class ActiveLearningTab(QWidget):
             model_dir,
             behavior_cfg,
             target_behavior,
-            use_fusion=use_fusion,
             strict_gpu=strict_gpu,
-            fusion_diagnostics=fusion_diag,
             progress_cb=_infer_sub_progress,
-            score_cache=getattr(self, "_fusion_score_cache", None),
         )
-        summary.fusion_device_used = str(fusion_diag.get("fusion_device_used", "cpu" if use_fusion else "skipped"))
-        if use_fusion and bool(fusion_diag.get("fusion_used_cpu_fallback", False)):
-            fuse_reason = str(fusion_diag.get("fusion_fallback_reason", ""))
-            if not summary.fallback_reason:
-                summary.fallback_reason = fuse_reason
-            _progress(
-                current_step,
-                total_steps,
-                f"WARNING: Fusion used CPU fallback ({fuse_reason or 'no additional details'}).",
-                "Fusion fell back to CPU",
-                0.0,
-            )
-
         out_model_dir = self._project_root / "derived" / "models" / summary.model_version
         out_model_dir.mkdir(parents=True, exist_ok=True)
         pred_df[["segment_id", "prediction_prob"]].to_parquet(out_model_dir / "segment_predictions.parquet", index=False)
@@ -7098,7 +7231,6 @@ class ActiveLearningTab(QWidget):
                 "candidates": summary.n_candidates,
                 "model_version": summary.model_version,
                 "model_device_used": summary.model_device_used,
-                "fusion_device_used": summary.fusion_device_used,
                 "fallback_reason": summary.fallback_reason,
                 "strict_gpu": bool(strict_gpu),
                 "quick_test": bool(quick_test),
@@ -7143,16 +7275,14 @@ class ActiveLearningTab(QWidget):
             "candidates": candidates_list,
             "metrics": train_result.get("metrics", {}),
             "model_device_used": summary.model_device_used,
-            "fusion_device_used": summary.fusion_device_used,
             "fallback_reason": summary.fallback_reason,
-            "fusion_diagnostics": fusion_diag,
             "phase1_result": phase1_result,
             "timing_chart_path": str(timing_chart_path) if timing_chart_path else "",
         }
 
     def _detect_backend_status(self) -> dict[str, str]:
         model_backend = "CPU"
-        fusion_backend = "CPU"
+        r3d_backend = "CPU"
 
         try:
             from xgboost import XGBClassifier
@@ -7177,16 +7307,16 @@ class ActiveLearningTab(QWidget):
 
             if torch.cuda.is_available():
                 _ = torch.zeros(1).to("cuda")
-                fusion_backend = "GPU"
+                r3d_backend = "GPU"
             else:
-                logger.info("torch.cuda.is_available() = False; fusion backend = CPU.")
-                fusion_backend = "CPU"
+                logger.info("torch.cuda.is_available() = False; R3D backend = CPU.")
+                r3d_backend = "CPU"
         except Exception as exc:
-            logger.info("Torch CUDA probe failed (%s); fusion backend = CPU.", str(exc).splitlines()[0])
-            fusion_backend = "CPU"
+            logger.info("Torch CUDA probe failed (%s); R3D backend = CPU.", str(exc).splitlines()[0])
+            r3d_backend = "CPU"
 
-        logger.info("Backend detection: modeling=%s, fusion=%s", model_backend, fusion_backend)
-        return {"modeling": model_backend, "fusion": fusion_backend}
+        logger.info("Backend detection: modeling=%s, r3d=%s", model_backend, r3d_backend)
+        return {"modeling": model_backend, "r3d": r3d_backend}
 
     def _detect_backend_plan(self, status: dict[str, str] | None = None) -> str:
         if status is None:
@@ -7198,7 +7328,7 @@ class ActiveLearningTab(QWidget):
         params = dict(train_cfg.classifier_params or {})
         device = str(params.get("device", "auto")).strip().lower() or "auto"
         return (
-            f"modeling_available={status['modeling']}, fusion_available={status['fusion']}, "
+            f"modeling_available={status['modeling']}, r3d_available={status['r3d']}, "
             f"trainer={family}(device={device})"
         )
 
@@ -7256,6 +7386,11 @@ class ActiveLearningTab(QWidget):
         """
         if self._project_root is None:
             return segment_df
+
+        def _log(msg: str) -> None:
+            if progress_cb is not None:
+                progress_cb(msg)
+
         review_path = self._project_root / "derived" / "review_labels" / "reviewer_labels.parquet"
         if not review_path.exists():
             return segment_df
@@ -7264,6 +7399,7 @@ class ActiveLearningTab(QWidget):
             return segment_df
 
         # ── Load enrichment cache ─────────────────────────────────────
+        _log("Checking reviewed windows against the feature table…")
         cache_path = self._project_root / "derived" / "representations" / "enriched_segments.parquet"
         skip_path = cache_path.with_name("enriched_segments_skipped.json")
         cached_enriched_df = pd.DataFrame()
@@ -7366,6 +7502,15 @@ class ActiveLearningTab(QWidget):
 
         if not needs_features:
             self._persist_enrichment_skips(skip_path, skipped_ids)
+            cached_enriched_df, _changed = self._backfill_r3d_for_enriched(
+                cached_enriched_df, segment_df, progress_cb
+            )
+            if _changed:
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cached_enriched_df.to_parquet(cache_path, index=False)
+                except Exception:
+                    logger.warning("Enrichment: failed to persist R3D backfill to %s", cache_path, exc_info=True)
             return self._merge_enriched(segment_df, cached_enriched_df)
 
         # Determine raw feature columns from the stat-suffixed segment columns.
@@ -7455,17 +7600,33 @@ class ActiveLearningTab(QWidget):
         self._persist_enrichment_skips(skip_path, skipped_ids)
 
         if not new_rows:
+            cached_enriched_df, _changed = self._backfill_r3d_for_enriched(
+                cached_enriched_df, segment_df, progress_cb
+            )
+            if _changed:
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cached_enriched_df.to_parquet(cache_path, index=False)
+                except Exception:
+                    logger.warning("Enrichment: failed to persist R3D backfill to %s", cache_path, exc_info=True)
             return self._merge_enriched(segment_df, cached_enriched_df)
 
         new_df = pd.DataFrame(new_rows)
 
-        # ── Persist newly computed rows to the enrichment cache ───────
+        # Combine cached + newly computed rows, then attach real R3D embeddings
+        # (this function can only recompute pose/context stats from cached
+        # frame-level data; R3D needs the raw video, so it's filled in here in
+        # one pass over the combined frame, covering both fresh rows and any
+        # legacy zero-filled rows already sitting in the cache).
+        all_enriched = (
+            pd.concat([cached_enriched_df, new_df], ignore_index=True)
+            if not cached_enriched_df.empty else new_df
+        )
+        all_enriched, _ = self._backfill_r3d_for_enriched(all_enriched, segment_df, progress_cb)
+
+        # ── Persist combined rows to the enrichment cache ───────
         try:
-            if not cached_enriched_df.empty:
-                updated_cache = pd.concat([cached_enriched_df, new_df], ignore_index=True)
-                updated_cache = updated_cache.drop_duplicates(subset=["segment_id"], keep="last")
-            else:
-                updated_cache = new_df.copy()
+            updated_cache = all_enriched.drop_duplicates(subset=["segment_id"], keep="last")
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             updated_cache.to_parquet(cache_path, index=False)
             logger.info(
@@ -7475,11 +7636,6 @@ class ActiveLearningTab(QWidget):
         except Exception:
             logger.warning("Enrichment cache: failed to write %s; results are still usable in-memory.", cache_path, exc_info=True)
 
-        # Combine: original segment_df + all cached enriched rows + newly computed rows.
-        all_enriched = (
-            pd.concat([cached_enriched_df, new_df], ignore_index=True)
-            if not cached_enriched_df.empty else new_df
-        )
         enriched = self._merge_enriched(segment_df, all_enriched)
         logger.info("Enrichment: added %d on-the-fly feature row(s) for reviewed segments.", len(new_rows))
         if progress_cb:
@@ -7496,6 +7652,79 @@ class ActiveLearningTab(QWidget):
             ignore_index=True,
         )
         return merged.drop_duplicates(subset=["segment_id"], keep="first")
+
+    def _backfill_r3d_for_enriched(
+        self,
+        enriched_df: pd.DataFrame,
+        segment_df: pd.DataFrame,
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> tuple[pd.DataFrame, bool]:
+        """Attach real R3D embeddings to enriched rows missing them.
+
+        ``_enrich_segment_df_for_reviewed_labels`` only recomputes pose/context
+        summary stats from cached frame-level data — it has no path to R3D,
+        which needs the raw video decoded. Rows it produced (or that
+        ``_merge_enriched``'s zero-fill reindex padded before this fix existed)
+        carry a placeholder 0.0 for every r3d_* column instead of NaN. Detect
+        those and run R3DFeatureService directly on their (segment_id,
+        session_id, start_frame, end_frame) — it works on arbitrary frame
+        ranges, not just the fixed grid, so this covers both freshly enriched
+        rows and legacy zero-filled cache entries in one pass. Returns
+        ``(possibly-updated df, whether anything changed)``.
+        """
+        if enriched_df is None or enriched_df.empty or self._project_root is None:
+            return enriched_df, False
+        r3d_cols = [c for c in segment_df.columns if c.startswith("r3d_")]
+        if not r3d_cols:
+            return enriched_df, False
+        req = {"segment_id", "session_id", "start_frame", "end_frame"}
+        if not req.issubset(set(enriched_df.columns)):
+            return enriched_df, False
+
+        if all(c in enriched_df.columns for c in r3d_cols):
+            needs = enriched_df[r3d_cols].fillna(0.0).eq(0.0).all(axis=1)
+        else:
+            needs = pd.Series(True, index=enriched_df.index)
+        if not needs.any():
+            return enriched_df, False
+
+        subset = enriched_df.loc[needs, ["segment_id", "session_id", "start_frame", "end_frame"]].copy()
+        if progress_cb:
+            progress_cb(f"Attaching R3D features to {len(subset)} enriched segment(s)…")
+        try:
+            from abel.services.r3d_feature_service import R3DFeatureService
+
+            embedded = R3DFeatureService().attach(self._project_root, subset, progress_cb=progress_cb)
+        except Exception:
+            logger.warning(
+                "Enrichment: R3D backfill failed; enriched rows keep placeholder values.", exc_info=True
+            )
+            return enriched_df, False
+
+        embedded_r3d_cols = [c for c in r3d_cols if c in embedded.columns]
+        if not embedded_r3d_cols:
+            return enriched_df, False
+
+        out = enriched_df.copy()
+        for c in r3d_cols:
+            if c not in out.columns:
+                out[c] = np.nan
+        update = (
+            embedded[["segment_id", *embedded_r3d_cols]]
+            .drop_duplicates(subset="segment_id")
+            .set_index("segment_id")
+        )
+        target_ids = out.loc[needs, "segment_id"]
+        resolved = target_ids[target_ids.isin(update.index)]
+        if resolved.empty:
+            return enriched_df, False
+
+        out.loc[resolved.index, embedded_r3d_cols] = update.loc[resolved.to_numpy(), embedded_r3d_cols].to_numpy()
+        logger.info(
+            "Enrichment: backfilled R3D for %d/%d segment(s) needing it.",
+            len(resolved), int(needs.sum()),
+        )
+        return out, True
 
     @staticmethod
     def _sessions_without_pose(
@@ -7544,10 +7773,18 @@ class ActiveLearningTab(QWidget):
             logger.warning("Enrichment: could not record unfeaturisable segments to %s", skip_path, exc_info=True)
 
     def _build_training_set(
-        self, segment_df: pd.DataFrame, target_behavior: str,
+        self,
+        segment_df: pd.DataFrame,
+        target_behavior: str,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> pd.DataFrame:
         if self._project_root is None:
             return pd.DataFrame()
+
+        def _log(msg: str) -> None:
+            if progress_cb is not None:
+                progress_cb(msg)
+
         rows: list[pd.DataFrame] = []
 
         seeds = self._seeds.seeds
@@ -7580,15 +7817,19 @@ class ActiveLearningTab(QWidget):
 
         review_path = self._project_root / "derived" / "review_labels" / "reviewer_labels.parquet"
         if review_path.exists():
+            _log("Reading reviewer labels…")
             lbl = pd.read_parquet(review_path)
 
             # Auto-generate features for reviewed segments that are not in the
             # current segment feature table (e.g. bout-based or random-sampled
             # review clips with different segment ID prefixes).
             if bool(self._auto_generate_reviewed_windows.isChecked()):
-                segment_df = self._enrich_segment_df_for_reviewed_labels(segment_df)
+                segment_df = self._enrich_segment_df_for_reviewed_labels(
+                    segment_df, progress_cb=progress_cb
+                )
 
             remap_enabled = bool(self._remap_reviewed_windows.isChecked())
+            _log(f"Matching {len(lbl)} reviewed label(s) to current windows…")
             work_lbl = self._remap_review_labels_to_current_windows(lbl, segment_df) if remap_enabled else lbl
             merged = self._aggregate_reviewer_labels(segment_df, work_lbl)
             if merged.empty and not remap_enabled:
@@ -7853,9 +8094,7 @@ class ActiveLearningTab(QWidget):
         model_dir: Path,
         behavior_cfg: BehaviorModelConfig,
         target_behavior: str,
-        use_fusion: bool = True,
         strict_gpu: bool = False,
-        fusion_diagnostics: dict[str, Any] | None = None,
         progress_cb: Callable[[str], None] | None = None,
         score_cache: dict[str, float] | None = None,
     ) -> pd.DataFrame:
@@ -7919,7 +8158,7 @@ class ActiveLearningTab(QWidget):
                 len(ctx_missing) >= 10 or len(ctx_missing) >= 0.5 * len(missing_cols)
             ):
                 _log(
-                    f"⚠ WARNING: '{target_behavior}' was trained with video/context "
+                    f"⚠ WARNING: '{self._behavior_display_name(target_behavior)}' was trained with video/context "
                     f"features (e.g. optical flow, TMT-zone distances) but {len(ctx_missing)} "
                     "such feature(s) are ABSENT for these sessions and were filled with 0. "
                     "Scores for context-dependent behaviours will be UNRELIABLE. Fix: enable "
@@ -8057,50 +8296,6 @@ class ActiveLearningTab(QWidget):
         )
         scored["prediction_prob"] = tgt_prob
 
-        manifest = self._imports.load_manifest(self._project_root)
-        if manifest is not None and use_fusion:
-            _log("Running fusion inference on uncertain segments…")
-            video_lookup = {}
-            subject_lookup = {}
-            for linked in manifest.linked_sessions:
-                path = self._imports.video_path_for_session(manifest, linked.session_id)
-                if path:
-                    video_lookup[linked.session_id] = path
-                    subject_lookup[linked.session_id] = linked.subject_id or None
-            roi_lookup = {
-                sid: self._rois.resolve_subject_crop_roi(self._project_root, subject_lookup.get(sid))
-                for sid in video_lookup
-            }
-            try:
-                fused = self._fusion.fuse_uncertain_segments(
-                    segments=scored,
-                    video_lookup=video_lookup,
-                    roi_lookup=roi_lookup,
-                    config=FusionConfig(uncertainty_threshold=float(behavior_cfg.fusion_threshold)),
-                    diagnostics=fusion_diagnostics,
-                    score_cache=score_cache,
-                )
-            except Exception as exc:
-                if strict_gpu:
-                    raise RuntimeError(
-                        "Strict GPU mode is enabled, but fusion failed and fallback is disabled. "
-                        f"Reason: {exc}. Disable 'Require GPU (fail if fallback occurs)' to allow CPU fallback."
-                    ) from exc
-                logger.warning("Fusion inference skipped due to runtime error: %s", exc)
-                if fusion_diagnostics is not None:
-                    fusion_diagnostics.setdefault("fusion_device_used", "skipped")
-                    fusion_diagnostics["fusion_used_cpu_fallback"] = True
-                    fusion_diagnostics["fusion_fallback_reason"] = str(exc)
-                fused = scored
-            if strict_gpu and fusion_diagnostics is not None and fusion_diagnostics.get("fusion_device_used") != "gpu":
-                reason = str(fusion_diagnostics.get("fusion_fallback_reason", ""))
-                raise RuntimeError(
-                    "Strict GPU mode is enabled, but fusion did not execute on GPU. "
-                    f"Reason: {reason or 'no additional details'}. Disable 'Require GPU (fail if fallback occurs)' to allow CPU fallback."
-                )
-            if "prediction_prob_fused" in fused.columns:
-                fused["prediction_prob"] = fused["prediction_prob_fused"]
-            scored = fused
 
         repr_path = self._project_root / "derived" / "representations" / "segment_features.parquet"
         # This write-back is how a scoring run can permanently corrupt the feature
@@ -8274,6 +8469,8 @@ class ActiveLearningTab(QWidget):
         fx = raw.get("feature_extraction") or {}
         if "use_video_features" in fx:
             model["use_video_features"] = bool(fx["use_video_features"])
+        if "use_r3d_features" in fx:
+            model["use_r3d_features"] = bool(fx["use_r3d_features"])
         model["active_learning_query_size"] = int(self._query_size.value())
         model["query_strategy"] = str(self._mode.currentData() or model.get("query_strategy", "uncertainty"))
         model["evaluation_split_strategy"] = str(
@@ -8594,7 +8791,7 @@ class ActiveLearningTab(QWidget):
         segment_window, segment_stride, _ = self._resolved_segment_settings(behavior_cfg)
         # Capture context feature config params from the ContextFeatureConfig defaults.
         # (Advanced users who changed these via direct config edits will have them
-        # persisted to project.yaml; for now we read the live dataclass defaults.)
+        # persisted to project.yaml; these values come from the live dataclass defaults.)
         ctx_cfg = ContextFeatureConfig(flow_temporal_stride=int(self._flow_temporal_stride.value()))
         ctx_dict = {
             "farneback_pyr_scale": ctx_cfg.farneback_pyr_scale,
@@ -8708,7 +8905,7 @@ class ActiveLearningTab(QWidget):
         banner.setStyleSheet("background:#e8f4e8; border:1px solid #88bb88; padding:6px; border-radius:3px;")
         banner.setText(
             f"<b>Current workflow:</b> model <code>{snapshot.model_version}</code> | "
-            f"behavior <code>{snapshot.target_behavior}</code> | "
+            f"behavior <code>{self._behavior_display_name(snapshot.target_behavior)}</code> | "
             f"window {snapshot.segment_window_frames} frames | "
             f"saved {str(snapshot.created_at or '—')[:19]}"
         )
@@ -9452,6 +9649,7 @@ class ActiveLearningTab(QWidget):
                         window_size_frames=int(snapshot.segment_window_frames),
                         window_stride_frames=int(snapshot.segment_stride_frames),
                         excluded_feature_cols=excluded,
+                        use_r3d_features=bool(self._use_r3d_features.isChecked()),
                     ),
                     session_ids={session_id},
                 )
@@ -9710,6 +9908,7 @@ class ActiveLearningTab(QWidget):
         self._snapshot_evaluation_graphs_for_model(summary.model_version, target_behavior=str(payload.get("target_behavior", "")))
         self._refresh_viz_model_options()
         target_behavior = str(payload.get("target_behavior", "target_behavior"))
+        target_behavior_label = self._behavior_display_name(target_behavior)
         # Persist workflow snapshot so batch-run can reproduce this exact pipeline.
         self._save_workflow_snapshot(
             model_version=summary.model_version,
@@ -9718,15 +9917,14 @@ class ActiveLearningTab(QWidget):
         model_disp = self._display_model_name(summary.model_version)
         candidates = payload.get("candidates", [])
         metrics = payload.get("metrics", {})
-        fusion_diag = payload.get("fusion_diagnostics", {})
         subject_map = self._subject_map()
         self._progress.setValue(self._progress.maximum())
         self._progress.setFormat("Complete")
         self._status.setText(
-            f"Pipeline complete ({target_behavior}). subjects={summary.n_sessions} frames={summary.n_frame_rows} "
+            f"Pipeline complete ({target_behavior_label}). subjects={summary.n_sessions} frames={summary.n_frame_rows} "
             f"segments={summary.n_segment_rows} train_rows={summary.n_train_rows} candidates={summary.n_candidates} "
             f"F1={float(metrics.get('f1', 0.0)):.3f} PR-AUC={float(metrics.get('pr_auc', 0.0)):.3f} "
-            f"model={model_disp} model_device={summary.model_device_used} fusion_device={summary.fusion_device_used} | "
+            f"model={model_disp} model_device={summary.model_device_used} | "
             f"{self._quality_explanation(metrics)}"
         )
         self._append_log(
@@ -9734,7 +9932,7 @@ class ActiveLearningTab(QWidget):
             f"model={model_disp}, "
             f"F1={float(metrics.get('f1', 0.0)):.3f}, PR-AUC={float(metrics.get('pr_auc', 0.0)):.3f}, "
             f"train={int(metrics.get('n_train', 0))}, val={int(metrics.get('n_val', 0))}, "
-            f"model_device={summary.model_device_used}, fusion_device={summary.fusion_device_used}."
+            f"model_device={summary.model_device_used}."
         )
         self._append_log(self._quality_explanation(metrics))
 
@@ -9745,15 +9943,9 @@ class ActiveLearningTab(QWidget):
                 self._append_log(f"- {card}")
 
         model_cpu_fallback = bool(metrics.get("used_cpu_fallback", False))
-        fusion_cpu_fallback = bool(fusion_diag.get("fusion_used_cpu_fallback", False))
-        if model_cpu_fallback or fusion_cpu_fallback:
+        if model_cpu_fallback:
             model_reason = str(metrics.get("fallback_reason", "")).strip()
-            fusion_reason = str(fusion_diag.get("fusion_fallback_reason", "")).strip()
-            details = []
-            if model_cpu_fallback:
-                details.append(f"Model fallback: {model_reason or 'no additional details'}")
-            if fusion_cpu_fallback:
-                details.append(f"Fusion fallback: {fusion_reason or 'no additional details'}")
+            details = [f"Model fallback: {model_reason or 'no additional details'}"]
             QMessageBox.warning(
                 self,
                 "GPU Fallback Notice",
@@ -9766,34 +9958,36 @@ class ActiveLearningTab(QWidget):
         self._populate_candidate_table(candidates)
         self._emit_uncertainty_candidates_for_clip_extraction(
             candidates,
-            source_label=f"Active Learning — Uncertainty Ranking ({target_behavior})",
+            source_label=f"Active Learning — Uncertainty Ranking ({target_behavior_label})",
         )
         self._refresh_visualization_preview()
 
     def _on_existing_model_finished(self, payload: dict[str, Any]) -> None:
         self._set_busy(False)
         self._cancel_flag[0] = False
+        self._pipeline_step_scale = 1
         model_version = str(payload.get("model_version", ""))
         self._snapshot_evaluation_graphs_for_model(model_version, target_behavior=str(payload.get("target_behavior", "")))
         self._refresh_viz_model_options()
         model_disp = self._display_model_name(model_version)
         target_behavior = str(payload.get("target_behavior", "target_behavior"))
+        target_behavior_label = self._behavior_display_name(target_behavior)
         n_candidates = int(payload.get("n_candidates", 0))
         segment_rows = int(payload.get("segment_rows", 0))
         self._progress.setValue(self._progress.maximum())
         self._progress.setFormat("Complete")
         self._status.setText(
             f"Existing model run complete ({model_disp}). "
-            f"target={target_behavior}, segments={segment_rows}, candidates={n_candidates}."
+            f"target={target_behavior_label}, segments={segment_rows}, candidates={n_candidates}."
         )
         self._append_log(
-            f"Existing model run complete: model={model_disp}, target={target_behavior}, "
+            f"Existing model run complete: model={model_disp}, target={target_behavior_label}, "
             f"segments={segment_rows}, candidates={n_candidates}."
         )
         self._populate_candidate_table(list(payload.get("candidates", [])))
         self._emit_uncertainty_candidates_for_clip_extraction(
             list(payload.get("candidates", [])),
-            source_label=f"Active Learning — Uncertainty Ranking ({target_behavior})",
+            source_label=f"Active Learning — Uncertainty Ranking ({target_behavior_label})",
         )
         self._refresh_visualization_preview()
 
@@ -10206,6 +10400,7 @@ class ActiveLearningTab(QWidget):
             return
         metrics = payload.get("metrics", {})
         target_behavior = str(payload.get("target_behavior", "target_behavior"))
+        target_behavior_label = self._behavior_display_name(target_behavior)
         model_version = str(payload.get("model_version", "")).strip()
         # Persist workflow snapshot.
         self._save_workflow_snapshot(
@@ -10223,7 +10418,7 @@ class ActiveLearningTab(QWidget):
             except Exception:
                 candidates = []
         self._status.setText(
-            f"Retrained model {model_disp} ({target_behavior}). F1={metrics.get('f1', 0.0):.3f} "
+            f"Retrained model {model_disp} ({target_behavior_label}). F1={metrics.get('f1', 0.0):.3f} "
             f"PR-AUC={metrics.get('pr_auc', 0.0):.3f} | train={int(metrics.get('n_train', 0))} "
             f"val={int(metrics.get('n_val', 0))} | candidates={int(payload.get('n_candidates', 0))} | "
             f"{self._quality_explanation(metrics)}"
@@ -10233,7 +10428,7 @@ class ActiveLearningTab(QWidget):
         self._append_log(
             "Retraining complete. "
             f"model={model_disp}, "
-            f"target={target_behavior}, "
+            f"target={target_behavior_label}, "
             f"F1={float(metrics.get('f1', 0.0)):.3f}, "
             f"PR-AUC={float(metrics.get('pr_auc', 0.0)):.3f}, "
             f"train={int(metrics.get('n_train', 0))}, val={int(metrics.get('n_val', 0))}, "
@@ -10243,7 +10438,7 @@ class ActiveLearningTab(QWidget):
         self._populate_candidate_table(candidates)
         self._emit_uncertainty_candidates_for_clip_extraction(
             candidates,
-            source_label=f"Active Learning \u2014 Retrain ({target_behavior})",
+            source_label=f"Active Learning \u2014 Retrain ({target_behavior_label})",
         )
         self._refresh_visualization_preview()
         if self._is_umap_enabled():
@@ -10254,6 +10449,7 @@ class ActiveLearningTab(QWidget):
     def _on_failed(self, traceback_text: str) -> None:
         self._set_busy(False)
         self._cancel_flag[0] = False
+        self._pipeline_step_scale = 1
         if self._pipeline_timeline is not None:
             self._pipeline_panel.stop()
         if "PIPELINE_CANCELLED_BY_USER" in traceback_text:

@@ -210,6 +210,14 @@ _ESSENCE_SKIP_METRICS: frozenset[str] = frozenset({"duration_sec"})
 # ~30 interpretable clip metrics.
 ESSENCE_MAX_FEATURES = 40
 
+# How many candidate features the *ranker* may consider — far more than the box.
+# A greedy conjunction has to justify every feature it adds, so it stays small; an
+# L1-penalised fit selects jointly and prunes what it doesn't need, so it can be
+# handed a wide pool and left to keep ~35 of them.  Piloting over 8 projects
+# (274,770 windows) found 40 features starves the fit while 300 costs ~0.45 s —
+# faster than the greedy box it replaces.
+ESSENCE_RANKER_MAX_FEATURES = 300
+
 
 # ---------------------------------------------------------------------------
 # Rich (shipped) feature space
@@ -428,6 +436,46 @@ def _split_even(items: list[ClipRef], k: int) -> list[list[ClipRef]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
+def select_even_by_group(
+    ordered_ids: list[str],
+    group_of: Callable[[str], str],
+    cap: int,
+) -> list[str]:
+    """Take up to *cap* ids spread as evenly as possible across their groups.
+
+    ``ordered_ids`` is best-first (highest match score first) and stays that way
+    *within* each group; the groups themselves are then drawn from round-robin, so
+    a batch of 100 across 10 subjects gives roughly 10 clips each instead of 100
+    from the one animal whose recording happens to score highest.  Groups that run
+    out are simply skipped, so their unused slots go to the subjects that still
+    have matches — "even where possible", never fewer clips than a plain top-N cut.
+    Group order follows first appearance, so the strongest match overall is still
+    the first clip returned.
+    """
+    cap = max(0, int(cap))
+    if cap <= 0 or not ordered_ids:
+        return []
+    groups: dict[str, list[str]] = {}
+    for wid in ordered_ids:
+        groups.setdefault(str(group_of(wid)), []).append(wid)
+    if len(groups) <= 1:
+        return list(ordered_ids[:cap])
+    out: list[str] = []
+    queues = list(groups.values())
+    while len(out) < cap:
+        drew = False
+        for q in queues:
+            if not q:
+                continue
+            out.append(q.pop(0))
+            drew = True
+            if len(out) >= cap:
+                break
+        if not drew:
+            break  # every group exhausted
+    return out
+
+
 def _score_clips_task(
     project_root_str: str, refs: list[ClipRef]
 ) -> dict[str, dict[str, float]]:
@@ -493,6 +541,16 @@ class ClipMetricsService:
         if self._manifest is not None:
             for s in self._manifest.linked_sessions:
                 self._subject_by_session[str(s.session_id)] = str(s.subject_id or "")
+
+    def subject_for_session(self, session_id: str) -> str:
+        """Subject (animal) the session belongs to, or the session id if unknown.
+
+        Used to spread a mined batch evenly across animals rather than across
+        recordings — several sessions of the same mouse must not count as several
+        subjects.  Sessions the manifest doesn't cover fall back to their own id,
+        which keeps them separate rather than silently pooling them together.
+        """
+        return self._subject_by_session.get(str(session_id)) or str(session_id)
 
     def load_segment_pool(self, session_ids: set[str] | None = None) -> list[ClipRef]:
         """Return every feature-extraction segment as a mineable :class:`ClipRef`.
@@ -1204,6 +1262,7 @@ class ClipMetricsService:
         criteria: list[Criterion],
         match_all: bool = True,
         rank_scores: "pd.Series | None" = None,
+        rank_only: bool = False,
     ) -> MiningResult:
         """Return clips whose metrics satisfy the active criteria.
 
@@ -1218,10 +1277,32 @@ class ClipMetricsService:
         overlaps others (and therefore still yields a broad AND match) still gets
         loaded best-first up to the UI cap, instead of the flat 1.0 AND score that
         can't tell one match from another.
+
+        ``rank_only`` — treat the criteria as *descriptive* rather than as a filter:
+        every evaluated clip is returned, ordered by ``rank_scores``.  This is the
+        mode essence extraction uses.  A conjunction of ranges is a cliff, and a
+        behaviour's real instances do not all fall on the near side of it: measured
+        across 8 projects the box kept only 4–7% of held-out instances from 3
+        exemplars.  Ranking loses nothing — a poor fit is simply ordered late — and
+        the cap on what gets loaded already supplies the selectivity the box was
+        being used for.  Requires ``rank_scores``; without one there is no ordering
+        to substitute for the filter, so it falls back to gating.
         """
         active = [c for c in criteria if c.enabled and c.metric_id in df.columns and (c.low is not None or c.high is not None)]
         result = MiningResult(n_evaluated=int(len(df)))
-        if df.empty or not active:
+        if df.empty:
+            return result
+        if rank_only and rank_scores is not None:
+            # Vectorised: this walks the whole pool, not just the matches, so a
+            # per-row Python loop would be felt on a 40k-segment project.
+            graded = pd.to_numeric(rank_scores, errors="coerce").reindex(df.index)
+            vals = graded.to_numpy(dtype=float)
+            vals = np.where(np.isfinite(vals), vals, 0.0)
+            ids = [str(w) for w in df.index]
+            result.scores = dict(zip(ids, (float(v) for v in vals)))
+            result.matched_ids = [ids[i] for i in np.argsort(-vals, kind="mergesort")]
+            return result
+        if not active:
             return result
 
         n = len(df)
@@ -1454,7 +1535,15 @@ class ClipMetricsService:
         pad_frac: float = 0.10,
         recall_target: float = 0.8,
     ) -> list[Criterion]:
-        """Infer ready-to-mine criteria that capture what the exemplars share.
+        """Infer the criteria that describe what the exemplars share.
+
+        These ranges are what the user is *shown* — the readable operational
+        definition of the behaviour ("faster and more stretched than the pool") and
+        the thing they edit, save, and audit a review queue against.  They are no
+        longer what selects clips for review: that is
+        :meth:`build_essence_scorer`'s continuous ranking, because a conjunction of
+        ranges used as a gate was measured to discard 50–96% of a behaviour's real
+        instances.  See :meth:`mine`'s ``rank_only``.
 
         With a **background** (``population_df`` — a random pool sample or the
         already-scored pool) this delegates to :meth:`extract_contrastive_essence`,
@@ -1676,20 +1765,30 @@ class ClipMetricsService:
     ) -> "EssenceScorer | None":
         """Build a graded exemplar-likeness ranker (higher = more exemplar-like).
 
-        Used to order matched clips so "load top N" gets the *most* exemplar-like
-        first — decisive for behaviours that overlap others, where even a good box
-        still matches broadly.  Prefers a regularised logistic fit of exemplars
-        vs. background over the most discriminative features; falls back to a
-        stateless, discrimination-weighted contrastive z-score when there are too
-        few exemplars to fit or scikit-learn is unavailable.  Returns ``None`` only
-        when there is no separable signal at all.
+        This is the *primary* essence output: a continuous ordering of the pool by
+        how exemplar-like each window is.  It is built by an L1-penalised logistic
+        fit of exemplars vs. background over a wide pool of separated features,
+        which selects a sparse subset of them jointly.  Falls back to a stateless,
+        discrimination-weighted contrastive z-score over the best ``n_features``
+        when there are too few exemplars to fit or scikit-learn is unavailable.
+        Returns ``None`` only when there is no separable signal at all.
+
+        Why a sparse fit rather than the AND-box the criteria still display: piloted
+        over 8 projects, the greedy box retained only 4–7% of held-out instances of
+        a behaviour from 3 exemplars and 33–50% from 20 — it is selective (5–21x
+        lift) but it discards most of the behaviour, and as a hard gate that loss is
+        unrecoverable.  A ranking has no such cliff: a window the definition fits
+        poorly is ordered late, not excluded.
         """
         if exemplar_df is None or exemplar_df.empty or background_df is None or background_df.empty:
             return None
-        feats = feature_ids or cls._usable_essence_metrics(exemplar_df, background_df)
+        feats = feature_ids or cls._usable_essence_metrics(
+            exemplar_df, background_df, max_features=ESSENCE_RANKER_MAX_FEATURES
+        )
         if not feats:
             return None
-        # Keep the most discriminative handful for a stable, low-variance ranker.
+        # Best-separated first, so the sparse fit's cap and the fallback's much
+        # smaller feature set are both prefixes of one ranking.
         ranked = sorted(
             feats,
             key=lambda m: cls._separation(
@@ -1698,8 +1797,12 @@ class ClipMetricsService:
             ),
             reverse=True,
         )
-        feats = ranked[: max(1, int(n_features))]
-        return EssenceScorer.build(exemplar_df, background_df, feats)
+        return EssenceScorer.build(
+            exemplar_df,
+            background_df,
+            ranked[:ESSENCE_RANKER_MAX_FEATURES],
+            n_fallback_features=n_features,
+        )
 
 
 @dataclass
@@ -1707,9 +1810,16 @@ class EssenceScorer:
     """A fitted, reusable exemplar-likeness scorer over a fixed feature set.
 
     ``score(df)`` returns a per-row Series (higher = more exemplar-like).  Two
-    backends: a logistic fit (when enough exemplars) and a discrimination-weighted
+    backends: an L1 sparse logistic fit (the primary one, when there are enough
+    exemplars and scikit-learn is present) and a discrimination-weighted
     contrastive z-score fallback; both consume the same metric DataFrame the rest
     of mining uses, so the ranker needs no extra feature pass.
+
+    ``feature_ids`` is everything the fit was *offered*; ``active_feature_ids`` is
+    the sparse subset it actually kept (or the fallback's features).  Callers that
+    have to materialise columns — joining the shipped feature table onto a scored
+    pool — should use the active list: the rest carry zero coefficients and so
+    cannot move the score, whatever value they are given.
     """
 
     feature_ids: list[str]
@@ -1717,11 +1827,20 @@ class EssenceScorer:
     bg_scale: dict[str, float]
     direction: dict[str, float]
     weight: dict[str, float]
+    fallback_ids: list[str] = field(default_factory=list)
     _model: object | None = None  # fitted sklearn pipeline, when available
+    _active: list[str] = field(default_factory=list)  # non-zero-coefficient subset
 
-    # Below this many exemplars a logistic fit is too unstable; use the
-    # stateless weighted z-score instead.
-    _MIN_LOGISTIC_EXEMPLARS = 6
+    # Below this many exemplars even a penalised fit is too unstable to trust;
+    # use the stateless weighted z-score instead.
+    _MIN_SPARSE_EXEMPLARS = 4
+
+    @property
+    def active_feature_ids(self) -> list[str]:
+        """The features that can actually move the score."""
+        if self._model is not None and self._active:
+            return list(self._active)
+        return list(self.fallback_ids or self.feature_ids)
 
     @classmethod
     def build(
@@ -1730,6 +1849,7 @@ class EssenceScorer:
         background_df: pd.DataFrame,
         feature_ids: list[str],
         n_bg_max: int = 1500,
+        n_fallback_features: int = 8,
     ) -> "EssenceScorer | None":
         feats = [m for m in feature_ids if m in exemplar_df.columns and m in background_df.columns]
         if not feats:
@@ -1748,12 +1868,16 @@ class EssenceScorer:
                     E[m].to_numpy(float), B[m].to_numpy(float)
                 )
             )
-        wsum = sum(weight.values()) or 1.0
+        # ``feats`` arrives best-separated-first, so the fallback's small feature
+        # set is its prefix; its weights are normalised over just those, since the
+        # z-score is a weighted mean and the unused tail must not dilute it.
+        fallback = feats[: max(1, int(n_fallback_features))]
+        wsum = sum(weight[m] for m in fallback) or 1.0
         weight = {m: (w / wsum) for m, w in weight.items()}
 
-        model = None
-        if len(exemplar_df) >= cls._MIN_LOGISTIC_EXEMPLARS:
-            model = cls._try_fit_logistic(E, B, feats, n_bg_max)
+        model, active = None, []
+        if len(exemplar_df) >= cls._MIN_SPARSE_EXEMPLARS:
+            model, active = cls._fit_sparse_ranker(E, B, feats, n_bg_max)
 
         return cls(
             feature_ids=feats,
@@ -1761,18 +1885,29 @@ class EssenceScorer:
             bg_scale={m: float(bscale[m]) for m in feats},
             direction={m: float(direction[m]) for m in feats},
             weight=weight,
+            fallback_ids=fallback,
             _model=model,
+            _active=active,
         )
 
     @staticmethod
-    def _try_fit_logistic(E, B, feats, n_bg_max):
+    def _fit_sparse_ranker(E, B, feats, n_bg_max):
+        """L1 logistic exemplar-vs-background fit; ``(pipeline, kept features)``.
+
+        L1 rather than the ridge penalty this replaces because the feature pool is
+        wide (~300) and heavily correlated — a ridge fit spreads weight thinly over
+        every correlated copy of the same signal, while L1 picks one per group and
+        zeroes the rest, which is both a better ranker and a far cheaper one to
+        evaluate (only the survivors' columns ever have to be read).  ``liblinear``
+        is the solver that supports L1 here and is the fastest at this problem size.
+        """
         try:
             from sklearn.impute import SimpleImputer
             from sklearn.linear_model import LogisticRegression
             from sklearn.pipeline import make_pipeline
-            from sklearn.preprocessing import RobustScaler
+            from sklearn.preprocessing import StandardScaler
         except Exception:
-            return None
+            return None, []
         try:
             rng = np.random.default_rng(0)
             bg = B
@@ -1783,29 +1918,47 @@ class EssenceScorer:
             y = np.r_[np.ones(len(E)), np.zeros(len(bg))]
             pipe = make_pipeline(
                 SimpleImputer(strategy="median"),
-                RobustScaler(),
-                LogisticRegression(max_iter=3000, class_weight="balanced", C=0.3),
+                StandardScaler(),
+                LogisticRegression(
+                    penalty="l1",
+                    solver="liblinear",
+                    C=0.1,
+                    class_weight="balanced",
+                    max_iter=3000,
+                ),
             )
             pipe.fit(X, y)
-            return pipe
         except Exception:
-            return None
+            return None, []
+        coef = np.ravel(pipe[-1].coef_)
+        # A degenerate fit (every coefficient zeroed) ranks nothing; report it as a
+        # failure so the caller drops to the z-score rather than a constant score.
+        kept = [m for m, c in zip(feats, coef) if c != 0.0]
+        if not kept:
+            return None, []
+        # The imputer learned a median per *offered* column, so a zeroed column may
+        # safely arrive missing at score time: it is filled with that median and
+        # then multiplied by zero.
+        return pipe, kept
 
     def score(self, df: pd.DataFrame) -> pd.Series:
         cols = [m for m in self.feature_ids if m in df.columns]
         if not cols:
             return pd.Series(0.0, index=df.index)
         X = df[cols].apply(pd.to_numeric, errors="coerce")
-        if self._model is not None:
+        if self._model is not None and all(m in X.columns for m in self._active):
             try:
-                proba = self._model.predict_proba(X[self.feature_ids].to_numpy(float))[:, 1]
+                # Reindex rather than index: columns the fit zeroed out need not be
+                # present, and the pipeline's imputer supplies them.
+                full = X.reindex(columns=self.feature_ids)
+                proba = self._model.predict_proba(full.to_numpy(float))[:, 1]
                 return pd.Series(proba, index=df.index)
             except Exception:
                 pass  # fall back to the stateless score
         # Discrimination-weighted, direction-aware contrastive z (clipped so a
         # single wild feature can't dominate the ranking).
         total = pd.Series(0.0, index=df.index)
-        for m in cols:
+        for m in [c for c in (self.fallback_ids or cols) if c in X.columns]:
             z = (X[m] - self.bg_median[m]) / (self.bg_scale[m] or 1.0)
             z = (z * self.direction[m]).clip(-4, 4)
             total = total.add(z * self.weight.get(m, 0.0), fill_value=0.0)

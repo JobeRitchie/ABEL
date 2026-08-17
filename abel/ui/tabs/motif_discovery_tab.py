@@ -507,9 +507,7 @@ class MotifDiscoveryTab(QWidget):
             behavior_id = model.parameters.get("behavior_id")
             seed_filtered = model.parameters.get("seed_filtered", False)
             if behavior_id:
-                defn = self._behavior_service.get(behavior_id)
-                bname = defn.name if defn else behavior_id
-                seed_hint = f"  |  seeded: {bname}"
+                seed_hint = f"  |  seeded: {self._behavior_service.display_name(behavior_id)}"
             else:
                 seed_hint = "  |  seeded" if seed_filtered else ""
             self._model_status.setText(
@@ -1180,7 +1178,7 @@ class MotifDiscoveryTab(QWidget):
             if behavior_id:
                 self._readout_seed_note.setText(
                     "Seed filter was ON: clustering focused on windows that overlap positive seed examples "
-                    f"for behaviour '{behavior_id}'."
+                    f"for behaviour '{self._behavior_service.display_name(behavior_id)}'."
                 )
             else:
                 self._readout_seed_note.setText(

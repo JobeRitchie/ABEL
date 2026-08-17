@@ -1413,9 +1413,13 @@ class TemporalRefinementTab(QWidget):
 
         )
 
-        parts = [f"{bid} -> {model}" for bid, model in shown[:3]]
+        parts = [
+            f"{self._behaviors.display_name(bid)} -> {model}" for bid, model in shown[:3]
+        ]
 
-        excluded = sorted(self._excluded_behavior_ids)
+        excluded = sorted(
+            self._behaviors.display_name(bid) for bid in self._excluded_behavior_ids
+        )
 
         if excluded:
 
@@ -1599,7 +1603,7 @@ class TemporalRefinementTab(QWidget):
 
             selectors[bid] = combo
 
-            form.addRow(f"{display_name} ({bid}):", combo)
+            form.addRow(f"{display_name}:", combo)
 
         # Auto-assign button to populate all combos with best detected model.
         def _auto_assign_all() -> None:

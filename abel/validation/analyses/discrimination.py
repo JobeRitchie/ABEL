@@ -373,9 +373,12 @@ def run_pair_discrimination(
     pool_ab = pool.loc[pa | pb].reset_index(drop=True)
     hold_ab = hold.loc[ha | hb].reset_index(drop=True)
 
-    has_social = bool(features.social_only_cols(pool_ab))
-    has_video = bool(features.video_only_cols(pool_ab))
-    has_context = bool(features.context_only_cols(pool_ab))
+    # Informative, not merely present — a constant column cannot separate a pair,
+    # so a rung built from one is a structural zero. See features.informative_cols.
+    has_social = bool(features.informative_cols(pool_ab, features.social_only_cols(pool_ab)))
+    has_video = bool(features.informative_cols(pool_ab, features.video_only_cols(pool_ab)))
+    has_context = bool(features.informative_cols(pool_ab,
+                                                 features.context_only_cols(pool_ab)))
     specs = build_feature_sets(project, has_social=has_social, has_video=has_video,
                                has_context=has_context)
 
@@ -414,15 +417,21 @@ def run_pair_discrimination(
                 n_clips=int(res.n_train_a + res.n_train_b),
                 seed=int(seed),
                 precision=r.precision, recall=r.recall, f1=r.f1,
+                precision_macro=r.precision_macro,
+                recall_macro=r.recall_macro, f1_macro=r.f1_macro,
                 pr_auc=r.pr_auc, cohen_kappa=r.cohen_kappa,
                 mcc=r.mcc, balanced_accuracy=r.balanced_accuracy,
                 specificity=r.specificity, roc_auc=r.roc_auc,
                 tp=r.tp, fp=r.fp, fn=r.fn, tn=r.tn,
+                confusion_measured=r.confusion_measured,
                 n_pos_train=r.n_pos_train, n_neg_train=r.n_neg_train,
                 n_features=r.n_features,
                 elapsed_sec_fit=r.elapsed_sec_fit,
                 elapsed_sec_total=r.elapsed_sec_total,
-                degenerate=r.degenerate, error=r.error,
+                degenerate=r.degenerate, degenerate_fit=r.degenerate_fit,
+                calibration_applied=r.calibration_applied,
+                calibration_method_used=r.calibration_method_used,
+                error=r.error,
             ))
             ok = not r.error
             # NaN keeps the per-seed lists aligned so gains stay paired.
@@ -562,6 +571,128 @@ def discrimination_seed_rows(results: list[PairResult]) -> pd.DataFrame:
                     "roc_auc": float(auc),
                 })
     return pd.DataFrame(rows)
+
+
+def pooled_gain_by_pair(disc_df: pd.DataFrame) -> pd.DataFrame:
+    """Pool each feature family's effect **across behavior pairs** — one row per
+    family, the manuscript-level test.
+
+    ``p_value`` on a :class:`PairResult` pairs across random *seeds*, so its n is
+    the seed count and it says only "this pair's gain reproduces under reseeding".
+    The claim being made is broader — "this family separates confusable behaviors"
+    — and its unit is the pair.  Each pair contributes one value, then a paired
+    t-test runs across pairs.
+
+    Only pairs with real headroom count.  A pair the pose baseline already solves
+    at AUC 0.999 has no discrimination question left, and including it pulls every
+    mean toward zero while inflating n with pairs that could not have moved (see
+    the ceiling-effect note on :meth:`PairResult.error_reduction`).  Error
+    reduction — the share of the baseline's *remaining* error removed — is the
+    magnitude reported, because raw ΔAUC is uninterpretable near ceiling.
+
+    **That filter is a selection effect and the table now says so.**  Headroom is
+    ``1 − pose_only_auc``, computed from the same baseline arm the gain is measured
+    against, and across the manuscript pairs headroom correlates with gain at
+    r = 0.93-0.95.  Most of that is a legitimate ceiling constraint — a pair at AUC
+    0.999 *cannot* gain 0.03, so bounded-by-headroom is arithmetic, not bias.  The
+    real problem is narrower: selection uses a *noisy estimate* of the baseline and
+    the test then measures a difference from that same estimate, so a pair admitted
+    on a lucky-low baseline draw brings an upward-biased gain with it.  Reported
+    rather than silently corrected, because the honest fix — re-estimating headroom
+    on a split independent of the one scored — costs a whole extra baseline arm per
+    pair and is a run-cost decision, not a code decision:
+
+    - ``n_pairs_excluded`` / ``frac_near_cutoff`` size the exposure (pairs whose
+      membership sits within 5× MIN_HEADROOM of the line are the ones seed noise
+      can flip),
+    - ``mean_gain_excluded`` shows what the discarded pairs were doing,
+    - ``r_headroom_gain`` is the correlation itself,
+    - ``mean_auc_gain_all_pairs`` is the unfiltered mean — the conservative bound,
+      free of any selection.
+
+    Pairs cluster in projects exactly as behaviors do, so the reported p comes from
+    the same random-intercept model the ablation uses
+    (:func:`metrics.clustered_mean_test`), not a t-test that would treat 100 pairs
+    from 8 projects as 100 independent observations.
+    """
+    if disc_df is None or disc_df.empty or "feature_set" not in disc_df.columns:
+        return pd.DataFrame()
+    df = disc_df[disc_df["feature_set"].astype(str) != BASELINE_FEATURE_SET].copy()
+    df = df[df["feature_set"].astype(str) != ""]
+    if df.empty:
+        return pd.DataFrame()
+    df["_gain"] = pd.to_numeric(df["auc_gain_vs_pose"], errors="coerce")
+    df["_er"] = pd.to_numeric(df["error_reduction"], errors="coerce")
+    df["_head"] = pd.to_numeric(df.get("headroom"), errors="coerce")
+    kept = df[df["_head"] >= MIN_HEADROOM]
+    if kept.empty:
+        return pd.DataFrame()
+    rows = []
+    for fs, grp in kept.groupby("feature_set", sort=False):
+        sub = grp.dropna(subset=["_gain"])
+        gains = sub["_gain"].to_numpy(dtype=float)
+        ers = grp["_er"].dropna().to_numpy(dtype=float)
+        if gains.size == 0:
+            continue
+        clusters = (sub["project"].astype(str).tolist() if "project" in sub.columns
+                    else list(range(gains.size)))
+        mm = vmetrics.clustered_mean_test(gains, clusters)
+
+        # Selection-effect diagnostics, computed over every pair of this family —
+        # kept and excluded alike — so the filter can be audited from the table.
+        fam = df[df["feature_set"].astype(str) == str(fs)]
+        excl = fam[(fam["_head"] < MIN_HEADROOM)]["_gain"].dropna().to_numpy(dtype=float)
+        both = fam.dropna(subset=["_gain", "_head"])
+        r_hg = float("nan")
+        if len(both) >= 3:
+            r_hg = vmetrics.pearson_r(both["_head"].to_numpy(dtype=float),
+                                      both["_gain"].to_numpy(dtype=float))
+        near = sub["_head"].to_numpy(dtype=float)
+        frac_near = (float(np.mean(near < 5.0 * MIN_HEADROOM))
+                     if near.size else float("nan"))
+        all_gains = fam["_gain"].dropna().to_numpy(dtype=float)
+
+        rows.append({
+            "feature_set": str(fs),
+            "label": str(grp["label"].iloc[0]) if "label" in grp.columns else str(fs),
+            "n_pairs": int(gains.size),
+            "n_projects": int(mm.n_clusters),
+            "mean_auc_gain": float(np.mean(gains)),
+            "ci95_auc_gain": float(mm.ci95),
+            "estimate": float(mm.estimate),
+            "se": float(mm.se),
+            "t_stat": float(mm.t_stat),
+            "df": float(mm.df),
+            "df_method": str(mm.df_method),
+            "p_value": float(mm.p_value),
+            "icc_project": float(mm.icc),
+            "design_effect": float(mm.design_effect),
+            "n_effective": float(mm.n_effective),
+            "p_naive_pair": float(mm.p_naive),
+            "p_project_mean": float(mm.p_cluster_mean),
+            "p_sign_flip": float(mm.p_sign_flip),
+            "median_error_reduction": float(np.median(ers)) if ers.size else float("nan"),
+            "mean_error_reduction": float(np.mean(ers)) if ers.size else float("nan"),
+            "n_improved": int(np.sum(gains > 0)),
+            "n_projects_helped": int(mm.n_clusters_positive),
+            # Headroom-selection exposure (see the docstring).
+            "n_pairs_excluded": int(excl.size),
+            "mean_gain_excluded": float(np.mean(excl)) if excl.size else float("nan"),
+            "frac_near_cutoff": frac_near,
+            "r_headroom_gain": r_hg,
+            "mean_auc_gain_all_pairs": (float(np.mean(all_gains))
+                                        if all_gains.size else float("nan")),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    # Every family here is a screening test of the same kind — no pre-specified
+    # primary among them — so the whole table is one BH family.
+    out["endpoint"] = "secondary"
+    from abel.validation.analyses.ablation import _add_bh  # noqa: PLC0415
+
+    out = _add_bh(out, group_cols=[])
+    return out.drop(columns=["endpoint"])
 
 
 def confusable_pairs_table(results: list[PairResult]) -> pd.DataFrame:

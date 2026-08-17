@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from abel.validation.metrics import ci95
+from abel.validation.metrics import ci95, clustered_mean_test
 
 # Logical name -> (run-dir subdir, filename). The bundle flattens these to
 # ``<subdir>__<filename>`` in a single data/ folder; both loaders below use this map.
@@ -231,18 +231,39 @@ def summary_feature_value(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
                      & (df["label"].astype(str) == label)]
             if grp.empty:
                 continue
-            gains = pd.to_numeric(grp["gain_over_baseline"], errors="coerce").dropna()
+            keep = grp.assign(
+                _gain=pd.to_numeric(grp["gain_over_baseline"], errors="coerce")
+            ).dropna(subset=["_gain"])
+            gains = keep["_gain"]
             # ``significant`` may round-trip as a real bool or the string "True";
             # count it without a fillna-downcast on the object column.
             sig = grp["significant"].tolist() if "significant" in grp.columns else []
             n_sig = sum(1 for v in sig if str(v).strip().lower() == "true")
+            # The manuscript-level test. Each row here is already one seed-averaged
+            # gain per behavior, but behaviors cluster within projects (ICC ~0.3-0.4),
+            # so a flat t-test across them overstates significance by ~2 orders of
+            # magnitude — the same defect corrected in
+            # ablation.pooled_gain_by_behavior, and corrected the same way here so
+            # the summary table cannot disagree with the pooled one.
+            clusters = (keep["assay"].astype(str).tolist()
+                        if "assay" in keep.columns
+                        else (keep["project"].astype(str).tolist()
+                              if "project" in keep.columns else list(range(len(keep)))))
+            mm = clustered_mean_test(gains.tolist(), clusters)
             rows.append({
                 "enhancement": label,
                 "clip_budget": budget,
                 "mean_dF1": float(gains.mean()) if len(gains) else float("nan"),
-                "ci95": ci95(gains.tolist()) if len(gains) else 0.0,
+                "ci95": float(mm.ci95),
+                "p_across_behaviors": float(mm.p_value),
+                # `n_significant` counts the per-behavior across-SEED test, which
+                # answers a narrower question — see ablation.pooled_gain_by_behavior.
                 "n_significant": int(n_sig),
                 "n_total": int(len(grp)),
+                "n_projects": int(mm.n_clusters),
+                "icc_project": float(mm.icc),
+                "p_naive_behavior": float(mm.p_naive),
+                "p_project_mean": float(mm.p_cluster_mean),
             })
     return pd.DataFrame(rows)
 

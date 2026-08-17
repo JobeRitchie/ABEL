@@ -41,11 +41,34 @@ def _save(fig, save_path: Path | None):
 
 # The selectable learning-curve views: key -> human-readable label.
 LEARNING_CURVE_VIEWS: dict[str, str] = {
-    "f1_prauc": "F1 & PR-AUC",
+    "f1_prauc": "Target-class F1 & PR-AUC",
     "precision_recall": "Precision & Recall",
-    "counts": "TP / FP / FN counts",
+    "counts": "Held-out error rates",
     "kappa": "Cohen's κ",
 }
+
+
+def _non_degenerate_points(points: list) -> list:
+    """Learning-curve points whose fits actually learned something.
+
+    A point is dropped when most of its seeds collapsed to predicting one class
+    (``LearningCurvePoint.is_degenerate``, ultimately :func:`metrics.is_degenerate_fit`
+    — MCC ≤ 0).  These live at the cold-start end: they dominate the error-rate
+    y-axis and make the trend read backwards, and under target-class F1 they also
+    score *well* (recall 1.0, specificity 0.0), so they inflate the F1 curve and the
+    knee that is read off it.
+
+    This used to threshold the predicted-positive fraction at 0.5, which is right
+    for a rare-behavior detection curve and wrong everywhere else — pairwise
+    discrimination is ~50% positive by construction, and on the real cells that rule
+    flags 1080 of 2000 discrimination fits whose median F1 is 0.971.  The MCC test is
+    prevalence-agnostic and flags 9 of them.
+
+    If *every* point is degenerate we keep them all rather than draw an empty
+    panel — better to show the ugly truth than nothing.
+    """
+    keep = [p for p in points if not getattr(p, "is_degenerate", False)]
+    return keep or list(points)
 
 
 def _knee_marker(ax, lc, y: float = 0.02) -> None:
@@ -61,7 +84,8 @@ def learning_curve_plot(lc, save_path: Path | None = None,
 
     ``view`` selects which metrics are drawn:
     ``f1_prauc`` (default, with knee marker), ``precision_recall``, ``counts``
-    (held-out TP/FP/FN), or ``kappa``.
+    (held-out error rates — false alarms & misses as % of the held-out set), or
+    ``kappa``.
     """
     if not _HAS_MPL or not lc.points:
         return None
@@ -71,16 +95,24 @@ def learning_curve_plot(lc, save_path: Path | None = None,
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
     if view == "counts":
-        tp = np.array([p.tp_mean for p in lc.points], dtype=float)
-        fp = np.array([p.fp_mean for p in lc.points], dtype=float)
-        fn = np.array([p.fn_mean for p in lc.points], dtype=float)
-        ax.plot(xs, tp, "-o", color=_colour(2), label="True positives", linewidth=2)
-        ax.plot(xs, fp, "-s", color=_colour(1), label="False positives", linewidth=2)
-        ax.plot(xs, fn, "-^", color=_colour(3), label="False negatives", linewidth=2)
-        ax.set_ylabel("Held-out clips (mean across seeds)")
+        # Held-out error burden as a % of the fixed held-out set. We plot only the
+        # two error types — false alarms (FP) and misses (FN). The held-out set is
+        # identical at every budget, so true positives carry no information the
+        # misses don't (TP = P − FN); plotting them too would be a redundant line.
+        # Percent-of-held-out (not raw counts) keeps the average-across-behaviors
+        # panel fair — raw counts are dominated by behaviors with larger held-out
+        # sets. The all-positive cold-start regime is dropped (see
+        # _non_degenerate_points) so it doesn't dominate the y-axis.
+        pts = _non_degenerate_points(lc.points)
+        xsc = np.array([p.n_clips_mean for p in pts], dtype=float)
+        fp = np.array([p.fp_pct for p in pts], dtype=float)
+        fn = np.array([p.fn_pct for p in pts], dtype=float)
+        ax.plot(xsc, fp, "-s", color=_colour(1), label="False alarms (FP)", linewidth=2)
+        ax.plot(xsc, fn, "-^", color=_colour(3), label="Misses (FN)", linewidth=2)
+        ax.set_ylabel("% of held-out clips")
         ax.set_ylim(bottom=0)
         _knee_marker(ax, lc, y=ax.get_ylim()[1] * 0.02)
-        ax.set_title(f"{title}\nConfusion counts on the fixed held-out set")
+        ax.set_title(f"{title}\nHeld-out error rate — false alarms & misses")
     elif view == "precision_recall":
         prec = np.array([p.precision_mean for p in lc.points], dtype=float)
         rec = np.array([p.recall_mean for p in lc.points], dtype=float)
@@ -98,14 +130,27 @@ def learning_curve_plot(lc, save_path: Path | None = None,
         _knee_marker(ax, lc)
         ax.set_title(title)
     else:  # "f1_prauc"
-        f1 = np.array([p.f1_mean for p in lc.points], dtype=float)
-        f1ci = np.array([p.f1_ci for p in lc.points], dtype=float)
-        pr = np.array([p.pr_auc_mean for p in lc.points], dtype=float)
-        prci = np.array([p.pr_auc_ci for p in lc.points], dtype=float)
-        ax.plot(xs, f1, "-o", color=_colour(0), label="F1", linewidth=2)
-        ax.fill_between(xs, f1 - f1ci, f1 + f1ci, color=_colour(0), alpha=0.18)
-        ax.plot(xs, pr, "-s", color=_colour(2), label="PR-AUC", linewidth=2)
-        ax.fill_between(xs, pr - prci, pr + prci, color=_colour(2), alpha=0.18)
+        # Degenerate points are drawn hollow and excluded from the solid trend line:
+        # target-class F1 rewards an always-predict-target collapse, so leaving them
+        # on the curve inflates it exactly where the knee is read. They stay visible
+        # (a dropped point a reader cannot see is its own kind of dishonesty) but
+        # cannot carry the line or the knee.
+        pts = _non_degenerate_points(lc.points)
+        degen = [p for p in lc.points if getattr(p, "is_degenerate", False)]
+        xsg = np.array([p.n_clips_mean for p in pts], dtype=float)
+        f1 = np.array([p.f1_mean for p in pts], dtype=float)
+        f1ci = np.array([p.f1_ci for p in pts], dtype=float)
+        pr = np.array([p.pr_auc_mean for p in pts], dtype=float)
+        prci = np.array([p.pr_auc_ci for p in pts], dtype=float)
+        ax.plot(xsg, f1, "-o", color=_colour(0), label="Target-class F1", linewidth=2)
+        ax.fill_between(xsg, f1 - f1ci, f1 + f1ci, color=_colour(0), alpha=0.18)
+        ax.plot(xsg, pr, "-s", color=_colour(2), label="PR-AUC", linewidth=2)
+        ax.fill_between(xsg, pr - prci, pr + prci, color=_colour(2), alpha=0.18)
+        if degen:
+            ax.plot([p.n_clips_mean for p in degen], [p.f1_mean for p in degen],
+                    "o", markerfacecolor="none", markeredgecolor="#b00020",
+                    markersize=7, linestyle="none",
+                    label="Degenerate fit (excluded)")
         ax.set_ylabel("Score (held-out subjects)")
         ax.set_ylim(0, 1.05)
         _knee_marker(ax, lc)
@@ -159,7 +204,7 @@ def al_vs_random_plot(al_result, save_path: Path | None = None) -> "Figure | Non
     if al_n is not None and rnd_n is not None and al_n < rnd_n:
         sub = f"\n95% of peak F1: {int(al_n)} clips (AL) vs {int(rnd_n)} (random)"
     ax1.set_xlabel("# clips reviewed (labeling effort)")
-    ax1.set_ylabel("F1 (held-out subjects)")
+    ax1.set_ylabel("Target-class F1 (held-out subjects)")
     ax1.set_ylim(0, 1.05)
     ax1.set_title(f"Active learning vs. random — {al_result.behavior_name}{sub}", fontsize=10)
     ax1.legend(loc="lower right", fontsize=9)
@@ -376,7 +421,8 @@ def ablation_impact_plot(abl_results: list, save_path: Path | None = None,
     ax.set_yticks(y)
     ax.set_yticklabels(pretty, fontsize=9)
     ax.invert_yaxis()
-    ax.set_xlabel("ΔF1 vs. pose-only baseline  (positive ⇒ feature improves accuracy)")
+    ax.set_xlabel("Δ target-class F1 vs. pose-only baseline  "
+                  "(positive ⇒ feature improves accuracy)")
 
     btxt = f" @ {budget_title}" if budget_title else ""
     if len(abl_results) == 1:
@@ -384,7 +430,7 @@ def ablation_impact_plot(abl_results: list, save_path: Path | None = None,
         base = r.baseline_f1
         allf = r.f1_means.get("all_features", float("nan"))
         sub = (f"\nbaseline F1 = {base:.3f}"
-               + (f"   ·   all-enhancements F1 = {allf:.3f}" if np.isfinite(allf) else ""))
+               + (f"   ·   shipped-pipeline F1 = {allf:.3f}" if np.isfinite(allf) else ""))
         ax.set_title(f"Feature ablation{btxt} — {r.behavior_name} ({r.project_id}){sub}",
                      fontsize=11)
     else:

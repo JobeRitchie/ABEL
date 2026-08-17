@@ -18,6 +18,7 @@ from abel.validation.datamodel import CellResult
 
 _METRIC_COLS = [
     "precision", "recall", "f1", "pr_auc", "cohen_kappa",
+    "precision_macro", "recall_macro", "f1_macro",
     "mcc", "balanced_accuracy", "specificity", "roc_auc",
 ]
 
@@ -31,9 +32,11 @@ def cells_to_frame(cells: Iterable[CellResult]) -> pd.DataFrame:
                 "project_id", "project_name", "behavior_id", "behavior_name",
                 "analysis", "config_name", "n_clips", "seed",
                 *_METRIC_COLS,
-                "tp", "fp", "fn", "tn",
+                "tp", "fp", "fn", "tn", "confusion_measured",
                 "n_pos_train", "n_neg_train", "n_features",
-                "elapsed_sec_fit", "elapsed_sec_total", "degenerate", "error",
+                "elapsed_sec_fit", "elapsed_sec_total",
+                "degenerate", "degenerate_fit",
+                "calibration_applied", "calibration_method_used", "error",
                 "arrays_ref",
             ]
         )

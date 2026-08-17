@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,8 @@ import pandas as pd
 
 from abel.services.provenance_service import ProvenanceService
 from abel.storage.file_store import atomic_write_parquet, write_json
+
+logger = logging.getLogger("abel")
 
 
 # Statistic suffixes the segment builder appends to each frame-level series.
@@ -188,9 +191,14 @@ class RepresentationConfig:
     # v3: pairwise-distance columns are canonicalised (``dist_a_to_b`` /
     # ``dist_b_to_a`` merged onto the sorted name) so mixed-order pose exports no
     # longer produce duplicate, half-populated "dead" distance columns.
+    # v4: per-segment R3D-18 appearance embeddings (``r3d_000``…``r3d_511``) are
+    # merged into the segment features as a video feature family.
     # Bumping the version invalidates the content/config-hash representation cache
     # so segment features are rebuilt with the current feature definitions.
-    feature_version: str = "representation_v3"
+    feature_version: str = "representation_v4"
+    # R3D appearance embeddings.  Gated additionally on context/video features
+    # being present at all — no pixels means no appearance features.
+    use_r3d_features: bool = True
     # DEPRECATED / no-op: feature exclusions are applied at training time, not
     # baked into the representation, so the cache stays valid across exclusion
     # changes.  Retained only for call-site compatibility.  See
@@ -312,11 +320,17 @@ class BehaviorRepresentationService:
         # ActiveLearningTrainerService), so the representation always contains
         # all features and the cache stays valid regardless of which features a
         # user chooses to exclude downstream.
+        # ``use_r3d_features`` IS part of the signature: unlike an exclusion it
+        # changes which columns the cached segment table contains, so without it
+        # the toggle is inert on any project that already has a cache — turning
+        # it off would keep serving the r3d_* columns, and turning it on would
+        # never add them.
         return {
             "window_size_frames": int(config.window_size_frames),
             "window_stride_frames": int(config.window_stride_frames),
             "feature_version": str(config.feature_version),
             "model_version": str(config.model_version),
+            "use_r3d_features": bool(config.use_r3d_features),
         }
 
     @staticmethod
@@ -738,6 +752,26 @@ class BehaviorRepresentationService:
                 )
 
         segment_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+        # ── R3D-18 appearance embeddings (video feature family) ───────────
+        # Merged here, before the cache is written, so every consumer of
+        # segment_features.parquet — training, the ablation harness, the
+        # validation suite — sees them as ordinary numeric feature columns.
+        # ``frame_context_path is None`` means pixel features are off for this
+        # run, so appearance features are off with them.
+        if config.use_r3d_features and frame_context_path is not None and not segment_df.empty:
+            try:
+                from abel.services.r3d_feature_service import R3DFeatureService
+
+                segment_df = R3DFeatureService().attach(
+                    project_root, segment_df, progress_cb=progress_cb
+                )
+            except Exception as exc:
+                # Appearance features are additive: a project without torch, or
+                # with unreachable video, must still produce a representation.
+                logger.warning("R3D appearance features skipped: %s", exc)
+                _progress(f"Representation: R3D appearance features skipped ({exc}).")
+
         _progress(
             f"Representation: completed frame_rows={len(frame_df)}, segment_rows={len(segment_df)}."
         )

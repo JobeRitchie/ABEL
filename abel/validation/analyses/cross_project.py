@@ -132,6 +132,52 @@ def confusion_by_behavior(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=_CONFUSION_OUT_COLS) if rows else empty
 
 
+#: Metrics carried per behavior for the figure panels, in reporting order.  PR-AUC
+#: leads: it is the imbalance-sensitive one, and the panels that plot performance
+#: against rarity are exactly the ones a floored metric would flatter.
+BEHAVIOR_METRICS = ["pr_auc", "f1", "cohen_kappa", "mcc", "balanced_accuracy"]
+
+
+def metrics_by_behavior(df: pd.DataFrame) -> pd.DataFrame:
+    """Mean/SD/n across seeds of every headline metric, one row per behavior.
+
+    The same cell selection as :func:`accuracy_by_behavior` and
+    :func:`confusion_by_behavior` (see :func:`_headline_cells`), widened to every
+    metric so a single table backs all the per-behavior figure panels — a panel
+    built off its own private selection of cells is how two figures in one paper
+    end up disagreeing.
+
+    SD, not the CI half-width: the Prism panels this feeds are Mean/SD/N tables,
+    and converting back and forth loses the seed count that makes SD readable.
+    """
+    if df.empty:
+        return pd.DataFrame()
+    src = _headline_cells(df)
+    keys = ["project_id", "behavior_name"]
+    if src.empty or not set(keys) <= set(src.columns):
+        return pd.DataFrame()
+    if "error" in src.columns:
+        src = src[~src["error"].astype(bool)]
+    # A collapsed fit scores deceptively well on target-class F1 (it predicts the
+    # majority class and the negative side carries the average), so it must not sit
+    # in a mean the figure reports.  Dropped here rather than downstream so every
+    # panel inherits the same exclusion.
+    if "degenerate" in src.columns:
+        keep = ~src["degenerate"].fillna(False).astype(bool)
+        if keep.any():
+            src = src[keep]
+    if src.empty:
+        return pd.DataFrame()
+    out = src.groupby(keys, dropna=False).size().rename("n_seeds").reset_index()
+    for metric in BEHAVIOR_METRICS:
+        if metric not in src.columns:
+            continue
+        g = src.groupby(keys, dropna=False)[metric]
+        stat = pd.DataFrame({f"{metric}_mean": g.mean(), f"{metric}_sd": g.std(ddof=1)})
+        out = out.merge(stat.reset_index(), on=keys, how="left")
+    return out.sort_values(keys, ignore_index=True)
+
+
 #: Imbalance-robust summaries surfaced per project alongside F1 for publication.
 PUBLICATION_METRICS = ["f1", "mcc", "balanced_accuracy", "roc_auc", "cohen_kappa"]
 

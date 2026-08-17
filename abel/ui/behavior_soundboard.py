@@ -38,6 +38,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from abel.services.behavior_service import behavior_label
+
 
 _SOLO_BTN_QSS = (
     "QPushButton{background:#1E2A36;color:#ECEFF1;border:1px solid #33475B;"
@@ -229,7 +231,7 @@ class BehaviorSoundboard(QWidget):
                 arrow = "→" if direction == "directed" else "⇄"
                 display = f"{b[1]}: {self._animal_name(focal)} {arrow} {self._animal_name(partner)}"
             else:
-                display = f"{(b[1] if b else bid)}: {self._animal_name(focal)}"
+                display = f"{(b[1] if b else behavior_label(bid))}: {self._animal_name(focal)}"
             rebuilt.append({
                 "behavior_id": bid, "focal_animal_id": focal,
                 "partner_animal_id": partner, "display": display,
@@ -365,7 +367,7 @@ class BehaviorSoundboard(QWidget):
             arrow = "→" if direction == "directed" else "⇄"
             display = f"{b[1]}: {self._animal_name(focal)} {arrow} {self._animal_name(partner)}"
         else:
-            display = f"{(b[1] if b else bid)}: {self._animal_name(focal)}"
+            display = f"{(b[1] if b else behavior_label(bid))}: {self._animal_name(focal)}"
         self._clip_labels.append({
             "behavior_id": bid, "focal_animal_id": focal,
             "partner_animal_id": partner, "display": display,

@@ -37,7 +37,8 @@ class TrainingConfig:
     max_train_samples_per_class: int = 0  # 0 = unlimited; caps each class for large-dataset speed
     no_behavior_sample_weight: float = 0.0  # 0 = auto (computed from class imbalance); >0 = manual override
     allow_co_occurring_behaviors: bool = False  # expand pipe-separated labels into per-behavior rows
-    adaptive_complexity: bool = True  # auto-tune n_estimators/max_depth from data
+    adaptive_complexity: bool = False  # auto-tune n_estimators/max_depth from data; off by
+    # default — validation across 43 behaviors found no benefit (mean ΔF1 −0.005, 7/43 improved)
     drop_zero_variance_features: bool = True  # remove features with zero variance before training
     # Per-run feature exclusions chosen in the Active Learning tab.  Applied at
     # training time (segment level) — NOT baked into the representation cache —
@@ -338,6 +339,25 @@ class ActiveLearningTrainerService:
         w_aug = np.concatenate([sample_weights] + aug_w_parts, axis=0)
         return x_aug, y_aug, w_aug
 
+    @staticmethod
+    def _canonicalize_training_distances(df: pd.DataFrame) -> pd.DataFrame:
+        """Collapse duplicate distance spellings onto the canonical name.
+
+        Delegates to the representation service so the training set and
+        ``segment_features.parquet`` always agree on the distance vocabulary.
+        Additive and idempotent: a table that is already canonical is returned
+        unchanged.
+        """
+        try:
+            from abel.services.behavior_representation_service import (
+                BehaviorRepresentationService,
+            )
+
+            return BehaviorRepresentationService._canonicalize_distance_columns(df)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("Training-set distance canonicalisation skipped: %s", exc)
+            return df
+
     def merge_and_snapshot_training_set(
         self,
         project_root: Path,
@@ -355,6 +375,18 @@ class ActiveLearningTrainerService:
             merged = merged.drop_duplicates(subset=["segment_id"], keep="last")
         else:
             merged = labeled_segments.drop_duplicates(subset=["segment_id"], keep="last")
+
+        # Symmetric pairwise distances must be canonicalised HERE, not only in
+        # the representation.  ``segment_features.parquet`` (what deployment and
+        # dense inference see) is canonical-only, but a plain concat of rows from
+        # different eras keeps both ``dist_a_to_b`` and ``dist_b_to_a``, each
+        # half-populated with complementary NaNs.  The NaN pattern then encodes
+        # *provenance* (imported/legacy vs native), and a tree model happily
+        # learns that split — at which point every deployment row looks like the
+        # stratum the model never saw positives in, and the behavior stops firing
+        # entirely.  See DG_FearConditioning "Explore" (1 detection over 426k
+        # windows before this, 25k after).
+        merged = self._canonicalize_training_distances(merged)
 
         merged.to_parquet(current_path, index=False)
         snap_path = snap_dir / f"training_set_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.parquet"
@@ -399,6 +431,17 @@ class ActiveLearningTrainerService:
 
         _log("Loading training set…")
         df = pd.read_parquet(train_path)
+        # Repair training sets written before canonicalisation was applied at
+        # merge time — otherwise a stale on-disk table keeps producing models
+        # that key on provenance-correlated NaNs (see
+        # ``_canonicalize_training_distances``).
+        n_cols_before = df.shape[1]
+        df = self._canonicalize_training_distances(df)
+        if df.shape[1] != n_cols_before:
+            _log(
+                f"Merged {n_cols_before - df.shape[1]} duplicate distance column(s) "
+                "onto their canonical names."
+            )
         # Apply session scope and the imported-examples include/exclude toggle.
         n_imported = int(self._imported_mask(df).sum())
         df = self._scope_training_rows(df, session_ids, cfg.include_imported)
@@ -423,6 +466,25 @@ class ActiveLearningTrainerService:
                     fb_raw = read_json(fp_path, {})
                     fp_map: dict[str, list] = fb_raw.get("false_positive_intervals_by_session", {})
                     fn_map: dict[str, list] = fb_raw.get("false_negative_intervals_by_session", {})
+                    # Temporal-review feedback MUST honour the session scope. A
+                    # session the user unticked in the training selector (i.e. not
+                    # in ``session_ids``) must contribute NO data to training by any
+                    # path.  Without this filter the hard-negative/-positive
+                    # injection below pulls segment_features rows for excluded
+                    # sessions straight from disk, silently reintroducing them and
+                    # leaking held-out data into the model (the reviewed FP/FN
+                    # corrections are applied on the very sessions being held out).
+                    if session_ids is not None:
+                        _scope = {str(s) for s in session_ids}
+                        _fb_before = len(fp_map) + len(fn_map)
+                        fp_map = {s: iv for s, iv in fp_map.items() if str(s) in _scope}
+                        fn_map = {s: iv for s, iv in fn_map.items() if str(s) in _scope}
+                        _fb_dropped = _fb_before - (len(fp_map) + len(fn_map))
+                        if _fb_dropped:
+                            _log(
+                                f"Excluded temporal feedback from {_fb_dropped} out-of-scope "
+                                "session(s) not selected for training."
+                            )
                     if fp_map or fn_map:
                         n_relabeled = 0
                         # The FP label means "the target behavior did NOT

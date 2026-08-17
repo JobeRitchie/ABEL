@@ -49,6 +49,12 @@ def blend_whole_run_eta(
     """
     if hist_total is None or hist_total <= 0.0:
         return max(0.0, live_remaining)
+    if hist_total <= elapsed:
+        # Reality has already disproved the anchor — this run has run longer than
+        # the whole historical total. Keeping any weight on it drags the blended
+        # total below the time already spent, which reads as "ETA 0 s" while the
+        # run carries on working. Only the live estimate says anything now.
+        return max(0.0, live_remaining)
     f = min(1.0, max(0.0, frac))
     live_total = elapsed + max(0.0, live_remaining)
     # Uncalibrated: original frac ramp (trust history while live still swings).
@@ -115,9 +121,33 @@ class StageEtaEstimator:
     def _expected(self, stage: int, fallback: float) -> float:
         return self._stage_mean.get(stage, fallback)
 
+    def expected_stage_seconds(self, stage: int) -> float:
+        """Expected wall time of one run of ``stage`` (measured, else seed/avg).
+
+        Lets a caller draw the current stage's cost down as it elapses, so a long
+        stage's ETA counts down instead of freezing until the stage ends.
+        """
+        return self._expected(int(stage) % self._stages, self._overall_avg())
+
+    def seconds_in_stage(self) -> float:
+        """Wall seconds since the current stage was entered (0 before any update)."""
+        if self._last_ts is None:
+            return 0.0
+        return max(0.0, self._clock() - self._last_ts)
+
     def _overall_avg(self) -> float:
+        """The stand-in duration for a stage this run has not yet measured.
+
+        A prior-run seed wins over this run's own measurements: the seed is a
+        whole-run average, whereas the stages measured so far are usually just
+        the cheap opening ones. Letting a 2 s prep stage stand in for a
+        not-yet-seen 3-minute scoring stage made the ETA collapse to seconds
+        right as the slowest part of the run began.
+        """
+        if self._seed is not None:
+            return self._seed
         if not self._stage_mean:
-            return self._seed if self._seed is not None else 0.0
+            return 0.0
         return sum(self._stage_mean.values()) / len(self._stage_mean)
 
     def is_calibrated(self) -> bool:
@@ -144,12 +174,22 @@ class StageEtaEstimator:
         now = self._clock()
         key = self._global_key(item, stage)
 
-        if self._last_ts is not None and self._last_key is not None and key > self._last_key:
-            self._record(self._last_key, key, now - self._last_ts)
-        # Monotonic guard: never move the marker backwards.
-        if self._last_key is None or key >= self._last_key:
+        # The entry timestamp must only move when the stage actually changes.
+        # Refreshing it on a repeat call at the same stage (which any caller that
+        # emits several progress messages within one stage does — representation
+        # messages, per-session R3D lines, ensemble fits) meant a long stage was
+        # only ever booked as the gap since its LAST message, so slow stages were
+        # learned as near-instant and the ETA badly underestimated the run.
+        if self._last_key is None:
             self._last_key = key
             self._last_ts = now
+        elif key > self._last_key:
+            if self._last_ts is not None:
+                self._record(self._last_key, key, now - self._last_ts)
+            self._last_key = key
+            self._last_ts = now
+        # key < last_key: monotonic guard — never move the marker backwards.
+        # key == last_key: keep the original stage-entry timestamp.
 
         fallback = self._overall_avg()
         remaining = 0.0

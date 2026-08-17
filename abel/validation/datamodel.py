@@ -33,10 +33,32 @@ class ProjectRef:
     # is the only path — which is what makes renaming project_id safe (see rename()).
     source_name: str = ""
     classifier_type: str = "xgboost"
+    # Hyperparameters the project set for its classifier. The product passes these
+    # into every TrainingConfig it builds, so the validation engine has to as well
+    # — otherwise it silently measures a differently-parameterized model than the
+    # one the project ships.
+    classifier_params: dict[str, Any] = field(default_factory=dict)
     calibration_method: str = "sigmoid"
     split_strategy: str = "group_shuffle_session"
     use_video_features: bool = True
+    # R3D appearance embeddings, a sub-family of the video features.  Read
+    # separately because a project can extract optical flow without paying for
+    # the 512-d embeddings, and the extraction benchmark must time what the
+    # project actually does.
+    use_r3d_features: bool = True
     allow_co_occurring_behaviors: bool = False
+    # Three training knobs the Active Learning tab persists into project.yaml's
+    # ``behavior_model`` block. The product read them; this engine did not, so a
+    # project that tuned any of them was validated under a configuration it does not
+    # ship. None of the eight manuscript projects has any of these keys — all sit at
+    # the defaults below — so nothing published was affected, but the trap was live
+    # for the next project to touch one. (Project-wide feature exclusions from the
+    # Feature Audit are a *separate* mechanism living in
+    # config/feature_exclusions.json, which the trainer already reads off disk; the
+    # two compose.)
+    max_train_samples_per_class: int = 0     # 0 = no cap
+    no_behavior_sample_weight: float = 0.0   # 0.0 = no reweighting
+    excluded_feature_cols: list[str] = field(default_factory=list)
     # Frame rate, only so a clip count can be reported in seconds. The clip
     # *length* is deliberately not read from config: ``segment_window_frames``
     # defaults to 60 but real projects set it from their own clip duration
@@ -73,6 +95,11 @@ class ProjectRef:
                 if bid:
                     names[bid] = str(b.get("name", bid))
 
+        # The Features tab's block is the source of truth for extraction
+        # settings; behavior_model only carries a copy synced after a run.
+        fx = cfg.get("feature_extraction", {}) or {}
+        use_r3d = fx.get("use_r3d_features", bm.get("use_r3d_features", True))
+
         name = str(cfg.get("project_name") or root.name)
         return cls(
             project_id=name,
@@ -80,10 +107,19 @@ class ProjectRef:
             source_name=name,
             root=root,
             classifier_type=str(bm.get("classifier_type", "xgboost")),
+            # Mirrors BehaviorModelConfig.classifier_params, whose default is
+            # {"tree_method": "hist"} — not an empty dict.
+            classifier_params=dict(bm.get("classifier_params")
+                                   or {"tree_method": "hist"}),
             calibration_method=str(bm.get("calibration_method", "sigmoid")),
             split_strategy=str(bm.get("evaluation_split_strategy", "group_shuffle_session")),
             use_video_features=bool(bm.get("use_video_features", True)),
+            use_r3d_features=bool(use_r3d),
             allow_co_occurring_behaviors=bool(bm.get("allow_co_occurring_behaviors", False)),
+            max_train_samples_per_class=int(bm.get("max_train_samples_per_class", 0) or 0),
+            no_behavior_sample_weight=float(bm.get("no_behavior_sample_weight", 0.0) or 0.0),
+            excluded_feature_cols=[str(c) for c in
+                                   (bm.get("excluded_feature_cols") or [])],
             fps=float(cfg.get("default_fps") or 30.0),
             behavior_names=names,
         )
@@ -277,12 +313,27 @@ class ConfigEvalResult:
     n_neg_train: int
     n_features: int
 
-    # Headline metrics (ABEL's own macro precision/recall/f1; target PR-AUC).
+    # Headline metrics, all TARGET-CLASS (behavior-vs-rest) on the held-out set.
+    #
+    # ABEL's trainer reports precision/recall/f1 MACRO-averaged over its two
+    # classes {target, no_behavior}.  On a rare behavior the no_behavior class is
+    # ~95% of the holdout and trivially easy, so its ~0.99 F1 is averaged in and
+    # the macro number carries a ~0.50 floor: a detector that finds nothing still
+    # scores ~0.49, and a real improvement shows up at roughly half its true size.
+    # Every figure and statistic here is about the behavior, not about the ease of
+    # the negative class, so these fields hold the target-class values derived from
+    # the tp/fp/fn counts below.  The macro numbers are kept alongside, explicitly
+    # named, for continuity with results produced before this change.
     precision: float = float("nan")
     recall: float = float("nan")
     f1: float = float("nan")
     pr_auc: float = float("nan")
     cohen_kappa: float = float("nan")
+
+    # ABEL's own macro-averaged precision/recall/f1 (see the note above).
+    precision_macro: float = float("nan")
+    recall_macro: float = float("nan")
+    f1_macro: float = float("nan")
 
     # Imbalance-robust classifier summaries (target-vs-rest held-out).
     mcc: float = float("nan")
@@ -295,10 +346,27 @@ class ConfigEvalResult:
     fp: int = 0
     fn: int = 0
     tn: int = 0
+    # Whether tp/fp/fn/tn above were actually measured. Several analyses report only
+    # f1/pr_auc and leave the counts at their structural zeros, which a consumer
+    # reading counts uniformly across analyses cannot distinguish from a fit that
+    # genuinely scored zero of everything. False means "not measured", not "zero".
+    confusion_measured: bool = False
 
     elapsed_sec_fit: float = 0.0
     elapsed_sec_total: float = 0.0
     degenerate: bool = False
+    # The fit predicted one class for effectively everything (MCC <= 0) — see
+    # :func:`metrics.is_degenerate_fit`.  Distinct from ``degenerate``, which is the
+    # trainer's own single-class-validation flag: this one is about the *model*
+    # collapsing, that one about the *data* being unscoreable.
+    degenerate_fit: bool = False
+    # Whether probability calibration actually ran for this cell. The engine
+    # silently disables it when the pool cannot support an honest calibration slice
+    # (measured: 5/5 seeds at n=10 and n=20 on the published schedule), so a cell
+    # requesting "sigmoid" may have been fit uncalibrated. Without this field that
+    # switch is invisible in every CSV, Prism export and plot.
+    calibration_applied: bool = False
+    calibration_method_used: str = ""
     error: str = ""
 
     # Binary target-vs-rest arrays (for plots); not persisted in the tidy table.
@@ -332,11 +400,18 @@ class CellResult:
     n_clips: int             # positive training clips (−1 = "all"/not-applicable)
     seed: int
 
+    # Target-class (behavior-vs-rest) metrics — see the note on ConfigEvalResult
+    # for why these are not the trainer's macro averages.
     precision: float = float("nan")
     recall: float = float("nan")
     f1: float = float("nan")
     pr_auc: float = float("nan")
     cohen_kappa: float = float("nan")
+
+    # ABEL's own macro-averaged precision/recall/f1, carried for continuity.
+    precision_macro: float = float("nan")
+    recall_macro: float = float("nan")
+    f1_macro: float = float("nan")
 
     # Imbalance-robust classifier summaries (persisted in cells.parquet).
     mcc: float = float("nan")
@@ -349,6 +424,10 @@ class CellResult:
     fp: int = 0
     fn: int = 0
     tn: int = 0
+    # See ConfigEvalResult: False means the counts were never measured for this
+    # analysis, not that they were measured as zero. Filter on it before summing
+    # tp/fp/fn across analyses.
+    confusion_measured: bool = False
 
     n_pos_train: int = 0
     n_neg_train: int = 0
@@ -356,6 +435,12 @@ class CellResult:
     elapsed_sec_fit: float = 0.0
     elapsed_sec_total: float = 0.0
     degenerate: bool = False
+    # See the notes on ConfigEvalResult: model collapse, and whether calibration
+    # actually ran. Both persisted so an analysis can filter on them without
+    # re-deriving them from the confusion counts.
+    degenerate_fit: bool = False
+    calibration_applied: bool = False
+    calibration_method_used: str = ""
     error: str = ""
 
     # hash key into arrays/<cell_hash>.parquet (PR curve / confusion sidecar)

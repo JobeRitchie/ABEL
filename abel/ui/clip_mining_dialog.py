@@ -23,6 +23,13 @@ Whatever it picks is shown as an editable row with a humanised name, so the
 definition stays inspectable.  Those features are precomputed, so an essence
 built on them needs no pose file — and mining them reads the feature table
 directly instead of re-scoring every segment from pose.
+
+What a batch contains is shaped by two defaults, both toggleable: clips that
+already carry a review decision are left out (checked live, so a clip judged
+behind this modeless window drops out of the batch about to load), and the
+capped batch is filled by taking turns between *subjects* rather than by raw
+score — otherwise the one animal whose recording scores highest can fill it
+alone, and the mined sample says nothing about the rest of the cohort.
 """
 
 from __future__ import annotations
@@ -34,6 +41,7 @@ import numpy as np
 import pandas as pd
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QCompleter,
     QDialog,
@@ -63,6 +71,7 @@ from abel.services.clip_metrics_service import (
     metric_def_for,
     metric_label,
     rich_metric_def,
+    select_even_by_group,
 )
 from abel.workers.task_worker import TaskWorker
 
@@ -239,6 +248,7 @@ class ClipMiningDialog(QDialog):
         parent: QWidget | None = None,
         scope_sessions: set[str] | None = None,
         on_flag_queue: Callable[[list[Criterion], bool], None] | None = None,
+        reviewed_provider: Callable[[], set[str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Targeted Clip Mining")
@@ -247,6 +257,7 @@ class ClipMiningDialog(QDialog):
         self._exemplar_provider = exemplar_provider
         self._on_apply = on_apply
         self._on_flag_queue = on_flag_queue
+        self._reviewed_provider = reviewed_provider
         self._scope_sessions = scope_sessions
         self._metrics = ClipMetricsService()
         self._metrics.set_project(project_root)
@@ -283,6 +294,9 @@ class ClipMiningDialog(QDialog):
         # Extracted-feature ids the essence has committed to (criteria or ranker),
         # so their columns can be joined onto the scored pool before mining.
         self._rich_needed: list[str] = []
+        # Matches dropped from the last count because they already carry a review
+        # decision — reported in the count label so the shrink is never silent.
+        self._skipped_reviewed = 0
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -335,13 +349,25 @@ class ClipMiningDialog(QDialog):
         ctrl.addWidget(QLabel("Match:"))
         self._match_all = QRadioButton("All (AND)")
         self._match_any = QRadioButton("Any (OR)")
+        self._match_ranked = QRadioButton("Ranked")
+        self._match_ranked.setToolTip(
+            "Rank every segment by how exemplar-like it is and load the best ones,\n"
+            "instead of keeping only those inside the criteria ranges. The criteria\n"
+            "below still show you what distinguishes the behaviour — they just stop\n"
+            "acting as a hard cut-off, which on real projects threw away most of the\n"
+            "behaviour's true instances. Available once you extract an essence."
+        )
         self._match_all.setChecked(True)
+        self._match_ranked.setEnabled(False)  # needs a fitted essence ranker
         grp = QButtonGroup(self)
         grp.addButton(self._match_all)
         grp.addButton(self._match_any)
+        grp.addButton(self._match_ranked)
         self._match_all.toggled.connect(lambda _c: self._update_count())
+        self._match_ranked.toggled.connect(lambda _c: self._update_count())
         ctrl.addWidget(self._match_all)
         ctrl.addWidget(self._match_any)
+        ctrl.addWidget(self._match_ranked)
         ctrl.addStretch(1)
         root.addLayout(ctrl)
 
@@ -407,6 +433,30 @@ class ClipMiningDialog(QDialog):
             flag_row.addStretch(1)
             root.addLayout(flag_row)
 
+        # What comes back: skip work already done, and spread it over the animals.
+        opts = QHBoxLayout()
+        self._skip_reviewed_chk = QCheckBox("Skip clips I've already reviewed")
+        self._skip_reviewed_chk.setChecked(True)
+        self._skip_reviewed_chk.setToolTip(
+            "Leave out segments that already have a review decision, so mining only\n"
+            "ever hands you clips you haven't judged yet. Untick to re-surface\n"
+            "reviewed clips (e.g. to audit them against a tightened definition)."
+        )
+        self._skip_reviewed_chk.toggled.connect(lambda _c: self._update_count())
+        opts.addWidget(self._skip_reviewed_chk)
+        opts.addSpacing(16)
+        self._balance_subjects_chk = QCheckBox("Spread evenly across subjects")
+        self._balance_subjects_chk.setChecked(True)
+        self._balance_subjects_chk.setToolTip(
+            "Fill the batch by taking turns between subjects — each animal's\n"
+            "best-scoring matches first — instead of loading whichever animal happens\n"
+            "to score highest. Subjects with fewer matches give their slots back to\n"
+            "the others, so you never get fewer clips than the cap allows."
+        )
+        opts.addWidget(self._balance_subjects_chk)
+        opts.addStretch(1)
+        root.addLayout(opts)
+
         # Mine trigger + progress.
         mine_row = QHBoxLayout()
         self._mine_btn = QPushButton("🔎 Find matches")
@@ -439,8 +489,9 @@ class ClipMiningDialog(QDialog):
         self._cap_spin.setSingleStep(100)
         self._cap_spin.setToolTip(
             "Cap on how many matched segments get extracted and loaded, so loose\n"
-            "criteria can't decode thousands of clips by accident. Only the\n"
-            "highest-scoring matches up to this many are loaded."
+            "criteria can't decode thousands of clips by accident. The batch is\n"
+            "filled with the highest-scoring matches, taken in turn from each\n"
+            "subject while 'Spread evenly across subjects' is ticked."
         )
         self._cap_spin.valueChanged.connect(lambda _v: self._update_count())
         actions.addWidget(self._cap_spin)
@@ -479,7 +530,7 @@ class ClipMiningDialog(QDialog):
             c.metric_id for c in self._current_criteria()
             if c.enabled and (c.low is not None or c.high is not None)
         ]
-        ids += list(getattr(self._essence_scorer, "feature_ids", []) or [])
+        ids += list(getattr(self._essence_scorer, "active_feature_ids", []) or [])
         return bool(ids) and all(is_rich_metric(m) for m in ids)
 
     def _needs_pose_scoring(self) -> bool:
@@ -713,12 +764,17 @@ class ClipMiningDialog(QDialog):
     def _refresh_rank_scores(self) -> None:
         """Grade the scored pool with the current essence ranker (best-first order)."""
         self._rank_scores = None
-        if self._essence_scorer is None or self._df is None:
-            return
-        try:
-            self._rank_scores = self._essence_scorer.score(self._df)
-        except Exception:
-            self._rank_scores = None
+        if self._essence_scorer is not None and self._df is not None:
+            try:
+                self._rank_scores = self._essence_scorer.score(self._df)
+            except Exception:
+                self._rank_scores = None
+        # Ranked mode has nothing to order by without a graded score; don't offer
+        # it, and don't strand the user in it if the ranker went away.
+        ok = self._rank_scores is not None
+        self._match_ranked.setEnabled(ok)
+        if not ok and self._match_ranked.isChecked():
+            self._match_all.setChecked(True)
 
     def _restore_or_seed(self) -> None:
         """Rebuild rows from the project's saved criteria, or seed a starter row."""
@@ -744,8 +800,10 @@ class ClipMiningDialog(QDialog):
     def _persist_criteria(self) -> None:
         """Save the current criteria + match mode to the project (best-effort)."""
         try:
+            # Ranked is a *loading* mode, not a criteria mode — the saved ranges are
+            # a conjunction either way, so it persists as AND rather than as OR.
             self._metrics.save_criteria(
-                self._current_criteria(), self._match_all.isChecked()
+                self._current_criteria(), not self._match_any.isChecked()
             )
         except Exception:
             pass
@@ -1017,7 +1075,9 @@ class ClipMiningDialog(QDialog):
         crits = out["crits"]
         self._essence_scorer = out["scorer"]
         self._rank_scores = None  # regraded below, once the criteria are installed
-        if not crits:
+        # The ranker, not the criteria box, is what essence delivers — a fit with no
+        # displayable ranges is still a usable hunt, so only bail when neither exists.
+        if not crits and self._essence_scorer is None:
             self._count_label.setText(
                 "Couldn't find distinguishing features — pick two or more clips "
                 "that are alike. " + note
@@ -1026,7 +1086,9 @@ class ClipMiningDialog(QDialog):
         # Extracted features aren't in the project's metric registry, so register
         # the chosen ones before any row tries to display them.
         chosen = [c.metric_id for c in crits]
-        ranker = list(getattr(self._essence_scorer, "feature_ids", []) or [])
+        # Only the ranker's non-zero-coefficient features have to be materialised
+        # on the pool; the rest were offered to the fit and dropped by it.
+        ranker = list(getattr(self._essence_scorer, "active_feature_ids", []) or [])
         self._register_metrics(chosen + ranker)
         self._rich_needed = [m for m in dict.fromkeys(chosen + ranker) if is_rich_metric(m)]
         # Replace the criteria with the discovered distinguishing features.
@@ -1043,14 +1105,25 @@ class ClipMiningDialog(QDialog):
         # feature columns it needs) so matches load most-exemplar-like first.
         self._ensure_rich_columns()
         self._refresh_rank_scores()
+        # Essence hunts by ranking, not by the box: the ranges are shown so the user
+        # can see what defines the behaviour, but gating on them was measured to
+        # discard most of its real instances, so switch to Ranked automatically.
+        # (The user can still pick All/Any to get the hard filter back.)
+        if self._match_ranked.isEnabled():
+            self._match_ranked.setChecked(True)
         # Refresh match count / apply state against the new criteria first. When the
         # pool is already scored that live count IS the "it updated" feedback; when
         # it isn't, keep the informative feature list instead of the generic prompt.
         self._update_count()
         if self._df is None:
-            self._count_label.setText(
+            found = (
                 f"Added {len(crits)} distinguishing feature(s) from {out['n_ex']} "
-                f"clip(s): {labels}. Click Find matches to search the pool "
+                f"clip(s): {labels}."
+                if crits else
+                f"Learned what sets your {out['n_ex']} clip(s) apart."
+            )
+            self._count_label.setText(
+                f"{found} Click Find matches to search the pool "
                 f"(ranked by similarity). {note}".rstrip()
             )
         elif note:
@@ -1060,6 +1133,37 @@ class ClipMiningDialog(QDialog):
 
     def _current_criteria(self) -> list[Criterion]:
         return [r.to_criterion() for r in self._rows]
+
+    def _reviewed_ids(self) -> set[str]:
+        """Windows that already carry a review decision (read live, each count).
+
+        The dialog is modeless, so the user can review clips behind it — reading
+        the host's decision set on every count means a clip judged five seconds ago
+        stops being offered without reopening the window.
+        """
+        if self._reviewed_provider is None:
+            return set()
+        try:
+            return {str(w) for w in (self._reviewed_provider() or set())}
+        except Exception:
+            return set()
+
+    def _select_for_load(self, matched: list[str], cap: int) -> list[str]:
+        """The clips a Load would actually take: best-first, capped, subject-spread."""
+        ordered = sorted(
+            matched, key=lambda w: self._last_scores.get(w, 0.0), reverse=True
+        )
+        if not self._balance_subjects_chk.isChecked():
+            return ordered[:cap]
+
+        def _subject(wid: str) -> str:
+            ref = self._clip_by_id.get(wid)
+            return (
+                self._metrics.subject_for_session(ref.session_id) if ref is not None
+                else ""
+            )
+
+        return select_even_by_group(ordered, _subject, cap)
 
     def _update_count(self) -> None:
         active = [
@@ -1078,24 +1182,66 @@ class ClipMiningDialog(QDialog):
                 )
             return
         self._ensure_rich_columns()
+        ranked = self._match_ranked.isChecked() and self._rank_scores is not None
         res = self._metrics.mine(
             self._df, self._current_criteria(), match_all=self._match_all.isChecked(),
-            rank_scores=self._rank_scores,
+            rank_scores=self._rank_scores, rank_only=ranked,
         )
-        self._last_matches = res.matched_ids
+        matched = res.matched_ids
+        self._skipped_reviewed = 0
+        if self._skip_reviewed_chk.isChecked():
+            reviewed = self._reviewed_ids()
+            if reviewed:
+                kept = [w for w in matched if w not in reviewed]
+                self._skipped_reviewed = len(matched) - len(kept)
+                matched = kept
+        self._last_matches = matched
         self._last_scores = res.scores
-        if not active:
+        if ranked:
+            cap = int(self._cap_spin.value())
+            selected = self._select_for_load(matched, cap)
+            skipped = (
+                f" {self._skipped_reviewed} already-reviewed clip(s) skipped."
+                if self._skipped_reviewed else ""
+            )
+            self._count_label.setText(
+                f"Ranked {len(matched)} of {res.n_evaluated} segment(s) by "
+                f"similarity to your clips — will load the top {len(selected)}."
+                f"{skipped} The {len(active)} criteria below describe the behaviour "
+                "but aren't filtering."
+            )
+            self._apply_btn.setEnabled(bool(matched))
+        elif not active:
             self._count_label.setText(f"No active criteria — {res.n_evaluated} segment(s) in scope.")
             self._apply_btn.setEnabled(False)
         else:
-            n_match = len(res.matched_ids)
+            n_match = len(matched)
             cap = int(self._cap_spin.value())
-            capped = f" — will load top {cap} by score" if n_match > cap else ""
+            skipped = (
+                f" {self._skipped_reviewed} already-reviewed match(es) skipped."
+                if self._skipped_reviewed else ""
+            )
+            load = ""
+            if n_match > cap:
+                selected = self._select_for_load(matched, cap)
+                n_subj = len({
+                    self._metrics.subject_for_session(ref.session_id)
+                    for ref in (self._clip_by_id.get(w) for w in selected)
+                    if ref is not None
+                })
+                load = (
+                    f" — will load {len(selected)}"
+                    + (
+                        f" spread over {n_subj} subject(s)"
+                        if self._balance_subjects_chk.isChecked() and n_subj > 1
+                        else " by score"
+                    )
+                )
             self._count_label.setText(
                 f"{n_match} of {res.n_evaluated} segment(s) match "
-                f"{len(active)} criteria.{capped}"
+                f"{len(active)} criteria.{skipped}{load}"
             )
-            self._apply_btn.setEnabled(bool(res.matched_ids))
+            self._apply_btn.setEnabled(bool(matched))
 
     def _flag_queue(self) -> None:
         """Hand the current essence ranges to the host to audit the review queue."""
@@ -1111,19 +1257,21 @@ class ClipMiningDialog(QDialog):
                 "Add or extract at least one criterion range before flagging the queue."
             )
             return
-        self._on_flag_queue(criteria, self._match_all.isChecked())
+        # Auditing an existing review queue *is* a hard range test (that is the
+        # question being asked of it), so Ranked flags as AND.
+        self._on_flag_queue(criteria, not self._match_any.isChecked())
 
     def _apply(self) -> None:
+        # Re-count first: the dialog is modeless, so clips may have been reviewed
+        # behind it since the last count and must drop out of this batch.
+        self._update_count()
         if not self._last_matches:
             return
         # Load only the highest-scoring matches up to the cap, so loose criteria
-        # can't trigger extraction of thousands of clips at once.
+        # can't trigger extraction of thousands of clips at once — taking turns
+        # between subjects when asked, so one animal can't fill the whole batch.
         cap = int(self._cap_spin.value())
-        ordered = sorted(
-            self._last_matches,
-            key=lambda w: self._last_scores.get(w, 0.0),
-            reverse=True,
-        )[:cap]
+        ordered = self._select_for_load(self._last_matches, cap)
         refs = [self._clip_by_id[w] for w in ordered if w in self._clip_by_id]
         if not refs:
             return

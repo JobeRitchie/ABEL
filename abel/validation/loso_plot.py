@@ -88,12 +88,16 @@ def loso_bar_chart(
 
     # Annotate the subject count under each behavior so the figure is self-describing.
     ns = ", ".join(f"{lbl}: n={n}" for lbl, n in zip(labels, n_subj))
+    caption = f"Each mouse held out once; error bars = SEM across held-out subjects  ({ns})"
+    # A run restricted to a subset of mice must say so on the figure itself.
+    excluded = sorted({str(s) for r in rows for s in (r.get("excluded_subjects") or [])})
+    if excluded:
+        caption += f"\nMice excluded from this run: {', '.join(excluded)}"
     fig.text(
-        0.01, 0.005,
-        f"Each mouse held out once; error bars = SEM across held-out subjects  ({ns})",
+        0.01, 0.005, caption,
         fontsize=7, color="#666666", ha="left", va="bottom",
     )
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.tight_layout(rect=(0, 0.06 if excluded else 0.03, 1, 1))
 
     if save_path is not None:
         fig.savefig(str(save_path), dpi=200, bbox_inches="tight")
@@ -113,18 +117,24 @@ def loso_results_to_csv(results: list[dict[str, Any]], path: Path | str) -> Path
         w.writerow([
             "row_type", "behavior", "subject", "n_subjects",
             "prauc_mean", "prauc_sem", "f1_mean", "f1_sem",
-            "fold_pr_auc", "fold_f1", "pooled_refined_f1", "error",
+            "fold_pr_auc", "fold_f1", "pooled_refined_f1",
+            "included_subjects", "excluded_subjects", "error",
         ])
         for r in results or []:
             behavior = str(r.get("behavior_name", r.get("behavior_id", "?")))
+            excluded = _joined(r.get("excluded_subjects"))
             if r.get("error"):
-                w.writerow(["summary", behavior, "", "", "", "", "", "", "", "", "", r["error"]])
+                w.writerow([
+                    "summary", behavior, "", "", "", "", "", "", "", "", "",
+                    "", excluded, r["error"],
+                ])
                 continue
             w.writerow([
                 "summary", behavior, "", r.get("n_subjects", 0),
                 _num(r.get("fold_prauc_mean")), _num(r.get("fold_prauc_sem")),
                 _num(r.get("fold_f1_mean")), _num(r.get("fold_f1_sem")),
-                "", "", _num(r.get("refined_f1")), "",
+                "", "", _num(r.get("refined_f1")),
+                _joined(r.get("subjects")), excluded, "",
             ])
             for f in r.get("folds", []):
                 if "f1" not in f and "pr_auc" not in f:
@@ -132,7 +142,7 @@ def loso_results_to_csv(results: list[dict[str, Any]], path: Path | str) -> Path
                 w.writerow([
                     "fold", behavior, f.get("subject", ""), "",
                     "", "", "", "",
-                    _num(f.get("pr_auc")), _num(f.get("f1")), "", "",
+                    _num(f.get("pr_auc")), _num(f.get("f1")), "", "", "", "",
                 ])
     return path
 
@@ -143,6 +153,16 @@ def _finite(value: object) -> float:
     except (TypeError, ValueError):
         return 0.0
     return v if np.isfinite(v) else 0.0
+
+
+def _joined(values: object) -> str:
+    """Semicolon-joined subject list ('; ' would split under a CSV comma)."""
+    if not values:
+        return ""
+    try:
+        return "; ".join(str(v) for v in values)  # type: ignore[union-attr]
+    except TypeError:
+        return str(values)
 
 
 def _num(value: object) -> str:

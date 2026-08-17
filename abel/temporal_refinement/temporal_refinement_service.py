@@ -38,6 +38,7 @@ from abel.services.behavior_representation_service import (
 )
 from abel.services.import_service import ImportService
 from abel.services.provenance_service import ProvenanceService
+from abel.services.r3d_feature_service import R3DFeatureService, is_r3d_column
 from abel.storage.file_store import read_json, write_json
 from abel.temporal_refinement.bout_postprocess import (
     binary_trace_to_intervals,
@@ -933,6 +934,16 @@ class TemporalRefinementService:
                         # host→device on each call; scoring on the CPU is ~8x faster.
                         xgb_predict.ensure_cpu_prediction(model_obj)
 
+        # Only pay for R3D when a model actually consumes it.  Models trained
+        # before video features existed, or with them switched off, carry no
+        # ``r3d_*`` columns and must not trigger a decode pass.
+        needs_r3d = any(
+            any(is_r3d_column(c) for c in (payload.get("feature_cols") or []))
+            for payload in model_payloads.values()
+        )
+        if needs_r3d:
+            self._emit(progress_cb, "Models use R3D video features; enabling dense R3D extraction.")
+
         # FP feedback suppression
         fp_by_session: dict[str, list[tuple[int, int]]] = {}
         try:
@@ -998,6 +1009,21 @@ class TemporalRefinementService:
             )
             if dense_segs.empty:
                 return None
+
+            # R3D is a *segment*-level video feature: the frame table these
+            # windows are rebuilt from has never carried it, so without this the
+            # aligner below zero-fills all 512 columns.  That is not a small
+            # degradation — on a labelled EPM stretch it takes Stretch Attend
+            # from 254 detected windows to 0 while inventing Head Dip where
+            # there is none.  Anchored embeddings bring the trace back to a
+            # probability MAE of 0.005 against a true per-window computation.
+            if needs_r3d:
+                dense_segs = R3DFeatureService().attach_dense(
+                    project_root, dense_segs, sid,
+                    manifest=manifest,
+                    window_frames=window_frames,
+                    progress_cb=lambda m: self._emit(progress_cb, m),
+                )
             n_windows = len(dense_segs)
             starts = dense_segs["start_frame"].to_numpy(dtype=int)
             ends = dense_segs["end_frame"].to_numpy(dtype=int)
@@ -1297,7 +1323,10 @@ class TemporalRefinementService:
         progress_cb: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         cfg = config or TemporalRefinementConfig()
-        self._emit(progress_cb, f"Bout postprocess started for behavior={concept_id}.")
+        self._emit(
+            progress_cb,
+            f"Bout postprocess started for behavior={self._behaviors.display_name(concept_id)}.",
+        )
 
         latest = self._load_latest(concept_id)
         inference_dir_raw = str(latest.get("inference_dir", "")).strip()
@@ -1316,21 +1345,32 @@ class TemporalRefinementService:
         for sid, tp in trace_paths.items():
             trace_frames[sid] = pd.read_parquet(tp)
 
-        # Select the probability signal for THIS behavior. When inference was run
-        # in competition / Direct-Use mode (concept_id="target_behavior"), the
-        # generic "probability" column holds the per-frame MAX across all behaviors
-        # (see _run_inference_for_session), so thresholding it would emit a bout
-        # wherever ANY behavior is active — inflating bout counts and collapsing
-        # latency to near-zero. The per-behavior prob_{behavior} column is the
-        # correct signal for a single behavior, matching what the Temporal Review
-        # trace plot uses. Fall back to "probability" for legacy single-behavior
-        # inference traces that have no per-behavior column.
+        # Select the probability signal(s) to threshold. In single-behavior mode
+        # concept_id is a real behavior id, so its prob_{behavior} column exists and
+        # is the correct signal (matching the Temporal Review trace plot). In
+        # competition / Direct-Use mode (concept_id="target_behavior") that column
+        # does NOT exist; the generic "probability" column holds the per-frame MAX
+        # across all behaviors (see _run_inference_for_session), so thresholding it
+        # would emit a bout wherever ANY behavior is active — measuring "time doing
+        # anything", not a specific behavior. Instead, split the competition trace
+        # into its per-behavior prob_{behavior} columns and emit one bout set per
+        # real behavior. Fall back to "probability" only for legacy single-behavior
+        # traces that carry no per-behavior column.
         prob_col = f"prob_{self._safe_name(concept_id)}"
-        smooth_by_session: dict[str, np.ndarray] = {}
-        for sid, tdf in trace_frames.items():
-            col = prob_col if prob_col in tdf.columns else "probability"
-            probs = np.nan_to_num(tdf[col].to_numpy(dtype=np.float32), nan=0.0)
-            smooth_by_session[sid] = smooth_probabilities(probs, cfg.smoothing_method, cfg.smoothing_window)
+        any_cols = list(next(iter(trace_frames.values())).columns) if trace_frames else []
+        behavior_prob_cols = [c for c in any_cols if c.startswith("prob_")]
+        if prob_col in any_cols:
+            postprocess_targets = [(concept_id, prob_col)]
+        elif behavior_prob_cols:
+            postprocess_targets = [(c[len("prob_"):], c) for c in behavior_prob_cols]
+        else:
+            postprocess_targets = [(concept_id, "probability")]
+        per_behavior_mode = len(postprocess_targets) > 1
+        self._emit(
+            progress_cb,
+            f"Postprocess targets: {len(postprocess_targets)} behavior(s)"
+            + (" (competition split by winning behavior's probability)" if per_behavior_mode else ""),
+        )
 
         cfg_payload = asdict(cfg)
         cfg_payload.update({"concept_id": concept_id, "source_inference": str(inference_dir)})
@@ -1351,39 +1391,62 @@ class TemporalRefinementService:
 
         metrics_by_session: dict[str, dict[str, Any]] = {}
         bout_paths: dict[str, str] = {}
+        # In per-behavior (competition) mode a session maps to MANY bout files (one
+        # per behavior), so they are keyed separately here and NOT folded into
+        # bout_paths — readers such as the Temporal Review tab treat bout_paths keys
+        # as session ids, and composite keys would corrupt the session list.
+        per_behavior_bout_paths: dict[str, dict[str, str]] = {}
 
-        for idx, (sid, tp) in enumerate(trace_paths.items(), 1):
-            self._emit(progress_cb, f"Postprocess session {idx}/{len(trace_paths)}: {sid}")
-            smooth = smooth_by_session.get(sid, np.array([], dtype=float))
-            if smooth.size == 0:
-                continue
+        for t_idx, (beh_id, pcol) in enumerate(postprocess_targets, 1):
+            beh_tag = self._safe_name(beh_id)
+            for idx, (sid, tp) in enumerate(trace_paths.items(), 1):
+                if per_behavior_mode:
+                    self._emit(progress_cb, f"Postprocess behavior {t_idx}/{len(postprocess_targets)} [{beh_id}] session {idx}/{len(trace_paths)}: {sid}")
+                else:
+                    self._emit(progress_cb, f"Postprocess session {idx}/{len(trace_paths)}: {sid}")
+                tdf = trace_frames[sid]
+                col = pcol if pcol in tdf.columns else "probability"
+                raw = np.nan_to_num(tdf[col].to_numpy(dtype=np.float32), nan=0.0)
+                smooth = smooth_probabilities(raw, cfg.smoothing_method, cfg.smoothing_window)
+                if smooth.size == 0:
+                    continue
 
-            binary = threshold_probabilities(smooth, onset_thresh=float(cfg.onset_threshold))
-            binary = merge_close_bouts(binary, cfg.merge_gap_frames)
-            binary = remove_short_bouts(binary, cfg.min_bout_duration_frames)
-            intervals = binary_trace_to_intervals(binary)
+                binary = threshold_probabilities(smooth, onset_thresh=float(cfg.onset_threshold))
+                binary = merge_close_bouts(binary, cfg.merge_gap_frames)
+                binary = remove_short_bouts(binary, cfg.min_bout_duration_frames)
+                intervals = binary_trace_to_intervals(binary)
 
-            out_df = pd.DataFrame(intervals, columns=["start_frame", "end_frame"])
-            out_df["session_id"] = sid
-            out_df["behavior_id"] = concept_id
-            out_path = bouts_dir / f"{self._safe_name(sid)}_bouts.parquet"
-            out_df.to_parquet(out_path, index=False)
-            bout_paths[sid] = str(out_path)
+                out_df = pd.DataFrame(intervals, columns=["start_frame", "end_frame"])
+                out_df["session_id"] = sid
+                out_df["behavior_id"] = beh_id
+                if per_behavior_mode:
+                    out_path = bouts_dir / f"{beh_tag}__{self._safe_name(sid)}_bouts.parquet"
+                    out_df.to_parquet(out_path, index=False)
+                    per_behavior_bout_paths.setdefault(beh_id, {})[sid] = str(out_path)
+                else:
+                    out_path = bouts_dir / f"{self._safe_name(sid)}_bouts.parquet"
+                    out_df.to_parquet(out_path, index=False)
+                    bout_paths[sid] = str(out_path)
 
-            bout_frames = sum(max(0, e - s + 1) for s, e in intervals)
-            fps = max(1.0, float(fps_by_session.get(sid, 30.0) or 30.0))
-            latency_s = float(intervals[0][0]) / fps if intervals else float("nan")
-            metrics_by_session[sid] = {
-                "frame_metrics": {},
-                "bout_metrics": {},
-                "boundary_metrics": {},
-                "probability_histogram": probability_histogram(smooth),
-                "n_bouts": len(intervals),
-                "n_bout_frames": bout_frames,
-                "fps": fps,
-                "time_spent_seconds": bout_frames / fps,
-                "latency_to_first_behavior_s": latency_s,
-            }
+                bout_frames = sum(max(0, e - s + 1) for s, e in intervals)
+                fps = max(1.0, float(fps_by_session.get(sid, 30.0) or 30.0))
+                latency_s = float(intervals[0][0]) / fps if intervals else float("nan")
+                entry = {
+                    "frame_metrics": {},
+                    "bout_metrics": {},
+                    "boundary_metrics": {},
+                    "probability_histogram": probability_histogram(smooth),
+                    "n_bouts": len(intervals),
+                    "n_bout_frames": bout_frames,
+                    "fps": fps,
+                    "time_spent_seconds": bout_frames / fps,
+                    "latency_to_first_behavior_s": latency_s,
+                }
+                if per_behavior_mode:
+                    sess_entry = metrics_by_session.setdefault(sid, {"per_behavior": {}})
+                    sess_entry.setdefault("per_behavior", {})[beh_id] = entry
+                else:
+                    metrics_by_session[sid] = entry
 
         write_json(run_dir / "session_metrics.json", metrics_by_session)
 
@@ -1401,6 +1464,9 @@ class TemporalRefinementService:
                 "merge_gap_frames": cfg.merge_gap_frames,
             },
             "bout_paths": bout_paths,
+            "per_behavior_bout_paths": per_behavior_bout_paths,
+            "per_behavior_mode": per_behavior_mode,
+            "behavior_ids": [b for b, _ in postprocess_targets],
         }
         write_json(run_dir / "postprocess_manifest.json", post_manifest)
 

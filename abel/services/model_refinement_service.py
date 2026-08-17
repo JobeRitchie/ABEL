@@ -1050,7 +1050,7 @@ class ModelRefinementService:
     # a mismatch makes otherwise-aligned columns not directly comparable.
     _DIAG_CFG_KEYS = (
         "segment_window_frames", "segment_stride_frames",
-        "use_video_features",
+        "use_video_features", "use_r3d_features",
     )
     _DIAG_INVARIANT_KEYS = (
         "enable_egocentric_kinematics", "enable_body_length_normalization",
@@ -1203,8 +1203,10 @@ class ModelRefinementService:
         # project.yaml's feature_extraction block; honour it over any stale
         # behavior_model copy so the comparison reflects the real extraction.
         fx = project.get("feature_extraction") or {}
-        if isinstance(fx, dict) and "use_video_features" in fx:
-            cfg["use_video_features"] = bool(fx["use_video_features"])
+        if isinstance(fx, dict):
+            for key in ("use_video_features", "use_r3d_features"):
+                if key in fx:
+                    cfg[key] = bool(fx[key])
         return cfg
 
     @classmethod
@@ -1218,6 +1220,11 @@ class ModelRefinementService:
             return []
         out: list[str] = []
         for key in cls._DIAG_CFG_KEYS:
+            # A key only one side records (a project older than the setting)
+            # tells us nothing about how it extracted features — same "don't cry
+            # wolf" rule the whole comparison is skipped under.
+            if key not in host_cfg or key not in source_cfg:
+                continue
             h, s = host_cfg.get(key), source_cfg.get(key)
             if h != s:
                 out.append(f"{key}: {h} vs {s}")

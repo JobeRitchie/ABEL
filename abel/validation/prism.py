@@ -28,6 +28,7 @@ carry.
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -269,7 +270,11 @@ def prism_kappa(gen_df: pd.DataFrame) -> pd.DataFrame:
         "Cohen's kappa": pd.to_numeric(gen_df["cohen_kappa"], errors="coerce"),
         "F1": pd.to_numeric(gen_df["f1"], errors="coerce"),
     })
-    ceiling = pd.to_numeric(gen_df.get("human_ceiling_kappa"), errors="coerce")
+    # ``.get`` returns None when the column is absent, and to_numeric(None) raises —
+    # which the export's error guard swallows, taking the whole panel with it.
+    raw = gen_df["human_ceiling_kappa"] if "human_ceiling_kappa" in gen_df.columns \
+        else None
+    ceiling = pd.to_numeric(raw, errors="coerce") if raw is not None else None
     if ceiling is not None and ceiling.notna().any():
         out["Human ceiling kappa"] = ceiling.to_numpy()
     return out.sort_values("Cohen's kappa", ascending=False, ignore_index=True)
@@ -308,6 +313,135 @@ def prism_video_value(vv_df: pd.DataFrame) -> pd.DataFrame:
         out["+Video (mean)"] = pd.to_numeric(df["f1_with_video"],
                                              errors="coerce").to_numpy()
     return out
+
+
+def prism_video_gain(vv_df: pd.DataFrame) -> pd.DataFrame:
+    """Column table: the video ΔF1 per behavior, sorted, with its own error bar.
+
+    The paired table above is what you re-run the test from; this is the panel the
+    figure actually draws — one bar per behavior, ascending, so the reader sees the
+    distribution of the effect rather than two adjacent means.  SD is recovered
+    from the stored CI half-width (see :func:`sd_from_ci95`); the exact p and the
+    significance flag ride along so the asterisks are not retyped by hand.
+    """
+    if vv_df is None or vv_df.empty or "gain" not in vv_df.columns:
+        return pd.DataFrame()
+    df = vv_df[vv_df.get("error").isna() | (vv_df.get("error") == "")] \
+        if "error" in vv_df.columns else vv_df
+    if df.empty:
+        return pd.DataFrame()
+    n = pd.to_numeric(df.get("n_seeds"), errors="coerce")
+    out = pd.DataFrame({
+        "Behavior": [_row_title(p, b) for p, b in
+                     zip(df["project_id"], df["behavior_name"])],
+    })
+    _mean_sd_n(out, "Video improvement (dF1)",
+               pd.to_numeric(df["gain"], errors="coerce").to_numpy(),
+               pd.to_numeric(df.get("gain_ci95"), errors="coerce").to_numpy(),
+               n.to_numpy())
+    if "p_value" in df.columns:
+        out["PValue"] = pd.to_numeric(df["p_value"], errors="coerce").to_numpy()
+    if "significant" in df.columns:
+        out["Significant"] = df["significant"].astype(bool).astype(int).to_numpy()
+    return out.sort_values("Video improvement (dF1):Mean", ignore_index=True)
+
+
+# ── Per-behavior metrics: rarity landscape + the per-assay kappa inset ──────
+
+
+#: Metric column stem -> the label the panel prints.  PR-AUC first: it is the
+#: imbalance-sensitive axis, and macro F1 is deliberately absent (its ~0.5 floor
+#: on a rare behavior is precisely the artefact a rarity panel would report as a
+#: finding).
+_BEHAVIOR_METRIC_LABELS = [
+    ("pr_auc", "PR-AUC"),
+    ("f1", "Target-class F1"),
+    ("cohen_kappa", "Cohen's kappa"),
+]
+
+
+def prism_rarity_vs_performance(rarity_df: pd.DataFrame,
+                                metrics_df: pd.DataFrame) -> pd.DataFrame:
+    """XY Mean/SD/N: deployment prevalence (X) against every headline metric (Y).
+
+    X is the percent of session time the behavior occupies, measured from dense
+    bout detections over whole sessions — set the X axis to log scale, which is
+    where two orders of magnitude of rarity become readable.
+
+    The join is on (project, behavior), never on behavior name alone: the same
+    name in two assays is two different behaviors with two different prevalences,
+    and joining on the name would cross-multiply them.  Behaviors missing from
+    either side are dropped rather than zero-filled — an unmeasured prevalence is
+    not a prevalence of zero, and at the rare end that lie would land on the
+    exact points the panel exists to show.
+    """
+    if (rarity_df is None or rarity_df.empty
+            or metrics_df is None or metrics_df.empty):
+        return pd.DataFrame()
+    keys = ["project_id", "behavior_name"]
+    if not (set(keys) <= set(rarity_df.columns)
+            and set(keys) <= set(metrics_df.columns)):
+        return pd.DataFrame()
+    j = metrics_df.merge(rarity_df, on=keys, how="inner")
+    j = j[pd.to_numeric(j["prevalence_pct"], errors="coerce").notna()]
+    if j.empty:
+        return pd.DataFrame()
+    kept = set(map(tuple, j[keys].to_numpy()))
+    dropped = sorted(_row_title(p, b) for p, b in
+                     map(tuple, metrics_df[keys].to_numpy()) if (p, b) not in kept)
+    j = j.sort_values("prevalence_pct", ignore_index=True)
+    out = pd.DataFrame({
+        "Prevalence (% of session time)": pd.to_numeric(j["prevalence_pct"],
+                                                        errors="coerce").to_numpy(),
+    })
+    n = pd.to_numeric(j.get("n_seeds"), errors="coerce").to_numpy()
+    for stem, label in _BEHAVIOR_METRIC_LABELS:
+        if f"{stem}_mean" not in j.columns:
+            continue
+        out[f"{label}:Mean"] = pd.to_numeric(j[f"{stem}_mean"],
+                                             errors="coerce").to_numpy()
+        # Already an SD across seeds -- do NOT route it through sd_from_ci95.
+        out[f"{label}:SD"] = pd.to_numeric(j.get(f"{stem}_sd"),
+                                           errors="coerce").to_numpy()
+        out[f"{label}:N"] = n
+    # Carried so a point can be identified without re-joining anything, and so the
+    # caption can state which prevalence source the axis came from.
+    out["Behavior"] = [_row_title(p, b) for p, b in
+                       zip(j["project_id"], j["behavior_name"])]
+    out["Prevalence SD"] = pd.to_numeric(j.get("prevalence_sd"),
+                                         errors="coerce").to_numpy()
+    out["n sessions"] = pd.to_numeric(j.get("n_sessions"), errors="coerce").to_numpy()
+    if "source" in j.columns:
+        out["Prevalence source"] = j["source"].astype(str).to_numpy()
+    # A behavior silently missing from a scatter is invisible — the reader counts
+    # points and believes it is the whole set. Carried out so INDEX.txt can name it.
+    out.attrs["dropped"] = dropped
+    return out
+
+
+def prism_metric_by_assay(metrics_df: pd.DataFrame,
+                          metric: str = "cohen_kappa") -> pd.DataFrame:
+    """Ragged Column table: one column per assay, one observation per behavior.
+
+    The compact per-assay view — paste it and Prism runs the one-way ANOVA /
+    Kruskal-Wallis across assays directly.  Columns are ragged by construction
+    (assays have different behavior counts); the short ones are blank-padded,
+    which Prism reads as missing rather than as zero.
+    """
+    col = f"{metric}_mean"
+    if metrics_df is None or metrics_df.empty or col not in metrics_df.columns:
+        return pd.DataFrame()
+    df = metrics_df[["project_id", col]].copy()
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+    df = df[df[col].notna()]
+    if df.empty:
+        return pd.DataFrame()
+    cols = {}
+    for assay, grp in df.groupby("project_id", dropna=False):
+        cols[str(assay)] = sorted(grp[col].to_numpy(), reverse=True)
+    width = max(len(v) for v in cols.values())
+    return pd.DataFrame({k: list(v) + [np.nan] * (width - len(v))
+                         for k, v in sorted(cols.items())})
 
 
 # ── Ablation: one table per clip budget (Prism grids are 2-factor) ──────────
@@ -908,16 +1042,84 @@ def prism_learning_curves(lc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         piv = df.pivot_table(index="n_clips_mean", columns="__col", values=metric)
         if piv.isna().all().all():
             continue    # PR-AUC is not always computed; skip the empty file
+        # Reindex the CI/N pivots onto the value pivot's index: pivot_table can drop
+        # an all-NaN x from one metric but not another (e.g. a cold-start row with
+        # NaN F1 but a real count), leaving the columns different lengths.
         ci = (df.pivot_table(index="n_clips_mean", columns="__col", values=ci_col)
-              if ci_col in df.columns else None)
+              .reindex(piv.index) if ci_col in df.columns else None)
         n = (df.pivot_table(index="n_clips_mean", columns="__col", values="n_seeds")
-             if "n_seeds" in df.columns else None)
+             .reindex(piv.index) if "n_seeds" in df.columns else None)
         table = pd.DataFrame({"Clips labeled": piv.index.to_numpy()})
         for name in [c for c in names if c in piv.columns]:
             _mean_sd_n(table, name, piv[name].to_numpy(),
                        None if ci is None else ci.get(name),
                        None if n is None else n.get(name))
         out[fname] = table
+    return out
+
+
+# The companion to the F1/PR-AUC curves: the held-out error burden that shrinks
+# as clips are added, as a percent of the fixed held-out set. False alarms (FP)
+# and misses (FN) are the two error types the counts figure plots; true positives
+# are omitted because TP = P - FN carries no information the misses don't.
+_LC_ERROR_METRICS = (
+    ("fp_pct", "fp_pct_ci", "False alarms (FP %)", "prism_learning_curve_error_fp.csv"),
+    ("fn_pct", "fn_pct_ci", "Misses (FN %)", "prism_learning_curve_error_fn.csv"),
+)
+
+
+def prism_learning_curve_errors(lc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """``{filename: wide XY table}`` for the held-out error-rate curves.
+
+    Same shape as :func:`prism_learning_curves` — shared X = clips labeled, one
+    ``:Mean``/``:SD``/``:N`` dataset per project·behavior with the across-behavior
+    average first — but the Y is the confusion **rate** (percent of the held-out
+    set): one file for false alarms (FP %), one for misses (FN %).  SD is rebuilt
+    from the same 95% CI columns, so these bars match the F1/PR-AUC export.
+    """
+    df = lc_df.copy()
+    df["__col"] = [_row_title(p, b) for p, b in
+                   zip(df["project_id"], df["behavior_name"])]
+    is_avg = df["behavior_name"].astype(str).str.startswith("Average across")
+    names = (list(dict.fromkeys(df.loc[is_avg, "__col"]))
+             + list(dict.fromkeys(df.loc[~is_avg, "__col"])))
+
+    out: dict[str, pd.DataFrame] = {}
+    for metric, ci_col, _label, fname in _LC_ERROR_METRICS:
+        if metric not in df.columns:
+            continue
+        piv = df.pivot_table(index="n_clips_mean", columns="__col", values=metric)
+        if piv.isna().all().all():
+            continue
+        # Align CI/N onto the value index (see prism_learning_curves) so a row
+        # dropped from one metric's pivot cannot misalign the SD column.
+        ci = (df.pivot_table(index="n_clips_mean", columns="__col", values=ci_col)
+              .reindex(piv.index) if ci_col in df.columns else None)
+        n = (df.pivot_table(index="n_clips_mean", columns="__col", values="n_seeds")
+             .reindex(piv.index) if "n_seeds" in df.columns else None)
+        table = pd.DataFrame({"Clips labeled": piv.index.to_numpy()})
+        for name in [c for c in names if c in piv.columns]:
+            _mean_sd_n(table, name, piv[name].to_numpy(),
+                       None if ci is None else ci.get(name),
+                       None if n is None else n.get(name))
+        out[fname] = table
+
+    # The direct companion to the headline F1/PR-AUC average graph: a single file
+    # with the pooled curve's two error lines (FP % and FN %) side by side, so it
+    # pastes as one XY table and plots as the two-line error-rate figure.
+    avg = df[is_avg]
+    if not avg.empty:
+        combo = pd.DataFrame({"Clips labeled": sorted(avg["n_clips_mean"].unique())})
+        for metric, ci_col, label, _fname in _LC_ERROR_METRICS:
+            if metric not in avg.columns:
+                continue
+            a = (avg[["n_clips_mean", metric, ci_col, "n_seeds"]]
+                 .drop_duplicates("n_clips_mean")
+                 .set_index("n_clips_mean").reindex(combo["Clips labeled"]))
+            _mean_sd_n(combo, label, a[metric].to_numpy(),
+                       a[ci_col].to_numpy() if ci_col in a else None,
+                       a["n_seeds"].to_numpy() if "n_seeds" in a else None)
+        out["prism_learning_curve_error_rate_average.csv"] = combo
     return out
 
 
@@ -983,6 +1185,359 @@ Notes
 """
 
 
+@contextmanager
+def _guard(errors: list[str], label: str):
+    """Isolate one table's build+write so a single bad pivot cannot sink the rest.
+
+    Every export block runs inside ``with _guard(errors, "<name>"):`` — an
+    exception is recorded and the export moves on to the next table, instead of
+    aborting the whole run's Prism output (which is how a run "stops short" of
+    exporting what it needs).  Skipped tables are listed at the end of the README.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 — one table's failure must not cascade
+        errors.append(f"{label}: {type(exc).__name__}: {exc}")
+
+
+# ── The curated per-panel set ───────────────────────────────────────────────
+#
+# ``write_all`` below is exhaustive on purpose: it is the archive, and on a
+# multi-project run it emits several hundred files (one per project, per behavior,
+# per feature family).  That is the right thing for a table you have to go looking
+# for and the wrong thing for the ten you plot every time — nobody should have to
+# work out which of 354 filenames is the headline curve.
+#
+# So the panels behind the manuscript figure are ALSO written, once, under
+# ``prism/FIGURES/`` with names that say which panel they are.  Each is a single
+# pre-pivoted block: paste it into a Prism table of the stated type and it draws.
+# Nothing here is a new computation — every table is the same builder ``write_all``
+# uses, so the curated copy and the archive copy can never disagree.
+
+def _pooled_lc_panel(lc_df: pd.DataFrame) -> pd.DataFrame:
+    """The across-behaviors learning curve alone: F1 and PR-AUC on one X.
+
+    ``prism_learning_curves`` puts every behavior in the file with the average
+    first; this keeps only the average, which is the line the figure plots, and
+    pairs both metrics against the shared X so one paste draws the whole panel.
+
+    The N column is the **behavior** count, not ``n_seeds``.  It used to be n_seeds
+    summed across surviving behaviors (215 at the left edge falling to 140 at the
+    right), which a reader had to divide by the seed count to recover the "28 of 43
+    behaviors" that actually matters — a disclosure in the wrong units is not a
+    disclosure.  A separate explicit column carries the composition so the attrition
+    is legible without arithmetic.
+    """
+    is_avg = lc_df["behavior_name"].astype(str).str.startswith("Average across")
+    avg = lc_df[is_avg]
+    if avg.empty:
+        return pd.DataFrame()
+    xs = sorted(pd.to_numeric(avg["n_clips_mean"], errors="coerce").dropna().unique())
+    out = pd.DataFrame({"Clips labeled": xs})
+    a = (avg.drop_duplicates("n_clips_mean").set_index("n_clips_mean").reindex(xs))
+    n_col = "n_behaviors" if "n_behaviors" in a.columns else "n_seeds"
+    for metric, ci_col, label in (
+        ("f1_mean", "f1_ci", "Target-class F1"),
+        ("pr_auc_mean", "pr_auc_ci", "PR-AUC"),
+    ):
+        if metric not in a.columns:
+            continue
+        _mean_sd_n(out, label, a[metric].to_numpy(),
+                   a[ci_col].to_numpy() if ci_col in a.columns else None,
+                   a[n_col].to_numpy() if n_col in a.columns else None)
+    # Composition and health, plainly named — a plateau read off the F1 column is
+    # only a plateau if these hold still across the same rows.
+    for src, label in (("n_behaviors", "n behaviors contributing"),
+                       ("mcc_mean", "MCC"),
+                       ("specificity_mean", "Specificity"),
+                       ("n_degenerate", "n degenerate seeds"),
+                       ("n_calibrated", "n calibrated seeds")):
+        if src in a.columns:
+            out[label] = pd.to_numeric(a[src], errors="coerce").to_numpy()
+    return out
+
+
+def _pooled_stat_panel(df: pd.DataFrame, title_col: str, keep: list[tuple[str, str]],
+                       ) -> pd.DataFrame:
+    """A pooled-statistics table as one row-title column plus named value columns."""
+    if df is None or df.empty or title_col not in df.columns:
+        return pd.DataFrame()
+    out = pd.DataFrame({title_col.replace("_", " ").title(): df[title_col].astype(str)})
+    for src, label in keep:
+        if src in df.columns:
+            out[label] = pd.to_numeric(df[src], errors="coerce").to_numpy()
+    return out
+
+
+#: ``filename -> (Prism table type, what the panel shows)``, written into
+#: ``FIGURES/INDEX.txt`` so the folder explains itself.
+_PANEL_NOTES: dict[str, tuple[str, str]] = {
+    "fig3_learning_curve_pooled.csv": (
+        "XY, Mean/SD/N",
+        "Data efficiency. X = clips labeled, Y = target-class F1 and PR-AUC "
+        "averaged across behaviors. NOTE: the average is survivorship-biased at the "
+        "high-clip end -- rare behaviors do not have that many labels and drop out "
+        "of the mean -- so the composition CHANGES along the curve. N is the "
+        "behavior count at each x ('n behaviors contributing'); part of any "
+        "right-hand flattening is that denominator shrinking, not saturation. For a "
+        "plateau claim use learning_curve_average_balanced.csv, which holds the "
+        "cohort fixed. 'n degenerate seeds' counts collapsed fits, which score well "
+        "on target-class F1 and are excluded from the plotted line and the knee."),
+    "fig3_learning_curve_by_behavior.csv": (
+        "XY, Mean/SD/N",
+        "The same curve broken out per behavior; the pooled line is dataset A."),
+    "fig3_learning_curve_knee.csv": (
+        "Column",
+        "Saturation point (knee clips) and max target-class F1 per behavior. The "
+        "knee is the first clip count reaching 98% of that behavior's own maximum "
+        "F1 with a marginal gain under 0.01 -- quote 98%, not 95%."),
+    "fig3_ablation_gain_seeds.csv": (
+        "Grouped, replicates, 'Enter and plot replicate values'",
+        "Per-seed PAIRED dF1 over the pose-only baseline (same seed, same "
+        "subsample). Analyze -> t tests -> One sample t test vs 0 reproduces the "
+        "per-behavior p-values."),
+    "fig3_ablation_pooled_by_behavior.csv": (
+        "Column",
+        "The manuscript statistic: each enhancement's dF1 pooled ACROSS BEHAVIORS "
+        "(seeds averaged within behavior first), so n = behaviors, not seeds."),
+    "fig3_discrimination_landscape.csv": (
+        "XY / Volcano",
+        "One point per behavior pair: pose-only separability against what each "
+        "feature family adds."),
+    "fig3_discrimination_pooled_by_pair.csv": (
+        "Column",
+        "Each feature family's effect pooled ACROSS PAIRS with headroom, so n = "
+        "pairs. Pairs the pose baseline already solves are excluded -- they cannot "
+        "move and would only dilute the mean."),
+    "fig3_discrimination_volcano.csv": (
+        "Multiple variables / Volcano",
+        "One row per behavior pair x feature family. Plot ErrorRemoved (X) vs "
+        "NegLog10P (Y), coloured by FeatureFamily. A pair rescued by two families "
+        "appears once per family, so do not count rows as pairs."),
+    "fig3_generalization_kappa.csv": (
+        "Column",
+        "Held-out agreement per behavior: Cohen's kappa and target-class F1."),
+    "fig3_kappa_by_assay.csv": (
+        "Column",
+        "The same agreement collapsed to one column per assay, one observation "
+        "per behavior. Ragged by design -- assays have different behavior counts, "
+        "and the short columns are blank-padded, which Prism reads as missing. "
+        "Analyze -> One-way ANOVA / Kruskal-Wallis compares assays."),
+    "fig3_rarity_vs_performance.csv": (
+        "XY, Mean/SD/N",
+        "Performance against deployment rarity. X = percent of session time from "
+        "dense bout detections over whole sessions -- SET THE X AXIS TO LOG. This "
+        "is NOT the 'prevalence' in combined_across_projects.csv, which is the "
+        "positive share of an enriched candidate pool. Behaviors with no measured "
+        "prevalence are dropped, not zero-filled."),
+    "fig3_video_value.csv": (
+        "Column",
+        "Video dF1 per behavior, sorted ascending, with SD and the exact paired "
+        "p-value. The seed-level table for re-running the test yourself is "
+        "prism_video_value.csv in the parent folder."),
+    "fig3_modality_shares.csv": (
+        "Grouped / stacked bar",
+        "Share of each behavior's feature importance carried by each modality "
+        "(pose geometry, kinematics, video, context). Rows sum to 100%."),
+    "fig3_feature_importance_heatmap.csv": (
+        "Heatmap",
+        "Rows = feature, columns = behavior, cell = importance. All-zero feature "
+        "rows are dropped so the map is not mostly blank."),
+    "fig3_al_vs_random_f1.csv": (
+        "XY, Mean/SD/N",
+        "Active learning vs random: target-class F1 against clips reviewed."),
+    "fig3_al_vs_random_positives.csv": (
+        "XY, Mean/SD/N",
+        "Active learning vs random: positives discovered against clips reviewed. "
+        "This is the robust win -- lead with it, not with F1."),
+    "fig3_rare_discovery_pooled.csv": (
+        "XY, Mean/SD/N",
+        "Clip hunting pooled over every model: positives found against clips "
+        "reviewed, one dataset per acquisition strategy."),
+    "fig3_rare_effort_minutes.csv": (
+        "Grouped",
+        "Minutes of human review each strategy costs to reach the target. Quote "
+        "the assumed seconds-per-clip review rate in the legend."),
+}
+
+
+def write_figure_panels(out_dir: Path, **frames) -> list[Path]:
+    """Write the curated per-panel Prism tables into ``out_dir/prism/FIGURES``.
+
+    Accepts the same frames as :func:`write_all` and silently skips any panel whose
+    source analysis did not run in this run.
+    """
+    fig_dir = Path(out_dir) / "prism" / "FIGURES"
+    written: list[Path] = []
+    errors: list[str] = []
+
+    def _emit(name: str, table) -> None:
+        if table is not None and not table.empty:
+            written.append(_write(table, fig_dir / name))
+
+    lc = frames.get("lc_points_df")
+    if lc is not None and not lc.empty:
+        with _guard(errors, "fig3 learning curve"):
+            _emit("fig3_learning_curve_pooled.csv", _pooled_lc_panel(lc))
+            curves = prism_learning_curves(lc)
+            _emit("fig3_learning_curve_by_behavior.csv",
+                  curves.get("prism_learning_curve_f1.csv"))
+    knee = frames.get("lc_knee_df")
+    if knee is not None and not knee.empty:
+        with _guard(errors, "fig3 learning-curve knee"):
+            _emit("fig3_learning_curve_knee.csv", prism_learning_curve_knee(knee))
+
+    abl = frames.get("ablation_df")
+    if abl is not None and not abl.empty:
+        with _guard(errors, "fig3 ablation"):
+            seeds = prism_ablation_gain_seeds(abl)
+            # The full-data budget is the shipped-pipeline comparison; if a run used
+            # only a low-data budget, fall back to whatever single budget it has.
+            key = "all" if "all" in seeds else (next(iter(seeds), None))
+            if key is not None:
+                _emit("fig3_ablation_gain_seeds.csv", seeds[key])
+    abl_pooled = frames.get("ablation_pooled_df")
+    if abl_pooled is not None and not abl_pooled.empty:
+        with _guard(errors, "fig3 ablation pooled"):
+            _emit("fig3_ablation_pooled_by_behavior.csv", _pooled_stat_panel(
+                abl_pooled, "label", [
+                    ("clip_budget", "Clip budget"), ("n_behaviors", "n behaviors"),
+                    ("n_projects", "n projects"),
+                    ("n_untestable", "n behaviors untestable (excluded)"),
+                    ("mean_gain", "Mean dF1"), ("median_gain", "Median dF1"),
+                    ("estimate", "Mixed-model dF1"),
+                    ("ci95", "95% CI half-width"),
+                    ("df", "df"), ("p_value", "PValue"),
+                    ("q_value", "QValue (BH)"),
+                    ("icc_project", "ICC (project)"),
+                    ("n_effective", "Effective n"),
+                    ("p_naive_behavior", "PValue (behavior-as-unit, uncorrected)"),
+                    ("p_project_mean", "PValue (project means)"),
+                    ("p_sign_flip", "PValue (cluster sign-flip)"),
+                    ("n_helped", "n behaviors improved"),
+                    ("n_projects_helped", "n projects improved"),
+                ]))
+
+    disc = frames.get("discrimination_df")
+    if disc is not None and not disc.empty:
+        with _guard(errors, "fig3 discrimination"):
+            _emit("fig3_discrimination_landscape.csv",
+                  prism_discrimination_landscape(disc))
+            _emit("fig3_discrimination_volcano.csv",
+                  prism_discrimination_volcano(disc))
+    disc_pooled = frames.get("discrimination_pooled_df")
+    if disc_pooled is not None and not disc_pooled.empty:
+        with _guard(errors, "fig3 discrimination pooled"):
+            _emit("fig3_discrimination_pooled_by_pair.csv", _pooled_stat_panel(
+                disc_pooled, "label", [
+                    ("n_pairs", "n pairs"), ("n_projects", "n projects"),
+                    ("mean_auc_gain", "Mean dAUC"),
+                    ("estimate", "Mixed-model dAUC"),
+                    ("ci95_auc_gain", "95% CI half-width"),
+                    ("df", "df"), ("p_value", "PValue"),
+                    ("q_value", "QValue (BH)"),
+                    ("icc_project", "ICC (project)"),
+                    ("p_naive_pair", "PValue (pair-as-unit, uncorrected)"),
+                    ("p_project_mean", "PValue (project means)"),
+                    ("p_sign_flip", "PValue (cluster sign-flip)"),
+                    ("median_error_reduction", "Median error reduction"),
+                    ("n_improved", "n pairs improved"),
+                    # Headroom-selection exposure — see pooled_gain_by_pair.
+                    ("n_pairs_excluded", "n pairs excluded (below headroom)"),
+                    ("mean_gain_excluded", "Mean dAUC of excluded pairs"),
+                    ("frac_near_cutoff", "Frac kept pairs near cutoff"),
+                    ("r_headroom_gain", "r(headroom, gain)"),
+                    ("mean_auc_gain_all_pairs", "Mean dAUC (no headroom filter)"),
+                ]))
+
+    gen = frames.get("gen_df")
+    if gen is not None and not gen.empty:
+        with _guard(errors, "fig3 generalization"):
+            _emit("fig3_generalization_kappa.csv", prism_kappa(gen))
+
+    rarity_dropped: list[str] = []
+    beh_metrics = frames.get("behavior_metrics_df")
+    if beh_metrics is not None and not beh_metrics.empty:
+        with _guard(errors, "fig3 rarity vs performance"):
+            rar = prism_rarity_vs_performance(frames.get("rarity_df"), beh_metrics)
+            rarity_dropped = list(rar.attrs.get("dropped", [])) if not rar.empty else []
+            _emit("fig3_rarity_vs_performance.csv", rar)
+        with _guard(errors, "fig3 kappa by assay"):
+            _emit("fig3_kappa_by_assay.csv", prism_metric_by_assay(beh_metrics))
+
+    vv = frames.get("video_df")
+    if vv is not None and not vv.empty:
+        with _guard(errors, "fig3 video value"):
+            _emit("fig3_video_value.csv", prism_video_gain(vv))
+
+    shares = frames.get("bscape_shares_df")
+    if shares is not None and not shares.empty:
+        with _guard(errors, "fig3 modality shares"):
+            _emit("fig3_modality_shares.csv", prism_behaviorscape_shares(shares))
+    bs_imp = frames.get("bscape_importance_df")
+    if bs_imp is not None and not bs_imp.empty:
+        with _guard(errors, "fig3 feature importance"):
+            _emit("fig3_feature_importance_heatmap.csv",
+                  prism_behaviorscape_importance(bs_imp))
+
+    al = frames.get("al_df")
+    if al is not None and not al.empty:
+        with _guard(errors, "fig3 active learning"):
+            curves = prism_al_curves(al)
+            for src, dst in (("prism_al_curve_f1.csv", "fig3_al_vs_random_f1.csv"),
+                             ("prism_al_curve_pos_discovered.csv",
+                              "fig3_al_vs_random_positives.csv")):
+                _emit(dst, curves.get(src))
+
+    _emit("fig3_rare_discovery_pooled.csv", frames.get("rare_pooled_df"))
+    _emit("fig3_rare_effort_minutes.csv", frames.get("rare_effort_minutes_df"))
+
+    # The effort target is chosen from the run (the largest N every arm reached in
+    # every project), so it is not knowable from the filename. State it, or the
+    # panel is a bar chart of minutes-to-an-unnamed-something.
+    notes = dict(_PANEL_NOTES)
+    if rarity_dropped:
+        table_type, what = notes["fig3_rarity_vs_performance.csv"]
+        notes["fig3_rarity_vs_performance.csv"] = (
+            table_type,
+            what + f" DROPPED for want of a measured prevalence, so absent from "
+            f"the scatter ({len(rarity_dropped)}): " + ", ".join(rarity_dropped) + ".")
+    target = frames.get("rare_effort_target")
+    if target:
+        table_type, what = notes["fig3_rare_effort_minutes.csv"]
+        notes["fig3_rare_effort_minutes.csv"] = (
+            table_type,
+            f"Minutes of human review each strategy costs to find {int(target)} "
+            "confirmed positives. One row = one behavior, so n = behaviors and the "
+            "arms are paired within a row. Quote the assumed seconds-per-clip "
+            "review rate in the legend. Companion tables at the other targets are "
+            "prism_effort_to_find<N>_minutes_pooled.csv in the parent folder.")
+
+    if written:
+        lines = [
+            "ABEL validation -- Prism tables for the manuscript figure panels.",
+            "",
+            "Each file is ONE pre-pivoted block: open a Prism data table of the",
+            "stated type, click the first cell, paste. Column 1 is the row/X titles.",
+            "The exhaustive per-project archive is in the parent prism/ folder.",
+            "",
+        ]
+        for path in written:
+            table_type, what = notes.get(path.name, ("", ""))
+            lines.append(path.name)
+            if table_type:
+                lines.append(f"    Table: {table_type}.")
+            for chunk in what.split(". "):
+                if chunk.strip():
+                    lines.append(f"    {chunk.strip().rstrip('.')}.")
+            lines.append("")
+        if errors:
+            lines.append("Panels skipped (source table failed to build):")
+            lines += [f"  - {e}" for e in errors]
+        write_text(fig_dir / "INDEX.txt", "\n".join(lines))
+    return written
+
+
 def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
               video_df: pd.DataFrame | None = None,
               ablation_df: pd.DataFrame | None = None,
@@ -1008,13 +1563,16 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
     out_dir = Path(out_dir) / "prism"
     written: list[Path] = []
     sections: list[str] = []
+    errors: list[str] = []   # tables that failed to build; surfaced in the README
 
     if gen_df is not None and not gen_df.empty:
+      with _guard(errors, "kappa"):
         written.append(_write(prism_kappa(gen_df), out_dir / "prism_kappa.csv"))
         sections.append("prism_kappa.csv\n    Table: Column (or Grouped, 1 replicate).\n"
                         "    One row per behavior; Cohen's kappa + F1.\n")
 
     if video_df is not None and not video_df.empty:
+      with _guard(errors, "video_value"):
         t = prism_video_value(video_df)
         n_rep = sum(1 for c in t.columns if str(c).startswith("Pose only:"))
         written.append(_write(t, out_dir / "prism_video_value.csv"))
@@ -1024,6 +1582,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    Paired video-off vs video-on F1. Analyze -> t tests -> Paired.\n")
 
     if ablation_df is not None and not ablation_df.empty:
+      with _guard(errors, "ablation"):
         for budget, table in prism_ablation(ablation_df).items():
             path = out_dir / f"prism_ablation_{budget}.csv"
             written.append(_write(table, path))
@@ -1052,6 +1611,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    -- the feature_impact heatmap, restyle it yourself.\n")
 
     if bench_df is not None and not bench_df.empty:
+      with _guard(errors, "throughput"):
         for stage, table in prism_throughput(bench_df).items():
             written.append(_write(table, out_dir / f"prism_throughput_{stage}.csv"))
         sections.append(
@@ -1059,6 +1619,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    extract/infer are x-real-time and train is seconds.\n")
 
     if al_df is not None and not al_df.empty:
+      with _guard(errors, "al_curves"):
         for fname, table in prism_al_curves(al_df).items():
             written.append(_write(table, out_dir / fname))
         sections.append(
@@ -1066,6 +1627,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    one Y column per project·behavior·strategy (AL vs Random).\n")
 
     if calibration_df is not None and not calibration_df.empty:
+      with _guard(errors, "calibration"):
         written.append(_write(prism_calibration(calibration_df),
                               out_dir / "prism_calibration_reliability.csv"))
         sections.append(
@@ -1073,6 +1635,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    accuracy columns per series — the reliability diagram.\n")
 
     if time_budget_df is not None and not time_budget_df.empty:
+      with _guard(errors, "time_budget"):
         written.append(_write(prism_time_budget(time_budget_df),
                               out_dir / "prism_time_budget_prevalence.csv"))
         sections.append(
@@ -1080,6 +1643,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    prevalence per behavior; points are sessions.\n")
 
     if bscape_shares_df is not None and not bscape_shares_df.empty:
+      with _guard(errors, "behaviorscape_shares"):
         written.append(_write(prism_behaviorscape_shares(bscape_shares_df),
                               out_dir / "prism_behaviorscape_modality_shares.csv"))
         sections.append(
@@ -1087,6 +1651,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    Rows = behaviors, columns = modality %.\n")
 
     if bscape_importance_df is not None and not bscape_importance_df.empty:
+      with _guard(errors, "behaviorscape_importance"):
         written.append(_write(prism_behaviorscape_importance(bscape_importance_df),
                               out_dir / "prism_behaviorscape_importance.csv"))
         sections.append(
@@ -1094,6 +1659,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    columns = behavior, cell = importance (all-zero rows dropped).\n")
 
     if discrimination_df is not None and not discrimination_df.empty:
+      with _guard(errors, "discrimination"):
         for fname, table in prism_discrimination(discrimination_df).items():
             written.append(_write(table, out_dir / fname))
         sections.append(
@@ -1119,6 +1685,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
                 "    families appears once per family.\n")
 
     if discrimination_seeds_df is not None and not discrimination_seeds_df.empty:
+      with _guard(errors, "discrimination_seeds"):
         seeds = prism_discrimination_seeds(discrimination_seeds_df)
         if not seeds.empty:
             written.append(_write(seeds, out_dir / "prism_discrimination_seeds.csv"))
@@ -1129,6 +1696,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
                 "    Prism rather than pasting our PValue.\n")
 
     if accuracy_by_behavior_df is not None and not accuracy_by_behavior_df.empty:
+      with _guard(errors, "accuracy_by_behavior"):
         written.append(_write(prism_accuracy_by_behavior(accuracy_by_behavior_df),
                               out_dir / "prism_accuracy_by_behavior.csv"))
         sections.append(
@@ -1136,6 +1704,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    F1 + 95% CI per project·behavior.\n")
 
     if confusion_df is not None and not confusion_df.empty:
+      with _guard(errors, "confusion"):
         written.append(_write(prism_confusion(confusion_df),
                               out_dir / "prism_confusion.csv"))
         sections.append(
@@ -1147,16 +1716,29 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    not a bout.\n")
 
     if lc_points_df is not None and not lc_points_df.empty:
-        for fname, table in prism_learning_curves(lc_points_df).items():
-            written.append(_write(table, out_dir / fname))
-        sections.append(
-            "prism_learning_curve_<metric>.csv\n    Table: XY, 'Enter and plot error\n"
-            "    values' -> Mean, SD, N (3 subcolumns per dataset). Shared X = clips\n"
-            "    labeled; one dataset per project (dot) behavior, the across-behavior\n"
-            "    average first. SD is reconstructed from the t-based 95% CI and N, so\n"
-            "    Prism's error bars match the PNG.\n")
+        with _guard(errors, "learning_curve"):
+            for fname, table in prism_learning_curves(lc_points_df).items():
+                written.append(_write(table, out_dir / fname))
+            sections.append(
+                "prism_learning_curve_<metric>.csv\n    Table: XY, 'Enter and plot error\n"
+                "    values' -> Mean, SD, N (3 subcolumns per dataset). Shared X = clips\n"
+                "    labeled; one dataset per project (dot) behavior, the across-behavior\n"
+                "    average first. SD is reconstructed from the t-based 95% CI and N, so\n"
+                "    Prism's error bars match the PNG.\n")
+        with _guard(errors, "learning_curve_errors"):
+            err_tables = prism_learning_curve_errors(lc_points_df)
+            for fname, table in err_tables.items():
+                written.append(_write(table, out_dir / fname))
+            if err_tables:
+                sections.append(
+                    "prism_learning_curve_error_fp.csv / _error_fn.csv\n"
+                    "    Table: XY, 'Enter and plot error values' -> Mean, SD, N. The\n"
+                    "    companion to the F1/PR-AUC curves: held-out FALSE ALARMS (FP)\n"
+                    "    and MISSES (FN) as a percent of the held-out set vs. clips\n"
+                    "    labeled. Same datasets/average/error bars as the F1 file.\n")
 
     if lc_knee_df is not None and not lc_knee_df.empty:
+      with _guard(errors, "learning_curve_knee"):
         written.append(_write(prism_learning_curve_knee(lc_knee_df),
                               out_dir / "prism_learning_curve_knee.csv"))
         sections.append(
@@ -1164,6 +1746,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    (knee) in clips and the max F1 reached, per behavior.\n")
 
     if time_budget_agreement_df is not None and not time_budget_agreement_df.empty:
+      with _guard(errors, "time_budget_agreement"):
         for fname, table in prism_time_budget_agreement(time_budget_agreement_df).items():
             written.append(_write(table, out_dir / fname))
         sections.append(
@@ -1175,6 +1758,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    (LoA = bias +/- 1.96 SD).\n")
 
     if feature_roles_df is not None and not feature_roles_df.empty:
+      with _guard(errors, "feature_roles"):
         written.append(_write(prism_feature_roles(feature_roles_df),
                               out_dir / "prism_feature_roles.csv"))
         sections.append(
@@ -1183,6 +1767,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    group. Analyze -> Nonparametric -> Kruskal-Wallis reproduces the test.\n")
 
     if feature_roles_bars_df is not None and not feature_roles_bars_df.empty:
+      with _guard(errors, "feature_roles_bars"):
         written.append(_write(prism_feature_roles_bars(feature_roles_bars_df),
                               out_dir / "prism_feature_roles_bars.csv"))
         sections.append(
@@ -1190,6 +1775,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    One bar per feature modality: mean dF1 over pose-only.\n")
 
     if publication_metrics_df is not None and not publication_metrics_df.empty:
+      with _guard(errors, "publication_metrics"):
         written.append(_write(prism_publication_metrics(publication_metrics_df),
                               out_dir / "prism_publication_metrics.csv"))
         sections.append(
@@ -1197,6 +1783,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    accuracy / ROC-AUC / kappa per project -- the reviewer summary.\n")
 
     if project_accuracy_df is not None and not project_accuracy_df.empty:
+      with _guard(errors, "project_accuracy"):
         written.append(_write(prism_project_accuracy(project_accuracy_df),
                               out_dir / "prism_accuracy_by_project.csv"))
         sections.append(
@@ -1204,6 +1791,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             "    Held-out F1 per project.\n")
 
     if training_speed_df is not None and not training_speed_df.empty:
+      with _guard(errors, "training_speed"):
         speed = prism_training_speed(training_speed_df)
         if not speed.empty:      # all-zero timings are "not measured", not "instant"
             written.append(_write(speed, out_dir / "prism_training_speed.csv"))
@@ -1211,6 +1799,10 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
                 "prism_training_speed.csv\n    Table: Column. Median/mean training\n"
                 "    seconds per project.\n")
 
+    if errors:
+        sections.append(
+            "SKIPPED (these tables failed to build and were left out; the rest of\n"
+            "the export continued):\n    " + "\n    ".join(errors) + "\n")
     if written:
         written.append(write_text(out_dir / "README_PRISM.txt",
                                   _README.format(sections="\n".join(sections))))

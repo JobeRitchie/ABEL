@@ -2971,10 +2971,11 @@ class TemporalReviewTab(QWidget):
                 / self._safe_name(bid)
                 / "latest.json"
             ) if self._project_root is not None else None
+            bname = self._behaviors.display_name(bid)
             if latest_path is None or (not latest_path.exists()):
                 skipped.append(bid)
                 if progress_cb is not None:
-                    progress_cb(f"Skipping {bid}: no temporal inference artifacts found.")
+                    progress_cb(f"Skipping {bname}: no temporal inference artifacts found.")
                 continue
 
             onset = float(cfg_vals.get("onset_threshold", 0.65))
@@ -2984,7 +2985,7 @@ class TemporalReviewTab(QWidget):
                 merge_gap_frames=int(cfg_vals.get("merge_gap_frames", 4)),
             )
             if progress_cb is not None:
-                progress_cb(f"Batch postprocess {idx}/{len(settings_map)}: {bid}")
+                progress_cb(f"Batch postprocess {idx}/{len(settings_map)}: {bname}")
             manager.run_temporal_refinement_postprocess(
                 concept_id=bid,
                 config=cfg,
