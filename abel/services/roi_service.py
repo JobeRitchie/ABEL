@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,21 @@ ROI_COLORS = [
     "#FFCC80",  # ROI 8 — pale amber
 ]
 MAX_ROIS = len(ROI_COLORS)
+
+# Every feature emitted against a target zone, at frame or segment level:
+#   in_roi_1_nose, nose_to_roi_1_edge_dist, nose_roi_1_axial_abs_p90,
+#   roi_1_present, nose_to_target_dist_max, head_angle_to_target_mean.
+_ROI_COLUMN_RE = re.compile(r"(^|_)roi_\d+(_|$)|_to_target(_|$)|_angle_to_target(_|$)")
+
+
+def is_roi_column(name: str) -> bool:
+    """True when *name* is a feature computed against a target-zone ROI.
+
+    Such columns go all-NaN when the session's ROI resolves to no area, so
+    callers use this to tell whether a model actually depends on ROIs before
+    deciding that a missing zone matters.
+    """
+    return bool(_ROI_COLUMN_RE.search(str(name)))
 
 
 class ROIService:
@@ -197,6 +213,31 @@ class ROIService:
         """Return the primary (first) target-zone ROI.  Backward-compatible."""
         rois = self.resolve_target_rois(project_root, subject_id)
         return rois[0] if rois else self._default_roi()
+
+    def subjects_without_target_area(
+        self, project_root: Path, subject_keys: list[str]
+    ) -> list[str]:
+        """Return the *subject_keys* whose target zones all resolve to no area.
+
+        A subject with no ``subject_rois`` entry falls back to the project
+        defaults, which are a zero-size box unless the project draws one.  That
+        resolves silently, and every downstream ROI/target feature then comes out
+        all-NaN (see ``context_feature_service._roi_point_features``) — models
+        that lean on those features score such a session off a constant input.
+        Callers use this to refuse the run instead of emitting a flat trace.
+
+        A subject counts as covered when *any* of its zones has area, matching
+        ``resolve_target_rois``' per-slot project fallback.
+        """
+        from abel.utils import roi_geometry
+
+        return [
+            key for key in subject_keys
+            if not any(
+                roi_geometry.roi_has_area(roi)
+                for roi in self.resolve_target_rois(project_root, key)
+            )
+        ]
 
     def resolve_subject_crop_roi(
         self, project_root: Path, subject_id: str | None = None

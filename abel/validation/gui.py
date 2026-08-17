@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from abel.ui.raw_data_warning import confirm_run_with_missing_raw_data
 from abel.validation import bundle, pdf_report, subsample
+from abel.validation.analyses import review_effort
 from abel.validation.analyses.discrimination import FEATURE_SET_LABELS
 from abel.validation.analyses.learning_curve import DEFAULT_SIZES
 from abel.validation.datamodel import ProjectRef
@@ -40,7 +41,8 @@ from abel.validation.plots import LEARNING_CURVE_VIEWS
 from abel.validation.runner import (
     ANALYSIS_ABLATION, ANALYSIS_AL_CURVE, ANALYSIS_BEHAVIORSCAPE,
     ANALYSIS_DISCRIMINATION, ANALYSIS_GENERALIZATION, ANALYSIS_LABELS,
-    ANALYSIS_LEARNING_CURVE, ANALYSIS_RARE_DISCOVERY, ANALYSIS_THROUGHPUT,
+    ANALYSIS_LEARNING_CURVE, ANALYSIS_RARE_DISCOVERY, ANALYSIS_REVIEW_EFFORT,
+    ANALYSIS_THROUGHPUT,
     ANALYSIS_VIDEO_VALUE, FIGURE3_ANALYSES, FULL_SUITE,
     MANUSCRIPT_LC_SIZES, MANUSCRIPT_MAX_PAIRS, MANUSCRIPT_NEG_PER_POS,
     MANUSCRIPT_RARE_SEED_POS,
@@ -477,6 +479,55 @@ class _BenchmarkWorker(QRunnable):
             self.signals.progress.emit("Benchmark complete.", 1.0)
             self.signals.finished.emit({
                 "images": [png], "tables": {"Throughput": csv_path},
+                "summary": summary, "out_dir": self.out_dir})
+        except Exception:
+            self.signals.error.emit(traceback.format_exc())
+
+
+class _ReviewEffortWorker(QRunnable):
+    """Human clip-review effort ledger — a cheap read of the decision logs."""
+
+    def __init__(self, projects, out_dir, break_sec: float, batch_sec: float) -> None:
+        super().__init__()
+        self.projects = projects
+        self.out_dir = Path(out_dir)
+        self.break_sec = float(break_sec)
+        self.batch_sec = float(batch_sec)
+        self.signals = _JobSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from abel.validation.analyses import review_effort  # noqa: PLC0415
+
+            total = max(1, len(self.projects))
+            results: list = []
+            for i, project in enumerate(self.projects):
+                self.signals.progress.emit(
+                    f"[{project.name}] reading review decisions…", i / total)
+                results.append(review_effort.measure_project(
+                    project, break_sec=self.break_sec, batch_sec=self.batch_sec))
+
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = self.out_dir / "review_effort.csv"
+            review_effort.results_to_frame(results).to_csv(csv_path, index=False)
+            tables = {"Review effort": csv_path}
+            pooled = review_effort.pooled_to_frame(results)
+            if not pooled.empty:
+                pooled_path = self.out_dir / "review_effort_pooled.csv"
+                pooled.to_csv(pooled_path, index=False)
+                tables["Pooled summary"] = pooled_path
+            png = review_effort.plot_review_effort(
+                results, self.out_dir / "review_effort.png")
+
+            summary = review_effort.summary_text(results)
+            failed = [r for r in results if r.error]
+            if failed:
+                summary += "\n\nNot measured:\n" + "\n".join(
+                    f"  • {r.project_id}: {r.error}" for r in failed)
+            self.signals.progress.emit("Review effort measured.", 1.0)
+            self.signals.finished.emit({
+                "images": [png], "tables": tables,
                 "summary": summary, "out_dir": self.out_dir})
         except Exception:
             self.signals.error.emit(traceback.format_exc())
@@ -1187,6 +1238,7 @@ class ValidationWindow(QMainWindow):
         self._tabs.addTab(self._bscape_tab, "Behaviorscape")
         self._tabs.addTab(self._build_video_value_tab(), "Video Features")
         self._tabs.addTab(self._build_r3d_value_tab(), "R3D Value")
+        self._tabs.addTab(self._build_review_effort_tab(), "Review Effort")
         self._tabs.addTab(self._build_throughput_tab(), "Throughput")
         self._tabs.addTab(self._build_feature_demo_tab(), "Feature Demo")
         self._tabs.addTab(self._build_log_tab(), "Log")
@@ -1382,6 +1434,11 @@ class ValidationWindow(QMainWindow):
                 "Pools feature importance across every project, so it is most "
                 "informative with 2+ projects loaded. Also required, alongside the "
                 "ablation, for the feature-roles clustering.",
+            ANALYSIS_REVIEW_EFFORT:
+                "How much human time the labels cost: seconds per clip, total active "
+                "review hours, and review hours per hour of video. Reads each "
+                "project's review decision log — nothing is trained, so it is nearly "
+                "free to tick.",
         }
         for key in FULL_SUITE:
             label = ANALYSIS_LABELS.get(key, key)
@@ -2440,6 +2497,98 @@ class ValidationWindow(QMainWindow):
 
         self._bench_panel = _ResultPanel(title="Pipeline throughput")
         return _split_tab([intro, box, run, self._bench_status], self._bench_panel)
+
+    def _build_review_effort_tab(self) -> QWidget:
+        intro = _explain(
+            "Human review effort: what did labeling actually cost? Reads each added\n"
+            "project's review decision log — nothing is trained and nothing is written\n"
+            "back to the project, so this takes about a second.\n"
+            "\n"
+            "A clip's review time is the gap to the previous decision by the same\n"
+            "reviewer: you look, you judge, you commit. Two kinds of gap are NOT review\n"
+            "time and are excluded:\n"
+            "• under the bulk-action threshold — one UI action (an assign-to-selection,\n"
+            "  a held-down shortcut, a temporal-review interval tiling into windows)\n"
+            "  writing many decisions in one loop, not a human looking at clips.\n"
+            "• over the break threshold — the reviewer walked away.\n"
+            "\n"
+            "Because the first clip after every break has no measurable gap, the hours\n"
+            "reported are a floor. The table also carries an adjusted total that adds\n"
+            "those clips back at the project's own median rate.\n"
+            "\n"
+            "Labels imported from another project are excluded entirely (they are not\n"
+            "this project's human work); Temporal Review corrections are counted in\n"
+            "their own column but never timed.")
+
+        box = QGroupBox("Gap thresholds"); form = QFormLayout(box)
+        self._effort_batch = QDoubleSpinBox()
+        self._effort_batch.setRange(0.0, 5.0)
+        self._effort_batch.setSingleStep(0.01)
+        self._effort_batch.setDecimals(2)
+        self._effort_batch.setSuffix(" s")
+        self._effort_batch.setValue(review_effort.BATCH_SEC)
+        self._effort_batch.setToolTip(
+            "Gaps shorter than this are one bulk UI action, not a per-clip look. "
+            "Raise it if your bulk operations are slower than the default.")
+        form.addRow("Bulk-action below:", self._effort_batch)
+
+        self._effort_break = QDoubleSpinBox()
+        self._effort_break.setRange(5.0, 3600.0)
+        self._effort_break.setSingleStep(30.0)
+        self._effort_break.setDecimals(0)
+        self._effort_break.setSuffix(" s")
+        self._effort_break.setValue(review_effort.BREAK_SEC)
+        self._effort_break.setToolTip(
+            "Gaps longer than this count as the reviewer stepping away and are not "
+            "charged to any clip. Lower it and genuine slow clips get dropped; raise "
+            "it and coffee breaks get billed as review time.")
+        form.addRow("Break above:", self._effort_break)
+
+        run = QPushButton("Measure Review Effort"); run.setObjectName("runBtn")
+        run.clicked.connect(self._run_review_effort)
+        self._effort_run_btn = run
+
+        self._effort_status = QLabel(""); self._effort_status.setWordWrap(True)
+        self._effort_status.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._effort_status.setStyleSheet("color:#a6adc8; font-size:11px;")
+
+        self._effort_panel = _ResultPanel(title="Human review effort")
+        return _split_tab([intro, box, run, self._effort_status], self._effort_panel)
+
+    def _run_review_effort(self) -> None:
+        if self._busy:
+            QMessageBox.information(self, "Busy", "A run is already in progress.")
+            return
+        projects = list(self._projects.values())
+        if not projects:
+            QMessageBox.warning(self, "No projects",
+                                "Add at least one project on the Projects tab first.")
+            return
+        base = self._output_dir or Path(tempfile.gettempdir()) / "abel_review_effort"
+        out_dir = Path(base) / f"review_effort_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        self._set_busy(True)
+        self._effort_status.setText("Reading review decision logs…")
+        self._log_msg(f"Review effort: projects={[p.name for p in projects]}, "
+                      f"out={out_dir}")
+        worker = _ReviewEffortWorker(projects, out_dir,
+                                     self._effort_break.value(),
+                                     self._effort_batch.value())
+        worker.signals.progress.connect(self._on_progress)
+        worker.signals.finished.connect(self._on_review_effort_finished)
+        worker.signals.error.connect(self._on_job_error)
+        self._effort_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_review_effort_finished(self, result: object) -> None:
+        self._set_busy(False); self._progress.setValue(100)
+        if not isinstance(result, dict):
+            return
+        self._effort_panel.set_simple(result.get("images") or [], result.get("tables"),
+                                      folder=result.get("out_dir"))
+        self._effort_status.setText(str(result.get("summary", "")))
+        self._log_msg("Review effort measured.")
+        self.statusBar().showMessage("Review effort ready.", 8000)
 
     def _run_benchmark(self) -> None:
         if self._busy:
@@ -3521,6 +3670,16 @@ class ValidationWindow(QMainWindow):
             self._bench_panel.set_simple(th_imgs, {"Throughput": th_dir / "benchmark.csv"},
                                          folder=th_dir)
             self._report_figures("Throughput", th_imgs)
+        if ANALYSIS_REVIEW_EFFORT in analyses:
+            re_dir = out.run_dir / "review_effort"
+            re_imgs = sorted(re_dir.glob("*.png"))
+            self._effort_panel.set_simple(re_imgs, {
+                "Review effort": re_dir / "review_effort.csv",
+                "Pooled summary": re_dir / "review_effort_pooled.csv",
+            }, folder=re_dir)
+            self._report_figures("Review effort", re_imgs, hint=(
+                "Needs at least two timestamped clip-review decisions in a project's "
+                "review log."))
 
         # The consolidated summary. Findings are cheap and always shown; the PDF
         # render needs the GUI thread (QtWebEngine wants an event loop), which is

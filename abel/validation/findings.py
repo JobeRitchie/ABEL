@@ -70,6 +70,7 @@ class FindingsInput:
     al_results: list = field(default_factory=list)
     vv_results: list = field(default_factory=list)
     bench_results: list = field(default_factory=list)
+    effort_results: list = field(default_factory=list)
     bscape_stats: object = None
     bscape_data: object = None
 
@@ -798,6 +799,94 @@ def _throughput_findings(inp: FindingsInput) -> list[Finding]:
     return out
 
 
+def _review_effort_findings(inp: FindingsInput) -> list[Finding]:
+    """What the labels cost a human, and the caveats on reading that as a total."""
+    from abel.validation.analyses import review_effort  # noqa: PLC0415
+
+    usable = [r for r in inp.effort_results if r is not None and not r.error]
+    if not usable:
+        return []
+    pooled = review_effort.pooled_summary(usable)
+    if not pooled:
+        return []
+
+    out: list[Finding] = []
+    detail = (f"Pooled over {int(pooled['n_clips_timed']):,} timed clips in "
+              f"{int(pooled['n_projects'])} project(s): IQR "
+              f"{_f(pooled['p25_sec'], 1)}–{_f(pooled['p75_sec'], 1)} s, p90 "
+              f"{_f(pooled['p90_sec'], 1)} s, {_f(pooled['clips_per_hour'], 0)} "
+              "clips/hour sustained.")
+    out.append(Finding(
+        "Review effort",
+        f"Labeling cost {_f(pooled['active_hours'], 1)} hours of human clip review, "
+        f"at a median {_f(pooled['median_sec'], 1)} s per clip.",
+        detail,
+    ))
+
+    if "review_min_per_video_hour" in pooled:
+        anchors = [
+            (f"{p:g}×", pooled.get(f"manual_hours_{p:g}x"),
+             pooled.get(f"saving_factor_{p:g}x"))
+            for p in review_effort.MANUAL_PASSES
+        ]
+        anchors = [(lab, h, s) for lab, h, s in anchors
+                   if h is not None and s is not None and math.isfinite(s)]
+        if anchors:
+            n_all = int(pooled.get("n_projects", 0))
+            n_vid = int(pooled.get("n_projects_with_video", n_all))
+            # Every ratio below is over the projects whose footage could be measured,
+            # which may be fewer than were reviewed — say so rather than let the two
+            # hour figures silently disagree.
+            scope = ("" if n_vid >= n_all else
+                     f" Measured over the {n_vid} of {n_all} projects whose video "
+                     f"duration could be read ({_f(pooled.get('video_active_hours'), 1)} "
+                     "h of review between them).")
+            out.append(Finding(
+                "Review effort",
+                f"That is {_f(pooled['review_min_per_video_hour'], 1)} review-minutes "
+                f"per hour of video — "
+                f"{_f(anchors[0][2], 0)}–{_f(anchors[-1][2], 0)}× less human time than "
+                "scoring every frame by hand.",
+                f"{_f(pooled['video_hours'], 0)} h of footage; manual scoring at "
+                + ", ".join(f"{lab} real-time = {_f(h, 0)} h" for lab, h, _ in anchors)
+                + ". The comparison is against watching the whole recording, which is "
+                  "what a manual ethogram requires; ABEL's reviewer saw "
+                + (_pct(pooled['footage_reviewed_frac'], 2)
+                   if "footage_reviewed_frac" in pooled else "a small fraction")
+                + " of it." + scope,
+            ))
+
+    out.append(Finding(
+        "Review effort",
+        "Review hours are a floor, not a total — only time *between* consecutive "
+        "decisions is counted.",
+        f"Gaps under {review_effort.BATCH_SEC:g} s are one bulk UI action and gaps "
+        f"over {review_effort.BREAK_SEC:g} s are breaks; neither is charged to a "
+        "clip, so the first clip after every break contributes nothing. Adding those "
+        "back at each project's median rate gives "
+        f"{_f(pooled.get('active_hours_adjusted'), 1)} h. Time spent thinking before "
+        "the first decision, and any earlier pass over a re-reviewed clip (the log "
+        "keeps only the latest), are invisible.",
+        KIND_CAVEAT,
+    ))
+
+    median = pooled.get("median_sec", float("nan"))
+    assumed = review_effort.ASSUMED_SEC_PER_CLIP
+    if math.isfinite(median) and median > 0:
+        out.append(Finding(
+            "Review effort",
+            f"The measured rate is {_f(median, 1)} s/clip, against the "
+            f"{assumed:g} s/clip the rare-discovery effort figures assume.",
+            f"Those figures convert clip budgets to minutes at a fixed "
+            f"{assumed:g} s/clip, so they overstate hunting time by about "
+            f"{_f(assumed / median, 1)}× relative to this reviewer's measured pace. "
+            "Nothing here changes that constant — it is reported so the two can be "
+            "read together.",
+            KIND_CAVEAT,
+        ))
+    return out
+
+
 # ── entry point ─────────────────────────────────────────────────────────────
 
 _DERIVERS = (
@@ -813,6 +902,7 @@ _DERIVERS = (
     _video_value_findings,
     _behaviorscape_findings,
     _throughput_findings,
+    _review_effort_findings,
 )
 
 

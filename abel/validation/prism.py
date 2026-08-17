@@ -655,6 +655,51 @@ def prism_throughput(bench_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return tables
 
 
+# ── Review effort: what the labels cost a human ─────────────────────────────
+
+
+def prism_review_effort(effort_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """``{name: table}`` — per-clip time and total effort, which don't share units.
+
+    ``per_clip`` is a Column table (one row per project, seconds) for the "how long
+    does one clip take" bar; ``hours`` is a Grouped table pairing each project's
+    human review hours against the manual-scoring hours the same footage would
+    cost, which is the paired comparison the effort claim rests on.
+    """
+    tables: dict[str, pd.DataFrame] = {}
+    ok = effort_df[effort_df.get("error").isna() | (effort_df.get("error") == "")] \
+        if "error" in effort_df.columns else effort_df
+    ok = ok[pd.to_numeric(ok.get("n_clips_timed"), errors="coerce").fillna(0) > 0]
+    if ok.empty:
+        return tables
+
+    def _num(col: str):
+        return pd.to_numeric(ok.get(col), errors="coerce").to_numpy()
+
+    tables["per_clip"] = pd.DataFrame({
+        "Project": ok["project"].astype(str).to_numpy(),
+        "Median s/clip": _num("median_sec_per_clip"),
+        "Mean s/clip": _num("mean_sec_per_clip"),
+        "p25 s/clip": _num("p25_sec_per_clip"),
+        "p75 s/clip": _num("p75_sec_per_clip"),
+        "Clips/hour": _num("clips_per_hour"),
+        "Clips timed": _num("n_clips_timed"),
+    })
+
+    hours = pd.DataFrame({
+        "Project": ok["project"].astype(str).to_numpy(),
+        "ABEL clip review (h)": _num("active_review_hours"),
+    })
+    for col in ok.columns:
+        name = str(col)
+        if name.startswith("manual_hours_"):
+            hours[f"Manual {name.removeprefix('manual_hours_')} real-time (h)"] = _num(name)
+    hours["Video in project (h)"] = _num("video_hours")
+    hours["Review-h per video-h"] = _num("review_hours_per_video_hour")
+    tables["hours"] = hours
+    return tables
+
+
 # ── Active learning: wide XY learning curves ────────────────────────────────
 
 _AL_STRATEGY = {"active_learning": "AL", "random": "Random"}
@@ -1542,6 +1587,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
               video_df: pd.DataFrame | None = None,
               ablation_df: pd.DataFrame | None = None,
               bench_df: pd.DataFrame | None = None,
+              review_effort_df: pd.DataFrame | None = None,
               al_df: pd.DataFrame | None = None,
               calibration_df: pd.DataFrame | None = None,
               time_budget_df: pd.DataFrame | None = None,
@@ -1617,6 +1663,16 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
         sections.append(
             "prism_throughput_<stage>.csv\n    Table: Column. Split by stage because\n"
             "    extract/infer are x-real-time and train is seconds.\n")
+
+    if review_effort_df is not None and not review_effort_df.empty:
+      with _guard(errors, "review_effort"):
+        for name, table in prism_review_effort(review_effort_df).items():
+            written.append(_write(table, out_dir / f"prism_review_effort_{name}.csv"))
+        sections.append(
+            "prism_review_effort_per_clip.csv\n    Table: Column. One row per project;\n"
+            "    median/mean seconds a reviewer spent per clip.\n"
+            "prism_review_effort_hours.csv\n    Table: Grouped. Human review hours\n"
+            "    beside the manual frame-by-frame hours the same footage would cost.\n")
 
     if al_df is not None and not al_df.empty:
       with _guard(errors, "al_curves"):

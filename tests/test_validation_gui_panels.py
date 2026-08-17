@@ -38,12 +38,14 @@ from abel.validation.plots import LEARNING_CURVE_VIEWS  # noqa: E402
 from abel.validation.runner import (  # noqa: E402
     ANALYSIS_ABLATION, ANALYSIS_AL_CURVE, ANALYSIS_DISCRIMINATION,
     ANALYSIS_GENERALIZATION, ANALYSIS_LEARNING_CURVE, ANALYSIS_RARE_DISCOVERY,
+    ANALYSIS_REVIEW_EFFORT,
     RunOutputs,
 )
 
 ALL_ANALYSES = [
     ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_DISCRIMINATION,
     ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE, ANALYSIS_RARE_DISCOVERY,
+    ANALYSIS_REVIEW_EFFORT,
 ]
 
 PROJ = "proj1"          # runner._tag() of a project id
@@ -115,6 +117,11 @@ def _fake_run_dir(root: Path) -> Path:
     _csv(run / "prism" / "prism_discovery_fullpool.csv")
     _csv(run / "prism" / "prism_rarity_scaling.csv")
 
+    # review effort (labeling-time ledger)
+    _png(run / "review_effort" / "review_effort.png")
+    _csv(run / "review_effort" / "review_effort.csv")
+    _csv(run / "review_effort" / "review_effort_pooled.csv")
+
     # cross-project (written on every run)
     _png(run / "cross_project" / "0_forest_by_behavior.png")
     _png(run / "cross_project" / "accuracy_bars.png")
@@ -150,6 +157,7 @@ def populated_window(qapp, tmp_path):
         ("_gen_panel", "Generalization"),
         ("_al_panel", "Active Learning"),
         ("_rare_panel", "Rare Discovery"),
+        ("_effort_panel", "Review Effort"),
         ("_cross_panel", "Cross-Project"),
     ],
 )

@@ -332,3 +332,54 @@ def test_attach_dense_is_a_noop_on_empty_windows(tmp_path):
     empty = pd.DataFrame(columns=["segment_id", "session_id", "start_frame", "end_frame"])
     out = R3DFeatureService().attach_dense(tmp_path, empty, "s1", window_frames=15)
     assert out.empty
+
+
+def _dense_fixture(tmp_path):
+    video = tmp_path / "s1.mp4"
+    pose = tmp_path / "s1.h5"
+    video.write_bytes(b"video")
+    pose.write_bytes(b"pose")
+    svc = R3DFeatureService()
+    sig = svc._dense_signature(None, video, pose)
+    anchors = np.array([0, 15, 30], dtype=int)
+    emb = np.arange(3 * R3D_DIMS, dtype=np.float32).reshape(3, R3D_DIMS)
+    return svc, video, pose, sig, anchors, emb
+
+
+def test_dense_anchors_survive_a_round_trip(tmp_path):
+    """Dense anchors are reusable across runs — that is the whole point."""
+    svc, _video, _pose, sig, anchors, emb = _dense_fixture(tmp_path)
+    svc._store_dense_anchors(tmp_path, "s1", 15, sig, anchors, emb, lambda _m: None)
+
+    found = svc._load_dense_anchors(tmp_path, "s1", 15, sig)
+    assert set(found) == {0, 15, 30}
+    assert np.allclose(found[15], emb[1])
+
+
+def test_dense_anchors_live_outside_the_temporal_cache(tmp_path):
+    """Clearing the temporal cache must not cost GPU-hours of embedding."""
+    svc, _video, _pose, sig, anchors, emb = _dense_fixture(tmp_path)
+    svc._store_dense_anchors(tmp_path, "s1", 15, sig, anchors, emb, lambda _m: None)
+
+    from abel.temporal_refinement.temporal_refinement_service import TemporalRefinementService
+
+    temporal = TemporalRefinementService()
+    temporal.set_project(tmp_path)
+    temporal.clear_temporal_tab_cache(clear_run_artifacts=True)
+
+    assert svc._load_dense_anchors(tmp_path, "s1", 15, sig), "R3D anchors were cleared"
+
+
+def test_dense_anchors_are_dropped_when_the_video_changes(tmp_path):
+    """The embeddings are a function of the pixels; new pixels invalidate them."""
+    svc, video, pose, sig, anchors, emb = _dense_fixture(tmp_path)
+    svc._store_dense_anchors(tmp_path, "s1", 15, sig, anchors, emb, lambda _m: None)
+
+    video.write_bytes(b"a re-encoded video")
+    assert svc._load_dense_anchors(tmp_path, "s1", 15, svc._dense_signature(None, video, pose)) == {}
+
+
+def test_dense_anchors_of_another_window_length_are_not_reused(tmp_path):
+    svc, _video, _pose, sig, anchors, emb = _dense_fixture(tmp_path)
+    svc._store_dense_anchors(tmp_path, "s1", 15, sig, anchors, emb, lambda _m: None)
+    assert svc._load_dense_anchors(tmp_path, "s1", 30, sig) == {}

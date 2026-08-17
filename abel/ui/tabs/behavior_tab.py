@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -30,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from abel.models.schemas import BehaviorDefinition
-from abel.services.behavior_service import BehaviorService
+from abel.services.behavior_service import NO_BEHAVIOR_ID, BehaviorService
 from abel.storage.file_store import read_yaml, write_yaml
 
 logger = logging.getLogger("abel")
@@ -85,6 +86,43 @@ class BehaviorTab(QWidget):
             btn_bar.addWidget(b)
         btn_bar.addStretch()
 
+        # ── Preset bar ──────────────────────────────────────────────────
+        self._preset_combo = QComboBox()
+        self._preset_combo.setToolTip(
+            "Starting sets of behavior definitions for common assays.\n"
+            "Applying a preset adds any of its behaviors that this project does not\n"
+            "already define by name; nothing existing is changed or removed."
+        )
+        # Size from the font, not fixed pixels, so the names stay readable under
+        # Windows display scaling.
+        self._preset_combo.setMinimumWidth(
+            self.fontMetrics().horizontalAdvance("Elevated Plus Maze") + 40
+        )
+        self._preset_combo.currentIndexChanged.connect(self._on_preset_selection_changed)
+
+        apply_preset_btn = QPushButton("Apply")
+        apply_preset_btn.setToolTip("Add this preset's behaviors to the project.")
+        apply_preset_btn.clicked.connect(self._apply_preset)
+
+        save_preset_btn = QPushButton("Save as Preset…")
+        save_preset_btn.setToolTip(
+            "Save this project's behavior definitions as a reusable named preset,\n"
+            "available in every project on this computer."
+        )
+        save_preset_btn.clicked.connect(self._save_current_as_preset)
+
+        self._delete_preset_btn = QPushButton("🗑")
+        self._delete_preset_btn.setToolTip("Delete the selected saved preset.")
+        self._delete_preset_btn.setFixedWidth(int(self.fontMetrics().height() * 2.4))
+        self._delete_preset_btn.clicked.connect(self._delete_preset)
+
+        preset_bar = QHBoxLayout()
+        preset_bar.addWidget(QLabel("Preset:"))
+        preset_bar.addWidget(self._preset_combo, 1)
+        preset_bar.addWidget(apply_preset_btn)
+        preset_bar.addWidget(self._delete_preset_btn)
+        preset_bar.addWidget(save_preset_btn)
+
         self._co_occurring_chk = QCheckBox("Allow co-occurring behavior labels (multi-label per clip)")
         self._co_occurring_chk.setToolTip(
             "When enabled, the review and seed tabs allow assigning more than one behavior\n"
@@ -95,6 +133,7 @@ class BehaviorTab(QWidget):
 
         left = QVBoxLayout()
         left.addLayout(btn_bar)
+        left.addLayout(preset_bar)
         left.addWidget(self._table)
         left.addWidget(self._co_occurring_chk)
 
@@ -114,6 +153,7 @@ class BehaviorTab(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.addWidget(splitter)
 
+        self._refresh_presets()
         self._set_form_enabled(False)
 
     # ------------------------------------------------------------------
@@ -441,8 +481,123 @@ class BehaviorTab(QWidget):
         )
         self._f_color_btn.setText(color)
 
-    def _show_template_dialog(self) -> None:
-        pass  # Templates removed
+    # ------------------------------------------------------------------
+    # Presets
+    # ------------------------------------------------------------------
+
+    def _refresh_presets(self, select: str | None = None) -> None:
+        """Reload the preset dropdown, keeping the current selection if it survives."""
+        current = select or self._preset_combo.currentText()
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.clear()
+        self._preset_combo.addItems(self._service.preset_names())
+        idx = self._preset_combo.findText(current)
+        self._preset_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._preset_combo.blockSignals(False)
+        self._on_preset_selection_changed()
+
+    def _on_preset_selection_changed(self) -> None:
+        name = self._preset_combo.currentText()
+        self._delete_preset_btn.setEnabled(
+            bool(name) and not self._service.is_builtin_preset(name)
+        )
+        if name:
+            names = [str(d.get("name", "")) for d in self._service.preset_definitions(name)]
+            self._preset_combo.setItemData(
+                self._preset_combo.currentIndex(), ", ".join(names), Qt.ItemDataRole.ToolTipRole
+            )
+
+    def _apply_preset(self) -> None:
+        name = self._preset_combo.currentText().strip()
+        if not name:
+            return
+        if not self._project_root:
+            QMessageBox.warning(self, "No Project", "Open a project before applying a preset.")
+            return
+        definitions = self._service.preset_definitions(name)
+        if not definitions:
+            QMessageBox.information(self, "Preset", f"Preset '{name}' contains no behaviors.")
+            return
+        existing = {b.name.strip().lower() for b in self._service.behaviors}
+        new_names = [
+            str(d.get("name", "")) for d in definitions
+            if str(d.get("name", "")).strip().lower() not in existing
+        ]
+        if not new_names:
+            QMessageBox.information(
+                self, "Preset",
+                f"This project already defines every behavior in '{name}'.",
+            )
+            return
+        result = QMessageBox.question(
+            self, "Apply Preset",
+            f"Add {len(new_names)} behavior(s) from '{name}'?\n\n"
+            + "\n".join(f"• {n}" for n in new_names)
+            + "\n\nExisting behaviors are left unchanged.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        added = self._service.apply_preset(name)
+        self.refresh()
+        logger.info("Applied behavior preset '%s' (%d added)", name, added)
+        QMessageBox.information(self, "Apply Preset", f"Added {added} behavior(s) from '{name}'.")
+
+    def _save_current_as_preset(self) -> None:
+        behaviors = [
+            b for b in self._service.behaviors
+            if str(b.behavior_id).strip() != NO_BEHAVIOR_ID
+        ]
+        if not behaviors:
+            QMessageBox.information(
+                self, "Save Preset", "Define at least one behavior before saving a preset."
+            )
+            return
+        name, ok = QInputDialog.getText(self, "Save Preset", "Preset name:")
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "Save Preset", "A preset name is required.")
+            return
+        if self._service.is_builtin_preset(name):
+            QMessageBox.warning(
+                self, "Save Preset", f"'{name}' is a built-in preset. Choose another name."
+            )
+            return
+        overwrite = False
+        if name in self._service.preset_names():
+            result = QMessageBox.question(
+                self, "Save Preset",
+                f"A preset named '{name}' already exists. Replace it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if result != QMessageBox.StandardButton.Yes:
+                return
+            overwrite = True
+        try:
+            count = self._service.save_preset(name, overwrite=overwrite)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save Preset", str(exc))
+            return
+        self._refresh_presets(select=name)
+        QMessageBox.information(
+            self, "Save Preset", f"Saved '{name}' with {count} behavior(s)."
+        )
+
+    def _delete_preset(self) -> None:
+        name = self._preset_combo.currentText().strip()
+        if not name or self._service.is_builtin_preset(name):
+            return
+        result = QMessageBox.question(
+            self, "Delete Preset",
+            f"Delete the saved preset '{name}'?\n\nBehaviors already added to projects are not affected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        if self._service.delete_preset(name):
+            self._refresh_presets()
 
     def _export(self) -> None:
         if not self._service.behaviors:

@@ -155,6 +155,14 @@ SECTIONS: tuple[SectionSpec, ...] = (
         blurb="Wall-clock time per pipeline stage on one representative session per "
               "project, normalized by the video's true duration.",
     ),
+    SectionSpec(
+        "Review effort", "Human review effort (labeling time)",
+        figures=FigureSpec("review_effort", ("review_effort.png",), 1),
+        table=TableSpec("review_effort", "review_effort.csv"),
+        blurb="What the labels cost in human time, measured from the gaps between "
+              "consecutive review decisions. Bulk UI actions and breaks are excluded, "
+              "so the hours are a floor.",
+    ),
 )
 
 _CSS = """

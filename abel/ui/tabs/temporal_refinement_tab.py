@@ -1932,7 +1932,11 @@ class TemporalRefinementTab(QWidget):
 
             "for the current behavior scope?\n\n"
 
-            "This forces the next run to recompute inference outputs.",
+            "This forces the next run to recompute inference outputs.\n\n"
+
+            "R3D video embeddings are kept — they only change when the video "
+
+            "or pose does, and re-computing them costs GPU-hours.",
 
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
 

@@ -66,6 +66,7 @@ import pandas as pd
 
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
+from abel.storage.file_store import atomic_write_parquet, read_json, write_json
 
 logger = logging.getLogger("abel")
 
@@ -78,6 +79,7 @@ _BATCH = 64
 _CROP_BODY_MULT = 2.5
 _CROP_MIN_PX = 96
 _CACHE_VERSION = "r3d_v1"
+_DENSE_CACHE_VERSION = "r3d_dense_v1"
 # Frames held as 112x112 crops at once during the dense pass (~310 MB).
 _STACK_CHUNK = 8192
 
@@ -446,6 +448,14 @@ class R3DFeatureService:
         centre.  A session whose video or pose can't be reached is returned
         unchanged, leaving the caller's existing zero fill in place — a degraded
         trace for one session, not a failed run.
+
+        Anchors that the training cache does not cover are persisted under
+        ``derived/r3d_features/dense_anchors/`` and keyed on the video and pose
+        the crops came from, so a second inference run over the same session is
+        a parquet read.  That cache lives outside
+        ``derived/temporal_refinement/`` deliberately: clearing the temporal
+        cache must not throw away GPU-hours of embedding that only the pixels
+        can invalidate.
         """
         if dense_df.empty or "start_frame" not in dense_df.columns:
             return dense_df
@@ -482,11 +492,21 @@ class R3DFeatureService:
             if not len(anchors):
                 raise RuntimeError("no anchor fits the session")
 
-            cached = self._cached_by_start(project_root, session_id, window_frames)
+            signature = self._dense_signature(manifest, Path(video_path), Path(pose_path))
+            cached = self._load_dense_anchors(
+                project_root, session_id, window_frames, signature
+            )
+            # Training rows are the canonical value for the anchors they cover.
+            cached.update(self._cached_by_start(project_root, session_id, window_frames))
+            fresh_needed = any(int(a) not in cached for a in anchors)
             emb = self._anchor_embeddings(
                 Path(video_path), anchors, cx, cy, side, window_frames, cached, _log,
                 session_id,
             )
+            if fresh_needed:
+                self._store_dense_anchors(
+                    project_root, session_id, window_frames, signature, anchors, emb, _log
+                )
         except Exception as exc:
             logger.warning("R3D dense features skipped for %s: %s", session_id, exc)
             _log(f"R3D dense features: skipped {session_id} ({exc}).")
@@ -565,6 +585,101 @@ class R3DFeatureService:
             logger.debug("Could not read R3D cache for %s: %s", session_id, exc)
             return {}
 
+    # ── Dense anchor cache ───────────────────────────────────────────────
+    def _dense_cache_paths(
+        self, project_root: Path, session_id: str, window_frames: int
+    ) -> tuple[Path, Path]:
+        base = project_root / "derived" / "r3d_features" / "dense_anchors"
+        stem = f"{session_id}__w{int(window_frames)}"
+        return base / f"{stem}.parquet", base / f"{stem}.json"
+
+    @staticmethod
+    def _dense_signature(manifest: Any, video_path: Path, pose_path: Path) -> dict[str, Any]:
+        """What the cached anchors depend on, beyond the window geometry.
+
+        An embedding is a function of the pixels inside a crop box, and the box
+        comes from the pose read under the project's smoothing settings.  So a
+        re-encoded video, a re-exported pose file or a change to smoothing all
+        invalidate the cache; nothing else does.
+        """
+        sig: dict[str, Any] = {"cache_version": _DENSE_CACHE_VERSION}
+        for key, path in (("video", video_path), ("pose", pose_path)):
+            entry: dict[str, Any] = {"name": Path(path).name}
+            try:
+                st = Path(path).stat()
+                entry["size"] = int(st.st_size)
+                entry["mtime_ns"] = int(st.st_mtime_ns)
+            except OSError:
+                pass
+            sig[key] = entry
+        smoothing = getattr(manifest, "smoothing_settings", None)
+        dump = getattr(smoothing, "model_dump", None)
+        if callable(dump):
+            try:
+                sig["smoothing"] = dump()
+            except Exception:
+                pass
+        return sig
+
+    def _load_dense_anchors(
+        self,
+        project_root: Path,
+        session_id: str,
+        window_frames: int,
+        signature: dict[str, Any],
+    ) -> dict[int, np.ndarray]:
+        """Previously embedded dense anchors, keyed by start frame."""
+        parquet_path, meta_path = self._dense_cache_paths(
+            project_root, session_id, window_frames
+        )
+        if not parquet_path.exists() or not meta_path.exists():
+            return {}
+        meta = read_json(meta_path, {})
+        if dict(meta.get("signature") or {}) != signature:
+            return {}
+        try:
+            df = pd.read_parquet(parquet_path)
+            cols = r3d_columns()
+            if "start_frame" not in df.columns or any(c not in df.columns for c in cols):
+                return {}
+            rows = df[cols].to_numpy(dtype=np.float32)
+            return {
+                int(start): row
+                for start, row in zip(df["start_frame"].astype(int), rows)
+            }
+        except Exception as exc:
+            logger.debug("Could not read R3D dense cache for %s: %s", session_id, exc)
+            return {}
+
+    def _store_dense_anchors(
+        self,
+        project_root: Path,
+        session_id: str,
+        window_frames: int,
+        signature: dict[str, Any],
+        anchors: np.ndarray,
+        emb: np.ndarray,
+        log: Callable[[str], None],
+    ) -> None:
+        """Persist this run's anchor embeddings for the next one."""
+        parquet_path, meta_path = self._dense_cache_paths(
+            project_root, session_id, window_frames
+        )
+        try:
+            df = pd.DataFrame(emb, columns=r3d_columns())
+            df.insert(0, "start_frame", np.asarray(anchors, dtype=int))
+            df = df.drop_duplicates(subset="start_frame", keep="last")
+            atomic_write_parquet(df, parquet_path, index=False)
+            write_json(meta_path, {
+                "session_id": str(session_id),
+                "window_frames": int(window_frames),
+                "n_anchors": int(len(df)),
+                "signature": signature,
+            })
+            log(f"R3D dense features: cached {len(df)} anchors for {session_id}.")
+        except Exception as exc:  # a cache is an optimisation, never a hard failure
+            logger.debug("Could not write R3D dense cache for %s: %s", session_id, exc)
+
     def _anchor_embeddings(
         self,
         video_path: Path,
@@ -600,7 +715,7 @@ class R3DFeatureService:
                 filled[i] = True
         todo = anchors[~filled]
         if not len(todo):
-            log(f"R3D dense features: {session_id} fully covered by the training cache.")
+            log(f"R3D dense features: {session_id} fully covered by cache.")
             return emb
 
         log(

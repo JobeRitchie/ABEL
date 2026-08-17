@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from abel.core.constants import GLOBAL_CONFIG_DIR
 from abel.models.schemas import BehaviorDefinition
 from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 
@@ -46,121 +47,143 @@ def behavior_label(behavior_id: str | None, name_map: dict[str, str] | None = No
     return bid
 
 # ---------------------------------------------------------------------------
-# Built-in behavior templates
+# Behavior presets
 # ---------------------------------------------------------------------------
-_TEMPLATES: dict[str, list[dict]] = {
-    "Rodent Basic (4 behaviors)": [
-        {
-            "name": "Grooming", "short_name": "groom",
-            "description": "Self-directed grooming behavior.",
-            "operational_definition": (
-                "Repetitive forepaw-directed stroking movements aimed at the face, head, or body, "
-                "often preceded by licking of forepaws."
-            ),
-            "inclusion_criteria": "Forepaw contact with fur; rhythmic repetitive motion; face/body directed.",
-            "exclusion_criteria": "Locomotor scratching; single paw shake; incidental brief touch.",
-            "min_duration_sec": 0.5, "color": "#4A90E2", "keyboard_shortcut": "g", "review_priority": 1,
-        },
-        {
-            "name": "Rearing", "short_name": "rear",
-            "description": "Vertical exploratory posture.",
-            "operational_definition": "Animal stands on hindlimbs with forelimbs raised fully off the substrate.",
-            "inclusion_criteria": "Forelimbs fully off ground; vertical body posture.",
-            "exclusion_criteria": "Brief stumbles; supported rearing only when wall contact is incidental.",
-            "min_duration_sec": 0.2, "color": "#7ED321", "keyboard_shortcut": "r", "review_priority": 2,
-        },
-        {
-            "name": "Freezing", "short_name": "freeze",
-            "description": "Complete immobility — fear response.",
-            "operational_definition": (
-                "All tracked body parts remain stationary; centroid speed near zero "
-                "for a sustained minimum duration."
-            ),
-            "inclusion_criteria": "Zero locomotion; all keypoints below movement threshold for >= 1 s.",
-            "exclusion_criteria": "Brief pauses during locomotion; sleep postures.",
-            "min_duration_sec": 1.0, "color": "#9013FE", "keyboard_shortcut": "z", "review_priority": 1,
-        },
-        {
-            "name": "Locomotion", "short_name": "loco",
-            "description": "Directed movement across the arena.",
-            "operational_definition": "Centroid speed exceeds threshold continuously for the minimum duration.",
-            "inclusion_criteria": "Centroid speed > 5 cm/s; duration > 0.5 s.",
-            "exclusion_criteria": "In-place pivoting; head movement only; rearing.",
-            "min_duration_sec": 0.5, "color": "#F5A623", "keyboard_shortcut": "l", "review_priority": 3,
-        },
-    ],
-    "Open Field Extended (6 behaviors)": [
-        {
-            "name": "Grooming", "short_name": "groom",
-            "description": "Self-directed grooming behavior.",
-            "operational_definition": "Repetitive forepaw-directed stroking aimed at face/body.",
-            "inclusion_criteria": "Forepaw contact with fur; rhythmic motion.",
-            "exclusion_criteria": "Scratching; single paw touches.",
-            "min_duration_sec": 0.5, "color": "#4A90E2", "keyboard_shortcut": "g", "review_priority": 1,
-        },
-        {
-            "name": "Rearing", "short_name": "rear",
-            "description": "Vertical exploratory posture.",
-            "operational_definition": "Animal stands on hindlimbs with forelimbs raised.",
-            "inclusion_criteria": "Forelimbs fully off ground.",
-            "exclusion_criteria": "Brief stumbles.",
-            "min_duration_sec": 0.2, "color": "#7ED321", "keyboard_shortcut": "r", "review_priority": 2,
-        },
-        {
-            "name": "Freezing", "short_name": "freeze",
-            "description": "Complete immobility.",
-            "operational_definition": "All keypoints near-stationary for >= 1 s.",
-            "inclusion_criteria": "Zero locomotion; all keypoints stationary.",
-            "exclusion_criteria": "Brief pauses.",
-            "min_duration_sec": 1.0, "color": "#9013FE", "keyboard_shortcut": "z", "review_priority": 1,
-        },
-        {
-            "name": "Locomotion", "short_name": "loco",
-            "description": "Directed movement.", "operational_definition": "Centroid speed > 5 cm/s for > 0.5 s.",
-            "inclusion_criteria": "Centroid speed threshold met.", "exclusion_criteria": "Pivoting; rearing.",
-            "min_duration_sec": 0.5, "color": "#F5A623", "keyboard_shortcut": "l", "review_priority": 3,
-        },
-        {
-            "name": "Investigation", "short_name": "invest",
-            "description": "Directed sniffing / nose-contact investigation.",
-            "operational_definition": "Nose directed toward object/wall at close proximity with sustained contact.",
-            "inclusion_criteria": "Nose within 2 cm of object/wall; directed head movement.",
-            "exclusion_criteria": "Passing locomotion; grooming near object.",
-            "min_duration_sec": 0.3, "color": "#50E3C2", "keyboard_shortcut": "i", "review_priority": 2,
-        },
-        {
-            "name": "Eating", "short_name": "eat",
-            "description": "Food consumption.",
-            "operational_definition": "Sustained jaw movements and forepaw manipulation of food pellet at feeder.",
-            "inclusion_criteria": "Mouse at food source; jaw/paw movements visible.",
-            "exclusion_criteria": "Sniffing only; grooming near food area.",
-            "min_duration_sec": 0.5, "color": "#D0021B", "keyboard_shortcut": "e", "review_priority": 2,
-        },
-    ],
-    "EPM (3 behaviors)": [
-        {
-            "name": "Open Arm Entry", "short_name": "oae",
-            "description": "Complete entry into open arm of EPM.",
-            "operational_definition": "All four paws fully within an open arm zone.",
-            "inclusion_criteria": "All four paws in open arm.", "exclusion_criteria": "Partial entries.",
-            "min_duration_sec": 0.0, "color": "#F5A623", "keyboard_shortcut": "o", "review_priority": 1,
-        },
-        {
-            "name": "Closed Arm Time", "short_name": "cat",
-            "description": "Time spent within a closed arm of EPM.",
-            "operational_definition": "Animal centroid located within closed arm zone.",
-            "inclusion_criteria": "Centroid in closed arm.", "exclusion_criteria": "Transition regions.",
-            "min_duration_sec": 0.0, "color": "#4A90E2", "keyboard_shortcut": "c", "review_priority": 2,
-        },
-        {
-            "name": "Head Dip", "short_name": "hdip",
-            "description": "Head dipping from open arm over platform edge.",
-            "operational_definition": "Head/nose directed downward below platform level over open arm edge.",
-            "inclusion_criteria": "Head below platform level.", "exclusion_criteria": "Brief postural adjustments.",
-            "min_duration_sec": 0.2, "color": "#7ED321", "keyboard_shortcut": "h", "review_priority": 1,
-        },
-    ],
+# Presets are named starting sets of behavior definitions. The built-in ones are
+# composed from a shared library so that a behavior common to several assays
+# (rear/groom/walk) carries the same operational definition everywhere — labels
+# stay comparable when a lab runs more than one assay. User-defined presets are
+# saved to GLOBAL_CONFIG_DIR so they are available in every project.
+
+USER_PRESETS_PATH = GLOBAL_CONFIG_DIR / "behavior_presets.yaml"
+
+_BEHAVIOR_LIBRARY: dict[str, dict] = {
+    "rear": {
+        "name": "Rear", "short_name": "rear",
+        "description": "Vertical exploratory posture.",
+        "operational_definition": (
+            "Animal raises its forebody so both forelimbs leave the substrate and the "
+            "trunk approaches vertical, pivoting over the hindlimbs."
+        ),
+        "inclusion_criteria": "Both forelimbs off the floor; trunk elevated toward vertical; wall-supported rears included.",
+        "exclusion_criteria": "Brief stumbles or head-lifts with forepaws still down; grooming in an upright crouch.",
+        "min_duration_sec": 0.2, "color": "#7ED321", "keyboard_shortcut": "r", "review_priority": 2,
+    },
+    "groom": {
+        "name": "Groom", "short_name": "groom",
+        "description": "Self-directed grooming.",
+        "operational_definition": (
+            "Repetitive forepaw strokes directed at the face, head, or body, or licking/nibbling "
+            "of the flank, tail, or genitals, typically from a stationary crouched posture."
+        ),
+        "inclusion_criteria": "Rhythmic forepaw-to-face strokes or sustained licking of own fur; body largely stationary.",
+        "exclusion_criteria": "Single paw shake or wipe; hindlimb scratching; wet-dog shakes; grooming-like motion while walking.",
+        "min_duration_sec": 0.5, "color": "#4A90E2", "keyboard_shortcut": "g", "review_priority": 1,
+    },
+    "walk": {
+        "name": "Walk", "short_name": "walk",
+        "description": "Ambulation across the arena.",
+        "operational_definition": (
+            "Coordinated stepping that translates the body forward, with the centroid moving "
+            "continuously in a consistent heading."
+        ),
+        "inclusion_criteria": "Sustained forward translation of the centroid with stepping gait.",
+        "exclusion_criteria": "In-place pivoting or head scanning; postural shifts; rearing; being displaced without stepping.",
+        "min_duration_sec": 0.5, "color": "#F5A623", "keyboard_shortcut": "w", "review_priority": 3,
+    },
+    "head_dip": {
+        "name": "Head Dip", "short_name": "hdip",
+        "description": "Head dip over an arm edge (elevated plus maze).",
+        "operational_definition": (
+            "From an arm of the maze, the animal extends its head over the platform edge and "
+            "lowers the nose below platform level, scanning the space beneath."
+        ),
+        "inclusion_criteria": "Nose crosses the platform edge and drops below platform level; shoulders remain on the arm.",
+        "exclusion_criteria": "Nose past the edge without dropping below platform level; head lowered on the platform surface; slips or falls.",
+        "min_duration_sec": 0.2, "color": "#50E3C2", "keyboard_shortcut": "h", "review_priority": 1,
+    },
+    "protected_head_dip": {
+        "name": "Protected Head Dip", "short_name": "phdip",
+        "description": "Head dip performed from the centre or a closed arm.",
+        "operational_definition": (
+            "A head dip (nose over the edge and below platform level) performed while the body "
+            "remains in the centre square or a closed arm, i.e. from cover."
+        ),
+        "inclusion_criteria": "Head-dip criteria met with the trunk in the centre platform or a closed arm.",
+        "exclusion_criteria": "Dips with the trunk on an open arm (those are unprotected head dips).",
+        "min_duration_sec": 0.2, "color": "#00838F", "keyboard_shortcut": "p", "review_priority": 1,
+    },
+    "stretch_attend": {
+        "name": "Stretch Attend", "short_name": "sap",
+        "description": "Stretch-attend posture — risk assessment.",
+        "operational_definition": (
+            "The animal elongates its body forward with the hindpaws planted, keeping the trunk "
+            "low, then holds or withdraws without ambulating forward."
+        ),
+        "inclusion_criteria": "Body markedly elongated and flattened; forward head extension with stationary hindquarters.",
+        "exclusion_criteria": "Stretching that continues into ambulation; ordinary sniffing without body elongation; grooming stretches.",
+        "min_duration_sec": 0.3, "color": "#BD10E0", "keyboard_shortcut": "s", "review_priority": 1,
+    },
+    "freeze": {
+        "name": "Freeze", "short_name": "freeze",
+        "description": "Fear-related immobility.",
+        "operational_definition": (
+            "Complete absence of movement apart from respiration, held in a tense posture; "
+            "all tracked keypoints stay below the movement threshold."
+        ),
+        "inclusion_criteria": "No locomotion, head, or limb movement for at least the minimum duration; respiration only.",
+        "exclusion_criteria": "Brief pauses between bouts of locomotion; immobility while grooming, eating, or sleeping.",
+        "min_duration_sec": 1.0, "color": "#9013FE", "keyboard_shortcut": "z", "review_priority": 1,
+    },
+    "dart": {
+        "name": "Dart", "short_name": "dart",
+        "description": "Darting — brief high-velocity forward burst.",
+        "operational_definition": (
+            "A short, abrupt forward acceleration well above the animal's ordinary locomotor "
+            "speed, beginning and ending within roughly a second."
+        ),
+        "inclusion_criteria": "Sharp velocity spike from a slow or immobile state; brief, ballistic forward run.",
+        "exclusion_criteria": "Steady ambulation at normal speed; jumps and escape climbing; startle without translation.",
+        "min_duration_sec": 0.1, "color": "#D0021B", "keyboard_shortcut": "d", "review_priority": 1,
+    },
+    "approach": {
+        "name": "Approach", "short_name": "appr",
+        "description": "Directed approach to the food source.",
+        "operational_definition": (
+            "Oriented locomotion that reduces the distance to the food/novel stimulus, ending "
+            "with the nose near it, without consumption beginning."
+        ),
+        "inclusion_criteria": "Head oriented toward the food source while distance decreases; terminates in proximity or investigation.",
+        "exclusion_criteria": "Passing by without orientation; contact that begins feeding (score as Eat); retreat from the source.",
+        "min_duration_sec": 0.3, "color": "#F8B500", "keyboard_shortcut": "a", "review_priority": 1,
+    },
+    "eat": {
+        "name": "Eat", "short_name": "eat",
+        "description": "Feeding on the pellet.",
+        "operational_definition": (
+            "The animal holds or contacts the food with mouth and/or forepaws and makes sustained "
+            "biting/chewing movements."
+        ),
+        "inclusion_criteria": "Mouth on food with visible chewing or gnawing; pellet held in forepaws.",
+        "exclusion_criteria": "Sniffing or touching the pellet without biting; carrying without chewing; grooming beside the food.",
+        "min_duration_sec": 0.5, "color": "#C0392B", "keyboard_shortcut": "e", "review_priority": 1,
+    },
 }
+
+_BUILTIN_PRESETS: dict[str, list[str]] = {
+    "Standard Rodent": ["rear", "groom", "walk"],
+    "Elevated Plus Maze": [
+        "rear", "groom", "walk", "head_dip", "protected_head_dip", "stretch_attend",
+    ],
+    "Fear Conditioning": ["rear", "groom", "walk", "freeze", "dart"],
+    "Novelty Suppressed Feeding": ["rear", "groom", "walk", "approach", "eat"],
+}
+
+
+def builtin_preset_definitions(preset_name: str) -> list[dict]:
+    """Return the behavior definition dicts for a built-in preset."""
+    keys = _BUILTIN_PRESETS.get(preset_name, [])
+    return [dict(_BEHAVIOR_LIBRARY[k]) for k in keys]
 
 
 class BehaviorService:
@@ -189,10 +212,6 @@ class BehaviorService:
     @property
     def behaviors(self) -> list[BehaviorDefinition]:
         return list(self._behaviors)
-
-    @property
-    def template_names(self) -> list[str]:
-        return list(_TEMPLATES.keys())
 
     # ------------------------------------------------------------------
     # Multi-animal structured labels
@@ -570,24 +589,125 @@ class BehaviorService:
             self.save()
 
     # ------------------------------------------------------------------
-    # Templates
+    # Presets
     # ------------------------------------------------------------------
 
-    def apply_template(self, template_name: str, skip_existing: bool = True) -> int:
-        """Append template behaviors (skip names already present). Returns count added."""
-        items = _TEMPLATES.get(template_name, [])
-        existing_names = {b.name.lower() for b in self._behaviors}
+    @staticmethod
+    def is_builtin_preset(preset_name: str) -> bool:
+        return str(preset_name) in _BUILTIN_PRESETS
+
+    @staticmethod
+    def _load_user_presets() -> dict[str, list[dict]]:
+        raw = read_yaml(USER_PRESETS_PATH, {})
+        presets = raw.get("presets") or {}
+        if not isinstance(presets, dict):
+            return {}
+        out: dict[str, list[dict]] = {}
+        for name, items in presets.items():
+            if isinstance(items, list):
+                out[str(name)] = [i for i in items if isinstance(i, dict)]
+        return out
+
+    @staticmethod
+    def _write_user_presets(presets: dict[str, list[dict]]) -> None:
+        write_yaml(USER_PRESETS_PATH, {"presets": presets})
+
+    def preset_names(self) -> list[str]:
+        """Built-in preset names first, then the user's saved presets."""
+        return list(_BUILTIN_PRESETS.keys()) + sorted(
+            self._load_user_presets().keys(), key=str.lower
+        )
+
+    def preset_definitions(self, preset_name: str) -> list[dict]:
+        """Behavior definition dicts for a built-in or user preset."""
+        if self.is_builtin_preset(preset_name):
+            return builtin_preset_definitions(preset_name)
+        return [dict(item) for item in self._load_user_presets().get(str(preset_name), [])]
+
+    def apply_preset(self, preset_name: str, skip_existing: bool = True) -> int:
+        """Append a preset's behaviors to the project. Returns the count added.
+
+        Behaviors whose name already exists are skipped, so applying a second
+        preset that shares rear/groom/walk does not duplicate them. A keyboard
+        shortcut already claimed by an existing behavior is dropped rather than
+        duplicated — two behaviors on one key make the soundboard ambiguous.
+        """
+        items = self.preset_definitions(preset_name)
+        existing_names = {b.name.strip().lower() for b in self._behaviors}
+        taken_keys = {
+            str(b.keyboard_shortcut).lower() for b in self._behaviors if b.keyboard_shortcut
+        }
         added = 0
         for raw in items:
-            if skip_existing and raw["name"].lower() in existing_names:
+            name = str(raw.get("name", "")).strip()
+            if not name:
                 continue
-            self._behaviors.append(
-                BehaviorDefinition.model_validate({**raw, "behavior_id": str(uuid.uuid4())})
-            )
+            if skip_existing and name.lower() in existing_names:
+                continue
+            fields = {k: v for k, v in raw.items() if k not in ("behavior_id", "version_history")}
+            key = str(fields.get("keyboard_shortcut") or "").lower()
+            if key and key in taken_keys:
+                fields["keyboard_shortcut"] = None
+            try:
+                behavior = BehaviorDefinition.model_validate(
+                    {**fields, "behavior_id": str(uuid.uuid4())}
+                )
+            except Exception:
+                logger.warning("Skipped invalid behavior in preset %s: %s", preset_name, name)
+                continue
+            self._behaviors.append(behavior)
+            existing_names.add(name.lower())
+            if behavior.keyboard_shortcut:
+                taken_keys.add(str(behavior.keyboard_shortcut).lower())
             added += 1
         if added:
             self.save()
         return added
+
+    def save_preset(self, preset_name: str, overwrite: bool = False) -> int:
+        """Save the project's current behaviors as a named user preset.
+
+        The system ``No Behavior`` label is excluded (every project gets its own),
+        as are ids and version history, so the preset carries only the reusable
+        definition. Returns the number of behaviors stored.
+        """
+        name = str(preset_name).strip()
+        if not name:
+            raise ValueError("Preset name is required.")
+        if self.is_builtin_preset(name):
+            raise ValueError(f"'{name}' is a built-in preset and cannot be overwritten.")
+        presets = self._load_user_presets()
+        if name in presets and not overwrite:
+            raise ValueError(f"A preset named '{name}' already exists.")
+
+        items: list[dict] = []
+        for b in self._behaviors:
+            if str(b.behavior_id).strip() == NO_BEHAVIOR_ID:
+                continue
+            data = b.model_dump(mode="json")
+            data.pop("behavior_id", None)
+            data.pop("version_history", None)
+            items.append(data)
+        if not items:
+            raise ValueError("There are no behaviors to save as a preset.")
+
+        presets[name] = items
+        self._write_user_presets(presets)
+        logger.info("Saved behavior preset '%s' with %d behavior(s)", name, len(items))
+        return len(items)
+
+    def delete_preset(self, preset_name: str) -> bool:
+        """Delete a user preset. Built-in presets cannot be deleted."""
+        name = str(preset_name).strip()
+        if self.is_builtin_preset(name):
+            return False
+        presets = self._load_user_presets()
+        if name not in presets:
+            return False
+        presets.pop(name)
+        self._write_user_presets(presets)
+        logger.info("Deleted behavior preset '%s'", name)
+        return True
 
     # ------------------------------------------------------------------
     # Export / Import

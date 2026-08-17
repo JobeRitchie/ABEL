@@ -38,7 +38,12 @@ from abel.services.behavior_representation_service import (
 )
 from abel.services.import_service import ImportService
 from abel.services.provenance_service import ProvenanceService
+from abel.services.feature_coverage_service import (
+    audit_session_coverage,
+    format_coverage_report,
+)
 from abel.services.r3d_feature_service import R3DFeatureService, is_r3d_column
+from abel.services.roi_service import ROIService, is_roi_column
 from abel.storage.file_store import read_json, write_json
 from abel.temporal_refinement.bout_postprocess import (
     binary_trace_to_intervals,
@@ -479,6 +484,111 @@ class TemporalRefinementService:
         if len(sids) > limit:
             shown += f", … (+{len(sids) - limit} more)"
         return shown
+
+    def _preflight_feature_coverage(
+        self,
+        model_payloads: dict[str, dict[str, Any]],
+        target_sessions: list[str],
+        frame_by_session: dict[str, pd.DataFrame],
+        progress_cb: Callable | None,
+    ) -> None:
+        """Refuse to score when a model's features are missing for some sessions.
+
+        The ROI preflight reads the ROI *config*, so it cannot tell that a
+        representation cache was built before a zone was drawn — the config is
+        correct by then and the cached features are still all-NaN.  This checks
+        the features actually about to be scored, and so also catches the other
+        ways coverage goes lopsided (a partial R3D backfill, a distance column
+        that exists under two spellings, a session extracted under different
+        settings).
+
+        Restricted to columns some model reads: a split in a feature nothing
+        consumes changes no prediction.
+        """
+        model_cols = {
+            c for payload in model_payloads.values()
+            for c in (payload.get("feature_cols") or [])
+        }
+        if not model_cols:
+            return
+        frames = {
+            sid: frame_by_session[sid]
+            for sid in target_sessions
+            if sid in frame_by_session
+        }
+        splits = audit_session_coverage(frames, columns=model_cols)
+        if not splits:
+            return
+
+        raise ValueError(
+            f"Feature coverage is inconsistent across the {len(frames)} selected "
+            f"session(s): {len(splits)} group(s) of model features are populated "
+            f"for some sessions and missing for others.\n\n"
+            f"{format_coverage_report(splits)}\n\n"
+            f"Sessions missing a feature the model relies on get scored off a "
+            f"constant input, which yields a flat or saturated probability trace "
+            f"rather than an error. Re-extract features for the affected sessions "
+            f"(after drawing any missing ROIs) so every session carries the same "
+            f"columns, then retry."
+        )
+
+    def _preflight_target_rois(
+        self,
+        model_payloads: dict[str, dict[str, Any]],
+        target_sessions: list[str],
+        manifest: Any,
+        progress_cb: Callable | None,
+    ) -> None:
+        """Refuse to score sessions whose target zone resolves to no area.
+
+        A session with no ROI drawn falls back to the project default, which is
+        a zero-size box unless the project sets one.  Every ROI/target feature
+        then comes out all-NaN, and since a tree model routes all-NaN rows down
+        one fixed default path, the model emits a near-constant probability for
+        the whole session — a flat trace that yields zero bouts (or, for models
+        that lean the other way, fires on most of the video).  Neither looks like
+        an error downstream, so catch it before spending the inference pass.
+
+        Only fires when a model actually consumes ROI features; ROI-free models
+        score such sessions perfectly well.
+        """
+        roi_users = {
+            bid: sorted(
+                {c for c in (payload.get("feature_cols") or []) if is_roi_column(c)}
+            )
+            for bid, payload in model_payloads.items()
+        }
+        roi_users = {bid: cols for bid, cols in roi_users.items() if cols}
+        if not roi_users:
+            return
+
+        subject_by_session = self._subject_by_session(manifest) if manifest else {}
+        keys = {
+            sid: f"{subject_by_session.get(sid, sid)}::{sid}" for sid in target_sessions
+        }
+        project_root = self._require_project_root()
+        uncovered = set(
+            ROIService().subjects_without_target_area(project_root, list(keys.values()))
+        )
+        bad = sorted(sid for sid, key in keys.items() if key in uncovered)
+        if not bad:
+            return
+
+        worst_bid, worst_cols = max(roi_users.items(), key=lambda kv: len(kv[1]))
+        raise ValueError(
+            f"{len(bad)} of {len(target_sessions)} selected session(s) have no "
+            f"target zone drawn, but {len(roi_users)} of the "
+            f"{len(model_payloads)} behavior model(s) score against one "
+            f"(e.g. {worst_bid} uses {len(worst_cols)} ROI/target feature(s)).\n\n"
+            f"Without a zone these sessions produce all-NaN ROI features, and the "
+            f"models return a near-constant probability for the whole video — a "
+            f"flat trace with no bouts, which is indistinguishable from a genuine "
+            f"absence of the behavior.\n\n"
+            f"Draw the zone for these sessions in the ROI tab, then re-run feature "
+            f"extraction — context features rebuild automatically once the ROI "
+            f"config changes — and retry: "
+            f"{self._fmt_session_list([f'{subject_by_session.get(s, s)} ({s})' for s in bad], limit=20)}"
+        )
 
     def _no_target_sessions_message(
         self,
@@ -943,6 +1053,11 @@ class TemporalRefinementService:
         )
         if needs_r3d:
             self._emit(progress_cb, "Models use R3D video features; enabling dense R3D extraction.")
+
+        self._preflight_target_rois(model_payloads, target_sessions, manifest, progress_cb)
+        self._preflight_feature_coverage(
+            model_payloads, target_sessions, frame_by_session, progress_cb
+        )
 
         # FP feedback suppression
         fp_by_session: dict[str, list[tuple[int, int]]] = {}

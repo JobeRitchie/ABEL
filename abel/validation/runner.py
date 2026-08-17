@@ -23,7 +23,8 @@ from abel.validation import (
 )
 from abel.validation.analyses import (
     ablation, al_curve, behaviorscape, calibration, cross_project, discrimination,
-    feature_roles, generalization, learning_curve, rare_discovery, time_budget,
+    feature_roles, generalization, learning_curve, rare_discovery, review_effort,
+    time_budget,
 )
 from abel.validation.datamodel import CellResult, ProjectRef, RunManifest
 from abel.validation.store import ResultsStore
@@ -37,6 +38,7 @@ ANALYSIS_BEHAVIORSCAPE = "behaviorscape"
 ANALYSIS_VIDEO_VALUE = "video_value"
 ANALYSIS_THROUGHPUT = "throughput"
 ANALYSIS_RARE_DISCOVERY = "rare_discovery"
+ANALYSIS_REVIEW_EFFORT = "review_effort"
 
 ALL_ANALYSES = [
     ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_GENERALIZATION,
@@ -49,7 +51,8 @@ ALL_ANALYSES = [
 FULL_SUITE = [
     ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_DISCRIMINATION,
     ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE, ANALYSIS_RARE_DISCOVERY,
-    ANALYSIS_BEHAVIORSCAPE, ANALYSIS_VIDEO_VALUE, ANALYSIS_THROUGHPUT,
+    ANALYSIS_BEHAVIORSCAPE, ANALYSIS_VIDEO_VALUE, ANALYSIS_REVIEW_EFFORT,
+    ANALYSIS_THROUGHPUT,
 ]
 
 # The analyses behind the manuscript's Figure 3.  Ticked by default on the Run All
@@ -85,6 +88,7 @@ ANALYSIS_LABELS = {
     ANALYSIS_VIDEO_VALUE: "Video-feature value (paired)",
     ANALYSIS_THROUGHPUT: "Pipeline throughput",
     ANALYSIS_RARE_DISCOVERY: "Rare-behavior discovery (clip hunting)",
+    ANALYSIS_REVIEW_EFFORT: "Human review effort (labeling time)",
 }
 
 ProgressCB = Callable[[str, float], None]
@@ -172,6 +176,12 @@ class ValidationRunConfig:
     # session's temporal-refinement traces).
     throughput_stages: list[str] = field(
         default_factory=lambda: [benchmark.STAGE_EXTRACT, benchmark.STAGE_TRAIN])
+    # human review effort (the labeling-time ledger).  Read straight off each
+    # project's review_decisions.json — no training, no side effects, ~1 s per
+    # project.  The two thresholds decide which inter-decision gaps count as one
+    # clip's review; see abel.validation.analyses.review_effort for why.
+    review_break_sec: float = review_effort.BREAK_SEC
+    review_batch_sec: float = review_effort.BATCH_SEC
     # holdout
     min_confidence: float = 1.0
     holdout_test_size: float = 0.25
@@ -214,6 +224,8 @@ class ValidationRunConfig:
             "bscape_normalize": self.bscape_normalize,
             "n_seeds_video_value": self.n_seeds_video_value,
             "throughput_stages": self.throughput_stages,
+            "review_break_sec": self.review_break_sec,
+            "review_batch_sec": self.review_batch_sec,
             "min_confidence": self.min_confidence,
             "holdout_test_size": self.holdout_test_size,
             "holdout_seed": self.holdout_seed,
@@ -438,6 +450,8 @@ def run_validation(
             u += beh_count                                   # one fit per behavior
         if ANALYSIS_THROUGHPUT in config.analyses:
             u += len(config.throughput_stages)
+        if ANALYSIS_REVIEW_EFFORT in config.analyses:
+            u += 1                                           # one JSON read/project
         if ANALYSIS_RARE_DISCOVERY in config.analyses:
             # One coarse unit per completed sub-analysis (discovery, +rarity,
             # +full pool) per behavior, plus one behaviour-rarity readout/project.
@@ -502,6 +516,7 @@ def run_validation(
     proj_names: dict[str, str] = {p.project_id: p.name for p in projects}
     vv_results: list = []
     bench_results: list = []
+    effort_results: list = []
     tb_results: list = []
     cal_results: list = []
     disc_by_project: dict[str, list] = {}
@@ -834,6 +849,15 @@ def run_validation(
                 bench_results.append(benchmark.time_inference(proj.root, log=_emit_msg))
                 _emit("inference timed")
 
+    # ── human review effort (once per project; reads the decision log only) ──
+    if ANALYSIS_REVIEW_EFFORT in config.analyses:
+        for proj in projects:
+            _emit_msg(f"[{proj.name}] measuring human review effort…")
+            effort_results.append(review_effort.measure_project(
+                proj, break_sec=config.review_break_sec,
+                batch_sec=config.review_batch_sec))
+            _emit("review effort measured")
+
     # ── persist tidy substrate ──
     cells_df = aggregate.cells_to_frame(all_cells)
     store.save_cells(cells_df)
@@ -850,6 +874,7 @@ def run_validation(
     disc_seed_df: pd.DataFrame | None = None
     vv_df: pd.DataFrame | None = None
     bench_df: pd.DataFrame | None = None
+    effort_df: pd.DataFrame | None = None
     lc_knee_df: pd.DataFrame | None = None
     lc_points_df: pd.DataFrame | None = None
     rare_pooled_df: pd.DataFrame | None = None
@@ -1472,6 +1497,32 @@ def run_validation(
         sections.append(("Pipeline throughput",
                          report.table_section(bench_df) + report.img_section([bench_img])))
 
+    if effort_results:
+        effort_dir = store.sub("review_effort")
+        effort_df = review_effort.results_to_frame(effort_results)
+        store.write_csv(effort_df, "review_effort.csv", subdir="review_effort")
+        effort_pooled_df = review_effort.pooled_to_frame(effort_results)
+        if not effort_pooled_df.empty:
+            store.write_csv(effort_pooled_df, "review_effort_pooled.csv",
+                            subdir="review_effort")
+        effort_img = review_effort.plot_review_effort(
+            effort_results, effort_dir / "review_effort.png")
+        plots.close_all()
+        sections.append((
+            "Human review effort (labeling time)",
+            "<p>What the labels cost in human time. Each clip's review is measured as "
+            "the gap to the previous decision by the same reviewer; gaps under "
+            f"{config.review_batch_sec:g}s are one bulk UI action and gaps over "
+            f"{config.review_break_sec:g}s mean the reviewer stepped away, so neither "
+            "is charged to a clip. Active hours are therefore a floor — the first "
+            "clip after every break contributes nothing "
+            "(<code>active_review_hours_adjusted</code> adds those back at the "
+            "project's own median rate).</p>"
+            + report.table_section(effort_df)
+            + (report.table_section(effort_pooled_df)
+               if not effort_pooled_df.empty else "")
+            + report.img_section([effort_img])))
+
     # ── cross-project dashboard ──
     overview = cross_project.cross_project_overview(cells_df)
     acc_df = cross_project.accuracy_by_project(cells_df)
@@ -1568,6 +1619,7 @@ def run_validation(
         prism_paths = prism.write_all(
             store.run_dir,
             gen_df=gen_df, ablation_df=abl_df, video_df=vv_df, bench_df=bench_df,
+            review_effort_df=effort_df,
             al_df=al_pts, calibration_df=cal_pts, time_budget_df=tb_pts,
             bscape_shares_df=bs_shares, bscape_importance_df=bs_imp,
             discrimination_df=disc_df, discrimination_seeds_df=disc_seed_df,
@@ -1654,6 +1706,7 @@ def run_validation(
             disc_by_project=disc_by_project, gen_results=gen_results,
             tb_results=tb_results, cal_results=cal_results, al_results=al_results,
             vv_results=vv_results, bench_results=bench_results,
+            effort_results=effort_results,
             bscape_stats=bscape_stats, bscape_data=bscape_data,
         ))
         store.write_csv(findings_mod.findings_frame(run_findings), "findings.csv")
