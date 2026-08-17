@@ -402,6 +402,7 @@ def test_gui_worker_completes_and_populates(tmp_path):
 
 
 def test_build_ablation_configs_incremental():
+    from abel.services.active_learning_trainer_service import TrainingConfig
     from abel.validation.analyses.ablation import (
         ALL_FEATURES_CONFIG, BASELINE_CONFIG, build_ablation_configs,
     )
@@ -423,7 +424,12 @@ def test_build_ablation_configs_incremental():
     assert base.overrides["adaptive_complexity"] is False
     allc = next(c for c in cfgs if c.name == ALL_FEATURES_CONFIG)
     assert allc.feature_set == "all"
-    assert allc.overrides["adaptive_complexity"] is True
+    # "All features" must mirror what ABEL actually ships, not a fixed answer:
+    # adaptive complexity was evaluated by this very suite and then turned off by
+    # default, so pinning True here would make the bar report a configuration no
+    # user runs. Track the product default so the next flip cannot silently
+    # desynchronise the two.
+    assert allc.overrides["adaptive_complexity"] is TrainingConfig.adaptive_complexity
     assert allc.overrides["calibration_method"] == "sigmoid"
 
     # No video, co-occurring on.

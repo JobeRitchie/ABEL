@@ -20,6 +20,8 @@ clip under Windows display scaling.
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -41,9 +43,24 @@ from abel.services.raw_data_availability import (
     check_project_raw_data,
 )
 
+logger = logging.getLogger("abel")
+
 # How many individual paths to list before collapsing into "+N more".  Enough to
 # recognise the pattern, few enough that the dialog stays readable.
 _MAX_LISTED = 8
+
+
+def _is_non_interactive() -> bool:
+    """True when no human can answer a modal dialog.
+
+    The offscreen/minimal Qt platforms are what headless drivers (the test suite,
+    the benchmark and validation runners) use, and a blocking ``exec`` under them
+    waits forever.  Checked via the environment rather than the running
+    ``QApplication`` so it is correct before one exists.
+    """
+    return os.environ.get("QT_QPA_PLATFORM", "").strip().lower() in {
+        "offscreen", "minimal", "vnc",
+    }
 
 
 def _esc(s) -> str:
@@ -219,6 +236,20 @@ def confirm_run_with_missing_raw_data(
         if not rep.ok:
             reports.append(rep)
     if not reports:
+        return True
+
+    # No one to answer the question → do not ask it.  ``QMessageBox.exec`` spins a
+    # nested event loop that never returns without a click, so under an offscreen
+    # platform (headless tests, batch/benchmark drivers) this gate would hang the
+    # process forever rather than fail.  Proceed instead, and say so in the log:
+    # an automated caller has already committed to the run, and the reduced-arm
+    # outcome is recorded in the run's own outputs.
+    if _is_non_interactive():
+        logger.warning(
+            "Raw data unavailable for %s, but running non-interactively — "
+            "proceeding without confirmation. Affected: %s",
+            what, "; ".join(f"{Path(r.project_root).name}: {r.summary()}" for r in reports),
+        )
         return True
 
     from PySide6.QtWidgets import QMessageBox  # local: keeps import cost off startup

@@ -170,6 +170,25 @@ def test_fast_random_absent_generation_excludes_accepted_ranges(tmp_path) -> Non
     )
     labels.to_parquet(project_root / "derived" / "review_labels" / "reviewer_labels.parquet", index=False)
 
+    # Random-absent sampling draws real rows from the extracted segment grid rather
+    # than synthesizing frame ranges, so that reviewed labels land on a segment_id
+    # that already carries every feature — R3D included — instead of being enriched
+    # (and zero-filled) later. The fixture therefore needs the grid to exist.
+    grid_rows = [
+        {
+            "segment_id": f"seg_subj_1_session_abc12345_{s}_{s + 59}",
+            "session_id": "session_abc12345",
+            "animal_id": "subj_1",
+            "start_frame": s,
+            "end_frame": s + 59,
+        }
+        for s in range(0, 241, 20)
+    ]
+    (project_root / "derived" / "representations").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(grid_rows).to_parquet(
+        project_root / "derived" / "representations" / "segment_features.parquet", index=False
+    )
+
     svc = CandidateGenerationService()
     svc.set_project(project_root)
     cfg = SegmentCandidateGenerationConfig(
@@ -257,6 +276,28 @@ def test_fast_random_absent_generation_balances_across_subjects(tmp_path) -> Non
                 {"session_id": "s_b1", "video_asset_id": "v_b1", "pose_asset_id": "p_b1", "subject_id": "subject_b"},
             ],
         },
+    )
+
+    # The extracted grid random-absent sampling draws from (see the note in the
+    # single-session fixture above). Both subjects get plenty of rows, so any
+    # imbalance in the result is the balancing policy's doing, not the pool's.
+    grid_rows = [
+        {
+            "segment_id": f"seg_{subject}_{sid}_{s}_{s + 49}",
+            "session_id": sid,
+            "animal_id": subject,
+            "start_frame": s,
+            "end_frame": s + 49,
+        }
+        for sid, subject in (
+            ("s_a1", "subject_a"), ("s_a2", "subject_a"),
+            ("s_a3", "subject_a"), ("s_b1", "subject_b"),
+        )
+        for s in range(0, 201, 25)
+    ]
+    (project_root / "derived" / "representations").mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(grid_rows).to_parquet(
+        project_root / "derived" / "representations" / "segment_features.parquet", index=False
     )
 
     svc = CandidateGenerationService()

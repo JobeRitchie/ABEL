@@ -392,12 +392,13 @@ def test_publication_preset_excludes_dense_inference():
     assert "infer" not in publication_config().throughput_stages
 
 
-def test_publication_preset_runs_ablation_at_a_low_budget_too():
-    """Regularizers pay off in the low-data regime and vanish at full data; a
-    full-data-only ablation reports 'no effect' for features that do help."""
+def test_publication_preset_ablates_at_full_data_only():
+    """The headline ablation answers one question: what the shipped pipeline buys
+    at full data. A low clip budget answers a different one — whether regularizers
+    pay off when labels are scarce — and mixing the two into one figure made the
+    bars unreadable, so it is now opt-in rather than part of the preset."""
     budgets = publication_config().ablation_budgets
-    assert subsample.ALL_CLIPS in budgets
-    assert any(b != subsample.ALL_CLIPS for b in budgets)
+    assert budgets == [subsample.ALL_CLIPS]
 
 
 def test_preset_overrides_are_honoured():
