@@ -94,6 +94,19 @@ class LearningCurveResult:
     points: list[LearningCurvePoint] = field(default_factory=list)
     knee_clips: float | None = None
     f1_max: float = float("nan")
+    # Nonparametric variability for the two headline numbers above, from
+    # :func:`bootstrap_knee_ci`.  ``knee_clips`` and ``f1_max`` are read off the
+    # MEAN curve, so neither carries an error bar of its own; these are percentile
+    # intervals over resampled units (seeds for a per-behavior curve, behaviors for
+    # an average curve).  ``boot_unit`` records which, because the two are not
+    # interchangeable claims.
+    knee_lo: float = float("nan")
+    knee_hi: float = float("nan")
+    f1_max_lo: float = float("nan")
+    f1_max_hi: float = float("nan")
+    boot_n_reps: int = 0
+    boot_n_units: int = 0
+    boot_unit: str = ""
     cells: list[CellResult] = field(default_factory=list)
 
 
@@ -142,6 +155,158 @@ def detect_knee(points: list[LearningCurvePoint], eps: float = KNEE_EPS,
     return float(ordered[-1].n_clips_mean)
 
 
+#: Replicates and seed for :func:`bootstrap_knee_ci`, matching the LOSO subject
+#: bootstrap (``loso._bootstrap_subject_ci``) so both intervals in the manuscript
+#: are built the same way.
+KNEE_N_BOOT = 2000
+KNEE_BOOT_SEED = 42
+
+#: One unit's curve for the bootstrap: ``requested_size -> (n_clips, f1, n_degen,
+#: n_seeds)``.  A single seed contributes ``n_degen`` 0/1 and ``n_seeds`` 1; a whole
+#: behavior contributes its own point's tallies, so the same resampler serves the
+#: per-behavior curve (unit = seed) and the average curve (unit = behavior).
+UnitCurve = dict
+
+
+def _curve_ceiling(points: list[LearningCurvePoint]) -> float:
+    """Max F1 over the non-degenerate points -- the rule f1_max is built with."""
+    usable = [p for p in points if not p.is_degenerate] or list(points)
+    finite = [p.f1_mean for p in usable if np.isfinite(p.f1_mean)]
+    return float(max(finite)) if finite else float("nan")
+
+
+def bootstrap_knee_ci(
+    unit_curves: list[UnitCurve],
+    *,
+    unit: str = "seeds",
+    paired: bool | None = None,
+    n_reps: int = KNEE_N_BOOT,
+    seed: int = KNEE_BOOT_SEED,
+    eps: float = KNEE_EPS,
+    delta: float = KNEE_DELTA,
+) -> dict[str, float]:
+    """Percentile CIs for the knee and the F1 ceiling by resampling units.
+
+    Both statistics are read off the *mean* curve — the knee is a discrete argmin
+    over the clip schedule, the ceiling is a max — so neither has a closed-form
+    standard error, and the per-point ``f1_ci`` is no substitute: it describes F1 at
+    a fixed budget, not where the curve turns.  A replicate resamples units **with
+    replacement**, rebuilds the mean curve from exactly those units, and re-runs
+    :func:`detect_knee` under the same degeneracy rule.  No model is refit.
+
+    ``unit`` names what is resampled, and it decides ``paired``:
+
+    * ``"seeds"`` (a single behavior's curve) resamples **independently at each
+      budget**.  :func:`derive_seed` keys on ``size``, so repeat *r* at 50 clips and
+      repeat *r* at 100 clips are unrelated fits on unrelated subsamples — there is
+      no seed to hold fixed down the schedule, and treating the repeat index as if
+      there were would impose a correlation the design does not have.
+    * ``"behaviors"`` (the average curve) resamples **whole curves**.  A behavior is
+      one exchangeable object measured at every budget, and its curve-shape
+      correlation across x is real, so the draw must keep it.
+
+    Two limits belong beside the interval wherever it is quoted.  The knee can only
+    land on the clip schedule, so this is a *grid* interval: ``lo == hi`` means every
+    replicate picked the same schedule step, not that the knee is known to the clip.
+    And the held-out set is fixed across replicates, so the interval covers
+    subsample/seed (or behavior-panel) variability only — not sampling of animals or
+    of held-out clips.
+
+    Returns ``knee_lo``/``knee_hi``/``f1_max_lo``/``f1_max_hi`` (2.5 / 97.5
+    percentiles), the replicate and unit counts, and ``knee_undefined_frac`` — the
+    share of replicates with no defined knee, which is the honest signal that a curve
+    is too degenerate for the interval to mean much.
+    """
+    if paired is None:
+        paired = (unit != "seeds")
+    usable = [c for c in unit_curves if c and len(c) >= 2]
+    out: dict[str, float] = {
+        "boot_n_reps": int(n_reps),
+        "boot_seed": int(seed),
+        "boot_n_units": int(len(usable)),
+        "boot_unit": unit,
+        "boot_paired": bool(paired),
+        "knee_lo": float("nan"), "knee_hi": float("nan"),
+        "f1_max_lo": float("nan"), "f1_max_hi": float("nan"),
+        "knee_undefined_frac": float("nan"),
+    }
+    if len(usable) < 2:
+        return out
+
+    # size -> the units' measurements at that size, as parallel arrays.
+    by_size: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    members: dict[int, np.ndarray] = {}
+    for size in sorted({sz for c in usable for sz in c}):
+        idx = [i for i, c in enumerate(usable) if size in c]
+        rows = np.array([usable[i][size] for i in idx], dtype=float)
+        by_size[size] = (rows[:, 0], rows[:, 1], rows[:, 2], rows[:, 3])
+        members[size] = np.asarray(idx, dtype=int)
+
+    rng = np.random.default_rng(seed)
+    n = len(usable)
+    knees = np.full(n_reps, np.nan, dtype=float)
+    ceilings = np.full(n_reps, np.nan, dtype=float)
+    for r in range(n_reps):
+        drawn = rng.integers(0, n, size=n) if paired else None
+        pts: list[LearningCurvePoint] = []
+        for size, (clips, f1s, degen, seeds) in by_size.items():
+            if paired:
+                # Position of each drawn unit within this size's arrays; units that
+                # never reached this budget simply do not contribute to it.
+                pos = np.flatnonzero(np.isin(members[size], drawn))
+                if pos.size == 0:
+                    continue
+                counts = np.array([int(np.sum(drawn == members[size][i]))
+                                   for i in pos], dtype=int)
+                take = np.repeat(pos, counts)
+            else:
+                take = rng.integers(0, clips.size, size=clips.size)
+            f1_take = f1s[take]
+            pts.append(LearningCurvePoint(
+                requested_size=size,
+                n_clips_mean=float(np.mean(clips[take])),
+                f1_mean=(float(np.nanmean(f1_take))
+                         if np.any(np.isfinite(f1_take)) else float("nan")),
+                f1_ci=float("nan"), pr_auc_mean=float("nan"), pr_auc_ci=float("nan"),
+                kappa_mean=float("nan"),
+                n_seeds=int(seeds[take].sum()),
+                n_degenerate=int(degen[take].sum()),
+            ))
+        if len(pts) < 2:
+            continue
+        pts.sort(key=lambda p: p.n_clips_mean)
+        k = detect_knee(pts, eps=eps, delta=delta)
+        if k is not None:
+            knees[r] = float(k)
+        ceilings[r] = _curve_ceiling(pts)
+
+    def _pct(arr: np.ndarray) -> tuple[float, float]:
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
+            return float("nan"), float("nan")
+        return float(np.percentile(finite, 2.5)), float(np.percentile(finite, 97.5))
+
+    k_lo, k_hi = _pct(knees)
+    c_lo, c_hi = _pct(ceilings)
+    out.update({
+        "knee_lo": k_lo, "knee_hi": k_hi,
+        "f1_max_lo": c_lo, "f1_max_hi": c_hi,
+        "knee_undefined_frac": float(np.mean(~np.isfinite(knees))),
+    })
+    return out
+
+
+def _apply_boot(result: LearningCurveResult, boot: dict) -> None:
+    """Copy a :func:`bootstrap_knee_ci` result onto the curve it describes."""
+    result.knee_lo = float(boot.get("knee_lo", float("nan")))
+    result.knee_hi = float(boot.get("knee_hi", float("nan")))
+    result.f1_max_lo = float(boot.get("f1_max_lo", float("nan")))
+    result.f1_max_hi = float(boot.get("f1_max_hi", float("nan")))
+    result.boot_n_reps = int(boot.get("boot_n_reps", 0))
+    result.boot_n_units = int(boot.get("boot_n_units", 0))
+    result.boot_unit = str(boot.get("boot_unit", ""))
+
+
 def run_learning_curve(
     trainer: ActiveLearningTrainerService,
     project: ProjectRef,
@@ -186,6 +351,12 @@ def run_learning_curve(
             seen_all = True
         cleaned.append(s)
     eff_sizes = cleaned
+
+    # One curve per seed, kept alongside the averaged points so the knee can be
+    # bootstrapped over seeds (see :func:`bootstrap_knee_ci`).  The mean curve alone
+    # cannot produce that interval, and the per-point ``f1_ci`` is not a substitute:
+    # it describes F1 at a fixed budget, not where the curve turns.
+    seed_curves: list[dict[int, tuple]] = [{} for _ in range(n_seeds)]
 
     for size in eff_sizes:
         size_label = "all" if size == subsample.ALL_CLIPS else str(size)
@@ -270,8 +441,10 @@ def run_learning_curve(
                 # perfect target-class F1 off tp=<all negatives>, fp=fn=0. Counting
                 # only the first left that point looking healthy, and detect_knee
                 # then planted every behavior's knee at the smallest budget.
-                n_degen += int(bool(res.degenerate_fit or res.degenerate))
+                is_degen = int(bool(res.degenerate_fit or res.degenerate))
+                n_degen += is_degen
                 n_calib += int(bool(res.calibration_applied))
+                seed_curves[rep][size] = (float(n_pos), float(res.f1), is_degen, 1)
                 n_val = res.tp + res.fp + res.fn + res.tn
                 if n_val > 0:
                     tp_pcts.append(100.0 * res.tp / n_val)
@@ -315,10 +488,9 @@ def run_learning_curve(
     # leaving one in sets f1_max to a value no real model reached and every
     # "% of peak" statement downstream is measured against it.  Kept only if
     # every point is degenerate, mirroring detect_knee's fallback.
-    usable = [p for p in result.points if not p.is_degenerate] or list(result.points)
-    finite_f1 = [p.f1_mean for p in usable if np.isfinite(p.f1_mean)]
-    result.f1_max = float(max(finite_f1)) if finite_f1 else float("nan")
+    result.f1_max = _curve_ceiling(result.points)
     result.knee_clips = detect_knee(result.points)
+    _apply_boot(result, bootstrap_knee_ci(seed_curves, unit="seeds"))
     return result
 
 
@@ -440,7 +612,18 @@ def average_curve(
                        if balanced else f"Average across {comp}"),
         points=pts,
     )
-    finite_f1 = [p.f1_mean for p in pts if np.isfinite(p.f1_mean)]
-    avg.f1_max = float(max(finite_f1)) if finite_f1 else float("nan")
+    # Same non-degenerate ceiling rule as the per-behavior curve. Taking a plain
+    # max here read the ceiling off the 0-clip point, where every seed collapses to
+    # predicting the target and scores a perfect target-class F1: the average curve
+    # reported f1_max = 1.000 on the manuscript run, against a real ceiling of 0.74.
+    avg.f1_max = _curve_ceiling(pts)
     avg.knee_clips = detect_knee(pts)
+    # The unit here is the BEHAVIOR, not the seed: the recommended general-purpose
+    # clip count is a claim about the behavior panel, so the interval has to answer
+    # what happens if that panel were redrawn.  Resampling seeds instead would give
+    # a far narrower interval that answers a question nobody asked of this curve.
+    _apply_boot(avg, bootstrap_knee_ci(
+        [{p.requested_size: (p.n_clips_mean, p.f1_mean, p.n_degenerate, p.n_seeds)
+          for p in r.points} for r in results],
+        unit="behaviors"))
     return avg

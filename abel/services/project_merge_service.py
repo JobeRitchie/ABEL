@@ -247,7 +247,13 @@ class ProjectMergeService:
         # Map external bid → host bid (fall back to "tag::bid" if no match)
         def resolve_bid(ext_bid: str) -> tuple[str, str]:
             ext_name = ext_behaviors.get(ext_bid, ext_bid)
-            host_bid = name_to_host.get(ext_name.lower())
+            # Shared UUID first: projects of the same lineage keep the behavior
+            # id, so a rename on either side must not orphan the merged rows.
+            # Name matching stays as the fallback for unrelated projects.
+            host_bid = (
+                ext_bid if ext_bid in host_bid_name_map
+                else name_to_host.get(ext_name.lower())
+            )
             if host_bid:
                 host_name = host_bid_name_map[host_bid]
                 return host_bid, host_name
@@ -786,6 +792,11 @@ class ProjectMergeService:
             "latency_s":     latency_s,
             "distance_cm":   0.0,
         }
+
+    @classmethod
+    def project_fps(cls, root: Path) -> float:
+        """Public accessor for the fps recorded in a project's config (0 if absent)."""
+        return cls._read_project_fps(root)
 
     @staticmethod
     def _read_project_fps(root: Path) -> float:

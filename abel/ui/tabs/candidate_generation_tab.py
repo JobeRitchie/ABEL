@@ -75,7 +75,7 @@ class CandidateGenerationTab(QWidget):
         )
         self._no_project.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._no_project.setWordWrap(True)
-        self._no_project.setStyleSheet("color: #546E7A; font-size: 13px; padding: 20px;")
+        self._no_project.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 20px;")
 
         self._session_table = QTableWidget(0, 3)
         self._session_table.setHorizontalHeaderLabels(["", "Subject", "Feature windows"])

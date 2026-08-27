@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -35,14 +36,18 @@ class StartupWidget(QWidget):
             "padding: 18px 0 4px 0;"
         )
 
+        # A trailing normal space after each &nbsp; keeps the visual gap while
+        # giving the line somewhere to break -- without it the strapline is one
+        # unbreakable 1925 px run and clips on anything under a 1440p display.
         acronym = QLabel(
-            "<span style='color:#E8F4FF;'>A</span>ctive-learning &nbsp;"
-            "<span style='color:#E8F4FF;'>B</span>ehavior &nbsp;"
-            "<span style='color:#E8F4FF;'>E</span>stimation and &nbsp;"
+            "<span style='color:#E8F4FF;'>A</span>ctive-learning&nbsp; "
+            "<span style='color:#E8F4FF;'>B</span>ehavior&nbsp; "
+            "<span style='color:#E8F4FF;'>E</span>stimation and&nbsp; "
             "<span style='color:#E8F4FF;'>L</span>abeling"
         )
         acronym.setAlignment(Qt.AlignmentFlag.AlignCenter)
         acronym.setTextFormat(Qt.TextFormat.RichText)
+        acronym.setWordWrap(True)
         acronym.setStyleSheet(
             "font-size: 15px; font-weight: 700; letter-spacing: 2px; color: #64B5F6; padding-bottom: 6px;"
         )
@@ -62,7 +67,7 @@ class StartupWidget(QWidget):
         meta = QLabel("v0.5.0  ·  6/23/26")
         meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
         meta.setStyleSheet(
-            "font-size: 11px; font-weight: 600; color: #546E7A; padding-bottom: 10px;"
+            "font-size: 11px; font-weight: 600; color: #8FA6B4; padding-bottom: 10px;"
         )
 
         divider = QFrame()
@@ -114,7 +119,11 @@ class StartupWidget(QWidget):
         )
 
         # ── Layout ───────────────────────────────────────────────────────────
-        self.outer = QVBoxLayout(self)
+        # The splash's own minimum height (771 px) was setting the floor for the
+        # whole window, so ABEL refused to render on a 720p display. Scrolling
+        # the splash costs nothing; blocking the app on it costs everything.
+        content = QWidget()
+        self.outer = QVBoxLayout(content)
         self.outer.setContentsMargins(80, 30, 80, 30)
         self.outer.setSpacing(4)
         self.outer.addWidget(title)
@@ -130,6 +139,16 @@ class StartupWidget(QWidget):
         self.outer.addWidget(recent_label)
         self.outer.addWidget(self.recent_list)
         self.outer.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidget(content)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(scroll)
 
         self._apply_responsive_layout()
 

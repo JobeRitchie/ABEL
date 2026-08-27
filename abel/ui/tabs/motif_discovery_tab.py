@@ -82,7 +82,7 @@ class MotifDiscoveryTab(QWidget):
         )
         self._no_project.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._no_project.setWordWrap(True)
-        self._no_project.setStyleSheet("color: #546E7A; font-size: 13px; padding: 20px;")
+        self._no_project.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 20px;")
 
         # ── Seed filter group ───────────────────────────────────────────
         self._behavior_combo = QComboBox()
@@ -182,7 +182,7 @@ class MotifDiscoveryTab(QWidget):
 
         # UMAP params
         self._umap_label = QLabel("─── UMAP ───────────────")
-        self._umap_label.setStyleSheet("color: #546E7A; font-size: 10px;")
+        self._umap_label.setStyleSheet("color: #8FA6B4; font-size: 10px;")
         algo_form.addRow(self._umap_label)
 
         self._p_umap_n_comp = QSpinBox()
@@ -209,7 +209,7 @@ class MotifDiscoveryTab(QWidget):
 
         # HDBSCAN params
         self._hdbscan_label = QLabel("─── HDBSCAN ─────────────")
-        self._hdbscan_label.setStyleSheet("color: #546E7A; font-size: 10px;")
+        self._hdbscan_label.setStyleSheet("color: #8FA6B4; font-size: 10px;")
         algo_form.addRow(self._hdbscan_label)
 
         self._p_hdb_min_cluster = QSpinBox()
@@ -228,7 +228,7 @@ class MotifDiscoveryTab(QWidget):
 
         # Common params
         self._p_seed_label = QLabel("─── General ─────────────")
-        self._p_seed_label.setStyleSheet("color: #546E7A; font-size: 10px;")
+        self._p_seed_label.setStyleSheet("color: #8FA6B4; font-size: 10px;")
         algo_form.addRow(self._p_seed_label)
 
         self._p_seed = QSpinBox()

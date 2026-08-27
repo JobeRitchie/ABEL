@@ -7,6 +7,7 @@ rendered HTML must be well-formed.
 
 from __future__ import annotations
 
+import importlib
 from html.parser import HTMLParser
 
 import abel.ui.methods_content as mc
@@ -49,7 +50,7 @@ def test_references_nonempty_and_linked() -> None:
     keys = [r.key for r in mc.REFERENCES]
     assert len(keys) == len(set(keys)), "duplicate reference keys"
     for r in mc.REFERENCES:
-        assert r.url.startswith("http"), f"{r.key} has no resolvable link"
+        assert r.url.startswith("http"), f"{r.key} has no well-formed URL"
         assert r.authors and r.year and r.title and r.venue
         assert r.used_for, f"{r.key} does not say what it is used for"
 
@@ -64,12 +65,47 @@ def test_formulas_reference_existing_sources_and_refs() -> None:
             assert key in ref_keys, f"{f.name} cites unknown reference '{key}'"
 
 
+def test_formula_sources_resolve_to_real_code() -> None:
+    """Every formula's ``source`` must import.
+
+    A prefix check ("starts with abel.") cannot tell a real function from a
+    fictional one, and three formulas once named functions that did not exist.
+    Resolve the path for real so the Methods tab cannot drift from the code.
+    """
+    for f in mc.FORMULAS:
+        parts = f.source.split(".")
+        for split in range(len(parts), 0, -1):
+            try:
+                obj = importlib.import_module(".".join(parts[:split]))
+            except ImportError:
+                continue
+            for attr in parts[split:]:
+                assert hasattr(obj, attr), (
+                    f"{f.name}: '{f.source}' does not resolve — no attribute "
+                    f"'{attr}' on {obj!r}"
+                )
+                obj = getattr(obj, attr)
+            break
+        else:  # pragma: no cover - only fires on a wholly bogus module path
+            raise AssertionError(f"{f.name}: no importable module in '{f.source}'")
+
+
 def test_every_reference_is_used() -> None:
-    """No orphan citations: each reference backs at least one formula or is a
-    study-design/agreement source surfaced only in the References list."""
+    """No orphan citations: each reference backs at least one formula, or names a
+    pose format / library ABEL consumes rather than a procedure it computes.
+
+    Keep ``context_only`` short. It is an exemption from "this citation justifies
+    something we compute", not a parking space for related work.
+    """
     cited = {k for f in mc.FORMULAS for k in f.refs}
-    # These appear in the References list for context but need not tag a formula.
-    context_only = {"chicco2020", "stone1974", "mcinnes2018", "wilcoxon1945"}
+    # Input formats and libraries, not procedures: DeepLabCut and SLEAP are the
+    # pose formats ABEL reads; UMAP is the embedding library behind the motif
+    # presets and the Active Learning separation plots.
+    context_only = {
+        "mathis2018",
+        "pereira2022",
+        "mcinnes2018",
+    }
     for r in mc.REFERENCES:
         assert r.key in cited or r.key in context_only, f"orphan reference {r.key}"
 

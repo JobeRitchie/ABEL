@@ -2,13 +2,14 @@
 
 **ABEL — Active-learning Behavior Estimation and Labeling**
 
-Version 0.11.0 · Python ≥ 3.10 · UNC Non-Commercial License
+Version 0.12.0 · Python ≥ 3.10 · UNC Non-Commercial License
 
-ABEL is a local-first desktop application for reproducible, human-in-the-loop
-behavior modeling from DLC-tracked videos. It is built around a pose-first
-active-learning workflow, with optional video-derived features for
-context-sensitive behaviors. Source data and all derived artifacts stay in your
-project folder — nothing is uploaded anywhere.
+ABEL is a local-first desktop application for human-in-the-loop behavior modeling
+from DLC-tracked videos. You label a few examples, it ranks the frames worth
+labeling next, and you iterate until the model is good enough to run on new data.
+Pose features are the default; video-derived features are optional for behaviors
+that need visual context. Source data and derived artifacts stay in your project
+folder.
 
 ---
 
@@ -38,13 +39,17 @@ Heavy or task-specific dependencies are opt-in and can also be managed from the
 in-app **Dependencies** tab:
 
 ```bash
-pip install -e ".[preprocessing]"   # video features: opencv, scipy, imageio
+pip install -e ".[preprocessing]"   # video features: opencv, scipy, imageio, imageio-ffmpeg
 pip install -e ".[gpu]"             # torch (GPU backend for R3D appearance features)
 pip install -e ".[benchmarks]"      # xgboost
-pip install -e ".[clustering]"      # umap-learn, hdbscan: UMAP + motif clustering
+pip install -e ".[clustering]"      # scikit-learn, umap-learn, hdbscan: UMAP + motif clustering
 pip install -e ".[dev]"             # pytest
 pip install -e ".[all]"             # everything above
 ```
+
+R3D appearance features download Kinetics-pretrained weights from
+`download.pytorch.org` the first time they run, then cache them locally. That is
+the only network access ABEL performs — no data leaves the machine.
 
 ---
 
@@ -54,12 +59,9 @@ pip install -e ".[all]"             # everything above
 2. Define behaviors and add seed examples.
 3. Configure pose features (window duration, stride, smoothing) and optionally
    enable video-derived features (optical flow, motion).
-4. Run Active Learning:
-   - framewise pose feature extraction (`derived/pose_features/frame_pose.parquet`)
-   - optional framewise context extraction (`derived/context_features/frame_context.parquet`) — only when video features are enabled
-   - frame and segment representations (`derived/representations/*.parquet`)
-   - supervised training with context-padded label propagation (`derived/models/<model_version>/`)
-   - uncertainty scoring and candidate ranking (`derived/review_tables/candidate_segments.json`)
+4. Run Active Learning: feature extraction, frame and segment representations,
+   supervised training with context-padded label propagation, then uncertainty
+   scoring and candidate ranking. (Outputs are listed under *Project artifacts*.)
 5. Extract clips for selected segments.
 6. Review and relabel segments.
 7. Retrain and rerank candidates.
@@ -70,57 +72,57 @@ pip install -e ".[all]"             # everything above
 
 ## Applying models to new projects
 
-Once a project is trained, ABEL can apply it to brand-new data and help you
-trust the results:
-
-- **Direct Use** — replay a trained workflow on a new set of videos/pose files
-  without retraining. A *workflow snapshot* captures everything inference needs:
-  every behavior's model (full multi-behavior competition), window/stride,
-  temporal-refinement thresholds and bout settings, and whether the model used
-  video/context features. The Direct Use tab walks through source project →
-  input data → **pixel/mm calibration** → **keypoint mapping** → run.
-- **Keypoint mapping** — when new DLC files name keypoints differently
-  (e.g. `back_mid` vs `center_body`), ABEL maps them onto the names the model
-  expects so every derived feature lines up. Suggestions are auto-filled and
-  saved per source project. The same warning + remap is available in **Data
-  Import** for keeping a single project's pose files consistent.
-- **Transfer Feedback** (Direct Use subtab) — after refreshing analytics on a
-  Direct Use output, estimates how well the model transferred, per subject and
-  across the population. Subjects are scored and sorted worst-first with red
-  flags (near-zero detections, population outliers, stuck-high / lost-low
-  confidence runs, behavior-profile divergence) and a per-subject deep-dive.
-- **Model Refinement** — import labeled examples (segment features + labels)
-  from other projects, merge them into the training set, and retrain a refined
-  model. Projects that track the same keypoints under different names
-  (`back_mid` vs `center_body`) are reconciled automatically via keypoint
-  remapping before import; genuinely incompatible feature schemas are still
-  detected and blocked. Each source also shows informational *project-comparison
-  diagnostics* — net feature-value shift (vs a within-project baseline), spatial
-  calibration (px/mm), DLC pose-model match, and feature-extraction settings — so
-  you can judge whether merging is scientifically sound, not just schema-valid.
-  Imported examples are surfaced in the Review tab as reviewed, source-tagged
-  entries with their clips copied in, so you can see and audit what was imported.
-  Imported sources stay listed across sessions and can be cleanly removed
-  (un-imported) at any time; an Active Learning toggle controls whether imported
-  examples are included when training.
-- **Run Models** (Active Learning) — score a chosen subset of behaviors with
-  their existing trained models, no retraining.
+- **Direct Use** — replay a trained workflow on new videos without retraining. A
+  *workflow snapshot* captures every behavior's model, window/stride,
+  temporal-refinement thresholds, bout settings, and whether video features were
+  used. Steps: source project → input data → pixel/mm calibration → keypoint
+  mapping → run.
+- **Keypoint mapping** — maps differently-named DLC keypoints (`back_mid` vs
+  `center_body`) onto the names the model expects. Auto-filled and saved per
+  source project; also available in **Data Import**.
+- **Transfer Feedback** — scores how well the model transferred, per subject and
+  across the population, worst-first, flagging near-zero detections, population
+  outliers, stuck-high / lost-low confidence, and profile divergence.
+- **Model Refinement** — import labeled examples from other projects and retrain.
+  Keypoint names are reconciled automatically; incompatible schemas are blocked.
+  Each source reports feature-value shift, pixel/mm calibration, DLC pose-model
+  match, and extraction settings against the target project. Imports appear in
+  Review as source-tagged entries and can be removed at any time.
+- **Run Models** (Active Learning) — score a subset of behaviors with their
+  existing models, no retraining.
 
 ---
 
-## Scientific / engineering highlights
+## Modeling details
 
-- Multi-behavior supervised modeling (target behavior selectable per active-learning run)
-- Pose-only or pose+video feature modes selectable at project setup
+- Multi-behavior supervised modeling; target behavior selectable per run
+- Pose-only or pose+video feature modes, selected at project setup
 - Overlap-aware negative learning rule for behavior interactions
-- Uncertainty components: entropy, ensemble variance, density outlier, optional margin term
-- R3D-18 appearance features (512-d per segment, per-animal centered crops) computed before training as part of the video feature family, toggleable on the Feature Extraction tab
+- Uncertainty components: entropy, ensemble variance, density outlier, optional margin
+- R3D-18 appearance features (512-d per segment, per-animal centered crops)
+  computed before training, toggleable on the **Features** tab
 - Group-aware splitting by subject/session
-- Interactive ROI definition with drag-to-draw for both Target Zone and Subject Crop, plus Copy to All Subjects
-- Validation suite: model-quality overview, a blind labeling quiz (subject-centered clips, hotkeys, looping,
-  auto-advance, Unsure), and user-vs-machine / inter-rater / intra-rater reliability metrics
-- Behavior-overlap diagnostics with one-click mutual-inhibition application, and Excel export of test results
-- Reproducibility manifests including app version, git hash, model version, feature version, config hash, timestamp
+- Reproducibility manifests recording app version, git hash, model version,
+  feature version, config hash, and timestamp
+
+The in-app **Methods** tab lists the formulas ABEL evaluates, each tagged with the
+function that implements it, and the sources behind them.
+
+---
+
+## External validation suite
+
+A separate meta-analysis suite (`abel/validation/`) compares models across
+projects: leave-one-subject-out validation with subject-level bootstrap CIs,
+learning curves, cross-project discrimination, rare-behavior discovery, and
+Prism-ready exports. Launch it with `run_validation.bat`, or:
+
+```bash
+python -m abel.validation
+```
+
+Runs and saved setups are stored outside the repository, in the validation
+workspace you choose on first launch.
 
 ---
 
@@ -163,20 +165,15 @@ pytest
 ## Repository layout
 
 ```text
-abel/            Application package (UI, services, models, workers, benchmark, …)
-docs/            Architecture and structure notes
+abel/            Application package (UI, services, models, workers, benchmark, validation, …)
 scripts/         Developer utilities
 tests/           Test suite
 pyproject.toml   Packaging, entry points, optional dependency groups
 run_abel.bat     One-click Windows launcher
+run_validation.bat   External validation suite launcher
 ```
 
 ---
-
-## Notes
-
-- ABEL is local-first: source data and derived artifacts stay in the project folder.
-- Heavy dependencies are managed explicitly from the in-app Dependencies tab.
 
 ## License
 

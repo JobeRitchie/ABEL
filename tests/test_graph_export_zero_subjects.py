@@ -61,6 +61,7 @@ def _make_widget(metric: str, style: str, mode: str = "individual"):
     for name in (
         "_export_sessions", "_missing_value_for_metric", "_binned_session_grid",
         "_session_aggregate", "_build_wide_binned_df", "_collect_graph_data",
+        "_graph_rows", "_per_session_metric_table", "_scaled_rate_table",
     ):
         setattr(stub, name, getattr(_GraphsWidget, name).__get__(stub))
 

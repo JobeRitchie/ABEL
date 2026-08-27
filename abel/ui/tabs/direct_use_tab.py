@@ -75,13 +75,13 @@ _BTN = (
     "QPushButton { background: #1A2A3A; color: #B0BEC5; font-size: 12px;"
     " border: 1px solid #2A4060; border-radius: 4px; padding: 4px 12px; }"
     "QPushButton:hover { background: #1E3A5F; }"
-    "QPushButton:disabled { color: #546E7A; border-color: #1A2A3A; }"
+    "QPushButton:disabled { color: #8FA6B4; border-color: #1A2A3A; }"
 )
 _BTN_PRIMARY = (
     "QPushButton { background: #1565C0; color: white; font-size: 13px;"
     " font-weight: 700; border: none; border-radius: 5px; padding: 8px 20px; }"
     "QPushButton:hover { background: #1976D2; }"
-    "QPushButton:disabled { background: #263238; color: #546E7A; }"
+    "QPushButton:disabled { background: #263238; color: #8FA6B4; }"
 )
 
 
@@ -155,7 +155,7 @@ class _StepCard(QWidget):
         self._icon.setFixedWidth(26)
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._icon.setStyleSheet(
-            "font-size: 14px; color: #546E7A; background: transparent; border: none;"
+            "font-size: 14px; color: #8FA6B4; background: transparent; border: none;"
         )
 
         self._label = QLabel(STEP_LABELS.get(step_id, step_id))
@@ -184,7 +184,7 @@ class _StepCard(QWidget):
 
         self._timing = QLabel("")
         self._timing.setStyleSheet(
-            "font-size: 10px; color: #546E7A; background: transparent; border: none;"
+            "font-size: 10px; color: #8FA6B4; background: transparent; border: none;"
         )
         self._timing.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -206,7 +206,7 @@ class _StepCard(QWidget):
         self.setStyleSheet(_CARD_PENDING)
         self._icon.setText(_ICON_PENDING)
         self._icon.setStyleSheet(
-            "font-size: 14px; color: #546E7A; background: transparent; border: none;"
+            "font-size: 14px; color: #8FA6B4; background: transparent; border: none;"
         )
         self._progress.setValue(0)
         self._progress.setStyleSheet(
@@ -785,7 +785,7 @@ class DirectUseTab(QWidget):
         self._eta_label = QLabel("")
         self._eta_label.setFixedWidth(140)
         self._eta_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._eta_label.setStyleSheet("font-size: 11px; color: #546E7A;")
+        self._eta_label.setStyleSheet("font-size: 11px; color: #8FA6B4;")
         prog_row.addWidget(self._overall_progress, 1)
         prog_row.addWidget(self._time_label)
         prog_row.addWidget(self._eta_label)

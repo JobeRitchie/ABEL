@@ -24,6 +24,8 @@ from abel.temporal_refinement.refined_eval import (
     apply_temporal_refinement,
     load_temporal_settings,
     refined_holdout_metrics,
+    score_raw_and_refined,
+    target_class_prf,
 )
 
 
@@ -296,3 +298,73 @@ def test_refined_recovers_positives_when_onset_below_half(tmp_path: Path) -> Non
     assert res["raw_positive_pred"] == 0
     assert res["refined_positive_pred"] > 0
     assert res["refined_recall"] > res["raw_recall"]
+
+
+# ---------------------------------------------------------------------------
+# Target-class vs macro scoring
+# ---------------------------------------------------------------------------
+def test_target_class_prf_matches_counts_and_handles_empty() -> None:
+    p, r, f = target_class_prf(84, 6, 66)
+    assert abs(p - 84 / 90) < 1e-12
+    assert abs(r - 84 / 150) < 1e-12
+    assert abs(f - 2 * p * r / (p + r)) < 1e-12
+    # A model that predicts nothing scores zero, not a macro-style 0.5 floor.
+    assert target_class_prf(0, 0, 40) == (0.0, 0.0, 0.0)
+
+
+def test_target_class_scores_are_not_the_macro_scores() -> None:
+    """The reported score must follow from the reported counts.
+
+    Reproduces the regime that made the Validation tab misleading: a one-vs-rest
+    holdout that is overwhelmingly not-target. Macro averaging lifts recall far
+    above the target's own recall, which is the number the TP/FP/FN imply.
+    """
+    n = 400
+    n_pos = 40
+    y_true = np.zeros(n, dtype=int)
+    y_true[:n_pos] = 1
+    prob = np.full(n, 0.05)
+    prob[: n_pos // 2] = 0.9          # half the positives found
+    starts = np.arange(0, 3 * n, 3)
+    settings = {"onset_threshold": 0.5, "min_bout_duration_frames": 1, "merge_gap_frames": 2}
+
+    out = score_raw_and_refined(
+        y_true=y_true, prob=prob,
+        session_ids=np.array(["s"] * n),
+        start_frames=starts, end_frames=starts + 14,
+        settings=settings,
+    )
+    tp, fp, fn = out["raw_tp"], out["raw_fp"], out["raw_fn"]
+    exp_p, exp_r, exp_f = target_class_prf(tp, fp, fn)
+    assert abs(out["raw_target_precision"] - exp_p) < 1e-12
+    assert abs(out["raw_target_recall"] - exp_r) < 1e-12
+    assert abs(out["raw_target_f1"] - exp_f) < 1e-12
+    # Macro is retained but is a materially different, more flattering number.
+    assert out["raw_recall"] > out["raw_target_recall"] + 0.2
+
+
+def test_refined_target_scores_are_nan_when_not_evaluable() -> None:
+    """min_bout longer than every observed island suppresses refined scores."""
+    n = 40
+    y_true = np.zeros(n, dtype=int)
+    y_true[::2] = 1
+    prob = np.where(y_true == 1, 0.9, 0.05)
+    # 15-frame windows separated by 100-frame unobserved gaps: every island is
+    # one window long, far shorter than a 60-frame min-bout.
+    starts = np.arange(n) * 115
+    out = score_raw_and_refined(
+        y_true=y_true, prob=prob,
+        session_ids=np.array(["s"] * n),
+        start_frames=starts, end_frames=starts + 14,
+        settings={
+            "onset_threshold": 0.5,
+            "min_bout_duration_frames": 60,
+            "merge_gap_frames": 2,
+        },
+    )
+    assert out["refined_evaluable"] is False
+    assert math.isnan(out["refined_target_f1"])
+    assert math.isnan(out["refined_target_precision"])
+    assert math.isnan(out["refined_target_recall"])
+    # Raw is still perfectly scorable and must not be suppressed with it.
+    assert out["raw_target_f1"] > 0.9

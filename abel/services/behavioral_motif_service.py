@@ -94,7 +94,22 @@ class MotifSettings:
     hmm_n_restarts: int = 5
     """Number of random restarts when fitting each HMM (best log-likelihood kept)."""
     hmm_criterion: str = "bic"
-    """'aic' | 'bic' — information criterion used for automatic model selection."""
+    """'aic' | 'bic' | 'aicc' | 'icl' | 'cv' — criterion used for automatic model
+    selection.
+
+    - 'bic'/'aic': classical information criteria.  Both are known to over-select
+      states for behavioural sequence data (Pohle et al. 2017, JABES 22:270-293).
+    - 'aicc': AIC with the small-sample correction; use when N/n_free < ~40.
+    - 'icl':  BIC plus twice the entropy of the posterior state assignments
+      (Biernacki, Celeux & Govaert 2000).  Favours states that are actually
+      separable, which is what makes an emission heatmap interpretable.
+    - 'cv':   leave-one-session-out cross-validated held-out log-likelihood with
+      a 1-SE parsimony rule.  Slowest, but the only criterion here that measures
+      generalisation to a held-out animal rather than in-sample fit."""
+    hmm_random_seed: int = 0
+    """Base seed for HMM EM initialisation.  Restart *r* uses ``seed + r``, so a
+    given (data, settings) pair always reproduces the same fit.  Without this the
+    reported state count can change between runs of the same analysis."""
 
     # -- Permutation testing ------------------------------------------------
     n_permutations: int = 1000
@@ -323,6 +338,13 @@ def permutation_test_transition(
     Observed statistic: |mean_A - mean_B| per cell.
     Null distribution: shuffle group labels and recompute per cell.
 
+    p-values use the ``(b + 1) / (m + 1)`` estimator: the observed arrangement is
+    itself one of the possible label assignments, so it belongs in the null count.
+    The naive ``b / m`` can return exactly zero, which is not a valid p-value and
+    survives FDR correction as an apparently infinitely significant cell
+    (Phipson & Smyth 2010, Stat Appl Genet Mol Biol 9:39).  The smallest value
+    this can return is ``1 / (n_permutations + 1)``.
+
     Returns
     -------
     p-value matrix (same shape as each input matrix).
@@ -349,7 +371,7 @@ def permutation_test_transition(
         diff = np.abs(perm_a - perm_b)
         null_counts += (diff >= observed).astype(float)
 
-    return null_counts / max(n_permutations, 1)
+    return (null_counts + 1.0) / (n_permutations + 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -682,13 +704,52 @@ def _encode_sequences(
     return encoded
 
 
+def _posterior_entropy(model: Any, observations: list[np.ndarray]) -> float:
+    """Total entropy of the per-observation posterior state distribution.
+
+    Used for the ICL criterion.  Zero when every observation is assigned to one
+    state with certainty; large when states overlap and the decoding is
+    ambiguous.  Returns 0.0 if the posteriors cannot be computed, which makes
+    ICL degrade gracefully to BIC rather than failing the whole fit.
+    """
+    try:
+        lengths = [len(o) for o in observations]
+        X = np.concatenate(observations).reshape(-1, 1)
+        gamma = np.asarray(model.predict_proba(X, lengths), dtype=np.float64)
+        gamma = np.clip(gamma, 1e-12, 1.0)
+        return float(-np.sum(gamma * np.log(gamma)))
+    except Exception:
+        return 0.0
+
+
+def hmm_free_params(n_states: int, n_features: int) -> int:
+    """Number of free parameters in a categorical HMM.
+
+    ``K(K-1)`` transition + ``K(F-1)`` emission + ``(K-1)`` initial-state
+    probabilities, where K = n_states and F = n_features (number of behaviors).
+    Rows are simplex-constrained, hence the -1 in each term.
+    """
+    return n_states * (n_states - 1) + n_states * (n_features - 1) + (n_states - 1)
+
+
 def _fit_single_hmm(
     observations: list[np.ndarray],
     n_states: int,
     n_iter: int,
     n_features: int,
-) -> tuple[Any, float]:
-    """Fit one CategoricalHMM; return (model, log_likelihood)."""
+    seed: int | None = None,
+) -> tuple[Any, float, bool, int]:
+    """Fit one CategoricalHMM.
+
+    Returns ``(model, log_likelihood, converged, iters_used)``.
+
+    ``converged`` is computed here rather than read from
+    ``model.monitor_.converged``: hmmlearn's property reports ``True`` whenever
+    EM exhausts ``n_iter``, so a fit that ran out of iterations is
+    indistinguishable from one that reached a stationary point.  Model selection
+    compares log-likelihoods across state counts and is only valid if each fit
+    is at (or near) its own maximum, so the distinction matters.
+    """
     try:
         from hmmlearn import hmm as hmmlearn_hmm  # type: ignore[import-untyped]
     except ImportError:
@@ -703,13 +764,15 @@ def _fit_single_hmm(
         tol=1e-4,
         verbose=False,
         n_features=n_features,
+        random_state=seed,
     )
     try:
         model.fit(concatenated, lengths)
         ll = model.score(concatenated, lengths)
-        return model, float(ll)
+        iters = int(getattr(model.monitor_, "iter", n_iter))
+        return model, float(ll), bool(iters < n_iter), iters
     except Exception:
-        return model, float("-inf")
+        return model, float("-inf"), False, 0
 
 
 def fit_hmm(
@@ -748,7 +811,6 @@ def fit_hmm(
     n_features = len(behavior_ids)
 
     total_obs = sum(len(o) for o in observations)
-    n_params_per_state = n_features - 1 + (settings.hmm_n_states_max - 1) + (n_features - 1)
 
     model_selection: list[dict[str, Any]] = []
 
@@ -760,14 +822,28 @@ def fit_hmm(
     best_model = None
     best_criterion_val = float("inf")
     best_n = settings.hmm_n_states_min
+    unconverged: list[int] = []
+    seed0 = int(getattr(settings, "hmm_random_seed", 0))
+
+    # 'cv' is a calibration-time criterion; at fit time fall back to ICL, which
+    # is the cheap in-sample criterion that behaves most like held-out fit.
+    criterion = str(settings.hmm_criterion or "bic").lower()
+    if criterion not in {"aic", "bic", "aicc", "icl"}:
+        criterion = "icl" if criterion == "cv" else "bic"
 
     for n_states in n_range:
-        # Multiple random restarts — keep best log-likelihood
+        # Multiple random restarts — keep best log-likelihood.  Seeds are
+        # deterministic so the selected state count reproduces across runs.
         best_ll = float("-inf")
         best_run_model = None
+        any_converged = False
         for restart in range(settings.hmm_n_restarts):
             try:
-                model, ll = _fit_single_hmm(observations, n_states, settings.hmm_n_iter, n_features)
+                model, ll, conv, _iters = _fit_single_hmm(
+                    observations, n_states, settings.hmm_n_iter, n_features,
+                    seed=seed0 + restart,
+                )
+                any_converged = any_converged or conv
                 if ll > best_ll:
                     best_ll = ll
                     best_run_model = model
@@ -776,21 +852,32 @@ def fit_hmm(
 
         if best_run_model is None or best_ll == float("-inf"):
             continue
+        if not any_converged:
+            unconverged.append(n_states)
 
-        # AIC / BIC
-        n_free = n_states * (n_states - 1) + n_states * (n_features - 1) + (n_states - 1)
+        n_free = hmm_free_params(n_states, n_features)
         aic = -2 * best_ll + 2 * n_free
         bic = -2 * best_ll + n_free * np.log(max(total_obs, 1))
+        # AICc: small-sample correction; diverges as n_free approaches N.
+        denom = total_obs - n_free - 1
+        aicc = aic + (2 * n_free * (n_free + 1) / denom) if denom > 0 else float("inf")
+        # ICL = BIC + 2 * entropy of the posterior state assignments.  Penalises
+        # models whose states are not cleanly separable.
+        icl = bic + 2.0 * _posterior_entropy(best_run_model, observations)
 
         model_selection.append({
             "n_states": n_states,
             "log_likelihood": best_ll,
             "aic": aic,
             "bic": bic,
+            "aicc": aicc,
+            "icl": icl,
             "n_free_params": n_free,
+            "obs_per_param": total_obs / n_free if n_free else float("inf"),
+            "converged": any_converged,
         })
 
-        criterion_val = aic if settings.hmm_criterion == "aic" else bic
+        criterion_val = {"aic": aic, "bic": bic, "aicc": aicc, "icl": icl}[criterion]
         if criterion_val < best_criterion_val:
             best_criterion_val = criterion_val
             best_model = best_run_model
@@ -833,9 +920,544 @@ def fit_hmm(
         "log_likelihood": float(best_model.score(concatenated, lengths)),
         "aic": next((r["aic"] for r in model_selection if r["n_states"] == best_n), float("nan")),
         "bic": next((r["bic"] for r in model_selection if r["n_states"] == best_n), float("nan")),
+        "aicc": next((r["aicc"] for r in model_selection if r["n_states"] == best_n), float("nan")),
+        "icl": next((r["icl"] for r in model_selection if r["n_states"] == best_n), float("nan")),
         "model_selection": model_selection,
+        "criterion_used": criterion,
+        "n_observations": total_obs,
+        "n_sequences": len(observations),
+        "unconverged_state_counts": unconverged,
         "behavior_ids": behavior_ids,
         "error": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# HMM auto-calibration
+# ---------------------------------------------------------------------------
+#
+# Why this exists
+# ---------------
+# Published guidance on choosing the number of HMM states is genuinely
+# unsettled, and most of it was written for *continuous* emissions sampled on a
+# fixed grid (animal-movement step/turn series).  Two facts drive the design of
+# this routine:
+#
+#   1. AIC and BIC systematically over-select states for behavioural sequence
+#      data -- Pohle, Langrock, van Beest & Schmidt (2017), "Selecting the
+#      Number of States in Hidden Markov Models: Pitfalls, Practical Challenges
+#      and Pragmatic Solutions", JABES 22:270-293.  Their recommendation is to
+#      treat the criteria as one input among several, bound the search by what
+#      is biologically interpretable, and inspect the fitted states.  Dupont et
+#      al. (2025, Methods Ecol Evol 16:e70025) reach the same conclusion and
+#      note that cross-validated likelihood does not clearly beat BIC either.
+#
+#   2. Our emissions are *discrete behavior labels* and our time axis is the
+#      *bout index*, not a fixed sampling grid.  That makes this a Markov chain
+#      over a bout sequence, so the gap between bouts is not modelled at all.
+#      It is a deliberate simplification (surfaced as a caveat in the report),
+#      and it means state counts from the movement-HMM literature do not
+#      transfer directly.
+#
+# So calibration does not pick a "correct" K.  It measures what can be measured
+# -- whether EM converged, whether restarts agree, how much data there is per
+# parameter, and how each criterion ranks the candidates -- then reports where
+# they agree and defaults to the most conservative defensible choice.
+
+CALIB_MIN_OBS_PER_PARAM = 10.0
+"""Observations required per free parameter before a state count is considered
+estimable.  Ten is the conventional lower bound for multinomial-style models;
+the report flags anything below it rather than silently fitting it."""
+
+
+def _hmm_cv_loglik(
+    observations: list[np.ndarray],
+    n_states: int,
+    n_features: int,
+    n_iter: int,
+    n_restarts: int,
+    seed0: int,
+    folds: list[list[int]],
+) -> tuple[float, float, int]:
+    """Cross-validated held-out log-likelihood per observation.
+
+    Sequences are whole sessions, so every fold holds out complete sessions and
+    no animal contributes to both training and test within a fold.
+
+    Returns ``(mean_ll_per_obs, sem_across_folds, n_folds_used)``.
+    """
+    per_fold: list[float] = []
+    for fi, test_idx in enumerate(folds):
+        held = set(test_idx)
+        test = [observations[i] for i in test_idx]
+        train = [o for i, o in enumerate(observations) if i not in held]
+        if not train or not test:
+            continue
+        best_ll = float("-inf")
+        best_model = None
+        for r in range(n_restarts):
+            try:
+                m, ll, _c, _i = _fit_single_hmm(
+                    train, n_states, n_iter, n_features, seed=seed0 + 1000 * fi + r
+                )
+            except Exception:
+                continue
+            if ll > best_ll:
+                best_ll, best_model = ll, m
+        if best_model is None or best_ll == float("-inf"):
+            continue
+        try:
+            X = np.concatenate(test).reshape(-1, 1)
+            score = float(best_model.score(X, [len(o) for o in test]))
+            per_fold.append(score / max(len(X), 1))
+        except Exception:
+            continue
+    if not per_fold:
+        return float("nan"), float("nan"), 0
+    arr = np.asarray(per_fold, dtype=np.float64)
+    sem = float(arr.std(ddof=1) / np.sqrt(len(arr))) if len(arr) > 1 else 0.0
+    return float(arr.mean()), sem, len(arr)
+
+
+def _make_folds(n_seq: int, n_folds: int, seed: int) -> list[list[int]]:
+    """Split sequence indices into ``n_folds`` disjoint held-out blocks."""
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(n_seq)
+    return [list(map(int, c)) for c in np.array_split(order, n_folds) if len(c)]
+
+
+def calibrate_hmm_settings(
+    sequences: dict[str, list[tuple[float, float, str]]],
+    behavior_ids: list[str],
+    settings: MotifSettings,
+    time_budget_s: float = 240.0,
+    progress_cb: Any = None,
+) -> dict[str, Any]:
+    """Measure this dataset and propose HMM settings, with the evidence.
+
+    Four stages, each of which measures rather than assumes:
+
+    Stage 1 -- data adequacy.  Counts observations and sequences, then finds the
+    largest state count with at least :data:`CALIB_MIN_OBS_PER_PARAM`
+    observations per free parameter.  That caps the search range.
+
+    Stage 2 -- EM iterations.  Fits at the largest feasible state count with a
+    generous cap and records how many iterations EM actually needed.  This
+    matters more than it sounds: a truncated fit can make the log-likelihood
+    *decrease* as states are added, which is impossible at the true optimum and
+    silently corrupts every information criterion computed from it.
+
+    Stage 3 -- restarts.  Fits many restarts at a mid-range state count and
+    measures how often EM reaches the best optimum found, then sets the restart
+    count needed for a ~99% chance of reaching it at that hit rate.
+
+    Stage 4 -- state count.  Computes AIC, AICc, BIC and ICL over the feasible
+    range, plus cross-validated held-out log-likelihood when it fits in
+    ``time_budget_s``.  The recommendation is the most parsimonious state count
+    the criteria support: for CV, the smallest K within one standard error of
+    the best (the standard 1-SE rule); otherwise ICL, which penalises states
+    that are not cleanly separable and so over-selects less than BIC.
+
+    Returns a dict with ``proposed`` (settings to apply), ``report`` (text
+    lines), ``table`` (per-state-count criteria), ``warnings`` and ``error``.
+    """
+    import time as _time
+
+    def _tick(msg: str, frac: float) -> None:
+        if progress_cb:
+            try:
+                progress_cb(msg, float(frac))
+            except Exception:
+                pass
+
+    try:
+        from hmmlearn import hmm as _  # noqa: F401
+    except ImportError:
+        return {"error": "hmmlearn is required for calibration.\nInstall with:  pip install hmmlearn"}
+
+    encoded = _encode_sequences(sequences, behavior_ids)
+    if not encoded:
+        return {"error": "No behavior sequences found. Run temporal refinement first."}
+
+    observations = [np.array(v, dtype=int) for v in encoded.values() if len(v)]
+    n_features = len(behavior_ids)
+    n_seq = len(observations)
+    total_obs = int(sum(len(o) for o in observations))
+    seed0 = int(getattr(settings, "hmm_random_seed", 0))
+
+    report: list[str] = []
+    warnings_out: list[str] = []
+
+    # ---- Stage 1: data adequacy -------------------------------------------
+    _tick("Measuring data adequacy...", 0.02)
+    k_max_feasible = 2
+    for k in range(2, 21):
+        if total_obs / max(hmm_free_params(k, n_features), 1) >= CALIB_MIN_OBS_PER_PARAM:
+            k_max_feasible = k
+        else:
+            break
+    k_min = 2
+    k_max = max(k_max_feasible, k_min + 1)
+
+    lens = sorted(len(o) for o in observations)
+    report += [
+        "STAGE 1 - DATA ADEQUACY",
+        "  Behaviors (emission symbols): %d" % n_features,
+        "  Sessions (sequences):         %d" % n_seq,
+        "  Bouts (observations):         %d" % total_obs,
+        "  Sequence length: min=%d  median=%d  max=%d" % (lens[0], int(np.median(lens)), lens[-1]),
+        "  Largest state count with >=%.0f observations per free parameter: K=%d"
+        % (CALIB_MIN_OBS_PER_PARAM, k_max_feasible),
+        "  -> searching K = %d...%d" % (k_min, k_max),
+        "",
+    ]
+    if total_obs < 500:
+        warnings_out.append(
+            "Only %d bouts across %d sessions. State counts above ~4 are weakly identified "
+            "at this sample size; treat any hidden state as a hypothesis to check against "
+            "the emission heatmap, not a finding." % (total_obs, n_seq)
+        )
+    if n_seq < 8:
+        warnings_out.append(
+            "Only %d sessions. Per-group state-occupancy comparisons will have very low "
+            "power and the cross-validation SE will be unstable." % n_seq
+        )
+
+    # ---- Stage 2: EM iterations -------------------------------------------
+    _tick("Calibrating EM iterations...", 0.08)
+    hard_cap = 2000
+    probe_iters: list[int] = []
+    for k in (k_max, max(k_min, k_max - 2)):
+        for r in range(3):
+            try:
+                _m, ll, conv, iters = _fit_single_hmm(
+                    observations, k, hard_cap, n_features, seed=seed0 + r
+                )
+            except Exception:
+                continue
+            if ll > float("-inf") and conv:
+                probe_iters.append(iters)
+    if probe_iters:
+        needed = int(max(probe_iters))
+        proposed_iter = int(min(hard_cap, max(100, np.ceil(needed * 1.5 / 50.0) * 50)))
+        conv_note = "EM reached its own optimum in at most %d iterations" % needed
+    else:
+        needed = hard_cap
+        proposed_iter = hard_cap
+        conv_note = "EM did NOT converge within %d iterations at any probed state count" % hard_cap
+        warnings_out.append(
+            "EM did not converge within %d iterations. The likelihood surface for this "
+            "dataset is very flat - the state count should be read as indicative only."
+            % hard_cap
+        )
+    report += [
+        "STAGE 2 - EM ITERATIONS",
+        "  %s." % conv_note,
+        "  Current setting: n_iter=%d" % settings.hmm_n_iter,
+        "  -> proposing n_iter=%d (measured requirement plus 50%% headroom)" % proposed_iter,
+        "",
+    ]
+    if settings.hmm_n_iter < needed:
+        warnings_out.append(
+            "Current n_iter=%d truncates EM before it converges (it needs up to %d). "
+            "Truncated fits make AIC/BIC comparisons invalid, because the log-likelihood of "
+            "a larger model can come out BELOW a smaller one - which cannot happen at the "
+            "true maximum." % (settings.hmm_n_iter, needed)
+        )
+
+    # ---- Stage 3: restarts -------------------------------------------------
+    _tick("Measuring local optima...", 0.20)
+    k_probe = int(np.clip((k_min + k_max) // 2, k_min, k_max))
+    lls: list[float] = []
+    for r in range(25):
+        try:
+            _m, ll, _c, _i = _fit_single_hmm(
+                observations, k_probe, proposed_iter, n_features, seed=seed0 + 500 + r
+            )
+        except Exception:
+            continue
+        if ll > float("-inf"):
+            lls.append(ll)
+    if lls:
+        arr = np.asarray(lls)
+        top = float(arr.max())
+        hits = int(np.sum(arr >= top - 0.5))  # within 0.5 nat of the best found
+        hit_rate = hits / len(arr)
+        if hit_rate >= 0.999:
+            proposed_restarts = 5
+        else:
+            proposed_restarts = int(np.clip(
+                np.ceil(np.log(0.01) / np.log(max(1e-9, 1.0 - hit_rate))), 5, 50
+            ))
+        report += [
+            "STAGE 3 - RANDOM RESTARTS (local optima)",
+            "  Probed K=%d with %d restarts." % (k_probe, len(arr)),
+            "  Best log-likelihood %.2f; reached by %d/%d restarts (%.0f%%)."
+            % (top, hits, len(arr), 100 * hit_rate),
+            "  Spread across restarts: %.2f nats." % (arr.max() - arr.min()),
+            "  Current setting: n_restarts=%d" % settings.hmm_n_restarts,
+            "  -> proposing n_restarts=%d (>=99%% chance of reaching that optimum at the "
+            "measured hit rate)" % proposed_restarts,
+            "",
+        ]
+        if settings.hmm_n_restarts < proposed_restarts:
+            warnings_out.append(
+                "EM lands on the best optimum only %.0f%% of the time here, so %d restarts can "
+                "miss it and report a worse fit for some state counts than for others - which "
+                "distorts the criterion curve." % (100 * hit_rate, settings.hmm_n_restarts)
+            )
+    else:
+        proposed_restarts = max(10, settings.hmm_n_restarts)
+        report += ["STAGE 3 - RANDOM RESTARTS", "  Probe failed; keeping a conservative default.", ""]
+
+    # ---- Stage 4: state count ---------------------------------------------
+    _tick("Scoring state counts...", 0.32)
+    k_range = list(range(k_min, k_max + 1))
+    table: list[dict[str, Any]] = []
+    fit_cost_s = 0.0
+    for i, k in enumerate(k_range):
+        _tick("Scoring K=%d..." % k, 0.32 + 0.33 * i / max(len(k_range), 1))
+        best_ll, best_model, any_conv = float("-inf"), None, False
+        t0 = _time.time()
+        for r in range(proposed_restarts):
+            try:
+                m, ll, conv, _i2 = _fit_single_hmm(
+                    observations, k, proposed_iter, n_features, seed=seed0 + r
+                )
+            except Exception:
+                continue
+            any_conv = any_conv or conv
+            if ll > best_ll:
+                best_ll, best_model = ll, m
+        fit_cost_s += (_time.time() - t0) / max(proposed_restarts, 1)
+        if best_model is None or best_ll == float("-inf"):
+            continue
+        pfree = hmm_free_params(k, n_features)
+        aic = -2 * best_ll + 2 * pfree
+        bic = -2 * best_ll + pfree * np.log(max(total_obs, 1))
+        denom = total_obs - pfree - 1
+        aicc = aic + (2 * pfree * (pfree + 1) / denom) if denom > 0 else float("inf")
+        icl = bic + 2.0 * _posterior_entropy(best_model, observations)
+        table.append({
+            "n_states": k, "log_likelihood": best_ll, "n_free_params": pfree,
+            "obs_per_param": total_obs / pfree, "aic": aic, "aicc": aicc,
+            "bic": bic, "icl": icl, "converged": any_conv,
+            "cv_loglik": float("nan"), "cv_sem": float("nan"), "cv_folds": 0,
+        })
+
+    if not table:
+        return {
+            "error": "Every HMM fit failed. There may be too few bouts to model.",
+            "report": report,
+        }
+
+    lls_by_k = [r["log_likelihood"] for r in table]
+    if not all(b >= a - 1e-6 for a, b in zip(lls_by_k, lls_by_k[1:])):
+        warnings_out.append(
+            "Log-likelihood decreases somewhere as states are added, which is impossible at "
+            "the true maximum. Some fits are still stuck in local optima even after "
+            "calibration - raise n_restarts further before trusting the criterion curve."
+        )
+
+    # Cross-validation, if affordable.
+    per_fit = fit_cost_s / max(len(k_range), 1)
+    cv_restarts = max(3, min(proposed_restarts, 8))
+    n_folds = min(n_seq, 16)
+    est = per_fit * cv_restarts * n_folds * len(k_range)
+    while n_folds > 3 and est > time_budget_s:
+        n_folds = max(3, n_folds // 2)
+        est = per_fit * cv_restarts * n_folds * len(k_range)
+    cv_ok = n_seq >= 4 and est <= time_budget_s * 1.5
+    if cv_ok:
+        folds = _make_folds(n_seq, n_folds, seed0 + 77)
+        for i, row in enumerate(table):
+            _tick("Cross-validating K=%d..." % row["n_states"], 0.65 + 0.33 * i / len(table))
+            mean_ll, sem, used = _hmm_cv_loglik(
+                observations, int(row["n_states"]), n_features, proposed_iter,
+                cv_restarts, seed0, folds,
+            )
+            row["cv_loglik"], row["cv_sem"], row["cv_folds"] = mean_ll, sem, used
+
+    # ---- pick a recommendation --------------------------------------------
+    cv_complete = cv_ok and all(np.isfinite(r["cv_loglik"]) for r in table) and len(table) > 1
+    if cv_complete:
+        best_i = int(np.argmax([r["cv_loglik"] for r in table]))
+        thresh = table[best_i]["cv_loglik"] - (table[best_i]["cv_sem"] or 0.0)
+        rec_k = int(next(
+            (r["n_states"] for r in table if r["cv_loglik"] >= thresh),
+            table[best_i]["n_states"],
+        ))
+        used_criterion = "cv"
+    else:
+        rec_k = int(min(table, key=lambda r: r["icl"])["n_states"])
+        used_criterion = "icl"
+
+    picks = {
+        "AIC": int(min(table, key=lambda r: r["aic"])["n_states"]),
+        "AICc": int(min(table, key=lambda r: r["aicc"])["n_states"]),
+        "BIC": int(min(table, key=lambda r: r["bic"])["n_states"]),
+        "ICL": int(min(table, key=lambda r: r["icl"])["n_states"]),
+    }
+    if cv_complete:
+        picks["CV (1-SE)"] = rec_k
+
+    report += [
+        "STAGE 4 - NUMBER OF STATES",
+        "  AIC and BIC systematically favour more states than are biologically sensible for",
+        "  behavioural sequence data (Pohle, Langrock, van Beest & Schmidt 2017, JABES",
+        "  22:270-293; Dupont et al. 2025, Methods Ecol Evol 16:e70025). All four criteria are",
+        "  shown so you can see the direction and size of that disagreement rather than",
+        "  inherit one criterion's answer.",
+        "",
+    ]
+    hdr = ("   K        logL  params  obs/par        AIC       AICc        BIC        ICL")
+    if cv_ok:
+        hdr += "   CV logL/obs        +/-SE"
+    report += ["  " + hdr, "  " + "-" * len(hdr)]
+    for r in table:
+        line = ("  %4d  %10.2f  %6d  %7.1f  %9.1f  %9.1f  %9.1f  %9.1f"
+                % (r["n_states"], r["log_likelihood"], r["n_free_params"],
+                   r["obs_per_param"], r["aic"], r["aicc"], r["bic"], r["icl"]))
+        if cv_ok:
+            cv, sem = r["cv_loglik"], r["cv_sem"]
+            line += ("  %+12.4f  %11.4f" % (cv, sem)) if np.isfinite(cv) else \
+                "           n/a          n/a"
+        if not r["converged"]:
+            line += "  (not converged)"
+        report.append(line)
+    report += ["", "  Each criterion's preferred K:"]
+    for name, k in picks.items():
+        report.append("    %10s: K=%d" % (name, k))
+    agree = len(set(picks.values())) == 1
+    report += [
+        "",
+        ("  All criteria agree on K=%d, which is the strongest evidence this method can "
+         "give for a state count." % rec_k) if agree else
+        ("  The criteria disagree. That is the normal case, not a failure, and the "
+         "disagreement runs in the expected direction: AIC and BIC sit at higher state "
+         "counts than ICL and cross-validation."),
+    ]
+    if used_criterion == "cv":
+        report.append(
+            "  -> recommending K=%d by %d-fold session-held-out cross-validation with the "
+            "1-SE rule: the smallest state count whose held-out likelihood is within one "
+            "standard error of the best. This is the only criterion here that measures "
+            "generalisation to an unseen animal rather than in-sample fit." % (rec_k, n_folds)
+        )
+    else:
+        report.append(
+            "  -> recommending K=%d by ICL (BIC plus twice the posterior-assignment entropy; "
+            "Biernacki, Celeux & Govaert 2000). ICL penalises state counts whose states are "
+            "not cleanly separable, so the states it keeps are the ones you can actually read "
+            "off the emission heatmap." % rec_k
+        )
+        if not cv_ok:
+            report.append(
+                "  (Cross-validation was skipped: projected cost %.0fs exceeds the %.0fs "
+                "budget, or there are too few sessions.)" % (est, time_budget_s)
+            )
+    report.append("")
+
+    # How well-determined is K, really?
+    if cv_complete:
+        cvs = np.asarray([r["cv_loglik"] for r in table], dtype=np.float64)
+        sems = np.asarray([r["cv_sem"] for r in table], dtype=np.float64)
+        spread = float(cvs.max() - cvs.min())
+        typ_sem = float(np.nanmedian(sems))
+        within = int(np.sum(cvs >= cvs.max() - sems[int(np.argmax(cvs))]))
+        report += [
+            "  How well-determined is K?",
+            "    Held-out likelihood spans %.4f nats/bout across the candidates, against a "
+            "typical fold-to-fold SE of %.4f." % (spread, typ_sem),
+            "    %d of %d candidate state counts sit within one SE of the best."
+            % (within, len(table)),
+        ]
+        if spread <= 2.0 * typ_sem:
+            warnings_out.append(
+                "The held-out likelihood barely separates the candidate state counts "
+                "(spread %.4f nats/bout vs a fold SE of %.4f). K is weakly determined by "
+                "this data \u2014 prefer the smallest state count you can interpret, and do not "
+                "present the state count itself as a result." % (spread, typ_sem)
+            )
+        turns = sum(
+            1 for a, b, c in zip(cvs, cvs[1:], cvs[2:])
+            if (b - a) * (c - b) < 0
+        )
+        if turns > 1:
+            report.append(
+                "    The curve changes direction %d times across the range. At this fold "
+                "count that is fold noise, not structure \u2014 do not read the exact optimum "
+                "as meaningful." % turns
+            )
+        report.append("")
+
+    # Runtime the proposed settings imply for a subsequent 'Run HMM'.  per_fit was
+    # measured at the proposed iteration cap, so this is a like-for-like estimate.
+    est_run_s = per_fit * proposed_restarts
+    report += [
+        "  Cost of the proposed settings",
+        "    'Run HMM' will fit %d restarts at K=%d with up to %d EM iterations, roughly "
+        "%.0fs. The mode is set to Manual so it fits only the recommended state count "
+        "rather than re-sweeping the whole range."
+        % (proposed_restarts, rec_k, proposed_iter, max(est_run_s, 1.0)),
+        "",
+    ]
+
+    # ---- model caveats -----------------------------------------------------
+    self_t = sum(int(o[i] == o[i + 1]) for o in observations for i in range(len(o) - 1))
+    n_trans = sum(max(len(o) - 1, 0) for o in observations)
+    report += [
+        "MODEL CAVEATS (read before reporting these states)",
+        "  1. The time axis is the bout index, not the clock. This is a Markov chain over the",
+        "     ordered bout sequence, so the gap between bouts is not modelled. Two sessions",
+        "     with identical bout orders score identically even if one took twice as long.",
+        "     Using gap duration would require a hidden semi-Markov model.",
+        "  2. %d/%d (%.0f%%) of consecutive bouts repeat the same behavior. The HMM sees these;"
+        % (self_t, n_trans, 100 * self_t / max(n_trans, 1)),
+        "     the descriptive transition matrix does not when 'include self transitions' is",
+        "     off. The two panels are therefore answering slightly different questions.",
+        "  3. Emissions are model predictions, not ground truth. Per-behavior detector errors",
+        "     propagate into the state structure; a state can encode a confusable pair of",
+        "     behaviors rather than a behavioural mode.",
+        "  4. Hidden states are identified only up to permutation. State 0 in one run is not",
+        "     State 0 in another unless the seed is fixed, which is why calibration pins one.",
+        "",
+    ]
+
+    proposed = {
+        "hmm_n_states_mode": "manual",
+        "hmm_n_states": rec_k,
+        "hmm_n_states_min": int(k_min),
+        "hmm_n_states_max": int(k_max),
+        "hmm_n_iter": int(proposed_iter),
+        "hmm_n_restarts": int(proposed_restarts),
+        "hmm_criterion": "icl",
+        "hmm_random_seed": seed0,
+    }
+    _tick("Done.", 1.0)
+    return {
+        "error": None,
+        "proposed": proposed,
+        "current": {
+            "hmm_n_states_mode": settings.hmm_n_states_mode,
+            "hmm_n_states": settings.hmm_n_states,
+            "hmm_n_states_min": settings.hmm_n_states_min,
+            "hmm_n_states_max": settings.hmm_n_states_max,
+            "hmm_n_iter": settings.hmm_n_iter,
+            "hmm_n_restarts": settings.hmm_n_restarts,
+            "hmm_criterion": settings.hmm_criterion,
+            "hmm_random_seed": seed0,
+        },
+        "recommended_n_states": rec_k,
+        "criterion_picks": picks,
+        "selection_basis": used_criterion,
+        "cv_used": bool(cv_ok),
+        "cv_folds": int(n_folds) if cv_ok else 0,
+        "table": table,
+        "report": report,
+        "warnings": warnings_out,
+        "n_observations": total_obs,
+        "n_sequences": n_seq,
     }
 
 

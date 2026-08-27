@@ -56,7 +56,7 @@ class HomeTab(QWidget):
         self._project_name = QLabel("Project: Not loaded")
         self._project_name.setStyleSheet("font-size: 16px; font-weight: 800; color: #90CAF9;")
         self._project_path = QLabel("Path: —")
-        self._project_path.setStyleSheet("font-size: 11px; color: #546E7A;")
+        self._project_path.setStyleSheet("font-size: 11px; color: #8FA6B4;")
         self._status = QLabel(
             "Create or open a project to access Active Learning, clip review, temporal refinement, Direct Use, and exports."
         )
@@ -158,7 +158,7 @@ class HomeTab(QWidget):
             "QListWidget::item { padding: 3px 6px; }"
         )
         self._no_behaviors_label = QLabel("No behaviors defined yet.")
-        self._no_behaviors_label.setStyleSheet("color: #546E7A; font-size: 11px; font-style: italic; padding: 6px;")
+        self._no_behaviors_label.setStyleSheet("color: #8FA6B4; font-size: 11px; font-style: italic; padding: 6px;")
         behaviors_layout.addWidget(self._no_behaviors_label)
         behaviors_layout.addWidget(self._behavior_list)
         self._behavior_list.hide()

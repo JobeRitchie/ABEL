@@ -72,10 +72,26 @@ def _non_degenerate_points(points: list) -> list:
 
 
 def _knee_marker(ax, lc, y: float = 0.02) -> None:
-    if lc.knee_clips is not None and np.isfinite(lc.knee_clips):
-        ax.axvline(lc.knee_clips, color="#555", linestyle="--", linewidth=1.2)
-        ax.text(lc.knee_clips, y, f"  optimal ≈ {int(round(lc.knee_clips))} clips",
-                rotation=90, va="bottom", ha="left", fontsize=8, color="#555")
+    """Dashed knee line, shaded with its bootstrap interval where one exists.
+
+    The band matters more than the line: the knee can only land on the clip
+    schedule, so a bare dashed line at "300 clips" reads as a measurement to the
+    clip when the replicates may have ranged over several schedule steps.  A curve
+    with no interval (re-rendered from saved point means, where the per-seed values
+    are gone) draws the line alone rather than a misleadingly tight band.
+    """
+    if lc.knee_clips is None or not np.isfinite(lc.knee_clips):
+        return
+    lo = getattr(lc, "knee_lo", float("nan"))
+    hi = getattr(lc, "knee_hi", float("nan"))
+    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+        ax.axvspan(lo, hi, color="#555", alpha=0.10, linewidth=0, zorder=0)
+    ax.axvline(lc.knee_clips, color="#555", linestyle="--", linewidth=1.2)
+    label = f"  optimal ≈ {int(round(lc.knee_clips))} clips"
+    if np.isfinite(lo) and np.isfinite(hi):
+        label += f" [{int(round(lo))}–{int(round(hi))}]"
+    ax.text(lc.knee_clips, y, label,
+            rotation=90, va="bottom", ha="left", fontsize=8, color="#555")
 
 
 def learning_curve_plot(lc, save_path: Path | None = None,

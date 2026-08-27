@@ -612,6 +612,13 @@ def run_validation(
                 knees.append({
                     "project_id": proj.project_id, "project_name": proj.name,
                     "behavior_name": name, "knee_clips": lc.knee_clips, "f1_max": lc.f1_max,
+                    # Bootstrap-over-seeds interval for both headline numbers; without
+                    # it the knee table reads as an exact measurement when it is a
+                    # discrete statistic read off a 5-seed mean curve.
+                    "knee_lo": lc.knee_lo, "knee_hi": lc.knee_hi,
+                    "f1_max_lo": lc.f1_max_lo, "f1_max_hi": lc.f1_max_hi,
+                    "boot_n_units": lc.boot_n_units, "boot_n_reps": lc.boot_n_reps,
+                    "boot_unit": lc.boot_unit,
                 })
                 lc_dir = store.sub("learning_curves")
                 stem = f"{_tag(proj.project_id)}__{_tag(name)}"
@@ -1791,6 +1798,13 @@ def _lc_points_rows(lc) -> list[dict]:
             "n_degenerate": p.n_degenerate,
             "degenerate": p.is_degenerate,
             "n_calibrated": p.n_calibrated,
+            # Curve-level, repeated on every row so a figure re-rendered from this
+            # CSV keeps its knee band: the per-seed values needed to recompute the
+            # bootstrap are gone by then, and a knee line with no band reads as a
+            # measurement to the clip.
+            "knee_clips": lc.knee_clips,
+            "knee_lo": lc.knee_lo, "knee_hi": lc.knee_hi,
+            "f1_max_lo": lc.f1_max_lo, "f1_max_hi": lc.f1_max_hi,
         })
     return rows
 
@@ -1849,9 +1863,15 @@ def _lc_result_from_rows(rows: pd.DataFrame) -> "learning_curve.LearningCurveRes
         behavior_name=str(first.get("behavior_name", "")),
         points=pts,
     )
-    finite_f1 = [p.f1_mean for p in pts if np.isfinite(p.f1_mean)]
-    res.f1_max = float(max(finite_f1)) if finite_f1 else float("nan")
+    res.f1_max = learning_curve._curve_ceiling(pts)
     res.knee_clips = learning_curve.detect_knee(pts)
+    # The bootstrap cannot be redone here — the per-seed fits are not in this CSV —
+    # so the stored interval is carried through as-is. Runs predating it leave the
+    # band off rather than drawing a falsely tight one.
+    res.knee_lo = _row_float(first, "knee_lo")
+    res.knee_hi = _row_float(first, "knee_hi")
+    res.f1_max_lo = _row_float(first, "f1_max_lo")
+    res.f1_max_hi = _row_float(first, "f1_max_hi")
     return res
 
 

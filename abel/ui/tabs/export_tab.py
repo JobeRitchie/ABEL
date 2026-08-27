@@ -185,7 +185,31 @@ class ExportTab(QWidget):
         self._boutframes_binary_mode.setToolTip(
             "Export one row per frame with a 0/1 column per behavior instead of bout start-frame lists."
         )
+        self._boutframes_include_merged = QCheckBox("Include combined projects")
+        self._boutframes_include_merged.setChecked(True)
+        self._boutframes_include_merged.setToolTip(
+            "Also export subjects from the projects combined into this one\n"
+            "(Behavior Analytics → Combined Projects).  Their bouts are\n"
+            "computed with each external project's own temporal settings and\n"
+            "their sheets are named <tag>/<subject>."
+        )
         self._boutframes_behavior_filter: list[str] | None = None  # None = all behaviors
+        self._position_track_point = QComboBox()
+        for label, key in (
+            ("Centroid (all keypoints)", "centroid"),
+            ("Body center", "body_center"),
+            ("Nose", "nose"),
+            ("Tail base", "tail_base"),
+        ):
+            self._position_track_point.addItem(label, key)
+        self._position_track_point.setToolTip(
+            "Which tracked point becomes the animal's X/Y position.\n"
+            "Falls back to the centroid for sessions where the chosen part is not tracked."
+        )
+        self._position_session_filter: list[str] | None = None  # None = all sessions
+        self._position_select_btn = QPushButton("Select Sessions…")
+        self._position_select_btn.setToolTip("Choose which sessions to write position files for.")
+        self._position_select_btn.clicked.connect(self._pick_position_sessions)
         self._boutframes_select_btn = QPushButton("Select Behaviors\u2026")
         self._boutframes_select_btn.setToolTip("Choose which behaviors to include in the export.")
         self._boutframes_select_btn.clicked.connect(self._pick_boutframe_behaviors)
@@ -201,6 +225,14 @@ class ExportTab(QWidget):
         self._export_docx_btn.clicked.connect(self._export_docx)
         self._export_bout_btn = QPushButton("Export Boutframes Workbook")
         self._export_bout_btn.clicked.connect(self._export_boutframes)
+        self._export_position_btn = QPushButton("Export TRACY Position Files")
+        self._export_position_btn.setToolTip(
+            "Write one <Subject>ABELposition.csv per session for import into TRACY.\n"
+            "TRACY detects the ABELposition marker and aligns the track to the\n"
+            "photometry signal using the same video-frame transform it applies to\n"
+            "the boutframes workbook exported above."
+        )
+        self._export_position_btn.clicked.connect(self._export_abel_position)
         self._export_labeled_video_btn = QPushButton("Export Labeled Tracking Videos")
         self._export_labeled_video_btn.clicked.connect(self._export_labeled_videos)
         self._customize_overlay_btn = QPushButton("Customize Overlay…")
@@ -224,8 +256,17 @@ class ExportTab(QWidget):
         row_bout.addWidget(self._boutframes_filename, 1)
         row_bout.addWidget(self._boutframes_include_end)
         row_bout.addWidget(self._boutframes_binary_mode)
+        row_bout.addWidget(self._boutframes_include_merged)
         row_bout.addWidget(self._boutframes_select_btn)
         row_bout.addWidget(self._export_bout_btn)
+
+        row_position = QHBoxLayout()
+        row_position.addWidget(QLabel("TRACY position files:"))
+        row_position.addWidget(QLabel("Track point:"))
+        row_position.addWidget(self._position_track_point)
+        row_position.addStretch(1)
+        row_position.addWidget(self._position_select_btn)
+        row_position.addWidget(self._export_position_btn)
 
         row_view = QHBoxLayout()
         row_view.addWidget(QLabel("Accepted clips visualization:"))
@@ -266,6 +307,7 @@ class ExportTab(QWidget):
         layout.addLayout(row_csv)
         layout.addLayout(row_docx)
         layout.addLayout(row_bout)
+        layout.addLayout(row_position)
         layout.addLayout(row_labeled)
         layout.addLayout(row_view)
         layout.addWidget(self._progress)
@@ -432,27 +474,124 @@ class ExportTab(QWidget):
         if not self._project_root:
             QMessageBox.warning(self, "No Project", "Open a project first.")
             return
+        if self._running_simple_export:
+            return
 
         binary_mode = bool(self._boutframes_binary_mode.isChecked())
         candidates, decisions = self._load_inputs()
-        out = self._service.export_boutframes_xlsx(
+
+        self._running_simple_export = True
+        self._set_export_buttons_enabled(False)
+        self._progress.setRange(0, 0)
+        self._progress.setFormat("Working...")
+        self._status.setText("Exporting boutframes workbook...")
+
+        worker = TaskWorker(
+            self._service.export_boutframes_xlsx,
             candidates=candidates,
             decisions=decisions,
             filename=self._boutframes_filename.text().strip() or "boutframes.xlsx",
             include_end_frames=bool(self._boutframes_include_end.isChecked()) and not binary_mode,
             behavior_filter=self._boutframes_behavior_filter,
             binary_mode=binary_mode,
+            include_merged_projects=bool(self._boutframes_include_merged.isChecked()),
         )
-        if not out.success:
-            QMessageBox.warning(self, "Export failed", "\n".join(out.warnings) or "Unknown error")
+        worker.signals.finished.connect(self._on_boutframes_export_finished)
+        worker.signals.failed.connect(self._on_simple_export_failed)
+        self._pool.start(worker)
+
+    @Slot(object)
+    def _on_boutframes_export_finished(self, out) -> None:
+        self._running_simple_export = False
+        self._set_export_buttons_enabled(True)
+        self._progress.setRange(0, 1)
+        self._progress.setValue(1 if out and out.success else 0)
+        self._progress.setFormat("Done" if out and out.success else "Failed")
+
+        if not out or not out.success:
+            QMessageBox.warning(self, "Export failed", "\n".join(out.warnings) if out else "Unknown error")
             return
+
+        merged_note = (
+            f" (including {out.n_merged_projects} combined project(s))"
+            if out.n_merged_projects
+            else ""
+        )
         if len(out.output_paths) > 1:
             self._status.setText(
                 f"Exported {len(out.output_paths)} boutframes workbooks to "
-                f"{out.output_paths[0].parent}"
+                f"{out.output_paths[0].parent}{merged_note}"
             )
         else:
-            self._status.setText(f"Exported boutframes workbook to {out.output_path}")
+            self._status.setText(
+                f"Exported boutframes workbook to {out.output_path}{merged_note}"
+            )
+        for warning in out.warnings:
+            self._append_export_log(warning)
+
+    def _pick_position_sessions(self) -> None:
+        """Choose which sessions get a TRACY position file (None = all)."""
+        selected = self._pick_subjects(
+            title="Select Sessions for TRACY Position Export",
+            prompt="Choose which sessions to write <Subject>ABELposition.csv files for:",
+        )
+        if selected is None:
+            return
+        total = len(self._service.list_available_sessions())
+        self._position_session_filter = selected if len(selected) < total else None
+        n = len(selected)
+        self._position_select_btn.setText(
+            f"Select Sessions… ({n}/{total})"
+            if self._position_session_filter is not None
+            else "Select Sessions…"
+        )
+
+    def _export_abel_position(self) -> None:
+        if not self._project_root:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        if self._running_simple_export:
+            return
+
+        self._running_simple_export = True
+        self._set_export_buttons_enabled(False)
+        self._progress.setRange(0, 0)
+        self._progress.setFormat("Working...")
+        self._status.setText("Exporting TRACY position files...")
+
+        worker = TaskWorker(
+            self._service.export_abel_position_csv,
+            session_filter=self._position_session_filter,
+            track_point=self._position_track_point.currentData() or "centroid",
+        )
+        worker.signals.finished.connect(self._on_position_export_finished)
+        worker.signals.failed.connect(self._on_simple_export_failed)
+        self._pool.start(worker)
+
+    @Slot(object)
+    def _on_position_export_finished(self, out) -> None:
+        self._running_simple_export = False
+        self._set_export_buttons_enabled(True)
+        self._progress.setRange(0, 1)
+        self._progress.setValue(1 if out and out.success else 0)
+        self._progress.setFormat("Done" if out and out.success else "Failed")
+
+        if not out or not out.success:
+            QMessageBox.warning(
+                self, "Export failed", "\n".join(out.warnings) if out else "Unknown error"
+            )
+            return
+
+        self._status.setText(
+            f"Exported {len(out.output_paths)} TRACY position file(s) "
+            f"({out.n_rows} frames) to {out.output_path.parent}"
+        )
+        self._append_export_log(
+            "Copy these files into the folder TRACY batch-processes alongside the "
+            "matching FPData files; TRACY picks them up automatically."
+        )
+        for warning in out.warnings:
+            self._append_export_log(warning)
 
     def _view_behaviogram(self) -> None:
         if not self._project_root:
@@ -534,16 +673,20 @@ class ExportTab(QWidget):
             return None
         return selected
 
-    def _pick_subjects(self) -> list[str] | None:
+    def _pick_subjects(
+        self,
+        title: str = "Select Sessions to Export",
+        prompt: str = "Choose which sessions to include in labeled video export:",
+    ) -> list[str] | None:
         """Show a dialog to choose which sessions to export. Returns selected session IDs, or None if cancelled."""
         sessions = self._service.list_available_sessions()
         if not sessions:
             return []
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Select Sessions to Export")
+        dlg.setWindowTitle(title)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("Choose which sessions to include in labeled video export:"))
+        layout.addWidget(QLabel(prompt))
 
         checks: list[tuple[QCheckBox, str]] = []
         scroll = QScrollArea()
@@ -686,6 +829,7 @@ class ExportTab(QWidget):
         self._export_csv_btn.setEnabled(enabled)
         self._export_docx_btn.setEnabled(enabled)
         self._export_bout_btn.setEnabled(enabled)
+        self._export_position_btn.setEnabled(enabled)
         self._export_labeled_video_btn.setEnabled(enabled and not self._exporting_labeled_videos)
 
     @Slot(object)

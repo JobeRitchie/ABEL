@@ -155,7 +155,7 @@ class PoseFeaturesTab(QWidget):
         )
         self._no_project.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._no_project.setWordWrap(True)
-        self._no_project.setStyleSheet("color: #546E7A; font-size: 13px; padding: 20px;")
+        self._no_project.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 20px;")
 
         # ── Session table ───────────────────────────────────────────────
         self._session_table = QTableWidget(0, 4)
@@ -199,6 +199,12 @@ class PoseFeaturesTab(QWidget):
 
         # ── Preset selector ─────────────────────────────────────────────
         self._preset_combo = QComboBox()
+        # Preset names carry their window/stride ("Standard (2 s / 1 s stride)")
+        # and were truncated to the first two words at narrow widths.
+        self._preset_combo.setMinimumWidth(
+            self._preset_combo.fontMetrics().horizontalAdvance(
+                "Standard (2 s / 1 s stride)") + 44
+        )
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
         save_preset_btn = QPushButton("Save as Custom")
         save_preset_btn.clicked.connect(self._save_preset)

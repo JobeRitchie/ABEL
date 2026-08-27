@@ -246,14 +246,31 @@ class ValidationService:
                 "n_bouts": bout_counts.get(bid, 0),
                 "overlap_fraction": (overlap.get(bid) or {}).get("overlap_fraction"),
             }
-            row["quality"] = self._quality_badge(row.get("frame_f1"))
-            # Post-temporal-refinement metrics on the held-out set (None until the
-            # model is retrained with the held-out probability column).
+            # Held-out raw + post-refinement metrics recomputed from the model's
+            # own saved held-out probabilities (None until the model is retrained
+            # with that column).  When present these supersede metrics.json for
+            # the headline scores, because metrics.json stores *macro* P/R/F1 —
+            # target averaged with not-target — and a one-vs-rest holdout is ~85%
+            # not-target, so the macro number is far above the target's truth and
+            # cannot be reconciled with the TP/FP/FN shown beside it.
             refined = self._refined_metrics(bid, name, model_dir)
+            row["metrics_basis"] = "macro"
             if refined is not None:
-                row["refined_f1"] = refined.get("refined_f1")
-                row["refined_precision"] = refined.get("refined_precision")
-                row["refined_recall"] = refined.get("refined_recall")
+                row["metrics_basis"] = "target"
+                row["frame_f1"] = refined.get("raw_target_f1")
+                row["frame_precision"] = refined.get("raw_target_precision")
+                row["frame_recall"] = refined.get("raw_target_recall")
+                row["refined_f1"] = refined.get("refined_target_f1")
+                row["refined_precision"] = refined.get("refined_target_precision")
+                row["refined_recall"] = refined.get("refined_target_recall")
+                # Macro kept alongside so the UI can name both in a tooltip and
+                # nothing that used to be shown is silently lost.
+                row["frame_f1_macro"] = refined.get("raw_f1")
+                row["frame_precision_macro"] = refined.get("raw_precision")
+                row["frame_recall_macro"] = refined.get("raw_recall")
+                row["refined_f1_macro"] = refined.get("refined_f1")
+                row["refined_precision_macro"] = refined.get("refined_precision")
+                row["refined_recall_macro"] = refined.get("refined_recall")
                 # Held-out window-level counts against the reviewer's accepted
                 # labels, raw vs refined.  Event-level ("bout") counts used to be
                 # reported here and were removed: bouts are not identifiable from
@@ -263,11 +280,25 @@ class ValidationService:
                 row["refined_unsupported_fraction"] = refined.get(
                     "refined_unsupported_fraction"
                 )
-                for k in (
-                    "raw_tp", "raw_fp", "raw_fn", "raw_tn",
-                    "refined_tp", "refined_fp", "refined_fn", "refined_tn",
-                ):
+                row["refined_settings"] = refined.get("settings") or {}
+                for k in ("raw_tp", "raw_fp", "raw_fn", "raw_tn"):
                     row[k] = refined.get(k)
+                # Refined counts are withheld on the same rule that already NaNs
+                # the refined scores.  Publishing the counts while blanking the F1
+                # they imply hands the reader the exact quantity the rule exists to
+                # withhold, just in another notation (measured: Freeze's refined
+                # counts read 6/4/40 -- a recall of 0.13 -- beside a blank refined
+                # F1 and a raw recall of 0.87).
+                for k in ("refined_tp", "refined_fp", "refined_fn", "refined_tn"):
+                    row[k] = refined.get(k) if row["refined_evaluable"] else None
+                # metrics.json's n_val counts every held-out row; the recomputed
+                # numbers drop rows with no usable frame bounds or probability, so
+                # report the count the counts actually came from.
+                if refined.get("n_val") is not None:
+                    row["n_val"] = refined.get("n_val")
+            row["quality"] = self._quality_badge(
+                row.get("frame_f1"), basis=row["metrics_basis"]
+            )
             rows.append(row)
         return rows
 
@@ -287,17 +318,30 @@ class ValidationService:
             logger.debug("Refined metrics failed for %s", name, exc_info=True)
             return None
 
-    @staticmethod
-    def _quality_badge(f1: float | None) -> str:
+    # Badge cut-points, per metric basis.  Target-class F1 starts at 0 for a
+    # model that detects nothing, so its bar sits lower than the macro bar in
+    # absolute terms while being a strictly harder test: macro F1 has a ~0.50
+    # floor (the not-target class alone scores ~0.97), which is why a 0.80 macro
+    # cut used to hand "Good" to models with target F1 near 0.65.
+    _QUALITY_CUTS = {
+        "target": (0.75, 0.55),
+        "macro": (0.80, 0.60),
+    }
+
+    @classmethod
+    def _quality_badge(cls, f1: float | None, basis: str = "macro") -> str:
         if f1 is None:
             return "unknown"
         try:
             v = float(f1)
         except (TypeError, ValueError):
             return "unknown"
-        if v >= 0.80:
+        if not np.isfinite(v):
+            return "unknown"
+        good, fair = cls._QUALITY_CUTS.get(basis, cls._QUALITY_CUTS["macro"])
+        if v >= good:
             return "good"
-        if v >= 0.60:
+        if v >= fair:
             return "fair"
         return "poor"
 

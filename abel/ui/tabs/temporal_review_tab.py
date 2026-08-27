@@ -39,6 +39,8 @@ from abel.core.project_manager import ProjectManager
 from abel.services.behavior_service import BehaviorService
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
+from abel.ui.flow_layout import flow_row
+from abel.ui.mpl_theme import style_navigation_toolbar
 from abel.services.review_service import ReviewService
 from abel.models.schemas import CandidateWindow, ReviewDecisionType, ReviewerLabelRecord
 from abel.temporal_refinement.bout_postprocess import (
@@ -179,12 +181,15 @@ class TemporalReviewTab(QWidget):
             "different subjects one at a time."
         )
         self._send_subject_bouts_btn.clicked.connect(self._send_current_subject_behavior_bouts_to_clip_review)
-        preview_row.addWidget(self._preview_btn)
-        preview_row.addWidget(self._mark_fp_btn)
-        preview_row.addWidget(self._mark_fn_btn)
-        preview_row.addWidget(self._send_bouts_btn)
-        preview_row.addWidget(self._send_subject_bouts_btn)
-        preview_row.addStretch(1)
+        # These five labels are long enough that a QHBoxLayout clipped every one
+        # of them below ~1500 px; wrap onto extra rows instead of squeezing.
+        preview_row.addWidget(flow_row([
+            self._preview_btn,
+            self._mark_fp_btn,
+            self._mark_fn_btn,
+            self._send_bouts_btn,
+            self._send_subject_bouts_btn,
+        ]))
 
         self._player = CandidateVideoPlayer(self)
         self._player.setMinimumHeight(260)
@@ -217,7 +222,6 @@ class TemporalReviewTab(QWidget):
             "Right-click a red region to unflag."
         )
         self._fp_flag_btn.toggled.connect(self._toggle_fp_mode)
-        trace_row2.addWidget(self._fp_flag_btn)
 
         self._fn_flag_btn = QPushButton("Flag FN (drag range)")
         self._fn_flag_btn.setCheckable(True)
@@ -227,22 +231,26 @@ class TemporalReviewTab(QWidget):
             "Right-click a blue region to unflag."
         )
         self._fn_flag_btn.toggled.connect(self._toggle_fn_mode)
-        trace_row2.addWidget(self._fn_flag_btn)
 
         self._staged_count_label = QLabel("")
-        trace_row2.addWidget(self._staged_count_label)
 
         self._commit_flags_btn = QPushButton("Commit Flags")
         self._commit_flags_btn.setToolTip("Persist all staged FP/FN flags. Until committed, flags are only visual.")
         self._commit_flags_btn.clicked.connect(self._commit_staged_flags)
         self._commit_flags_btn.setEnabled(False)
-        trace_row2.addWidget(self._commit_flags_btn)
 
         self._clear_staged_btn = QPushButton("Clear Staged")
         self._clear_staged_btn.setToolTip("Discard all staged (uncommitted) flags.")
         self._clear_staged_btn.clicked.connect(self._clear_staged_flags)
         self._clear_staged_btn.setEnabled(False)
-        trace_row2.addWidget(self._clear_staged_btn)
+
+        trace_row2.addWidget(flow_row([
+            self._fp_flag_btn,
+            self._fn_flag_btn,
+            self._staged_count_label,
+            self._commit_flags_btn,
+            self._clear_staged_btn,
+        ]))
 
         # -- State for interactive FP/FN flagging --
         self._fp_flag_active = False
@@ -267,6 +275,7 @@ class TemporalReviewTab(QWidget):
         self._trace_axes = None
         self._trace_click_cid = None
         self._trace_toolbar = None
+        self._trace_playhead = None
         self._trace_placeholder = QLabel("Probability trace will appear after loading inference artifacts.")
         self._trace_placeholder.setWordWrap(True)
         trace_layout.addWidget(self._trace_placeholder)
@@ -3029,6 +3038,7 @@ class TemporalReviewTab(QWidget):
         canvas.setMinimumHeight(230)
         toolbar = NavigationToolbar2QT(canvas, self)
         toolbar.setMovable(False)
+        style_navigation_toolbar(toolbar)
 
         trace_layout.addWidget(toolbar)
         trace_layout.addWidget(canvas)
@@ -3036,6 +3046,8 @@ class TemporalReviewTab(QWidget):
         self._trace_canvas = canvas
         self._trace_axes = axes
         self._trace_toolbar = toolbar
+        self._trace_playhead = None
+        self._player.frame_changed.connect(self._on_player_frame_for_trace)
         self._trace_click_cid = canvas.mpl_connect("button_press_event", self._on_trace_click)
         canvas.mpl_connect("motion_notify_event", self._on_trace_motion)
         canvas.mpl_connect("button_release_event", self._on_trace_release)
@@ -3056,6 +3068,8 @@ class TemporalReviewTab(QWidget):
         sid = str(self._session.currentData() or "").strip()
         self._update_staged_ui()
         self._trace_axes.clear()
+        # clear() discards every artist, including the playhead line.
+        self._trace_playhead = None
         # axes.clear() removes all patches — make sure the rubber-band rect
         # references are nulled out so subsequent drag attempts don't try to
         # call .remove() on already-detached patch objects.
@@ -3123,13 +3137,20 @@ class TemporalReviewTab(QWidget):
         multi_cols = [c for c in prob_cols if str(c).startswith("prob_")] or [c for c in prob_cols if c == "probability"]
 
         if selected_col == "__all__":
-            # All behaviors: just overlay the traces — no behavior-specific thresholds or bouts
+            # All behaviors: overlay the traces, each with its own threshold drawn
+            # in the matching colour.  Bouts stay behavior-specific and are not
+            # highlighted here.
             for i, col in enumerate(multi_cols):
+                colour = _PALETTE[i % len(_PALETTE)]
                 raw = pd.to_numeric(trace_df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
                 smoothed = smooth_probabilities(raw, method=cfg.smoothing_method, window=cfg.smoothing_window)
                 y = self._maxpool_downsample(smoothed, stride)
-                self._trace_axes.plot(frame_plot, y, color=_PALETTE[i % len(_PALETTE)], linewidth=1.15,
+                self._trace_axes.plot(frame_plot, y, color=colour, linewidth=1.15,
                                       label=self._behavior_label_from_col(col))
+                self._trace_axes.axhline(
+                    self._threshold_for_col(col, cfg),
+                    color=colour, linestyle=":", linewidth=1.0, alpha=0.75,
+                )
         else:
             # Single behavior: plot its trace, threshold lines, and correct bout intervals
             col = selected_col if selected_col in trace_df.columns else ("probability" if "probability" in trace_df.columns else str(prob_cols[0]))
@@ -3140,7 +3161,10 @@ class TemporalReviewTab(QWidget):
                                   label=self._behavior_label_from_col(col))
 
             onset = float(cfg.onset_threshold)
-            self._trace_axes.axhline(onset, color="#555", linestyle="-", linewidth=1.0, label=f"Threshold {onset:.2f}")
+            self._trace_axes.axhline(
+                onset, color="#37474F", linestyle="--", linewidth=1.3,
+                label=f"Threshold {onset:.2f}",
+            )
 
             prob_plot = self._maxpool_downsample(smoothed_full, stride)
 
@@ -3221,7 +3245,28 @@ class TemporalReviewTab(QWidget):
                 )
                 _fn_labeled = True
 
+        self._draw_trace_playhead()
         self._trace_axes.legend(loc="upper right", fontsize=8)
+        self._trace_canvas.draw_idle()
+
+    def _draw_trace_playhead(self) -> None:
+        """Mark the frame currently showing in the video preview on the trace."""
+        if self._trace_axes is None:
+            return
+        frame = int(getattr(self._player, "current_frame", 0) or 0)
+        self._trace_playhead = self._trace_axes.axvline(
+            frame, color="#00E5FF", linewidth=1.4, alpha=0.95,
+            label="Current frame",
+        )
+
+    def _on_player_frame_for_trace(self, frame: int) -> None:
+        """Move the playhead as the video plays, without re-rendering the trace."""
+        if self._trace_axes is None or self._trace_canvas is None:
+            return
+        if self._trace_playhead is None:
+            self._draw_trace_playhead()
+        else:
+            self._trace_playhead.set_xdata([frame, frame])
         self._trace_canvas.draw_idle()
 
     def _resolve_bout_paths_for_trace_column(self, col: str) -> dict[str, str]:
@@ -3311,6 +3356,17 @@ class TemporalReviewTab(QWidget):
             if token == bid or token == safe:
                 return name
         return token
+
+    def _threshold_for_col(self, col: str, cfg: TemporalRefinementConfig) -> float:
+        """Positive threshold for one trace column, falling back to the global one."""
+        bid = self._behavior_id_from_col(col)
+        if bid:
+            try:
+                return float(self._settings_for_behavior(bid).get(
+                    "onset_threshold", cfg.onset_threshold))
+            except Exception:
+                pass
+        return float(cfg.onset_threshold)
 
     def _behavior_id_from_col(self, col: str) -> str | None:
         """Resolve the behavior_id behind a trace column ('prob_<token>' / 'probability').

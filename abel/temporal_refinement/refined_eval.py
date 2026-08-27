@@ -592,6 +592,24 @@ def refinement_evaluability(
     return frac <= _REFINE_UNSUPPORTED_MAX, float(frac)
 
 
+def target_class_prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
+    """Positive-class precision/recall/F1 from confusion counts.
+
+    The single derivation used wherever a target-class score is reported, so the
+    number on screen is always exactly the one implied by the TP/FP/FN printed
+    beside it.  Macro averaging is deliberately *not* used here: a one-vs-rest
+    behavior model's held-out set is ~85% not-target, the not-target class scores
+    ~0.97 on its own, and averaging the two hides the target's real performance
+    (measured on a real project: macro recall 0.777 where target recall was 0.560)
+    while giving a never-detects-anything model a ~0.5 floor.
+    """
+    tp, fp, fn = float(tp), float(fp), float(fn)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2.0 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return precision, recall, f1
+
+
 def score_raw_and_refined(
     *,
     y_true: np.ndarray,
@@ -606,8 +624,10 @@ def score_raw_and_refined(
     All inputs are aligned 1-D arrays with the positive class as ``1`` and
     ``prob`` = P(target). ``settings`` supplies the temporal-refinement knobs.
     Shared by the single-split path and leave-one-subject-out CV so the two
-    always agree on the math. Returns macro P/R/F1 and positive-class
-    TP/FP/FN/TN for both raw (``prob >= 0.5``) and refined predictions.
+    always agree on the math. Returns positive-class TP/FP/FN/TN for both raw
+    (``prob >= 0.5``) and refined predictions, plus P/R/F1 in two flavours:
+    ``*_target_*`` (the target class alone — what the Validation tab reports and
+    the only one that reconciles with the counts) and the legacy macro keys.
 
     Refined metrics come back as NaN (with ``refined_evaluable`` False) when the
     held-out windows are too sparse to support the project's ``min_bout``; see
@@ -652,6 +672,13 @@ def score_raw_and_refined(
     raw_tp, raw_fp, raw_fn, raw_tn = _counts(raw_pred)
     ref_tp, ref_fp, ref_fn, ref_tn = _counts(ref_pred)
 
+    raw_tprf = target_class_prf(raw_tp, raw_fp, raw_fn)
+    ref_tprf = (
+        target_class_prf(ref_tp, ref_fp, ref_fn)
+        if evaluable
+        else (float("nan"), float("nan"), float("nan"))
+    )
+
     # NOTE: event-level ("bout") TP/FP/FN used to be reported here and has been
     # removed — it was not identifiable from a held-out labeled subset.  Bouts
     # need contiguous observation, but the evaluated unit is an isolated ~15-frame
@@ -663,12 +690,24 @@ def score_raw_and_refined(
     # ground truth actually supports.  See `observed_islands`.
 
     return {
+        # Macro (target averaged with not-target).  Retained for callers that
+        # already report it; NOT what the Validation tab shows, because the
+        # not-target class is ~85% of a held-out set and scores ~0.97, which
+        # lifts every macro number well above the target-class truth.
         "raw_precision": raw_p,
         "raw_recall": raw_r,
         "raw_f1": raw_f,
         "refined_precision": ref_p,
         "refined_recall": ref_r,
         "refined_f1": ref_f,
+        # Target-class only, derived from the counts below so a displayed score
+        # and its displayed TP/FP/FN can never disagree.
+        "raw_target_precision": raw_tprf[0],
+        "raw_target_recall": raw_tprf[1],
+        "raw_target_f1": raw_tprf[2],
+        "refined_target_precision": ref_tprf[0],
+        "refined_target_recall": ref_tprf[1],
+        "refined_target_f1": ref_tprf[2],
         "raw_tp": raw_tp,
         "raw_fp": raw_fp,
         "raw_fn": raw_fn,

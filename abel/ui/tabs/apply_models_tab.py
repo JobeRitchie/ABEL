@@ -44,13 +44,13 @@ _BTN = (
     "QPushButton { background: #1A2A3A; color: #B0BEC5; font-size: 12px;"
     " border: 1px solid #2A4060; border-radius: 4px; padding: 4px 12px; }"
     "QPushButton:hover { background: #1E3A5F; }"
-    "QPushButton:disabled { color: #546E7A; border-color: #1A2A3A; }"
+    "QPushButton:disabled { color: #8FA6B4; border-color: #1A2A3A; }"
 )
 _BTN_PRIMARY = (
     "QPushButton { background: #1565C0; color: white; font-size: 13px;"
     " font-weight: 700; border: none; border-radius: 5px; padding: 8px 20px; }"
     "QPushButton:hover { background: #1976D2; }"
-    "QPushButton:disabled { background: #263238; color: #546E7A; }"
+    "QPushButton:disabled { background: #263238; color: #8FA6B4; }"
 )
 
 

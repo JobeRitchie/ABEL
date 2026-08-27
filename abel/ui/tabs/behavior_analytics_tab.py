@@ -73,7 +73,7 @@ def _ensure_cv2() -> bool:
     return _CV2_OK
 
 from PySide6.QtCore import Qt, QObject, QThreadPool, QTimer, QMimeData, QEvent, Signal
-from PySide6.QtGui import QAction, QDrag, QKeySequence, QGuiApplication, QValidator
+from PySide6.QtGui import QAction, QDrag, QFont, QKeySequence, QGuiApplication, QValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -94,6 +94,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -115,6 +116,7 @@ from abel.services.behavioral_motif_service import (
     load_motif_settings,
     save_motif_settings,
 )
+from abel.ui.mpl_theme import style_navigation_toolbar
 from abel.services.import_service import ImportService
 from abel.services.project_merge_service import ProjectMergeService
 from abel.services.pose_processing_service import PoseProcessingService
@@ -1236,6 +1238,36 @@ class BehaviorAnalyticsTab(QWidget):
         df["end_frame"] = ends.astype(np.int64)
         return df.reset_index(drop=True)
 
+    def _unrebase_bout_df_to_video_frames(self, bout_df: pd.DataFrame) -> pd.DataFrame:
+        """Map prechop-rebased bout frames back into raw video frame indices.
+
+        ``_raw_bouts`` is rebased to the analysis prechop (frame 0 = test start)
+        so latency and time-bin metrics are measured from test onset.  Pose
+        arrays are never rebased — they stay indexed by raw video frame.  Any
+        view that looks a bout's *position* up in the pose (spatial heatmap,
+        density maps) must add the offset back first; without it the plotted
+        coordinates come from wherever the animal happened to be 30–140 s
+        before the behaviour occurred, which smears every behaviour into the
+        same generic arena-occupancy map.  Mirrors the ``+ pre`` correction
+        already used by :meth:`_bout_velocity_records`.
+        """
+        if bout_df.empty or not {"session_id", "start_frame", "end_frame"}.issubset(bout_df.columns):
+            return bout_df
+        if not self._subject_prechop_frames and not self._session_prechop_overrides:
+            return bout_df
+
+        df = bout_df.copy()
+        sid_arr = df["session_id"].astype(str).to_numpy()
+        offsets = np.array([self._analysis_prechop_for_session(sid) for sid in sid_arr], dtype=np.int64)
+        if offsets.size == 0 or int(offsets.max()) <= 0:
+            return df
+
+        starts = pd.to_numeric(df["start_frame"], errors="coerce").fillna(0).to_numpy(dtype=np.int64)
+        ends = pd.to_numeric(df["end_frame"], errors="coerce").fillna(0).to_numpy(dtype=np.int64)
+        df["start_frame"] = (starts + offsets).astype(np.int64)
+        df["end_frame"] = (ends + offsets).astype(np.int64)
+        return df.reset_index(drop=True)
+
     def _recompute_summary_stats_from_shifted_bouts(self) -> None:
         """Recompute summary metrics from prechopped/rebased raw bouts when available."""
         if not self._summary_rows or not self._raw_bouts:
@@ -1870,6 +1902,20 @@ class BehaviorAnalyticsTab(QWidget):
         summary_rows: list[dict] = meta.get("summary_rows", [])
         if not summary_rows:
             return None
+        # Cached rows carry the behavior *name* that was current when they were
+        # written, and the fingerprint only tracks the data files — a rename
+        # touches behavior_definitions.yaml alone. Relabel from behavior_id so
+        # renames reach the graphs without discarding the cache. Pseudo-
+        # behaviors (distance / ROI) are absent from the map and keep their
+        # stored label.
+        bid_name_map = {
+            str(b.behavior_id): str(b.name or b.behavior_id)
+            for b in behavior_list
+        }
+        for row in summary_rows:
+            fresh = bid_name_map.get(str(row.get("behavior_id", "")))
+            if fresh:
+                row["behavior"] = fresh
         raw_bouts: dict[str, pd.DataFrame] = {}
         for behavior in behavior_list:
             bid = str(behavior.behavior_id or "").strip()
@@ -1878,9 +1924,12 @@ class BehaviorAnalyticsTab(QWidget):
             p = cache_dir / f"bouts_{self._safe_name(bid)}.parquet"
             if p.exists():
                 try:
-                    raw_bouts[bid] = pd.read_parquet(p)
+                    df = pd.read_parquet(p)
                 except Exception:
-                    pass
+                    continue
+                if "behavior" in df.columns and bid in bid_name_map:
+                    df["behavior"] = bid_name_map[bid]
+                raw_bouts[bid] = df
         return {
             "summary_rows": summary_rows,
             "raw_bouts": raw_bouts,
@@ -1937,6 +1986,13 @@ class BehaviorAnalyticsTab(QWidget):
         # Rebuild subject/session maps on the main thread (fast JSON read).
         # The background worker snapshots these maps before doing file I/O.
         if self._project_root is not None:
+            # Re-read behavior definitions from disk. This tab owns its own
+            # BehaviorService, so a rename made elsewhere in the session is
+            # invisible here until we reload; every selector below keys on
+            # behavior_id, so the current selection survives the rebuild.
+            self._behaviors.set_project(self._project_root)
+            self._refresh_behavior_filter()
+            self._graphs_tab._refresh_until_behavior_combo()
             self._subject_by_session = self._build_subject_map()
             self._session_by_subject = self._invert_subject_map()
             self._heatmap_tab._refresh_lists()
@@ -4844,7 +4900,9 @@ class _GraphsWidget(QWidget):
 
         self._export_excel_btn = QPushButton("Export Excel…")
         self._export_excel_btn.setToolTip(
-            "Export binned data to Excel (one sheet per behavior, columns per subject)."
+            "Export the graph's data to Excel.\n"
+            "Time-course styles: binned data, one sheet per behavior.\n"
+            "Otherwise: one value per subject, in the units shown on the graph."
         )
         self._export_excel_btn.clicked.connect(self._export_excel_data)
 
@@ -5138,7 +5196,7 @@ class _GraphsWidget(QWidget):
         self._placeholder.setMinimumHeight(260)
         self._placeholder.setStyleSheet(
             "border: 1px solid #1A2027; background: #0A1929; "
-            "border-radius: 4px; color: #546E7A;"
+            "border-radius: 4px; color: #8FA6B4;"
         )
         self._canvas_scroll: Any = None
         if _ensure_matplotlib() and Figure is not None and FigureCanvas is not None and NavigationToolbar is not None:
@@ -5154,6 +5212,7 @@ class _GraphsWidget(QWidget):
             self._canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._canvas.setFixedSize(_init_px_w, _init_px_h)
             self._toolbar = NavigationToolbar(self._canvas, self)
+            style_navigation_toolbar(self._toolbar)
             self._placeholder.setVisible(False)
             from PySide6.QtWidgets import QScrollArea as _QScrollArea
             self._canvas_scroll = _QScrollArea()
@@ -7346,11 +7405,12 @@ class _GraphsWidget(QWidget):
             return pd.DataFrame(columns=["session_label", "behavior", "time_bin_s", col])
         return pd.concat(parts, ignore_index=True)
 
-    def _collect_graph_data(self, export_individual_sessions: bool = False) -> pd.DataFrame | None:
-        """Collect the data underlying the current graph as a DataFrame.
+    def _graph_rows(self) -> list[dict[str, Any]]:
+        """Return the session x behavior summary rows behind the current graph.
 
-        When ``export_individual_sessions`` is True, group mode exports
-        per-session rows (with group labels) instead of group mean/SEM tables.
+        Applies, in order: the checked-subject and checked-group filters, the
+        Data Range recompute, the bout filter (First N / Until Behavior, which
+        is also where per-time scaling is applied) and the latency fallbacks.
         """
         checked = self._host._summary_tab._checked_subjects()
         metric = self._get_metric()
@@ -7371,9 +7431,8 @@ class _GraphsWidget(QWidget):
                 if r["session_label"] in checked
             ]
         checked_groups = self._checked_groups()
-        mode = self._get_mode()
         groups_map = self._host._session_groups
-        if mode == "group" and checked_groups:
+        if self._get_mode() == "group" and checked_groups:
             rows = [
                 r for r in rows
                 if groups_map.get(r["session_label"], "") in checked_groups
@@ -7384,9 +7443,71 @@ class _GraphsWidget(QWidget):
         # Apply bout filter
         if self._is_bout_filter_active():
             rows = self._recompute_rows_for_first_n(rows)
-        rows = self._apply_latency_fallbacks(rows)
+        return self._apply_latency_fallbacks(rows)
+
+    def _per_session_metric_table(
+        self, df: "pd.DataFrame", metric: str, metric_label: str, agg_fn: str,
+    ) -> "pd.DataFrame":
+        """One row per session x behavior: Session | Group | Behavior | metric.
+
+        Sessions that never performed a behavior are filled in from the export
+        roster so they appear at their missing-value level instead of vanishing.
+        """
+        groups_map = self._host._session_groups
+        behaviors = sorted(df["behavior"].unique())
+        # Fallback if the roster is empty for any reason.
+        sessions = self._export_sessions() or sorted(df["session_label"].unique())
+        groups_by_session = {sess: groups_map.get(sess, "") for sess in sessions}
+        out_rows = []
+        for bname in behaviors:
+            bdf = df[df["behavior"] == bname]
+            vals_by_session = bdf.groupby("session_label")[metric].agg(agg_fn).to_dict()
+            for sess in sessions:
+                if sess in vals_by_session:
+                    v = vals_by_session[sess]
+                else:
+                    v = self._missing_value_for_metric(metric, sess)
+                out_rows.append({
+                    "Session": sess,
+                    "Group": groups_by_session.get(sess, ""),
+                    "Behavior": bname,
+                    metric_label: v,
+                })
+        return pd.DataFrame(out_rows)
+
+    def _scaled_rate_table(self) -> "pd.DataFrame | None":
+        """Per-session rates for "Bouts Until Behavior" + "Scale by pre-behavior time".
+
+        The scaling divides each subject's pre-target count/duration by that
+        subject's own pre-target interval, so the result is a single rate per
+        session x behavior — it cannot be split into time bins, and summing it
+        across bins is meaningless.  Exports use this table instead of the
+        binned one whenever the scaling is active.
+        """
+        rows = self._graph_rows()
         if not rows:
             return None
+        metric = self._get_metric()
+        df = pd.DataFrame(rows)
+        return self._per_session_metric_table(
+            df, metric, self._metric_label(metric),
+            "mean" if metric == "mean_bout_s" else "sum",
+        )
+
+    def _collect_graph_data(self, export_individual_sessions: bool = False) -> pd.DataFrame | None:
+        """Collect the data underlying the current graph as a DataFrame.
+
+        When ``export_individual_sessions`` is True, group mode exports
+        per-session rows (with group labels) instead of group mean/SEM tables.
+        """
+        rows = self._graph_rows()
+        if not rows:
+            return None
+        metric = self._get_metric()
+        checked = self._host._summary_tab._checked_subjects()
+        checked_groups = self._checked_groups()
+        mode = self._get_mode()
+        groups_map = self._host._session_groups
 
         df = pd.DataFrame(rows)
         style = self._get_style()
@@ -7500,26 +7621,7 @@ class _GraphsWidget(QWidget):
                         })
                 return pd.DataFrame(out_rows)
             else:
-                behaviors = sorted(df["behavior"].unique())
-                # Fallback if the roster is empty for any reason.
-                sessions = self._export_sessions() or sorted(df["session_label"].unique())
-                groups_by_session = {sess: groups_map.get(sess, "") for sess in sessions}
-                out_rows = []
-                for bname in behaviors:
-                    bdf = df[df["behavior"] == bname]
-                    vals_by_session = bdf.groupby("session_label")[metric].agg(agg_fn).to_dict()
-                    for sess in sessions:
-                        if sess in vals_by_session:
-                            v = vals_by_session[sess]
-                        else:
-                            v = self._missing_value_for_metric(metric, sess)
-                        out_rows.append({
-                            "Session": sess,
-                            "Group": groups_by_session.get(sess, ""),
-                            "Behavior": bname,
-                            metric_label: v,
-                        })
-                return pd.DataFrame(out_rows)
+                return self._per_session_metric_table(df, metric, metric_label, agg_fn)
 
         elif style == "box":
             if groups_map:
@@ -7669,7 +7771,14 @@ class _GraphsWidget(QWidget):
         style = self._get_style()
         metric = self._get_metric()
 
-        if style in ("line", "overtime") and metric in _TIMEBINNED_METRICS:
+        if self._is_until_scaling_active():
+            # A pre-behavior rate has no per-bin decomposition — see
+            # _scaled_rate_table.
+            data = self._scaled_rate_table()
+            if data is None or data.empty:
+                QMessageBox.information(self, "Export Data", "No data to export for the current graph.")
+                return
+        elif style in ("line", "overtime") and metric in _TIMEBINNED_METRICS:
             data = self._build_wide_binned_df()
             if data is None or data.empty:
                 QMessageBox.information(self, "Export Data", "No data to export for the current graph.")
@@ -7735,6 +7844,15 @@ class _GraphsWidget(QWidget):
             self._export_ethogram_excel()
             return
 
+        # "Scale by pre-behavior time" turns the metric into one rate per
+        # subject over that subject's own pre-target interval.  It has no
+        # per-bin decomposition, so exporting it as bins (which _bin_bouts
+        # leaves unscaled) plus a "total" column reports numbers that are
+        # neither the graphed rate nor in the labelled unit.
+        if self._is_until_scaling_active():
+            self._export_excel_scaled_rate()
+            return
+
         # Metrics that live only as session-level summaries and are NOT columns
         # in _bin_bouts() output (which only contains n_bouts, duration_s,
         # distance_cm).  Routing these through the time-bin path causes a
@@ -7742,6 +7860,13 @@ class _GraphsWidget(QWidget):
         _TIMEBINNED_METRICS = {"n_bouts", "time_spent_s", "mean_bout_s", "distance_cm"}
         metric = self._get_metric()
         if metric not in _TIMEBINNED_METRICS:
+            self._export_excel_summary_metric()
+            return
+
+        # Only the time-course chart styles are actually binned; for bar/box/
+        # stacked the graph shows one value per subject, so the export should
+        # too (this mirrors the CSV export's routing).
+        if self._get_style() not in ("line", "overtime"):
             self._export_excel_summary_metric()
             return
 
@@ -7774,6 +7899,59 @@ class _GraphsWidget(QWidget):
                     beh_df = wide[wide["behavior"] == beh].drop(columns=["behavior"]).reset_index(drop=True)
                     sheet = str(beh)[:31].replace("/", "-").replace("\\", "-")
                     beh_df.to_excel(writer, sheet_name=sheet, index=False)
+            self._host._status.setText(f"Exported Excel workbook to {path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Error", str(exc))
+
+    def _export_excel_scaled_rate(self) -> None:
+        """Export pre-behavior-scaled rates: rows = subjects, columns = behaviors.
+
+        One sheet, one value per subject per behavior, in the rate unit shown
+        on the graph (e.g. Bout Count (/ min)).  No bins and no total column:
+        the scaling already divides by each subject's pre-target interval.
+        """
+        data = self._scaled_rate_table()
+        if data is None or data.empty:
+            QMessageBox.information(
+                self, "Export Excel",
+                "No data to export for the current graph.",
+            )
+            return
+
+        import re
+
+        metric_label = self._metric_label(self._get_metric())
+        # unstack rather than pivot_table: the latter would either drop
+        # all-NaN behaviors or, with dropna=False, expand Session x Group into
+        # a cartesian product of rows that never existed.
+        wide = (
+            data.set_index(["Session", "Group", "Behavior"])[metric_label]
+            .unstack("Behavior")
+        )
+        # Restore the roster order the unstack's lexical sort would discard.
+        order = {sess: i for i, sess in enumerate(data["Session"].drop_duplicates())}
+        wide = wide.reset_index()
+        wide = wide.sort_values("Session", key=lambda c: c.map(order)).reset_index(drop=True)
+        wide.columns.name = None
+        if not wide["Group"].astype(str).str.strip().any():
+            wide = wide.drop(columns=["Group"])
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Excel", "",
+            "Excel Workbook (*.xlsx);;All Files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            with pd.ExcelWriter(path, engine="openpyxl") as writer:
+                # Excel forbids / \ ? * [ ] : in sheet names, so spell the
+                # rate out rather than mangling "(/ min)" into "(- min)".
+                sheet = re.sub(r"\s+", " ", metric_label.replace("/", "per")).strip()
+                for _bad in '\\?*[]:':
+                    sheet = sheet.replace(_bad, "-")
+                sheet = sheet[:31]
+                wide.to_excel(writer, sheet_name=sheet or "Rate", index=False)
             self._host._status.setText(f"Exported Excel workbook to {path}")
         except Exception as exc:
             QMessageBox.warning(self, "Export Error", str(exc))
@@ -8356,6 +8534,7 @@ class _HeatmapWidget(QWidget):
             self._canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._canvas.setFixedSize(_hm_w, _hm_h)
             self._toolbar = NavigationToolbar(self._canvas, self)
+            style_navigation_toolbar(self._toolbar)
             self._canvas_scroll = QScrollArea()
             self._canvas_scroll.setWidget(self._canvas)
             self._canvas_scroll.setWidgetResizable(False)
@@ -8866,7 +9045,9 @@ class _HeatmapWidget(QWidget):
                 try:
                     sel = raw_df[raw_df["session_id"].astype(str).isin(target_sid_set)].copy()
                     if not sel.empty:
-                        sel = self._host._apply_prechop_to_bout_df(sel, rebase=False)
+                        # _raw_bouts is prechop-rebased; pose is not.  Undo the
+                        # rebase before any frame is used as a pose index.
+                        sel = self._host._unrebase_bout_df_to_video_frames(sel)
                         bdf = sel if not sel.empty else None
                 except Exception:
                     bdf = None
@@ -9907,6 +10088,7 @@ class _DensityAnalysisWidget(QWidget):
             self._density_canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._density_canvas.setFixedSize(mw, mh)
             self._density_toolbar = NavigationToolbar(self._density_canvas, w)
+            style_navigation_toolbar(self._density_toolbar)
             right_l.addWidget(self._density_toolbar)
             _cv_scroll = QScrollArea()
             _cv_scroll.setWidget(self._density_canvas)
@@ -10229,6 +10411,7 @@ class _DensityAnalysisWidget(QWidget):
             self._diff_canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._diff_canvas.setFixedSize(mw, mh)
             self._diff_toolbar = NavigationToolbar(self._diff_canvas, w)
+            style_navigation_toolbar(self._diff_toolbar)
             right_l.addWidget(self._diff_toolbar)
             _cv_scroll = QScrollArea()
             _cv_scroll.setWidget(self._diff_canvas)
@@ -10608,7 +10791,9 @@ class _DensityAnalysisWidget(QWidget):
                 try:
                     bdf = raw_df[raw_df["session_id"].astype(str).isin(target_sids)].copy()
                     if not bdf.empty:
-                        bdf = host._apply_prechop_to_bout_df(bdf, rebase=False)
+                        # _raw_bouts is prechop-rebased; pose is not.  Undo the
+                        # rebase before any frame is used as a pose index.
+                        bdf = host._unrebase_bout_df_to_video_frames(bdf)
                         if bdf.empty:
                             bdf = None
                     else:
@@ -11524,6 +11709,7 @@ class _BehaviorMotifWidget(QWidget):
         self._transition_result: dict[str, Any] = {}
         self._motif_result: dict[str, Any] = {}
         self._hmm_result: dict[str, Any] = {}
+        self._hmm_calibration: dict[str, Any] = {}
 
         # ── comparison filter (None = show all significant pairs) ────
         self._motif_selected_comparisons: set[str] | None = None
@@ -11700,6 +11886,7 @@ class _BehaviorMotifWidget(QWidget):
             self._tr_canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._tr_canvas.setFixedSize(_tr_w, _tr_h)
             self._tr_toolbar = NavigationToolbar(self._tr_canvas, w)
+            style_navigation_toolbar(self._tr_toolbar)
             self._tr_canvas_scroll = QScrollArea()
             self._tr_canvas_scroll.setWidget(self._tr_canvas)
             self._tr_canvas_scroll.setWidgetResizable(False)
@@ -11889,6 +12076,7 @@ class _BehaviorMotifWidget(QWidget):
             self._mo_canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             self._mo_canvas.setFixedSize(_mo_w, _mo_h)
             self._mo_toolbar = NavigationToolbar(self._mo_canvas, w)
+            style_navigation_toolbar(self._mo_toolbar)
             self._mo_canvas_scroll = QScrollArea()
             self._mo_canvas_scroll.setWidget(self._mo_canvas)
             self._mo_canvas_scroll.setWidgetResizable(False)
@@ -11926,7 +12114,7 @@ class _BehaviorMotifWidget(QWidget):
 
         ctrl1 = QHBoxLayout()
         self._hmm_mode_combo = QComboBox()
-        self._hmm_mode_combo.addItem("Auto (AIC/BIC)", userData="auto")
+        self._hmm_mode_combo.addItem("Auto (criterion)", userData="auto")
         self._hmm_mode_combo.addItem("Manual",         userData="manual")
         self._hmm_mode_combo.setCurrentIndex(
             0 if self._settings.hmm_n_states_mode == "auto" else 1
@@ -11938,32 +12126,55 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_n_states_spin.setVisible(self._settings.hmm_n_states_mode == "manual")
         self._hmm_run_btn = QPushButton("Run HMM")
         self._hmm_run_btn.clicked.connect(self._run_hmm)
+        self._hmm_calib_btn = QPushButton("Auto-calibrate\u2026")
+        self._hmm_calib_btn.clicked.connect(self._run_hmm_calibration)
+        self._hmm_calib_btn.setToolTip(
+            "Measure this dataset and propose HMM settings, showing the evidence for each.\n\n"
+            "Checks how much data there is per free parameter, how many EM iterations the\n"
+            "fits actually need, how often random restarts reach the same optimum, and how\n"
+            "AIC / AICc / BIC / ICL and session-held-out cross-validation each rank the\n"
+            "candidate state counts. Nothing is changed until you approve it."
+        )
         ctrl1.addWidget(QLabel("Mode:"))
         ctrl1.addWidget(self._hmm_mode_combo)
         ctrl1.addWidget(QLabel("N states:"))
         ctrl1.addWidget(self._hmm_n_states_spin)
+        ctrl1.addWidget(self._hmm_calib_btn)
         ctrl1.addWidget(self._hmm_run_btn)
         ctrl1.addStretch(1)
 
         ctrl2 = QHBoxLayout()
         self._hmm_view_combo = QComboBox()
-        self._hmm_view_combo.addItem("Model selection (AIC/BIC)",              userData="model_sel")
+        self._hmm_view_combo.addItem("Model selection (criteria)",             userData="model_sel")
         self._hmm_view_combo.addItem("Emission heatmap",                       userData="emission")
         self._hmm_view_combo.addItem("State occupancy per group",      userData="occupancy")
         self._hmm_view_combo.addItem("State-to-state transition heatmap",      userData="trans_hmm")
         self._hmm_view_combo.setToolTip(
             "Choose which aspect of the HMM to visualize."
         )
+        self._hmm_view_combo.currentIndexChanged.connect(lambda _=None: self._sync_hmm_split_enabled())
         self._hmm_view_combo.currentIndexChanged.connect(lambda _=None: self._render_hmm())
         self._hmm_export_fig_btn = QPushButton("Export Figure\u2026")
         self._hmm_export_fig_btn.clicked.connect(lambda: self._export_figure("hmm"))
         self._hmm_export_csv_btn = QPushButton("Export CSV\u2026")
         self._hmm_export_csv_btn.clicked.connect(lambda: self._export_data_csv("hmm"))
+        self._hmm_split_combo = QComboBox()
+        self._hmm_split_combo.addItem("By group",   userData="group")
+        self._hmm_split_combo.addItem("By session", userData="session")
+        self._hmm_split_combo.setToolTip(
+            "State occupancy only: aggregate one bar series per experimental "
+            "group (with error bars and significance), or draw one series per "
+            "session with no aggregation."
+        )
+        self._hmm_split_combo.currentIndexChanged.connect(lambda _=None: self._render_hmm())
         ctrl2.addWidget(QLabel("View:"))
         ctrl2.addWidget(self._hmm_view_combo)
+        ctrl2.addWidget(QLabel("Split:"))
+        ctrl2.addWidget(self._hmm_split_combo)
         ctrl2.addWidget(self._hmm_export_fig_btn)
         ctrl2.addWidget(self._hmm_export_csv_btn)
         ctrl2.addStretch(1)
+        self._sync_hmm_split_enabled()
         layout.addLayout(ctrl1)
         layout.addLayout(ctrl2)
 
@@ -11994,7 +12205,9 @@ class _BehaviorMotifWidget(QWidget):
                 self._sync_hmm_canvas_to_viewport, self
             )
             self._hmm_canvas_scroll.viewport().installEventFilter(self._hmm_resize_filter)
-            layout.addWidget(NavigationToolbar(self._hmm_sel_canvas, w))
+            _hmm_sel_toolbar = NavigationToolbar(self._hmm_sel_canvas, w)
+            style_navigation_toolbar(_hmm_sel_toolbar)
+            layout.addWidget(_hmm_sel_toolbar)
             layout.addWidget(self._hmm_canvas_scroll, 1)
         else:
             layout.addWidget(QLabel("Matplotlib required."))
@@ -12105,6 +12318,12 @@ class _BehaviorMotifWidget(QWidget):
     def _sync_gap_to_settings(self) -> None:
         self._settings.max_transition_gap_s = float(self._tr_gap_spin.value())
         self._save_settings()
+
+    def _sync_hmm_split_enabled(self) -> None:
+        """The session/group split only changes the occupancy view."""
+        self._hmm_split_combo.setEnabled(
+            str(self._hmm_view_combo.currentData() or "") == "occupancy"
+        )
 
     def _sync_hmm_mode(self) -> None:
         mode = str(self._hmm_mode_combo.currentData() or "auto")
@@ -13730,6 +13949,7 @@ class _BehaviorMotifWidget(QWidget):
             hmm_n_iter=self._settings.hmm_n_iter,
             hmm_n_restarts=self._settings.hmm_n_restarts,
             hmm_criterion=self._settings.hmm_criterion,
+            hmm_random_seed=getattr(self._settings, "hmm_random_seed", 0),
             bout_overlap_tolerance_s=self._settings.bout_overlap_tolerance_s,
         )
         session_group_map = self._build_session_group_map(sequences)
@@ -13789,7 +14009,10 @@ class _BehaviorMotifWidget(QWidget):
                             - all_v[p][n1:].mean()
                         ) >= obs
                     )
-                    pvals[st] = count / settings_snap.n_permutations
+                    # (b + 1) / (m + 1): the observed labelling is one of the
+                    # possible arrangements, and a p-value of exactly 0 is not
+                    # valid (Phipson & Smyth 2010).
+                    pvals[st] = (count + 1) / (settings_snap.n_permutations + 1)
                 pval_occ[(g1, g2)] = pvals
             hmm_res["session_occupancy"] = occ
             hmm_res["group_occ_mean"] = group_occ_mean
@@ -13804,6 +14027,213 @@ class _BehaviorMotifWidget(QWidget):
         worker.signals.finished.connect(self._on_hmm_done)
         worker.signals.failed.connect(self._on_worker_failed)
         self._pool.start(worker)
+
+
+    def _run_hmm_calibration(self) -> None:
+        """Measure the dataset and propose HMM settings, with the evidence.
+
+        Nothing is applied until the user approves it in the review dialog.
+        """
+        from abel.services.behavioral_motif_service import (
+            calibrate_hmm_settings,
+            filter_overlapping_events,
+        )
+
+        if not _ensure_hmmlearn():
+            self._status_lbl.setText(
+                "hmmlearn is not installed. Install it via the Dependencies tab "
+                "(pip install hmmlearn)."
+            )
+            return
+        if not self._host._raw_bouts:
+            self._status_lbl.setText("No analytics data loaded. Click Refresh Analytics first.")
+            return
+        bids, _bnames, _map = self._get_behavior_ids_and_names()
+        if len(bids) < 2:
+            self._status_lbl.setText(
+                "Select at least two behaviors \u2014 a one-symbol sequence carries no "
+                "transition structure to model."
+            )
+            return
+        sequences = self._get_sequences_for_analysis()
+        if not sequences:
+            self._status_lbl.setText(
+                "No session data found. Ensure sessions are checked in the Summary tab."
+            )
+            return
+
+        overlap_tol = self._settings.bout_overlap_tolerance_s
+        sequences = {
+            sid: filter_overlapping_events(evs, overlap_tol)
+            for sid, evs in sequences.items()
+        }
+
+        settings_snap = MotifSettings(
+            hmm_n_states_mode=self._settings.hmm_n_states_mode,
+            hmm_n_states=self._settings.hmm_n_states,
+            hmm_n_states_min=self._settings.hmm_n_states_min,
+            hmm_n_states_max=self._settings.hmm_n_states_max,
+            hmm_n_iter=self._settings.hmm_n_iter,
+            hmm_n_restarts=self._settings.hmm_n_restarts,
+            hmm_criterion=self._settings.hmm_criterion,
+            hmm_random_seed=getattr(self._settings, "hmm_random_seed", 0),
+            bout_overlap_tolerance_s=overlap_tol,
+        )
+
+        self._hmm_calib_btn.setEnabled(False)
+        self._hmm_calib_btn.setText("Calibrating\u2026")
+        self._hmm_run_btn.setEnabled(False)
+        self._status_lbl.setText("Calibrating HMM settings\u2026 this runs many fits and may take a few minutes.")
+
+        worker = TaskWorker(
+            lambda: calibrate_hmm_settings(
+                sequences, bids, settings_snap,
+                progress_cb=lambda msg, frac: worker.signals.line_emitted.emit(
+                    "Calibrating \u2014 %s (%d%%)" % (msg, int(frac * 100))
+                ),
+            )
+        )
+        worker.signals.line_emitted.connect(self._status_lbl.setText)
+        worker.signals.finished.connect(self._on_hmm_calibration_done)
+        worker.signals.failed.connect(self._on_hmm_calibration_failed)
+        self._pool.start(worker)
+
+    def _on_hmm_calibration_failed(self, msg: str) -> None:
+        self._hmm_calib_btn.setEnabled(True)
+        self._hmm_calib_btn.setText("Auto-calibrate\u2026")
+        self._hmm_run_btn.setEnabled(True)
+        self._status_lbl.setText("Calibration failed.")
+        self._on_worker_failed(msg)
+
+    def _on_hmm_calibration_done(self, result: dict[str, Any]) -> None:
+        self._hmm_calib_btn.setEnabled(True)
+        self._hmm_calib_btn.setText("Auto-calibrate\u2026")
+        self._hmm_run_btn.setEnabled(True)
+
+        if not isinstance(result, dict) or result.get("error"):
+            msg = (result or {}).get("error", "Calibration returned no result.")
+            self._status_lbl.setText("Calibration failed.")
+            QMessageBox.warning(self, "HMM Calibration", str(msg))
+            return
+
+        self._hmm_calibration = result
+        proposed = result.get("proposed", {})
+        current = result.get("current", {})
+        warns = result.get("warnings", [])
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("HMM Auto-Calibration")
+        dlg.setMinimumSize(760, 560)
+        vl = QVBoxLayout(dlg)
+
+        head = QLabel(
+            "Recommended: <b>%d hidden states</b> &nbsp;&mdash;&nbsp; selected by <b>%s</b> "
+            "over %d bouts in %d sessions."
+            % (
+                int(result.get("recommended_n_states", 0)),
+                "session-held-out cross-validation (1-SE rule)"
+                if result.get("selection_basis") == "cv" else "ICL",
+                int(result.get("n_observations", 0)),
+                int(result.get("n_sequences", 0)),
+            )
+        )
+        head.setWordWrap(True)
+        vl.addWidget(head)
+
+        if warns:
+            wl = QLabel(
+                "<b>Read before using these states:</b><ul>"
+                + "".join("<li>%s</li>" % w for w in warns)
+                + "</ul>"
+            )
+            wl.setWordWrap(True)
+            wl.setStyleSheet("color:#ffcc80;")
+            wl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            wsc = QScrollArea(dlg)
+            wsc.setWidgetResizable(True)
+            wsc.setWidget(wl)
+            wsc.setMaximumHeight(150)
+            vl.addWidget(wsc)
+
+        changed = [
+            (k, current.get(k), v) for k, v in proposed.items() if current.get(k) != v
+        ]
+        if changed:
+            tbl = QTableWidget(len(changed), 3, dlg)
+            tbl.setHorizontalHeaderLabels(["Setting", "Current", "Proposed"])
+            for r, (k, cur, new) in enumerate(changed):
+                for c, txt in enumerate((k, str(cur), str(new))):
+                    item = QTableWidgetItem(txt)
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    tbl.setItem(r, c, item)
+            tbl.resizeColumnsToContents()
+            tbl.verticalHeader().setVisible(False)
+            tbl.setMaximumHeight(min(240, 32 + 26 * len(changed)))
+            vl.addWidget(QLabel("Settings that would change:"))
+            vl.addWidget(tbl)
+        else:
+            vl.addWidget(QLabel("Your current settings already match the recommendation."))
+
+        vl.addWidget(QLabel("Evidence:"))
+        txt = QPlainTextEdit(dlg)
+        txt.setReadOnly(True)
+        txt.setPlainText("\n".join(result.get("report", [])))
+        txt.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        fnt = QFont("Consolas")
+        fnt.setStyleHint(QFont.StyleHint.Monospace)
+        fnt.setPointSize(9)
+        txt.setFont(fnt)
+        vl.addWidget(txt, 1)
+
+        btns = QDialogButtonBox(dlg)
+        copy_btn = btns.addButton("Copy report", QDialogButtonBox.ButtonRole.ActionRole)
+        apply_run_btn = btns.addButton("Apply and Run HMM", QDialogButtonBox.ButtonRole.AcceptRole)
+        apply_btn = btns.addButton("Apply only", QDialogButtonBox.ButtonRole.ApplyRole)
+        btns.addButton(QDialogButtonBox.StandardButton.Cancel)
+        apply_run_btn.setEnabled(bool(changed) or True)
+        apply_btn.setEnabled(bool(changed))
+        vl.addWidget(btns)
+
+        outcome = {"apply": False, "run": False}
+
+        def _copy() -> None:
+            QGuiApplication.clipboard().setText("\n".join(result.get("report", [])))
+            self._status_lbl.setText("Calibration report copied to clipboard.")
+
+        def _apply_only() -> None:
+            outcome["apply"] = True
+            dlg.accept()
+
+        def _apply_run() -> None:
+            outcome["apply"] = True
+            outcome["run"] = True
+            dlg.accept()
+
+        copy_btn.clicked.connect(_copy)
+        apply_btn.clicked.connect(_apply_only)
+        apply_run_btn.clicked.connect(_apply_run)
+        btns.rejected.connect(dlg.reject)
+
+        dlg.exec()
+        if not outcome["apply"]:
+            self._status_lbl.setText("Calibration complete \u2014 no settings changed.")
+            return
+
+        for key, val in proposed.items():
+            setattr(self._settings, key, val)
+        self._sync_settings_to_ui()
+        self._save_settings()
+        self._status_lbl.setText(
+            "Applied calibrated HMM settings (K=%d, n_iter=%d, restarts=%d, criterion=%s)."
+            % (
+                proposed.get("hmm_n_states", 0),
+                proposed.get("hmm_n_iter", 0),
+                proposed.get("hmm_n_restarts", 0),
+                str(proposed.get("hmm_criterion", "")).upper(),
+            )
+        )
+        if outcome["run"]:
+            self._run_hmm()
 
     def _on_hmm_done(self, result: dict[str, Any]) -> None:
         self._hmm_run_btn.setEnabled(True)
@@ -13837,11 +14267,19 @@ class _BehaviorMotifWidget(QWidget):
             model_sel = result.get("model_selection", [])
             ax = self._hmm_sel_fig.add_subplot(111)
             if model_sel and len(model_sel) > 1:
-                ns_vals  = [r["n_states"]         for r in model_sel]
-                aic_vals = [r["aic"]               for r in model_sel]
-                bic_vals = [r["bic"]               for r in model_sel]
-                ax.plot(ns_vals, aic_vals, "o-", label="AIC", color=_PALETTE[0])
-                ax.plot(ns_vals, bic_vals, "s-", label="BIC", color=_PALETTE[1])
+                ns_vals = [r["n_states"] for r in model_sel]
+                # Every criterion, so the reader can see where they disagree
+                # rather than only the one that happened to be selected.
+                series = [("AIC", "aic", "o-"), ("AICc", "aicc", "^-"),
+                          ("BIC", "bic", "s-"), ("ICL", "icl", "d-")]
+                for i, (label, key, style) in enumerate(series):
+                    vals = [r.get(key, float("nan")) for r in model_sel]
+                    if not any(np.isfinite(v) for v in vals):
+                        continue
+                    best_k = ns_vals[int(np.nanargmin(vals))]
+                    ax.plot(ns_vals, vals, style,
+                            label=f"{label} (min K={best_k})",
+                            color=_PALETTE[i % len(_PALETTE)])
                 ax.axvline(n_states, color="white", linestyle="--",
                            alpha=0.6, label=f"Selected: {n_states}")
                 ax.set_xlabel("N states", fontsize=gs["axis_fontsize"])
@@ -13894,67 +14332,91 @@ class _BehaviorMotifWidget(QWidget):
             groups = result.get("groups", sorted(group_occ_mean.keys()))
             ax = self._hmm_sel_fig.add_subplot(111)
             x = np.arange(n_states)
-            width = min(0.80, 0.70 * _hmm_bar_spacing) / max(len(groups), 1)
-            # Build per-group raw occupancy arrays for _eb_val
-            grp_occ_arrays: dict[str, np.ndarray] = {}
-            for grp in groups:
-                rows = [v for sid, v in session_occ.items()
-                        if session_grps_occ.get(sid) == grp]
-                grp_occ_arrays[grp] = np.array(rows) if rows else np.zeros((0, n_states))
-            for gi, grp in enumerate(groups):
-                means = np.array(group_occ_mean.get(grp, [0.0] * n_states))
-                occ_arr = grp_occ_arrays.get(grp, np.zeros((0, n_states)))
-                ebs = np.array([
-                    _eb_val(occ_arr[:, st] if occ_arr.shape[0] > 0 else np.array([0.0]),
-                            _hmm_error_style)
-                    for st in range(n_states)
-                ])
-                _hmm_cs = int(_hmm_mgs.get("eb_capsize", 4)) if _hmm_error_style != "None" else 0
-                _hmm_lw = float(_hmm_mgs.get("eb_linewidth", 1.0))
-                offset = (gi - len(groups) / 2 + 0.5) * width * _hmm_bar_spacing
-                ax.bar(x + offset, means,
-                       width=width * 0.9 * _hmm_bar_spacing,
-                       yerr=(ebs if _hmm_error_style != "None" else None),
-                       label=grp, color=_PALETTE[gi % len(_PALETTE)],
-                       alpha=0.85,
-                       capsize=_hmm_cs,
-                       error_kw={"elinewidth": _hmm_lw, "capthick": _hmm_lw} if _hmm_error_style != "None" else {})
-            # Add significance stars if pval_occ available (filtered by selected comparisons)
-            active_pval_occ = self._pval_mat_filtered(
-                {k: np.array(v) for k, v in pval_occ_raw.items()}
-            )
-            _hmm_show_stats = self._motif_graph_settings.get("show_stats", True)
-            for pair_key, pvals_arr in active_pval_occ.items():
-                if not _hmm_show_stats:
-                    break
-                for st in range(n_states):
-                    p = float(pvals_arr[st])
-                    if p < 0.05:
-                        sig = "***" if p < 0.001 else "**" if p < 0.01 else "*"
-                        max_bar = max(
-                            (group_occ_mean.get(g, [0.0]*n_states)[st] +
-                             _eb_val(
-                                 grp_occ_arrays.get(g, np.zeros((0, n_states)))[:, st]
-                                 if grp_occ_arrays.get(g, np.zeros((0, n_states))).shape[0] > 0
-                                 else np.array([0.0]),
-                                 _hmm_error_style
-                             ))
-                            for g in groups
-                        ) if groups else 0.0
-                        _hmm_sig_gap = max_bar * 0.04 + 0.02
-                        ax.text(st, max_bar + _hmm_sig_gap, sig,
-                                ha="center", va="bottom",
-                                fontsize=10, color="black", fontweight="bold", zorder=6)
-            ax.set_xticks(x)
-            ax.set_xticklabels([f"State {i}" for i in range(n_states)],
-                               fontsize=gs["tick_fontsize"])
-            ax.set_ylabel("Mean Occupancy Fraction", fontsize=gs["axis_fontsize"])
-            ax.set_ylim(0, min(1.0, ax.get_ylim()[1] * 1.2 + 0.05))
-            _hmm_eb_lbl = f" \u00b1 {_hmm_error_style}" if _hmm_error_style != "None" else ""
-            ax.set_title(f"State Occupancy per Group (mean{_hmm_eb_lbl})",
-                         fontsize=gs["title_fontsize"])
-            if groups:
-                ax.legend(fontsize="x-small")
+
+            if str(self._hmm_split_combo.currentData() or "group") == "session":
+                # One series per session: no aggregation, so no error bars and
+                # no significance markers -- each bar is a single observation.
+                sids = sorted(session_occ.keys())
+                s_width = min(0.80, 0.70 * _hmm_bar_spacing) / max(len(sids), 1)
+                for si, sid in enumerate(sids):
+                    vals = np.array(session_occ.get(sid, [0.0] * n_states))
+                    offset = (si - len(sids) / 2 + 0.5) * s_width * _hmm_bar_spacing
+                    grp = session_grps_occ.get(sid, "")
+                    ax.bar(x + offset, vals,
+                           width=s_width * 0.9 * _hmm_bar_spacing,
+                           label=f"{sid} ({grp})" if grp else str(sid),
+                           color=_PALETTE[si % len(_PALETTE)], alpha=0.85)
+                ax.set_xticks(x)
+                ax.set_xticklabels([f"State {i}" for i in range(n_states)],
+                                   fontsize=gs["tick_fontsize"])
+                ax.set_ylabel("Occupancy Fraction", fontsize=gs["axis_fontsize"])
+                ax.set_ylim(0, min(1.0, ax.get_ylim()[1] * 1.2 + 0.05))
+                ax.set_title("State Occupancy per Session",
+                             fontsize=gs["title_fontsize"])
+                if sids:
+                    ax.legend(fontsize="xx-small", ncol=2)
+            else:
+                width = min(0.80, 0.70 * _hmm_bar_spacing) / max(len(groups), 1)
+                # Build per-group raw occupancy arrays for _eb_val
+                grp_occ_arrays: dict[str, np.ndarray] = {}
+                for grp in groups:
+                    rows = [v for sid, v in session_occ.items()
+                            if session_grps_occ.get(sid) == grp]
+                    grp_occ_arrays[grp] = np.array(rows) if rows else np.zeros((0, n_states))
+                for gi, grp in enumerate(groups):
+                    means = np.array(group_occ_mean.get(grp, [0.0] * n_states))
+                    occ_arr = grp_occ_arrays.get(grp, np.zeros((0, n_states)))
+                    ebs = np.array([
+                        _eb_val(occ_arr[:, st] if occ_arr.shape[0] > 0 else np.array([0.0]),
+                                _hmm_error_style)
+                        for st in range(n_states)
+                    ])
+                    _hmm_cs = int(_hmm_mgs.get("eb_capsize", 4)) if _hmm_error_style != "None" else 0
+                    _hmm_lw = float(_hmm_mgs.get("eb_linewidth", 1.0))
+                    offset = (gi - len(groups) / 2 + 0.5) * width * _hmm_bar_spacing
+                    ax.bar(x + offset, means,
+                           width=width * 0.9 * _hmm_bar_spacing,
+                           yerr=(ebs if _hmm_error_style != "None" else None),
+                           label=grp, color=_PALETTE[gi % len(_PALETTE)],
+                           alpha=0.85,
+                           capsize=_hmm_cs,
+                           error_kw={"elinewidth": _hmm_lw, "capthick": _hmm_lw} if _hmm_error_style != "None" else {})
+                # Add significance stars if pval_occ available (filtered by selected comparisons)
+                active_pval_occ = self._pval_mat_filtered(
+                    {k: np.array(v) for k, v in pval_occ_raw.items()}
+                )
+                _hmm_show_stats = self._motif_graph_settings.get("show_stats", True)
+                for pair_key, pvals_arr in active_pval_occ.items():
+                    if not _hmm_show_stats:
+                        break
+                    for st in range(n_states):
+                        p = float(pvals_arr[st])
+                        if p < 0.05:
+                            sig = "***" if p < 0.001 else "**" if p < 0.01 else "*"
+                            max_bar = max(
+                                (group_occ_mean.get(g, [0.0]*n_states)[st] +
+                                 _eb_val(
+                                     grp_occ_arrays.get(g, np.zeros((0, n_states)))[:, st]
+                                     if grp_occ_arrays.get(g, np.zeros((0, n_states))).shape[0] > 0
+                                     else np.array([0.0]),
+                                     _hmm_error_style
+                                 ))
+                                for g in groups
+                            ) if groups else 0.0
+                            _hmm_sig_gap = max_bar * 0.04 + 0.02
+                            ax.text(st, max_bar + _hmm_sig_gap, sig,
+                                    ha="center", va="bottom",
+                                    fontsize=10, color="black", fontweight="bold", zorder=6)
+                ax.set_xticks(x)
+                ax.set_xticklabels([f"State {i}" for i in range(n_states)],
+                                   fontsize=gs["tick_fontsize"])
+                ax.set_ylabel("Mean Occupancy Fraction", fontsize=gs["axis_fontsize"])
+                ax.set_ylim(0, min(1.0, ax.get_ylim()[1] * 1.2 + 0.05))
+                _hmm_eb_lbl = f" \u00b1 {_hmm_error_style}" if _hmm_error_style != "None" else ""
+                ax.set_title(f"State Occupancy per Group (mean{_hmm_eb_lbl})",
+                             fontsize=gs["title_fontsize"])
+                if groups:
+                    ax.legend(fontsize="x-small")
 
         elif view == "trans_hmm":
             trans_mat = result.get("transition_matrix")
@@ -13999,7 +14461,9 @@ class _BehaviorMotifWidget(QWidget):
         sel_criterion = self._settings.hmm_criterion.upper()
         criterion_reason = ""
         if model_sel and len(model_sel) > 1:
-            crit_vals = [r[self._settings.hmm_criterion] for r in model_sel if self._settings.hmm_criterion in r]
+            crit_key = str(result.get("criterion_used") or self._settings.hmm_criterion).lower()
+            sel_criterion = crit_key.upper()
+            crit_vals = [r[crit_key] for r in model_sel if crit_key in r]
             if crit_vals:
                 best_idx = int(np.argmin(crit_vals))
                 best_n = model_sel[best_idx]["n_states"]
@@ -14421,11 +14885,33 @@ class _BehaviorMotifWidget(QWidget):
         form.addRow("N states max:", hmm_max_spin)
         hmm_iter_spin = QSpinBox(dlg); hmm_iter_spin.setRange(10, 2000); hmm_iter_spin.setValue(s.hmm_n_iter)
         form.addRow("HMM iterations:", hmm_iter_spin)
-        hmm_restart_spin = QSpinBox(dlg); hmm_restart_spin.setRange(1, 20); hmm_restart_spin.setValue(s.hmm_n_restarts)
+        hmm_restart_spin = QSpinBox(dlg); hmm_restart_spin.setRange(1, 50); hmm_restart_spin.setValue(s.hmm_n_restarts)
+        hmm_restart_spin.setToolTip(
+            "Random EM initialisations per state count; the best log-likelihood is kept.\n"
+            "EM finds local optima, so too few restarts can report a worse fit for one\n"
+            "state count than another and distort the criterion curve.\n"
+            "Auto-calibrate measures the hit rate and sets this for you."
+        )
         form.addRow("HMM restarts:", hmm_restart_spin)
-        hmm_crit_combo = QComboBox(dlg); hmm_crit_combo.addItem("BIC", userData="bic"); hmm_crit_combo.addItem("AIC", userData="aic")
-        hmm_crit_combo.setCurrentIndex(0 if s.hmm_criterion == "bic" else 1)
+        hmm_crit_combo = QComboBox(dlg)
+        for _lbl, _dat in (("ICL (recommended)", "icl"), ("BIC", "bic"),
+                           ("AICc", "aicc"), ("AIC", "aic")):
+            hmm_crit_combo.addItem(_lbl, userData=_dat)
+        _crit_idx = hmm_crit_combo.findData(str(s.hmm_criterion or "bic").lower())
+        hmm_crit_combo.setCurrentIndex(_crit_idx if _crit_idx >= 0 else 1)
+        hmm_crit_combo.setToolTip(
+            "ICL = BIC plus twice the posterior-assignment entropy; it penalises states\n"
+            "that are not cleanly separable. AIC and BIC are known to over-select states\n"
+            "for behavioural sequence data (Pohle et al. 2017, JABES 22:270-293).\n"
+            "AICc adds the small-sample correction to AIC."
+        )
         form.addRow("Selection criterion:", hmm_crit_combo)
+        hmm_seed_spin = QSpinBox(dlg); hmm_seed_spin.setRange(0, 999999); hmm_seed_spin.setValue(int(getattr(s, "hmm_random_seed", 0)))
+        hmm_seed_spin.setToolTip(
+            "Seed for EM initialisation. Fixed so the same data and settings always\n"
+            "reproduce the same state count and the same state numbering."
+        )
+        form.addRow("HMM random seed:", hmm_seed_spin)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, dlg
@@ -14456,7 +14942,8 @@ class _BehaviorMotifWidget(QWidget):
         s.hmm_n_states_max        = max(hmm_max_spin.value(), hmm_min_spin.value())
         s.hmm_n_iter              = hmm_iter_spin.value()
         s.hmm_n_restarts          = hmm_restart_spin.value()
-        s.hmm_criterion           = str(hmm_crit_combo.currentData() or "bic")
+        s.hmm_criterion           = str(hmm_crit_combo.currentData() or "icl")
+        s.hmm_random_seed         = hmm_seed_spin.value()
         self._tr_gap_spin.setValue(s.max_transition_gap_s)
         self._tr_norm_cb.setChecked(s.normalize_rows)
         self._save_settings()
@@ -14748,6 +15235,7 @@ class _BehaviorMotifWidget(QWidget):
             (self._tr_run_btn, "Run"),
             (self._mo_run_btn, "Run"),
             (self._hmm_run_btn, "Run HMM"),
+            (self._hmm_calib_btn, "Auto-calibrate…"),
         ]:
             btn.setEnabled(True)
             btn.setText(default)
@@ -15276,7 +15764,7 @@ class _SessionSectionsWidget(QWidget):
         self._placeholder.setMinimumHeight(200)
         self._placeholder.setStyleSheet(
             "border: 1px solid #1A2027; background: #0A1929; "
-            "border-radius: 4px; color: #546E7A;"
+            "border-radius: 4px; color: #8FA6B4;"
         )
         self._canvas_scroll: Any = None
 
@@ -15296,6 +15784,7 @@ class _SessionSectionsWidget(QWidget):
             )
             self._canvas.setFixedSize(_pw, _ph)
             self._toolbar = NavigationToolbar(self._canvas, self)
+            style_navigation_toolbar(self._toolbar)
             self._placeholder.setVisible(False)
             from PySide6.QtWidgets import QScrollArea as _QScrollArea2
             self._canvas_scroll = _QScrollArea2()
@@ -17959,7 +18448,7 @@ class _VelocityWidget(QWidget):
         self._placeholder.setMinimumHeight(260)
         self._placeholder.setStyleSheet(
             "border:1px solid #1A2027;background:#0A1929;"
-            "border-radius:4px;color:#546E7A;"
+            "border-radius:4px;color:#8FA6B4;"
         )
         self._canvas_scroll: Any = None
         if (
@@ -17978,6 +18467,7 @@ class _VelocityWidget(QWidget):
             )
             self._canvas.setFixedSize(_pw, _ph)
             self._toolbar = NavigationToolbar(self._canvas, self)
+            style_navigation_toolbar(self._toolbar)
             self._placeholder.setVisible(False)
             from PySide6.QtWidgets import QScrollArea as _SA
             self._canvas_scroll = _SA()

@@ -117,6 +117,7 @@ from abel.services.import_service import ImportService
 
 from abel.temporal_refinement.temporal_refinement_service import TemporalRefinementConfig
 
+from abel.ui.mpl_theme import style_navigation_toolbar
 from abel.ui.suppression_helper_dialog import SuppressionHelperDialog
 
 from abel.ui.widgets.session_selection_dialog import SessionOption, choose_sessions
@@ -384,6 +385,22 @@ class TemporalRefinementTab(QWidget):
 
         )
 
+        # ── Auto-clear cache ──────────────────────────────────────
+
+        self._auto_clear_cache = QCheckBox("Clear cache first")
+
+        self._auto_clear_cache.setChecked(True)
+
+        self._auto_clear_cache.setToolTip(
+
+            "Clear the temporal cache and inference artifacts before each run, "
+
+            "so results always reflect the current settings. Untick to reuse "
+
+            "cached inference outputs. R3D video embeddings are kept either way."
+
+        )
+
 
 
         # ── Session scope ─────────────────────────────────────────
@@ -486,9 +503,12 @@ class TemporalRefinementTab(QWidget):
             int(self._tr_graph_settings.get("max_h", 500)),
         )
 
+        # A near-white placeholder inherited the theme's light text, giving
+        # 1.16:1. The pane only ever holds a rendered plot, so ground it in the
+        # app's own dark surface and let the text stay legible.
         self._viz_preview.setStyleSheet(
 
-            "border: 1px solid #cccccc; background: #f7f7f7;"
+            "border: 1px solid #1565C0; background: #0F2744; color: #8FA6B4;"
 
         )
 
@@ -522,6 +542,7 @@ class TemporalRefinementTab(QWidget):
             )
 
             self._viz_toolbar = NavigationToolbar(self._viz_canvas, self)
+            style_navigation_toolbar(self._viz_toolbar)
 
             self._viz_toolbar.setVisible(False)
 
@@ -645,7 +666,7 @@ class TemporalRefinementTab(QWidget):
 
         self._tips.setWordWrap(True)
 
-        self._tips.setStyleSheet("color: #616161; font-size: 11px;")
+        self._tips.setStyleSheet("color: #8FA6B4; font-size: 11px;")
 
         config_layout.addWidget(self._tips)
 
@@ -658,6 +679,8 @@ class TemporalRefinementTab(QWidget):
         btn_row.addWidget(self._refine_btn)
 
         btn_row.addWidget(self._test_single_session)
+
+        btn_row.addWidget(self._auto_clear_cache)
 
         btn_row.addWidget(self._refresh_results_btn)
 
@@ -1723,6 +1746,8 @@ class TemporalRefinementTab(QWidget):
 
         self._clear_cache_btn.setEnabled(not busy)
 
+        self._auto_clear_cache.setEnabled(not busy)
+
 
 
     # ==================================================================
@@ -1752,6 +1777,12 @@ class TemporalRefinementTab(QWidget):
         test_mode = self._test_single_session.isChecked()
 
         label = " (test: 1 session)" if test_mode else ""
+
+        self._status.setText(f"Running dense temporal inference{label}...")
+
+        if self._auto_clear_cache.isChecked():
+
+            self._clear_temporal_cache_now()
 
         self._status.setText(f"Running dense temporal inference{label}...")
 
@@ -1945,6 +1976,21 @@ class TemporalRefinementTab(QWidget):
         )
 
         if answer != QMessageBox.StandardButton.Yes:
+
+            return
+
+        self._clear_temporal_cache_now()
+
+    def _clear_temporal_cache_now(self) -> None:
+        """Clear the cache without prompting.
+
+        Used both by the manual button (after it has confirmed) and by the
+        auto-clear checkbox on the inference run, where a modal prompt in the
+        middle of starting a job would be wrong.
+        """
+        manager = self._manager
+
+        if manager is None:
 
             return
 

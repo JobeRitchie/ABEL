@@ -235,10 +235,14 @@ def training_speed_by_project(df: pd.DataFrame) -> pd.DataFrame:
 def data_efficiency_summary(knees: list[dict]) -> pd.DataFrame:
     """Summarize per-(project,behavior) learning-curve knees into one table.
 
-    ``knees`` items: {project_id, project_name, behavior_name, knee_clips, f1_max}.
+    ``knees`` items: {project_id, project_name, behavior_name, knee_clips, f1_max}
+    plus the bootstrap interval for both (``knee_lo``/``knee_hi``,
+    ``f1_max_lo``/``f1_max_hi``) — see :func:`learning_curve.bootstrap_knee_ci`.
     """
     if not knees:
-        return pd.DataFrame(columns=["project_id", "behavior_name", "knee_clips", "f1_max"])
+        return pd.DataFrame(columns=[
+            "project_id", "behavior_name", "knee_clips", "f1_max",
+            "knee_lo", "knee_hi", "f1_max_lo", "f1_max_hi"])
     return pd.DataFrame(knees)
 
 

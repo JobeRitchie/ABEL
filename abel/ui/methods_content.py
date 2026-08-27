@@ -2,15 +2,19 @@
 
 This module is the single source of truth behind the **Methods** tab. Keeping the
 content as structured data (rather than inline HTML in the widget) makes it testable
-— tests assert every reference has a resolvable link and every formula names the
-ABEL function that implements it — and lets the same content be exported later.
+— tests assert every reference URL is well formed and every formula's ``source``
+resolves to a real importable attribute — and lets the same content be exported later.
 
 Two public tables:
 
-* :data:`REFERENCES` — the peer-reviewed / canonical sources that justify each
-  statistical procedure ABEL performs, grouped by topic.
+* :data:`REFERENCES` — the sources behind the non-trivial procedures ABEL performs,
+  plus the pose formats it consumes (DeepLabCut, SLEAP), grouped by topic. Most back
+  a specific formula; a few are cited for the input format or library ABEL uses.
 * :data:`FORMULAS` — the raw formulas ABEL evaluates, each tagged with the source
   function so a reviewer can trace equation → code.
+
+Add a formula only when the code actually implements it: a formula here is a claim
+about what ABEL computes, and a reviewer will read it as one.
 
 Formulas render as HTML + Unicode (the app has no LaTeX engine); helper glyphs live
 in this module so the markup stays readable.
@@ -81,20 +85,6 @@ REFERENCES: list[Reference] = [
         "Reporting per-fold variability (mean ± SEM) and cautioning that small "
         "subject counts yield wide error bars.",
     ),
-    Reference(
-        "stone1974", "Stone, M.", "1974",
-        "Cross-validatory choice and assessment of statistical predictions",
-        "Journal of the Royal Statistical Society: Series B, 36(2), 111–147",
-        "https://doi.org/10.1111/j.2517-6161.1974.tb00994.x",
-        "Foundational definition of cross-validation.",
-    ),
-    Reference(
-        "kohavi1995", "Kohavi, R.", "1995",
-        "A study of cross-validation and bootstrap for accuracy estimation and model selection",
-        "Proceedings of IJCAI 1995, 1137–1143",
-        "https://dl.acm.org/doi/10.5555/1643031.1643047",
-        "Empirical basis for k-fold cross-validation as a generalization estimator.",
-    ),
     # ---- Evaluation metrics ----
     Reference(
         "saito2015", "Saito, T., & Rehmsmeier, M.", "2015",
@@ -104,14 +94,6 @@ REFERENCES: list[Reference] = [
         "https://doi.org/10.1371/journal.pone.0118432",
         "Choosing PR-AUC (average precision) as the primary metric for imbalanced "
         "behavior data instead of ROC-AUC.",
-    ),
-    Reference(
-        "powers2011", "Powers, D. M. W.", "2011",
-        "Evaluation: From precision, recall and F-measure to ROC, informedness, "
-        "markedness and correlation",
-        "Journal of Machine Learning Technologies, 2(1), 37–63",
-        "https://arxiv.org/abs/2010.16061",
-        "Definitions of precision, recall, and F-measure.",
     ),
     Reference(
         "chicco2020", "Chicco, D., & Jurman, G.", "2020",
@@ -144,44 +126,6 @@ REFERENCES: list[Reference] = [
         "https://doi.org/10.2307/2529310",
         "Interpretation benchmarks for κ agreement magnitudes.",
     ),
-    # ---- Statistical tests (Behavior Analytics) ----
-    Reference(
-        "student1908", "Student (Gosset, W. S.)", "1908",
-        "The probable error of a mean",
-        "Biometrika, 6(1), 1–25",
-        "https://doi.org/10.1093/biomet/6.1.1",
-        "The t-test for two-group comparisons.",
-    ),
-    Reference(
-        "welch1947", "Welch, B. L.", "1947",
-        "The generalization of 'Student's' problem when several different population "
-        "variances are involved",
-        "Biometrika, 34(1–2), 28–35",
-        "https://doi.org/10.1093/biomet/34.1-2.28",
-        "Welch's unequal-variance t-test used for two-group analytics comparisons.",
-    ),
-    Reference(
-        "fisher1925", "Fisher, R. A.", "1925",
-        "Statistical Methods for Research Workers",
-        "Oliver and Boyd, Edinburgh (reprinted in S. Kotz & N. L. Johnson, Eds., "
-        "Breakthroughs in Statistics, Springer, 1992)",
-        "https://doi.org/10.1007/978-1-4612-4380-9_6",
-        "One-way and two-way analysis of variance (ANOVA).",
-    ),
-    Reference(
-        "wilcoxon1945", "Wilcoxon, F.", "1945",
-        "Individual comparisons by ranking methods",
-        "Biometrics Bulletin, 1(6), 80–83",
-        "https://doi.org/10.2307/3001968",
-        "The Wilcoxon signed-rank test for paired feature-ablation F1 differences.",
-    ),
-    Reference(
-        "sidak1967", "Šidák, Z.", "1967",
-        "Rectangular confidence regions for the means of multivariate normal distributions",
-        "Journal of the American Statistical Association, 62(318), 626–633",
-        "https://doi.org/10.1080/01621459.1967.10482935",
-        "Šidák correction for post-hoc pairwise comparisons.",
-    ),
     Reference(
         "benjamini1995", "Benjamini, Y., & Hochberg, Y.", "1995",
         "Controlling the false discovery rate: A practical and powerful approach to "
@@ -196,6 +140,65 @@ REFERENCES: list[Reference] = [
         "Springer, New York",
         "https://doi.org/10.1007/b138696",
         "Label-shuffle permutation tests for behavioral-motif differences.",
+    ),
+    # ---- Machine-learning platforms & models ----
+    Reference(
+        "nilsson2020", "Nilsson, S. R. O., Goodwin, N. L., Choong, J. J., et al.", "2020",
+        "Simple Behavioral Analysis (SimBA) - an open source toolkit for computer "
+        "classification of complex social behaviors in experimental animals",
+        "bioRxiv, 2020.04.19.049452",
+        "https://doi.org/10.1101/2020.04.19.049452",
+        "Original SimBA description; source of the pose-feature vocabulary ABEL "
+        "extends (inter-keypoint distances, body-length normalization, rolling-window "
+        "statistics) and of its social / dyadic feature conventions.",
+    ),
+    Reference(
+        "mathis2018", "Mathis, A., Mamidanna, P., Cury, K. M., et al.", "2018",
+        "DeepLabCut: markerless pose estimation of user-defined body parts with deep "
+        "learning",
+        "Nature Neuroscience, 21, 1281-1289",
+        "https://doi.org/10.1038/s41593-018-0209-y",
+        "Source of the pose tracking ABEL consumes; DeepLabCut CSV/H5 is ABEL's native "
+        "pose input format.",
+    ),
+    Reference(
+        "pereira2022", "Pereira, T. D., Tabris, N., Matsliah, A., et al.", "2022",
+        "SLEAP: A deep learning system for multi-animal pose tracking",
+        "Nature Methods, 19, 486-495",
+        "https://doi.org/10.1038/s41592-022-01426-1",
+        "Multi-animal pose tracking; SLEAP predictions are converted to the "
+        "DeepLabCut layout on import.",
+    ),
+    Reference(
+        "tran2018", "Tran, D., Wang, H., Torresani, L., Ray, J., LeCun, Y., & Paluri, M.", "2018",
+        "A closer look at spatiotemporal convolutions for action recognition",
+        "Proceedings of CVPR 2018, 6450-6459",
+        "https://doi.org/10.1109/CVPR.2018.00675",
+        "The 3D ResNet-18 architecture behind ABEL's video appearance features "
+        "(torchvision r3d_18).",
+    ),
+    Reference(
+        "kay2017", "Kay, W., Carreira, J., Simonyan, K., et al.", "2017",
+        "The Kinetics human action video dataset",
+        "arXiv:1705.06950",
+        "https://arxiv.org/abs/1705.06950",
+        "Pretraining corpus for the R3D-18 backbone whose penultimate activations ABEL "
+        "uses as transferable video features.",
+    ),
+    Reference(
+        "chen2016", "Chen, T., & Guestrin, C.", "2016",
+        "XGBoost: A scalable tree boosting system",
+        "Proceedings of KDD 2016, 785-794",
+        "https://doi.org/10.1145/2939672.2939785",
+        "Gradient-boosted-tree classifier used for the segment and center-frame models.",
+    ),
+    Reference(
+        "ke2017", "Ke, G., Meng, Q., Finley, T., et al.", "2017",
+        "LightGBM: A highly efficient gradient boosting decision tree",
+        "Advances in Neural Information Processing Systems, 30, 3146-3154",
+        "https://proceedings.neurips.cc/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html",
+        "Alternative gradient-boosting backend (scikit-learn histogram gradient "
+        "boosting is the always-available default).",
     ),
     # ---- Temporal model / calibration / active learning ----
     Reference(
@@ -220,13 +223,6 @@ REFERENCES: list[Reference] = [
         "Proceedings of KDD 2002, 694–699",
         "https://doi.org/10.1145/775047.775151",
         "Isotonic-regression probability calibration.",
-    ),
-    Reference(
-        "niculescu2005", "Niculescu-Mizil, A., & Caruana, R.", "2005",
-        "Predicting good probabilities with supervised learning",
-        "Proceedings of ICML 2005, 625–632",
-        "https://doi.org/10.1145/1102351.1102430",
-        "Reliability-curve assessment of calibration quality.",
     ),
     Reference(
         "settles2009", "Settles, B.", "2009",
@@ -259,27 +255,6 @@ REFERENCES: list[Reference] = [
 FORMULAS: list[Formula] = [
     # ---- Classification metrics ----
     Formula(
-        "Precision", "Classification metrics",
-        "Precision = TP / (TP + FP)",
-        "Fraction of predicted-positive windows that are truly positive.",
-        "abel.services.evaluation_service.segment_metrics",
-        ("powers2011", "pedregosa2011"),
-    ),
-    Formula(
-        "Recall (Sensitivity)", "Classification metrics",
-        "Recall = TP / (TP + FN)",
-        "Fraction of true-positive windows the model recovers.",
-        "abel.services.evaluation_service.segment_metrics",
-        ("powers2011", "pedregosa2011"),
-    ),
-    Formula(
-        "F1 score", "Classification metrics",
-        "F1 = 2 · (Precision · Recall) / (Precision + Recall)",
-        "Harmonic mean of precision and recall; robust default under imbalance.",
-        "abel.services.evaluation_service.segment_metrics",
-        ("powers2011",),
-    ),
-    Formula(
         "Macro-F1", "Classification metrics",
         "F1<sub>macro</sub> = (1/K) · Σ<sub>k</sub> F1<sub>k</sub>",
         "Unweighted mean of per-class F1 across the K classes (used by the trainer "
@@ -292,15 +267,24 @@ FORMULAS: list[Formula] = [
         "AP = Σ<sub>n</sub> (R<sub>n</sub> − R<sub>n−1</sub>) · P<sub>n</sub>",
         "Area under the precision–recall curve as a step-wise sum over thresholds; "
         "the primary threshold-free metric for imbalanced behavior data.",
-        "abel.services.evaluation_service.segment_metrics",
+        "abel.services.evaluation_service.EvaluationService.segment_metrics",
         ("saito2015", "pedregosa2011"),
+    ),
+    Formula(
+        "Matthews correlation coefficient", "Classification metrics",
+        "MCC = (TP·TN − FP·FN) / √((TP+FP)(TP+FN)(TN+FP)(TN+FN))",
+        "Chance-corrected correlation between prediction and truth. A high value "
+        "requires doing well on both classes at once, so it cannot be gamed by the "
+        "majority class; MCC ≤ 0 is ABEL's degeneracy gate for a held-out result.",
+        "abel.validation.metrics.matthews_corrcoef",
+        ("chicco2020", "pedregosa2011"),
     ),
     Formula(
         "Cohen's κ", "Rater agreement",
         "κ = (p<sub>o</sub> − p<sub>e</sub>) / (1 − p<sub>e</sub>)",
         "Chance-corrected agreement between two raters; p<sub>o</sub> observed, "
         "p<sub>e</sub> expected-by-chance agreement.",
-        "abel.services.validation_service.compute_metrics",
+        "abel.services.validation_service.ValidationService.compute_metrics",
         ("cohen1960", "landis1977"),
     ),
     Formula(
@@ -308,7 +292,7 @@ FORMULAS: list[Formula] = [
         "κ = (P&#772; − P&#772;<sub>e</sub>) / (1 − P&#772;<sub>e</sub>)",
         "Agreement among more than two raters; P&#772; mean per-item agreement, "
         "P&#772;<sub>e</sub> = Σ<sub>j</sub> p<sub>j</sub>² expected agreement.",
-        "abel.services.validation_service._fleiss_kappa",
+        "abel.services.validation_service.ValidationService._kappa",
         ("fleiss1971",),
     ),
     # ---- Cross-validation ----
@@ -318,38 +302,14 @@ FORMULAS: list[Formula] = [
         "Leave-One-Group-Out cross-validation — the subject-grouped special case of "
         "k-fold with k = number of mice — so no mouse appears in both train and test.",
         "abel.validation.loso.leave_one_subject_out",
-        ("saeb2017", "pedregosa2011", "kohavi1995"),
-    ),
-    Formula(
-        "Mean ± SEM across folds", "Cross-validation",
-        "x&#772; = (1/n) Σ x<sub>i</sub>&nbsp;&nbsp;&nbsp;SEM = s / &radic;n,&nbsp; "
-        "s = &radic;[ Σ(x<sub>i</sub> − x&#772;)² / (n−1) ]",
-        "Per-fold metric summarized across the n held-out subjects (each mouse one "
-        "observation); s is the sample standard deviation.",
-        "abel.validation.loso._mean_std_sem",
-        ("varoquaux2018",),
-    ),
-    Formula(
-        "95% confidence interval", "Cross-validation",
-        "CI<sub>95</sub> = x&#772; ± 1.96 · SEM",
-        "Normal-approximation interval used for analytics error bars.",
-        "abel.ui.tabs.behavior_analytics_tab",
-        ("varoquaux2018",),
+        ("saeb2017", "pedregosa2011", "varoquaux2018"),
     ),
     # ---- Temporal refinement ----
     Formula(
         "Moving-average smoothing", "Temporal refinement",
         "p&#771;<sub>t</sub> = (1/w) Σ<sub>i=t−w/2</sub><sup>t+w/2</sup> p<sub>i</sub>",
         "Box-filter smoothing of the per-window probability trace over a window w.",
-        "abel.temporal_refinement.bout_postprocess.moving_average",
-    ),
-    Formula(
-        "Hysteresis (Schmitt) thresholding", "Temporal refinement",
-        "onset when p ≥ θ<sub>on</sub>; offset when p &lt; θ<sub>off</sub>, "
-        "θ<sub>off</sub> = 0.7 · θ<sub>on</sub>",
-        "Two-threshold gating so a bout opens on a strong frame and only closes when "
-        "confidence drops well below, preventing flicker.",
-        "abel.temporal_refinement.bout_postprocess.hysteresis_threshold",
+        "abel.temporal_refinement.bout_postprocess.smooth_probabilities",
     ),
     Formula(
         "Temporal IoU (bout matching)", "Temporal refinement",
@@ -374,7 +334,7 @@ FORMULAS: list[Formula] = [
         "a = Δv · fps;&nbsp; jerk = Δa · fps",
         "Velocity, speed, acceleration and jerk from per-frame keypoint differences "
         "scaled to units per second.",
-        "abel.services.pose_processing_service.compute_frame_pose_features",
+        "abel.services.pose_processing_service.PoseProcessingService.compute_frame_pose_features",
     ),
     Formula(
         "Joint angle (three keypoints)", "Feature engineering",
@@ -390,6 +350,7 @@ FORMULAS: list[Formula] = [
         "Inter-keypoint distances divided by nose-to-tail body length, making "
         "features scale-invariant across animals and cameras.",
         "abel.services.pose_processing_service",
+        ("nilsson2020",),
     ),
     Formula(
         "Grouped z-score", "Feature engineering",
@@ -405,34 +366,34 @@ FORMULAS: list[Formula] = [
         "(e.g. scratching, digging).",
         "abel.services.pose_processing_service",
     ),
+    # ---- Learned models ----
+    Formula(
+        "Gradient-boosted trees", "Learned models",
+        "F<sub>M</sub>(x) = &Sigma;<sub>m=1</sub><sup>M</sup> &eta; · f<sub>m</sub>(x);&nbsp; "
+        "obj = &Sigma;<sub>i</sub> l(y<sub>i</sub>, F(x<sub>i</sub>)) + "
+        "&Sigma;<sub>m</sub> &Omega;(f<sub>m</sub>)",
+        "The segment and center-frame classifiers: an additive ensemble of M regression "
+        "trees fit stage-wise to the loss gradient, with shrinkage &eta; and a complexity "
+        "penalty &Omega;. Backends are XGBoost, LightGBM, or scikit-learn histogram "
+        "gradient boosting.",
+        "abel.services.active_learning_trainer_service",
+        ("chen2016", "ke2017", "pedregosa2011"),
+    ),
+    Formula(
+        "R3D-18 video embedding", "Learned models",
+        "z = GAP( f<sub>&theta;</sub>(C&times;T&times;H&times;W clip) ) &isin; ℝ<sup>512</sup>",
+        "Appearance features: a Kinetics-pretrained 3D ResNet-18 is run over the cropped "
+        "clip around each window and its global-average-pooled penultimate activations "
+        "(512 dims) are concatenated with the pose features before training.",
+        "abel.services.r3d_feature_service",
+        ("tran2018", "kay2017"),
+    ),
     # ---- Statistical tests ----
-    Formula(
-        "Welch's t-test", "Statistical tests",
-        "t = (x&#772;<sub>1</sub> − x&#772;<sub>2</sub>) / "
-        "&radic;(s<sub>1</sub>²/n<sub>1</sub> + s<sub>2</sub>²/n<sub>2</sub>)",
-        "Unequal-variance two-group comparison in Behavior Analytics.",
-        "abel.ui.tabs.behavior_analytics_tab",
-        ("welch1947", "student1908"),
-    ),
-    Formula(
-        "One-way ANOVA F", "Statistical tests",
-        "F = MS<sub>between</sub> / MS<sub>within</sub>",
-        "Ratio of between-group to within-group mean squares across ≥3 groups.",
-        "abel.ui.tabs.behavior_analytics_tab",
-        ("fisher1925",),
-    ),
-    Formula(
-        "Šidák correction", "Statistical tests",
-        "p<sub>adj</sub> = 1 − (1 − p)<sup>m</sup>,&nbsp; m = C(k, 2)",
-        "Family-wise error control across m post-hoc pairwise comparisons.",
-        "abel.ui.tabs.behavior_analytics_tab",
-        ("sidak1967",),
-    ),
     Formula(
         "Benjamini–Hochberg FDR", "Statistical tests",
         "q<sub>(k)</sub> = min<sub>k′≥k</sub> [ p<sub>(k′)</sub> · m / k′ ]",
         "False-discovery-rate adjusted p-values for motif/transition tests.",
-        "abel.ui.tabs.behavior_analytics_tab._fdr_bh_adjust",
+        "abel.ui.tabs.behavior_analytics_tab._BehaviorMotifWidget._fdr_bh_adjust",
         ("benjamini1995",),
     ),
     Formula(
@@ -447,7 +408,7 @@ FORMULAS: list[Formula] = [
         "Shannon entropy (uncertainty)", "Active learning",
         "H(p) = − Σ<sub>k</sub> p<sub>k</sub> · ln p<sub>k</sub>",
         "Predictive uncertainty of a segment's class distribution (in nats).",
-        "abel.services.uncertainty_service.entropy",
+        "abel.services.uncertainty_service.UncertaintyScoringService.entropy",
         ("shannon1948", "settles2009"),
     ),
     Formula(
@@ -455,7 +416,7 @@ FORMULAS: list[Formula] = [
         "margin = |p<sub>(1)</sub> − p<sub>(2)</sub>|",
         "Gap between the top-two class probabilities; small margins flag ambiguous "
         "segments (least-confidence = 1 − margin).",
-        "abel.services.uncertainty_service.classification_margin",
+        "abel.services.uncertainty_service.UncertaintyScoringService.classification_margin",
         ("settles2009",),
     ),
     Formula(
@@ -474,7 +435,7 @@ FORMULAS: list[Formula] = [
         "Logistic mapping of a classifier score s to a calibrated probability; "
         "A, B fit on the validation split (isotonic regression is the alternative).",
         "abel.services.active_learning_trainer_service",
-        ("platt1999", "zadrozny2002", "niculescu2005"),
+        ("platt1999", "zadrozny2002"),
     ),
     Formula(
         "Gaussian HMM log-likelihood", "Calibration & models",
@@ -511,28 +472,26 @@ def _ordered_groups(items: list, key: str) -> list[str]:
 def _reference_group(ref: Reference) -> str:
     """Map a reference to its display section (mirrors the authored ordering)."""
     return {
+        "nilsson2020": "Machine-learning platforms & models",
+        "mathis2018": "Machine-learning platforms & models",
+        "pereira2022": "Machine-learning platforms & models",
+        "tran2018": "Machine-learning platforms & models",
+        "kay2017": "Machine-learning platforms & models",
+        "chen2016": "Machine-learning platforms & models",
+        "ke2017": "Machine-learning platforms & models",
         "pedregosa2011": "Cross-validation & study design",
         "saeb2017": "Cross-validation & study design",
         "varoquaux2018": "Cross-validation & study design",
-        "stone1974": "Cross-validation & study design",
-        "kohavi1995": "Cross-validation & study design",
         "saito2015": "Evaluation metrics",
-        "powers2011": "Evaluation metrics",
         "chicco2020": "Evaluation metrics",
         "cohen1960": "Rater agreement",
         "fleiss1971": "Rater agreement",
         "landis1977": "Rater agreement",
-        "student1908": "Statistical tests",
-        "welch1947": "Statistical tests",
-        "fisher1925": "Statistical tests",
-        "wilcoxon1945": "Statistical tests",
-        "sidak1967": "Statistical tests",
         "benjamini1995": "Statistical tests",
         "good2005": "Statistical tests",
         "rabiner1989": "Models, calibration & active learning",
         "platt1999": "Models, calibration & active learning",
         "zadrozny2002": "Models, calibration & active learning",
-        "niculescu2005": "Models, calibration & active learning",
         "settles2009": "Models, calibration & active learning",
         "shannon1948": "Models, calibration & active learning",
         "mcinnes2018": "Models, calibration & active learning",
@@ -540,6 +499,7 @@ def _reference_group(ref: Reference) -> str:
 
 
 _REFERENCE_SECTIONS = [
+    "Machine-learning platforms & models",
     "Cross-validation & study design",
     "Evaluation metrics",
     "Rater agreement",
@@ -552,9 +512,11 @@ def render_references_html() -> str:
     """Build the References subtab HTML (sectioned, with clickable links)."""
     parts = [
         _WRAP_OPEN,
-        "<p style='color:#90A4AE;'>Peer-reviewed and canonical sources for every "
-        "statistical procedure ABEL performs. Each entry notes which ABEL analysis it "
-        "supports. Links open the DOI or archival page.</p>",
+        "<p style='color:#90A4AE;'>Sources for the non-trivial procedures ABEL "
+        "performs and for the machine-learning platforms and models it builds on. "
+        "Textbook statistics (t-tests, ANOVA, precision/recall) are used but not "
+        "cited. Each entry notes which ABEL analysis it supports; links open the DOI "
+        "or archival page.</p>",
     ]
     for section in _REFERENCE_SECTIONS:
         refs = [r for r in REFERENCES if _reference_group(r) == section]
@@ -581,9 +543,10 @@ def render_formulas_html() -> str:
     """Build the Formulas subtab HTML (grouped by category)."""
     parts = [
         _WRAP_OPEN,
-        "<p style='color:#90A4AE;'>The raw formulas ABEL evaluates across its primary "
-        "analyses. Each is tagged with the implementing function so equations can be "
-        "traced directly to the code.</p>",
+        "<p style='color:#90A4AE;'>The non-obvious formulas ABEL evaluates across its "
+        "primary analyses; standard textbook definitions are omitted. Each is tagged "
+        "with the implementing function so equations can be traced directly to the "
+        "code.</p>",
     ]
     by_key = {r.key: r for r in REFERENCES}
     for category in _ordered_groups(FORMULAS, "category"):

@@ -253,7 +253,31 @@ def run_analysis(
 
 
 def results_to_frame(results: list[VideoValueResult]) -> pd.DataFrame:
-    return pd.DataFrame([r.to_row() for r in results])
+    """Flat table of every behavior, with the multiplicity correction applied.
+
+    ``p_value`` is one behavior's own paired test; the manuscript claim is about a
+    *family* of them ("video features improved N of M behaviors"), so a raw p at
+    0.05 across ~45 behaviors buys a couple of expected false positives.  ``q_value``
+    is the BH-adjusted p over the testable behaviors, and ``significant_bh`` is the
+    flag a figure should colour by.  ``significant`` is left alone so older runs and
+    the per-behavior panel keep their meaning.
+    """
+    df = pd.DataFrame([r.to_row() for r in results])
+    if df.empty or "p_value" not in df.columns:
+        return df
+    from abel.validation import metrics as vmetrics  # noqa: PLC0415
+
+    df["q_value"] = vmetrics.benjamini_hochberg_adjust(
+        pd.to_numeric(df["p_value"], errors="coerce").to_numpy())
+    q = pd.to_numeric(df["q_value"], errors="coerce")
+    gain = pd.to_numeric(df.get("gain"), errors="coerce")
+    df["significant_bh"] = (q < 0.05) & gain.notna()
+    # Signed verdict, so a panel can colour "helped" apart from "hurt" without
+    # re-deriving it from a sign and a flag.
+    df["verdict"] = np.where(
+        ~df["significant_bh"], "ns",
+        np.where(gain > 0, "improved", "degraded"))
+    return df
 
 
 def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:

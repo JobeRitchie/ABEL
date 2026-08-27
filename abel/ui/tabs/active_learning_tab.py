@@ -604,7 +604,7 @@ class ActiveLearningTab(QWidget):
             "QPushButton { background: #1565C0; color: #FFFFFF; border-radius: 5px; "
             "padding: 6px 18px; font-weight: 800; font-size: 13px; }"
             "QPushButton:hover { background: #1976D2; }"
-            "QPushButton:disabled { background: #263238; color: #546E7A; }"
+            "QPushButton:disabled { background: #263238; color: #8FA6B4; }"
         )
         self._run_btn.clicked.connect(self._run_pipeline)
 
@@ -636,7 +636,7 @@ class ActiveLearningTab(QWidget):
             "QPushButton { background: #0D47A1; color: #FFFFFF; border-radius: 5px; "
             "padding: 6px 14px; font-weight: 800; font-size: 12px; }"
             "QPushButton:hover { background: #1565C0; }"
-            "QPushButton:disabled { background: #263238; color: #546E7A; }"
+            "QPushButton:disabled { background: #263238; color: #8FA6B4; }"
         )
         self._run_pipeline_all_btn.setToolTip(
             "Run the full active-learning pipeline for every defined behavior in sequence.\n"
@@ -668,7 +668,7 @@ class ActiveLearningTab(QWidget):
             "QPushButton { background: #37474F; color: #EF9A9A; border-radius: 4px; "
             "padding: 4px 12px; font-weight: 700; }"
             "QPushButton:hover { background: #B71C1C; color: white; }"
-            "QPushButton:disabled { background: #1A2027; color: #37474F; }"
+            "QPushButton:disabled { background: #1A2027; color: #8FA6B4; }"
         )
 
         self._pipeline_panel = ProgressPanel("Active Learning pipeline")
@@ -741,7 +741,7 @@ class ActiveLearningTab(QWidget):
             int(self._al_graph_settings.get("max_w", 2400)),
             int(self._al_graph_settings.get("max_h", 1400)),
         )
-        self._viz_preview.setStyleSheet("border: 1px solid #1A2027; background: #0A1929; border-radius: 4px; color: #546E7A;")
+        self._viz_preview.setStyleSheet("border: 1px solid #1A2027; background: #0A1929; border-radius: 4px; color: #8FA6B4;")
         self._viz_pixmap_original: QPixmap | None = None
         self._viz_source_path: Path | None = None
         self._viz_save_btn = QPushButton("Save Visualization...")
@@ -10832,6 +10832,7 @@ class ActiveLearningTab(QWidget):
         self._save_pipeline_timeline_history()
         self._pipeline_panel.update_snapshot(tl.snapshot())
         self._pipeline_panel.stop()
+        self._progress_notes.mark_finished()
 
     def _pipeline_timeline_history_path(self) -> Path | None:
         if self._project_root is None:

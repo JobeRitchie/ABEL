@@ -80,7 +80,7 @@ class _FramePlayer(QWidget):
         self._display.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
-        self._display.setStyleSheet("background: #060E18; color: #546E7A; font-size: 13px;")
+        self._display.setStyleSheet("background: #060E18; color: #8FA6B4; font-size: 13px;")
 
         self._slider = QSlider(Qt.Orientation.Horizontal)
         self._slider.setMinimum(0)
@@ -418,7 +418,7 @@ class SeedExamplesTab(QWidget):
         )
         no_project.setAlignment(Qt.AlignmentFlag.AlignCenter)
         no_project.setWordWrap(True)
-        no_project.setStyleSheet("color: #546E7A; font-size: 13px; padding: 20px;")
+        no_project.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 20px;")
         self._no_project_label = no_project
         root.addWidget(no_project)
         root.addWidget(splitter)

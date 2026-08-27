@@ -460,7 +460,7 @@ class _ROICanvas(QWidget):
                 painter.fillRect(self._drag_rect, fill_color)
 
         if self._pixmap is None:
-            painter.setPen(QColor("#546E7A"))
+            painter.setPen(QColor("#8FA6B4"))
             font = painter.font()
             font.setPointSize(10)
             painter.setFont(font)
@@ -775,7 +775,7 @@ class ROIDefinitionTab(QWidget):
         clear_all_btn.setToolTip(
             "Remove all project and per-subject ROI settings and start fresh."
         )
-        clear_all_btn.setStyleSheet("color: #EF5350;")
+        clear_all_btn.setObjectName("destructive")
         clear_all_btn.clicked.connect(self._clear_all_roi_data)
         button_row = QHBoxLayout()
         button_row.addWidget(save_btn)

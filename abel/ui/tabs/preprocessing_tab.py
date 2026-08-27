@@ -1055,8 +1055,8 @@ class ClipExtractionTab(QWidget):
             "disagreement": "#6A1B9A",
             "exploration": "#2E7D32",
             "diversity": "#00838F",
-            "candidate": "#546E7A",
-            "baseline": "#546E7A",
+            "candidate": "#8FA6B4",
+            "baseline": "#8FA6B4",
         }
 
         # Pre-build a lookup of existing clip files so the status column

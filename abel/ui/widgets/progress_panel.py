@@ -39,7 +39,7 @@ _STATE_GLYPH = {
     "skipped": "⏭",
 }
 _STATE_COLOR = {
-    "pending": "#546E7A",
+    "pending": "#8FA6B4",
     "running": "#90CAF9",
     "done": "#66BB6A",
     "skipped": "#78909C",

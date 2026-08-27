@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from abel.ui.mpl_theme import style_navigation_toolbar
+
 # ---------------------------------------------------------------------------
 # Lazy matplotlib import (same pattern as temporal_refinement_tab)
 # ---------------------------------------------------------------------------
@@ -326,6 +328,7 @@ class SuppressionHelperDialog(QDialog):
             self._fig = Figure(figsize=(9.0, 6.4), tight_layout=True)
             self._canvas = FigureCanvas(self._fig)
             self._toolbar = NavigationToolbar(self._canvas, self)
+            style_navigation_toolbar(self._toolbar)
             self._canvas.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )

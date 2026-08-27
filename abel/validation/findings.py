@@ -272,6 +272,17 @@ def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
     if valid:
         vals = [k for _, k in valid]
         median_knee = float(np.median(vals))
+        # The recommended budget is a median over behaviors, so its uncertainty is
+        # the behavior panel's, not any one curve's: resample behaviors and re-take
+        # the median. Quoting a bare median invited "300 clips" to be read as exact.
+        _rng = np.random.default_rng(learning_curve.KNEE_BOOT_SEED)
+        _meds = np.median(
+            _rng.choice(np.asarray(vals, dtype=float),
+                        size=(learning_curve.KNEE_N_BOOT, len(vals)), replace=True),
+            axis=1) if len(vals) >= 2 else np.asarray([], dtype=float)
+        knee_ci = (f" (95% CI {_clips(np.percentile(_meds, 2.5))}–"
+                   f"{_clips(np.percentile(_meds, 97.5))}, bootstrap over behaviors)"
+                   if _meds.size else "")
         worst_lc, worst_k = max(valid, key=lambda kv: kv[1])
         best_lc, best_k = min(valid, key=lambda kv: kv[1])
         # Quote the threshold the detector actually uses. This read "95%" twice while
@@ -280,13 +291,16 @@ def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
         knee_pct = f"{(1.0 - learning_curve.KNEE_EPS) * 100:g}%"
         out.append(Finding(
             "Learning curves",
-            f"A median of ~{_clips(median_knee)} labeled clips per behavior reaches "
-            f"{knee_pct} of that behavior's peak held-out F1 — this is the recommended "
-            f"labeling budget.",
+            f"A median of ~{_clips(median_knee)} labeled clips per behavior{knee_ci} "
+            f"reaches {knee_pct} of that behavior's peak held-out F1 — this is the "
+            f"recommended labeling budget.",
             f"Per-behavior knee ranges from {_clips(best_k)} clips "
             f"({best_lc.behavior_name}) to {_clips(worst_k)} clips "
             f"({worst_lc.behavior_name}). The knee is the smallest clip count whose mean "
-            f"F1 reaches {knee_pct} of the curve's maximum, averaged over seeds.",
+            f"F1 reaches {knee_pct} of the curve's maximum, averaged over seeds. Each "
+            f"behavior's own knee carries a 95% bootstrap-over-seeds interval in "
+            f"optimal_clips_summary.csv; because the knee can only land on the clip "
+            f"schedule, those intervals are grid-valued.",
         ))
         out.append(Finding(
             "Learning curves",

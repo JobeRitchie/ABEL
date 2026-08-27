@@ -78,8 +78,11 @@ QTabBar::tab {
     background: #0F2744;
     color: #90CAF9;
     font-weight: 700;
-    padding: 6px 10px;
-    min-width: 84px;
+    /* 15 top-level tabs at min-width 84 needed ~1620 px, so four of them fell
+       off the bar and were reachable only via the scroll chevrons. Let each tab
+       size to its own label instead. */
+    padding: 6px 8px;
+    min-width: 0px;
     max-width: 176px;
     border: 1px solid #1565C0;
     border-bottom: none;
@@ -111,8 +114,36 @@ QPushButton:pressed {
 }
 QPushButton:disabled {
     background-color: #1A2A3A;
-    color: #546E7A;
+    color: #8FA6B4;
     border-color: #263238;
+}
+
+/* Destructive actions. Setting only `color:` left red text on the theme's
+   blue button ground, which measured as low as 1.8:1. */
+QPushButton#destructive {
+    background-color: #6B1E1E;
+    color: #FFD9D9;
+    border: 1px solid #8E2020;
+}
+QPushButton#destructive:hover {
+    background-color: #8E2020;
+    border-color: #B33A3A;
+}
+QPushButton#destructive:disabled {
+    background-color: #2A1616;
+    color: #B08A8A;
+    border-color: #3E1F1F;
+}
+
+/* Qt's default disabled palette lands around #5D5D5D, which measures 2.6:1 on
+   our grounds -- a user can see something is greyed out but cannot read which
+   action it is. Restate it for every widget class that carries text. */
+QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled,
+QGroupBox:disabled, QGroupBox::title:disabled,
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled,
+QTabBar::tab:disabled, QToolButton:disabled {
+    color: #8FA6B4;
 }
 
 /* ── Input fields ──────────────────────────────────────── */
@@ -199,7 +230,7 @@ QCheckBox::indicator:checked {
 /* ── Status bar / separators ───────────────────────────── */
 QStatusBar {
     background: #0D1B2A;
-    color: #546E7A;
+    color: #8FA6B4;
     font-weight: 600;
 }
 

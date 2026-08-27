@@ -177,7 +177,11 @@ class CandidateVideoPlayer(QWidget):
 
         self._keypoints_chk = QPushButton("Show Keypoints")
         self._keypoints_chk.setCheckable(True)
-        self._keypoints_chk.setFixedWidth(100)
+        # Measured, not hardcoded: a fixed 100 px clipped this label at every
+        # window size and under display scaling.
+        self._keypoints_chk.setMinimumWidth(
+            self._keypoints_chk.fontMetrics().horizontalAdvance("Show Keypoints") + 28
+        )
         self._keypoints_chk.setToolTip("Overlay pose keypoints on the video (requires pose data).")
         self._keypoints_chk.toggled.connect(self._on_keypoints_toggled)
 
@@ -589,7 +593,7 @@ class ReviewTab(QWidget):
         self._empty_label = QLabel("Open a project, generate candidates, and extract clips to start review.")
         self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty_label.setWordWrap(True)
-        self._empty_label.setStyleSheet("color: #546E7A; font-size: 13px; padding: 20px;")
+        self._empty_label.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 20px;")
 
         self._candidate_label = QLabel("No candidates loaded")
         self._candidate_label.setStyleSheet("font-weight: 600;")
@@ -602,7 +606,7 @@ class ReviewTab(QWidget):
         self._filter_panel.setFrameShape(QFrame.Shape.StyledPanel)
         self._filter_panel.setFrameShadow(QFrame.Shadow.Raised)
         self._filter_panel.setStyleSheet(
-            "QFrame { background: #263238; border: 1px solid #546E7A; border-radius: 6px; padding: 4px; }"
+            "QFrame { background: #263238; border: 1px solid #8FA6B4; border-radius: 6px; padding: 4px; }"
         )
 
         panel_layout = QVBoxLayout(self._filter_panel)
@@ -615,7 +619,7 @@ class ReviewTab(QWidget):
 
         _sep1 = QFrame()
         _sep1.setFrameShape(QFrame.Shape.HLine)
-        _sep1.setStyleSheet("color: #546E7A;")
+        _sep1.setStyleSheet("color: #8FA6B4;")
         panel_layout.addWidget(_sep1)
 
         self._show_reviewed_chk = QCheckBox("Show reviewed candidates")
@@ -653,7 +657,7 @@ class ReviewTab(QWidget):
 
         _sep2 = QFrame()
         _sep2.setFrameShape(QFrame.Shape.HLine)
-        _sep2.setStyleSheet("color: #546E7A;")
+        _sep2.setStyleSheet("color: #8FA6B4;")
         panel_layout.addWidget(_sep2)
 
         self._show_fp_fn_btn = QPushButton("Temporal Bout Review Clips")
@@ -789,7 +793,7 @@ class ReviewTab(QWidget):
         self._accept_selected_btn = QPushButton("Accept")
         self._accept_selected_btn.setToolTip("Mark selected candidate rows as Accepted")
         self._accept_selected_btn.setStyleSheet(
-            "background-color: #388E3C; color: white; font-weight: 600; padding: 4px;"
+            "background-color: #2E7D32; color: white; font-weight: 600; padding: 4px;"
         )
         self._accept_selected_btn.clicked.connect(lambda: self._apply_batch_decision(ReviewDecisionType.ACCEPT))
 
@@ -1014,7 +1018,7 @@ class ReviewTab(QWidget):
         self._pending_labels_display = QLabel("None")
         self._pending_labels_display.setWordWrap(True)
         self._pending_labels_display.setStyleSheet(
-            "background: #37474F; border: 1px solid #546E7A; border-radius: 4px; "
+            "background: #37474F; border: 1px solid #8FA6B4; border-radius: 4px; "
             "padding: 4px 8px; font-size: 11px; color: #B0BEC5; min-height: 22px;"
         )
         self._pending_labels_display.setVisible(False)
@@ -1034,7 +1038,7 @@ class ReviewTab(QWidget):
         self._notes_edit.setPlaceholderText("Optional notes for this candidate")
 
         self._save_btn = QPushButton("Save Decision (Enter)")
-        self._save_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: 600; padding: 6px;")
+        self._save_btn.setStyleSheet("background-color: #2E7D32; color: white; font-weight: 600; padding: 6px;")
         self._save_btn.clicked.connect(self._save_decision)
 
         quick_row = QHBoxLayout()
@@ -1519,7 +1523,7 @@ class ReviewTab(QWidget):
         if not self._pending_labels:
             self._pending_labels_display.setText("None — press behavior hotkeys to add labels")
             self._pending_labels_display.setStyleSheet(
-                "background: #37474F; border: 1px solid #546E7A; border-radius: 4px; "
+                "background: #37474F; border: 1px solid #8FA6B4; border-radius: 4px; "
                 "padding: 4px 8px; font-size: 11px; color: #78909C; min-height: 22px;"
             )
             return

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 # ── Palette (muted sci-fi: deep navy, cyan/green accents) ──────────────────
 _BG = "#070C12"
 _BORDER = "#16323C"
-_DIM = "#4C6472"          # key labels / inactive
+_DIM = "#8FA6B4"          # key labels / inactive (6.9:1 on the panel ground)
 _ACCENT = "#39D0D8"       # cyan — headings, primary values
 _GREEN = "#7CFF9E"        # ticker / good metrics
 _AMBER = "#FFC24B"        # ETA
@@ -65,13 +65,13 @@ class ProgressNotesPanel(QFrame):
         self._dot.setStyleSheet(f"color: {_DIM}; font-size: 11px;")
         title = QLabel("ACTIVE-LEARNING TELEMETRY")
         title.setStyleSheet(
-            f"color: {_ACCENT}; font-size: 10px; font-weight: 700;"
+            f"color: {_ACCENT}; font-size: 11px; font-weight: 700;"
             "letter-spacing: 2px; font-family: 'Consolas','Courier New',monospace;"
         )
         self._finish = QLabel("")
         self._finish.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self._finish.setStyleSheet(
-            f"color: {_DIM}; font-size: 10px; letter-spacing: 1px;"
+            f"color: {_DIM}; font-size: 11px; letter-spacing: 1px;"
             "font-family: 'Consolas','Courier New',monospace;"
         )
         head.addWidget(self._dot)
@@ -119,12 +119,12 @@ class ProgressNotesPanel(QFrame):
         box.setSpacing(0)
         k = QLabel(key)
         k.setStyleSheet(
-            f"color: {_DIM}; font-size: 8px; font-weight: 700; letter-spacing: 1px;"
+            f"color: {_DIM}; font-size: 11px; font-weight: 700; letter-spacing: 1px;"
             "font-family: 'Consolas','Courier New',monospace;"
         )
         v = QLabel("—")
         v.setStyleSheet(
-            f"color: {value_color}; font-size: 12px; font-weight: 600;"
+            f"color: {value_color}; font-size: 13px; font-weight: 600;"
             "font-family: 'Consolas','Courier New',monospace;"
         )
         v.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
@@ -151,6 +151,19 @@ class ProgressNotesPanel(QFrame):
         else:
             self._pulse.stop()
             self._dot.setStyleSheet(f"color: {_DIM}; font-size: 11px;")
+            # The ETA cell only ever changes when a log line carries one, so on
+            # any non-completing exit (cancel, failure) the last estimate would
+            # otherwise sit there forever. An unknown ETA is not zero.
+            if self._val_eta.text() not in ("—", "0 s"):
+                self._val_eta.setText("—")
+                self._finish.setText("")
+
+    def mark_finished(self) -> None:
+        """Settle the readouts after a run that ran to completion."""
+        self._val_eta.setText("0 s")
+        self._val_progress.setText("100%")
+        self._finish.setText("done")
+        self.set_running(False)
 
     def reset(self, message: str = "standby — awaiting run…") -> None:
         for lbl in (

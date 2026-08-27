@@ -428,14 +428,9 @@ def leave_one_subject_out(
 
     # Pooled target-class P/R/F1 from the pooled counts score_raw_and_refined
     # already computed at the same 0.5 threshold, so the two never disagree.
-    p_tp = float(pooled.get("raw_tp", 0)); p_fp = float(pooled.get("raw_fp", 0))
-    p_fn = float(pooled.get("raw_fn", 0))
-    pooled_prec = p_tp / (p_tp + p_fp) if (p_tp + p_fp) > 0 else 0.0
-    pooled_rec = p_tp / (p_tp + p_fn) if (p_tp + p_fn) > 0 else 0.0
-    pooled_f1t = (
-        2.0 * pooled_prec * pooled_rec / (pooled_prec + pooled_rec)
-        if (pooled_prec + pooled_rec) > 0 else 0.0
-    )
+    pooled_prec = float(pooled["raw_target_precision"])
+    pooled_rec = float(pooled["raw_target_recall"])
+    pooled_f1t = float(pooled["raw_target_f1"])
 
     from sklearn.metrics import average_precision_score  # noqa: PLC0415
     y_pooled, p_pooled = np.concatenate(y_all), np.concatenate(p_all)

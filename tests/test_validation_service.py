@@ -486,3 +486,66 @@ def test_suggestions_flags_low_precision(tmp_path: Path) -> None:
     }
     suggestions = svc.suggestions(metrics)
     assert any("over-predicts" in s["message"] for s in suggestions)
+
+
+def test_model_overview_withholds_refined_counts_when_not_evaluable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A blanked refined score must blank its counts too.
+
+    Publishing refined TP/FP/FN beside a suppressed refined F1 showed the reader
+    the exact quantity the suppression rule exists to withhold (measured on a real
+    project: 6/4/40, a recall of 0.13, next to a raw recall of 0.87).
+    """
+    root = _make_project(tmp_path)
+    mdir = root / "derived" / "models" / "behavior_model_Grooming"
+    mdir.mkdir(parents=True)
+    (mdir / "metrics.json").write_text(
+        json.dumps({"f1": 0.9, "precision": 0.9, "recall": 0.9, "pr_auc": 0.9,
+                    "n_train": 100, "n_val": 25}),
+        encoding="utf-8",
+    )
+    svc = _service(root)
+    monkeypatch.setattr(
+        svc, "_refined_metrics",
+        lambda bid, name, model_dir: {
+            "raw_target_f1": 0.80, "raw_target_precision": 0.85, "raw_target_recall": 0.76,
+            "raw_f1": 0.90, "raw_precision": 0.92, "raw_recall": 0.88,
+            "refined_target_f1": float("nan"),
+            "refined_target_precision": float("nan"),
+            "refined_target_recall": float("nan"),
+            "refined_f1": float("nan"),
+            "raw_tp": 40, "raw_fp": 7, "raw_fn": 13, "raw_tn": 940,
+            "refined_tp": 6, "refined_fp": 4, "refined_fn": 40, "refined_tn": 950,
+            "refined_evaluable": False, "refined_unsupported_fraction": 0.78,
+            "settings": {"onset_threshold": 0.3, "min_bout_duration_frames": 30,
+                         "merge_gap_frames": 0},
+            "n_val": 1000,
+        },
+    )
+    row = {r["behavior_name"]: r for r in svc.model_overview()}["Grooming"]
+    assert row["metrics_basis"] == "target"
+    assert row["refined_evaluable"] is False
+    for k in ("refined_tp", "refined_fp", "refined_fn", "refined_tn"):
+        assert row[k] is None
+    # Raw survives untouched and drives the badge on the target-class scale.
+    assert row["raw_tp"] == 40
+    assert abs(row["frame_f1"] - 0.80) < 1e-9
+    assert row["frame_f1_macro"] == 0.90
+    assert row["quality"] == "good"
+
+
+def test_model_overview_falls_back_to_macro_for_legacy_models(tmp_path: Path) -> None:
+    """No saved held-out probabilities -> macro metrics, flagged as such."""
+    root = _make_project(tmp_path)
+    mdir = root / "derived" / "models" / "behavior_model_Grooming"
+    mdir.mkdir(parents=True)
+    (mdir / "metrics.json").write_text(
+        json.dumps({"f1": 0.77, "precision": 0.81, "recall": 0.73, "pr_auc": 0.85,
+                    "n_train": 100, "n_val": 25}),
+        encoding="utf-8",
+    )
+    row = {r["behavior_name"]: r for r in _service(root).model_overview()}["Grooming"]
+    assert row["metrics_basis"] == "macro"
+    assert abs(row["frame_f1"] - 0.77) < 1e-9
+    assert row.get("raw_tp") is None

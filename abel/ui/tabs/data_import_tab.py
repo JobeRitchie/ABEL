@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, Signal
 
+from abel.ui.flow_layout import flow_row
 from abel.models.schemas import ImportManifest, ImportNameSettings, SourceMode
 from abel.services import keypoint_mapping
 from abel.services.import_service import ImportService
@@ -170,8 +171,10 @@ class DataImportTab(QWidget):
         )
         copy_pxmm_selected_btn.clicked.connect(self._apply_pxmm_to_selected_sessions)
 
+        # Nine variable-width buttons in one QHBoxLayout clipped their own
+        # labels below ~1400 px; a flow layout wraps instead of squeezing.
         button_row = QHBoxLayout()
-        for btn in [
+        button_row.addWidget(flow_row([
             import_video_btn,
             import_pose_btn,
             auto_match_btn,
@@ -181,8 +184,7 @@ class DataImportTab(QWidget):
             keypoint_map_btn,
             rename_parts_btn,
             identity_map_btn,
-        ]:
-            button_row.addWidget(btn)
+        ]))
 
         # Keypoint-consistency warning banner (hidden unless a mismatch exists).
         self._keypoint_warning = QLabel("")

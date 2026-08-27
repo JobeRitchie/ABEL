@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from abel.ui.flow_layout import flow_row, labelled
 from abel.models.schemas import ValidationAnswerRecord, ValidationRun, ValidationSettings
 from abel.services.behavior_service import BehaviorService
 from abel.services.validation_service import NO_BEHAVIOR_ID, ValidationService
@@ -56,7 +57,7 @@ _QUALITY_COLORS = {
     "good": "#2E7D32",
     "fair": "#F9A825",
     "poor": "#C62828",
-    "unknown": "#546E7A",
+    "unknown": "#8FA6B4",
 }
 
 
@@ -272,18 +273,34 @@ class LosoResultsDialog(QDialog):
             name = r.get("behavior_name", r.get("behavior_id", "?"))
             if r.get("error"):
                 rows.append(
-                    f"<tr><td>{name}</td><td colspan='6' style='color:#EF9A9A;'>"
+                    f"<tr><td>{name}</td><td colspan='7' style='color:#EF9A9A;'>"
                     f"{r['error']}</td></tr>"
                 )
                 continue
+            # Pooled target-class scores with the subject-level bootstrap CI —
+            # not the per-fold mean ± SEM, which loso.py itself flags invalid
+            # (`fold_sem_valid: False`: folds are neither equally sized nor
+            # independent observations of one quantity), and not the macro F1,
+            # which averages the behavior with 'not the behavior' and floors near
+            # 0.50 for a model that detects nothing.
+            lo = _fmt(r.get("boot_f1_target_lo"))
+            hi = _fmt(r.get("boot_f1_target_hi"))
+            ci = "—" if "—" in (lo, hi) else f"{lo}–{hi}"
+            evaluable = bool(r.get("refined_evaluable", True))
+            ref_f1 = _fmt(r.get("refined_target_f1")) if evaluable else "n/e"
+            ref_counts = (
+                _tpfpfn(r.get("refined_tp"), r.get("refined_fp"), r.get("refined_fn"))
+                if evaluable else "n/e"
+            )
             rows.append(
                 "<tr>"
                 f"<td style='color:#ECEFF1;'>{name}</td>"
-                f"<td align='center'>{_fmt(r.get('fold_prauc_mean'))} ± {_fmt(r.get('fold_prauc_sem'))}</td>"
-                f"<td align='center'>{_fmt(r.get('fold_f1_mean'))} ± {_fmt(r.get('fold_f1_sem'))}</td>"
-                f"<td align='center'>{_fmt(r.get('refined_f1'))}</td>"
-                f"<td align='center'>{_tpfpfn(r.get('refined_tp'), r.get('refined_fp'), r.get('refined_fn'))}</td>"
-                f"<td align='center'>{r.get('refined_tn', '—')}</td>"
+                f"<td align='center'>{_fmt(r.get('pooled_prauc'))}</td>"
+                f"<td align='center'>{_fmt(r.get('pooled_f1_target'))}</td>"
+                f"<td align='center'>{ci}</td>"
+                f"<td align='center'>{_tpfpfn(r.get('raw_tp'), r.get('raw_fp'), r.get('raw_fn'))}</td>"
+                f"<td align='center'>{ref_f1}</td>"
+                f"<td align='center'>{ref_counts}</td>"
                 f"<td align='center'>{r.get('n_subjects', 0)}</td>"
                 "</tr>"
             )
@@ -296,18 +313,34 @@ class LosoResultsDialog(QDialog):
                 "<p style='color:#FFCC80;'>⚠ Restricted run — these mice were excluded "
                 "from both training and evaluation: " + ", ".join(excluded) + "</p>"
             )
+        not_eval = sorted({
+            str(r.get("behavior_name", r.get("behavior_id", "?")))
+            for r in self._results
+            if not r.get("error") and not r.get("refined_evaluable", True)
+        })
+        if not_eval:
+            scope += (
+                "<p style='color:#FFCC80;'>⚠ <b>n/e</b> = refinement not evaluable: "
+                + ", ".join(not_eval)
+                + " have a min-bout longer than their observed held-out windows, so a "
+                "refined score would measure label sparsity rather than the model.</p>"
+            )
         return (
             "<h3>Leave-one-mouse-out CV</h3>"
             + scope
-            + "<p style='color:#90A4AE;'>Each mouse is held out once (Leave-One-Group-Out "
-            "cross-validation). Bars above show per-fold mean ± SEM across held-out "
-            "subjects; refinement-only labels (temporal feedback / imported) are excluded "
-            "from evaluation. Counts are per scored window, against the reviewer's own "
-            "accepted labels.</p>"
+            + "<p style='color:#90A4AE;'>Each mouse is held out once "
+            "(Leave-One-Group-Out cross-validation) and every mouse's held-out "
+            "predictions are pooled into one score per behavior. Scores are "
+            "<b>target-class</b> — this behavior alone, never averaged with 'not "
+            "this behavior' — and the 95% CI is a subject-level bootstrap "
+            "(resampling mice, the unit of independence), not a per-fold SEM. "
+            "Counts are per scored window against the reviewer's own accepted "
+            "labels; refinement-only labels (temporal feedback / imported) are "
+            "excluded from evaluation.</p>"
             "<table cellpadding='5' cellspacing='0'>"
             "<tr style='color:#B0BEC5;'><th align='left'>Behavior</th>"
-            "<th>PR-AUC (mean±SEM)</th><th>F1 (mean±SEM)</th>"
-            "<th>pooled ref F1</th><th>TP/FP/FN</th><th>TN</th><th>n</th></tr>"
+            "<th>PR-AUC</th><th>F1 raw</th><th>95% CI</th><th>TP/FP/FN raw</th>"
+            "<th>F1 refined</th><th>TP/FP/FN refined</th><th>mice</th></tr>"
             + "".join(rows)
             + "</table>"
         )
@@ -349,11 +382,161 @@ class LosoResultsDialog(QDialog):
 class ValidationOverviewPanel(QWidget):
     """Dashboard of every behavior model's quality and data coverage."""
 
+    # Held-out counts are window-level: the unit of evaluation is one ~15-frame
+    # segment window, because that is the only unit a sparsely-labelled holdout
+    # can support (see refined_eval — event/bout counts were removed for exactly
+    # this reason).  Raw and refined are shown side by side so the effect of the
+    # Temporal Review settings is visible rather than implied.
     _COLUMNS = [
-        "Behavior", "Model", "Quality", "F1", "Precision", "Recall",
-        "F1 (ref)", "Prec (ref)", "Rec (ref)", "TP/FP/FN (win)", "TN (win)",
-        "PR-AUC", "Train", "Val", "Pos labels", "Neg labels", "Bouts", "Overlap",
+        "Behavior", "Model", "Quality",
+        "F1 (raw)", "Prec (raw)", "Rec (raw)", "TP/FP/FN (raw)",
+        "F1 (refined)", "Prec (refined)", "Rec (refined)", "TP/FP/FN (refined)",
+        "PR-AUC", "Train / Val", "Pos labels", "Bouts", "Overlap",
     ]
+
+    # Displayed header text.  The metric columns are stacked onto two lines
+    # because a single line of "TP/FP/FN (refined)" needs ~228px and 16 stretched
+    # columns get ~116px at the app's minimum usable width — it elided to
+    # "TP/FP/FN (…" exactly where the reader needs to know which pass it is.
+    # Qt measures a header's width from its widest LINE, so stacking costs
+    # nothing horizontally.
+    _HEADER_LABELS = {
+        "F1 (raw)": "F1\nraw",
+        "Prec (raw)": "Prec\nraw",
+        "Rec (raw)": "Rec\nraw",
+        "TP/FP/FN (raw)": "TP/FP/FN\nraw",
+        "F1 (refined)": "F1\nrefined",
+        "Prec (refined)": "Prec\nrefined",
+        "Rec (refined)": "Rec\nrefined",
+        "TP/FP/FN (refined)": "TP/FP/FN\nrefined",
+        "Train / Val": "Train\n/ Val",
+        "Pos labels": "Pos\nlabels",
+    }
+
+    _UNIT_NOTE = (
+        "Unit: one segment window (~15 frames), not one bout and not one frame.\n"
+        "A sparsely-labelled held-out set cannot support bout-level scoring — a "
+        "bout needs contiguous observation, while the held-out rows are isolated "
+        "windows — so window-level counts are what the ground truth actually "
+        "supports."
+    )
+
+    _RAW_NOTE = (
+        "RAW = the model's own per-window output at P(behavior) >= 0.5, with no "
+        "temporal post-processing. This is the model itself."
+    )
+
+    _REFINED_NOTE = (
+        "REFINED = the same held-out probabilities put through the pipeline that "
+        "actually ships: smooth -> onset threshold -> merge close bouts -> drop "
+        "short bouts, using this behavior's settings from the Temporal Review tab. "
+        "This is what your exported bouts are scored on."
+    )
+
+    _TARGET_NOTE = (
+        "Target-class only: computed for THIS behavior alone, from the TP/FP/FN in "
+        "the same row.\n\n"
+        "It is not macro-averaged. Macro would average this behavior with the "
+        "'not this behavior' class, which is ~85% of the held-out set and scores "
+        "~0.97 on its own — that lifts every number and gives a model that never "
+        "detects anything a floor near 0.50."
+    )
+
+    _COLUMN_HELP = {
+        "Behavior": "The behavior this one-vs-rest model was trained to detect.",
+        "Model": (
+            "Model directory under derived/models that these numbers were read "
+            "from. Hover a cell for when it was trained and how it was calibrated."
+        ),
+        "Quality": (
+            "Badge from the raw target-class F1: Good >= 0.75, Fair >= 0.55, Poor "
+            "below.\n\n"
+            "It grades the MODEL, so it uses the raw score — the refined score "
+            "also depends on Temporal Review settings you can retune at any time.\n\n"
+            "The bar used to sit at 0.80 on a macro F1, which was a much weaker "
+            "test: macro F1 has a floor near 0.50, so models with a target-class F1 "
+            "around 0.65 were being badged Good."
+        ),
+        "F1 (raw)": (
+            "Harmonic mean of raw precision and recall.\n\n"
+            + _TARGET_NOTE + "\n\n" + _RAW_NOTE
+        ),
+        "Prec (raw)": (
+            "TP / (TP + FP) — of the windows the model called this behavior, the "
+            "fraction the reviewer agreed with.\n\n" + _TARGET_NOTE + "\n\n" + _RAW_NOTE
+        ),
+        "Rec (raw)": (
+            "TP / (TP + FN) — of the windows the reviewer labelled this behavior, "
+            "the fraction the model found.\n\n" + _TARGET_NOTE + "\n\n" + _RAW_NOTE
+        ),
+        "TP/FP/FN (raw)": (
+            "Held-out confusion counts before temporal refinement.\n\n"
+            "TP — reviewer said yes, model said yes.\n"
+            "FP — reviewer said no, model said yes.\n"
+            "FN — reviewer said yes, model said no.\n\n"
+            "Ground truth is the reviewer's own accepted label for that window, so "
+            "a false positive means a human looked at it and said it was not this "
+            "behavior.\n\n" + _UNIT_NOTE + "\n\n"
+            "True negatives are in each cell's own tooltip: they are ~85-95% of "
+            "every row (most windows are not any given behavior) and say little on "
+            "their own, so they no longer take a column."
+        ),
+        "F1 (refined)": (
+            "Harmonic mean of refined precision and recall.\n\n"
+            + _TARGET_NOTE + "\n\n" + _REFINED_NOTE
+        ),
+        "Prec (refined)": (
+            "Precision after temporal refinement.\n\n"
+            + _TARGET_NOTE + "\n\n" + _REFINED_NOTE
+        ),
+        "Rec (refined)": (
+            "Recall after temporal refinement.\n\n"
+            + _TARGET_NOTE + "\n\n" + _REFINED_NOTE
+        ),
+        "TP/FP/FN (refined)": (
+            "The same held-out confusion counts after temporal refinement.\n\n"
+            + _REFINED_NOTE + "\n\n"
+            "Compare against the raw counts to the left: refinement almost always "
+            "trades recall for precision (it deletes short and isolated "
+            "detections), so FN rising while FP falls is expected.\n\n"
+            "Shows a dash when this behavior's min-bout is longer than the observed "
+            "held-out windows — in that regime no prediction can survive refinement "
+            "no matter how good the model is, so the counts would measure label "
+            "sparsity rather than the model. Hover the dash for the measured "
+            "fraction.\n\n" + _UNIT_NOTE
+        ),
+        "PR-AUC": (
+            "Average precision for this behavior across every threshold — a "
+            "threshold-free summary, so unlike F1 it does not move when you retune "
+            "the onset threshold.\n\n"
+            "Already target-class in the stored metrics, and the most robust single "
+            "number here for a rare behavior."
+        ),
+        "Train / Val": (
+            "Rows used to fit the model, then rows held out from training and "
+            "scored here. Every row's TP + FP + FN + TN sums to the Val number.\n\n"
+            "The shipped model is afterwards refit on ALL labelled rows so your "
+            "per-mouse corrections reach inference; these metrics stay from the "
+            "honest held-out split."
+        ),
+        "Pos labels": (
+            "Human labels for this behavior across the whole project (accepted "
+            "review decisions + reviewer segment labels).\n\n"
+            "This is the label pool, not the modelled rows — it will not match "
+            "Train + Val, because a label only becomes a row once its segment has "
+            "extracted features. Hover a cell for the negative and total counts."
+        ),
+        "Bouts": (
+            "Bouts detected in the full inference traces using this behavior's "
+            "current Temporal Review settings. A count of output, not an accuracy "
+            "measure — no ground truth is involved."
+        ),
+        "Overlap": (
+            "Fraction of this behavior's flagged frames where another behavior is "
+            "also flagged. High overlap suggests thresholds are too lax or "
+            "behavior inhibition is too weak."
+        ),
+    }
 
     def __init__(self, service: ValidationService, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -365,8 +548,12 @@ class ValidationOverviewPanel(QWidget):
         header = QLabel("Model Overview")
         header.setStyleSheet("font-size: 16px; font-weight: 700; color: #ECEFF1;")
         subtitle = QLabel(
-            "Quality metrics, label coverage, detected bouts, and behavior overlap for each model."
+            "Held-out quality per behavior model, raw and refined. "
+            "Hover any column header for what it means."
         )
+        # Unwrapped, this label's full single-line width became the panel's
+        # minimum width and dragged the whole app's usable floor with it.
+        subtitle.setWordWrap(True)
         subtitle.setStyleSheet("color: #90A4AE; font-size: 12px;")
 
         self._refresh_btn = QPushButton("Refresh")
@@ -389,73 +576,94 @@ class ValidationOverviewPanel(QWidget):
         title_box.setSpacing(2)
         title_box.addWidget(header)
         title_box.addWidget(subtitle)
-        top.addLayout(title_box)
-        top.addStretch()
+        # Stretch factor rather than a spacer: the subtitle wraps, so it must be
+        # given the spare width instead of being squeezed to its minimum beside it.
+        top.addLayout(title_box, 1)
         top.addWidget(self._loso_btn)
         top.addWidget(self._refresh_btn)
 
+        # Answers "what do raw and refined mean?" without needing a hover.
+        self._legend = QLabel(
+            "<b>raw</b> = the model alone, every window at P &ge; 0.5"
+            "&nbsp;&nbsp;·&nbsp;&nbsp;"
+            "<b>refined</b> = after the smooth &rarr; onset threshold &rarr; merge "
+            "&rarr; min-bout pipeline your exports actually use"
+            "&nbsp;&nbsp;·&nbsp;&nbsp;"
+            "scores are <b>target-class</b> (this behavior alone, never averaged "
+            "with 'not this behavior') and follow from the TP/FP/FN in the same row"
+        )
+        self._legend.setWordWrap(True)
+        self._legend.setStyleSheet("color: #8FA6B4; font-size: 11px;")
+
         self._table = QTableWidget(0, len(self._COLUMNS))
-        self._table.setHorizontalHeaderLabels(self._COLUMNS)
-        overlap_header = self._table.horizontalHeaderItem(self._COLUMNS.index("Overlap"))
-        if overlap_header is not None:
-            overlap_header.setToolTip(
-                "Fraction of this behavior's flagged frames where another behavior is also flagged. "
-                "High overlap suggests thresholds are too lax or behavior inhibition is too weak."
-            )
-        _ref_tip = (
-            "Held-out metrics AFTER temporal refinement (smoothing + per-behavior onset "
-            "threshold + merge-gap + min-bout duration from Temporal Review settings), vs. the "
-            "raw F1/Precision/Recall which grade the model's un-refined per-window output.\n\n"
-            "Shows “—” for models trained before held-out probabilities were saved — retrain the "
-            "model to populate these."
+        self._table.setHorizontalHeaderLabels(
+            [self._HEADER_LABELS.get(c, c) for c in self._COLUMNS]
         )
-        for _ref_col in ("F1 (ref)", "Prec (ref)", "Rec (ref)"):
-            _h = self._table.horizontalHeaderItem(self._COLUMNS.index(_ref_col))
-            if _h is not None:
-                _h.setToolTip(_ref_tip)
-        _win_tip = (
-            "Held-out target-class counts — True Positives / False Positives / False "
-            "Negatives — counted per segment window, AFTER temporal refinement (the "
-            "onset threshold + merge-gap + min-bout the product actually ships, not a "
-            "raw 0.5 cut).\n\n"
-            "Ground truth is the reviewer's own accepted label for each window, so a "
-            "false positive means a human looked at that window and said it was not "
-            "this behavior.\n\n"
-            "One real bout spans many windows, so a single loose boundary window still "
-            "counts here.\n\n"
-            "Shows “—” for models trained before held-out probabilities were saved — "
-            "retrain to populate."
-        )
-        _tn_tip = (
-            "True Negatives: reviewed windows the model correctly left alone. Large "
-            "relative to TP/FP/FN because most reviewed windows are not any given "
-            "behavior — read it alongside precision rather than on its own.\n\n"
-            "An event-level (whole-bout) count used to sit here and was removed: bouts "
-            "cannot be scored from a held-out labeled subset, because the evaluated "
-            "unit is an isolated ~15-frame window while a bout needs contiguous "
-            "observation. It reported extreme false positives and negatives even for "
-            "well-trained models."
-        )
-        for _tp_col, _tip in (("TP/FP/FN (win)", _win_tip), ("TN (win)", _tn_tip)):
-            _h = self._table.horizontalHeaderItem(self._COLUMNS.index(_tp_col))
+        for _name, _tip in self._COLUMN_HELP.items():
+            _h = self._table.horizontalHeaderItem(self._COLUMNS.index(_name))
             if _h is not None:
                 _h.setToolTip(_tip)
         self._table.verticalHeader().setVisible(False)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        _hdr = self._table.horizontalHeader()
+        _hdr.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        _hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        # Floor every column at the width its own header needs, measured from the
+        # current font rather than assumed in pixels, so display scaling shrinks
+        # the table into a horizontal scroll instead of eliding "TP/FP/FN" into
+        # "TP/F…".  Stretch still shares out any width above the floor.
+        _fm = _hdr.fontMetrics()
+        _hdr.setMinimumSectionSize(
+            max(
+                _fm.horizontalAdvance(line)
+                for label in self._COLUMNS
+                for line in self._HEADER_LABELS.get(label, label).splitlines()
+            )
+            + 2 * _fm.averageCharWidth()
+        )
+
+        # Surfaces withheld/legacy rows without making the user hover to discover
+        # that a dash is a deliberate refusal rather than missing data.
+        self._notes = QLabel("")
+        self._notes.setWordWrap(True)
+        self._notes.setStyleSheet("color: #FFCC80; font-size: 11px;")
+        self._notes.hide()
 
         self._empty = QLabel("Open a project with trained models to see the overview.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setStyleSheet("color: #546E7A; font-size: 13px; padding: 20px;")
+        self._empty.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 20px;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.addLayout(top)
+        layout.addWidget(self._legend)
         layout.addWidget(self._table, 1)
+        layout.addWidget(self._notes)
         layout.addWidget(self._empty)
         self._empty.hide()
+
+    @staticmethod
+    def _counts_tooltip(kind: str, tp: object, fp: object, fn: object, tn: object) -> str:
+        """Full 2x2 breakdown plus the rates it implies, for one counts cell."""
+        try:
+            tp, fp, fn, tn = int(tp), int(fp), int(fn), int(tn)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return ""
+        n = tp + fp + fn + tn
+        prec = tp / (tp + fp) if (tp + fp) else float("nan")
+        rec = tp / (tp + fn) if (tp + fn) else float("nan")
+        spec = tn / (tn + fp) if (tn + fp) else float("nan")
+        return (
+            f"{kind} held-out windows (n = {n})\n\n"
+            f"  True positives   {tp}   model yes, reviewer yes\n"
+            f"  False positives  {fp}   model yes, reviewer no\n"
+            f"  False negatives  {fn}   model no,  reviewer yes\n"
+            f"  True negatives   {tn}   model no,  reviewer no\n\n"
+            f"  precision {prec:.3f}    recall {rec:.3f}    specificity {spec:.3f}\n\n"
+            "True negatives are large because most held-out windows are some other "
+            "behavior — read them alongside precision, not on their own."
+        )
 
     def refresh(self) -> None:
         try:
@@ -464,53 +672,253 @@ class ValidationOverviewPanel(QWidget):
             logger.exception("Validation overview refresh failed")
             rows = []
         self._table.setRowCount(0)
+        self._notes.hide()
         if not rows:
             self._table.hide()
+            self._legend.hide()
             self._empty.show()
             return
         self._empty.hide()
+        self._legend.show()
         self._table.show()
+
+        col = {name: i for i, name in enumerate(self._COLUMNS)}
+        suppressed: list[str] = []
+        legacy: list[str] = []
+
         for data in rows:
             r = self._table.rowCount()
             self._table.insertRow(r)
+            name = str(data.get("behavior_name", "?"))
             quality = data.get("quality", "unknown")
             overlap = data.get("overlap_fraction")
             overlap_text = "—" if overlap is None else f"{overlap:.0%}"
+            basis = str(data.get("metrics_basis") or "macro")
+            evaluable = bool(data.get("refined_evaluable", True))
+            has_counts = data.get("raw_tp") is not None
+
+            if basis != "target":
+                legacy.append(name)
+            if has_counts and not evaluable:
+                suppressed.append(name)
+
+            # Refinement is withheld wholesale — scores AND counts.  Publishing the
+            # counts while blanking the F1 they imply showed the reader the exact
+            # quantity the suppression rule exists to withhold (measured on a real
+            # project: Freeze's refined counts read 6/4/40, a recall of 0.13, sitting
+            # next to a blank refined F1 and a raw recall of 0.87).
+            ref_f1 = _fmt(data.get("refined_f1")) if evaluable else "—"
+            ref_p = _fmt(data.get("refined_precision")) if evaluable else "—"
+            ref_r = _fmt(data.get("refined_recall")) if evaluable else "—"
+            ref_counts = (
+                _tpfpfn(data.get("refined_tp"), data.get("refined_fp"), data.get("refined_fn"))
+                if evaluable else "—"
+            )
+
             cells = [
-                data.get("behavior_name", "?"),
+                name,
                 data.get("model_version", "—"),
-                quality.capitalize(),
+                str(quality).capitalize(),
                 _fmt(data.get("frame_f1")),
                 _fmt(data.get("frame_precision")),
                 _fmt(data.get("frame_recall")),
-                _fmt(data.get("refined_f1")),
-                _fmt(data.get("refined_precision")),
-                _fmt(data.get("refined_recall")),
-                _tpfpfn(data.get("refined_tp"), data.get("refined_fp"), data.get("refined_fn")),
-                str(data.get("refined_tn") if data.get("refined_tn") is not None else "—"),
+                _tpfpfn(data.get("raw_tp"), data.get("raw_fp"), data.get("raw_fn")),
+                ref_f1,
+                ref_p,
+                ref_r,
+                ref_counts,
                 _fmt(data.get("pr_auc")),
-                str(data.get("n_train") if data.get("n_train") is not None else "—"),
-                str(data.get("n_val") if data.get("n_val") is not None else "—"),
+                "{} / {}".format(
+                    data.get("n_train") if data.get("n_train") is not None else "—",
+                    data.get("n_val") if data.get("n_val") is not None else "—",
+                ),
                 str(data.get("n_positive_labels", 0)),
-                str(data.get("n_negative_labels", 0)),
                 str(data.get("n_bouts", 0)),
                 overlap_text,
             ]
-            overlap_col = len(cells) - 1
             for c, val in enumerate(cells):
                 item = QTableWidgetItem(str(val))
-                if c == 2:  # quality badge
-                    item.setForeground(QColor("#FFFFFF"))
-                    item.setBackground(QColor(_QUALITY_COLORS.get(quality, "#546E7A")))
+                if c != 0:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                elif c == overlap_col and overlap is not None:
-                    # Amber/red as overlap rises — high overlap means weak inhibition.
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    if overlap >= 0.15:
-                        item.setForeground(QColor("#EF9A9A"))
-                    elif overlap >= 0.05:
-                        item.setForeground(QColor("#FFCC80"))
                 self._table.setItem(r, c, item)
+
+            def _tip(column: str, text: str, _row: int = r) -> None:
+                it = self._table.item(_row, col[column])
+                if it is not None and text:
+                    it.setToolTip(text)
+
+            def _amber(column: str, _row: int = r) -> None:
+                it = self._table.item(_row, col[column])
+                if it is not None:
+                    it.setForeground(QColor("#FFCC80"))
+
+            # --- quality badge ------------------------------------------------
+            q_item = self._table.item(r, col["Quality"])
+            if q_item is not None:
+                q_item.setForeground(QColor("#FFFFFF"))
+                q_item.setBackground(QColor(_QUALITY_COLORS.get(quality, "#8FA6B4")))
+            _tip(
+                "Quality",
+                f"{str(quality).capitalize()} — from the raw "
+                + ("target-class" if basis == "target" else "macro")
+                + f" F1 of {_fmt(data.get('frame_f1'))}.\n\n"
+                + (
+                    "Good >= 0.75, Fair >= 0.55."
+                    if basis == "target"
+                    else "Good >= 0.80, Fair >= 0.60 on a macro F1 (floor near 0.50)."
+                ),
+            )
+
+            # --- score cells --------------------------------------------------
+            if basis == "target":
+                macro_note = (
+                    "\n\nMacro-averaged equivalent (this behavior averaged with "
+                    "'not this behavior'), for reference only: "
+                    f"F1 {_fmt(data.get('frame_f1_macro'))}, "
+                    f"precision {_fmt(data.get('frame_precision_macro'))}, "
+                    f"recall {_fmt(data.get('frame_recall_macro'))}."
+                )
+                for _c in ("F1 (raw)", "Prec (raw)", "Rec (raw)"):
+                    _tip(_c, "Target-class, computed from this row's raw TP/FP/FN." + macro_note)
+            else:
+                for _c in ("F1 (raw)", "Prec (raw)", "Rec (raw)"):
+                    _amber(_c)
+                    _tip(
+                        _c,
+                        "MACRO-averaged, not target-class — this model predates the "
+                        "saved held-out probability column, so its target-class score "
+                        "cannot be recovered after the fact. Macro averages this "
+                        "behavior with 'not this behavior' (~85% of the set, scoring "
+                        "~0.97), so this number is optimistic and has a floor near "
+                        "0.50.\n\n"
+                        "Retrain the model to replace it with the target-class score "
+                        "and populate the confusion counts.",
+                    )
+
+            # --- counts cells -------------------------------------------------
+            if has_counts:
+                _tip(
+                    "TP/FP/FN (raw)",
+                    self._counts_tooltip(
+                        "Raw (P >= 0.5, no temporal refinement) —",
+                        data.get("raw_tp"), data.get("raw_fp"),
+                        data.get("raw_fn"), data.get("raw_tn"),
+                    ),
+                )
+            else:
+                for _c in (
+                    "TP/FP/FN (raw)", "TP/FP/FN (refined)",
+                    "F1 (refined)", "Prec (refined)", "Rec (refined)",
+                ):
+                    _tip(_c, "Retrain this model to populate held-out confusion counts.")
+
+            st = data.get("refined_settings") or {}
+            st_note = ""
+            if st:
+                st_note = (
+                    "\n\nSettings used: onset {onset}, min bout {mb} frames, "
+                    "merge gap {mg} frames."
+                ).format(
+                    onset=st.get("onset_threshold"),
+                    mb=st.get("min_bout_duration_frames"),
+                    mg=st.get("merge_gap_frames"),
+                )
+
+            if has_counts and evaluable:
+                _tip(
+                    "TP/FP/FN (refined)",
+                    self._counts_tooltip(
+                        "Refined (the pipeline that ships) —",
+                        data.get("refined_tp"), data.get("refined_fp"),
+                        data.get("refined_fn"), data.get("refined_tn"),
+                    ) + st_note,
+                )
+                for _c in ("F1 (refined)", "Prec (refined)", "Rec (refined)"):
+                    _tip(
+                        _c,
+                        "Target-class, computed from this row's refined TP/FP/FN."
+                        + st_note,
+                    )
+            elif has_counts:
+                frac = data.get("refined_unsupported_fraction")
+                pct = "—" if frac is None else f"{float(frac):.0%}"
+                msg = (
+                    "Not evaluable on this held-out set — deliberately blank, not "
+                    "missing data.\n\n"
+                    f"{pct} of this behavior's held-out positive windows sit in "
+                    "observed stretches shorter than its min-bout duration "
+                    f"({st.get('min_bout_duration_frames', '?')} frames), so "
+                    "refinement deletes them no matter how good the model is. Any "
+                    "refined score or count here would measure how sparsely the "
+                    "holdout was labelled, not the model.\n\n"
+                    "Read the raw columns for this behavior, or shorten its min-bout "
+                    "in the Temporal Review tab if the current value is not "
+                    "biologically motivated."
+                )
+                for _c in (
+                    "F1 (refined)", "Prec (refined)", "Rec (refined)",
+                    "TP/FP/FN (refined)",
+                ):
+                    _amber(_c)
+                    _tip(_c, msg)
+
+            # --- context cells ------------------------------------------------
+            pos = int(data.get("n_positive_labels", 0) or 0)
+            neg = int(data.get("n_negative_labels", 0) or 0)
+            _tip(
+                "Pos labels",
+                f"{pos} human labels for this behavior.\n"
+                f"{neg} labels for every other behavior, out of {pos + neg} in the "
+                "project.\n\n"
+                "This is the whole label pool. It will not equal Train + Val — a "
+                "label only becomes a modelled row once its segment has extracted "
+                "features.",
+            )
+            _tip(
+                "Model",
+                "derived/models/" + str(data.get("model_version", "—"))
+                + (f"\nLast trained: {data.get('last_trained')}" if data.get("last_trained") else "")
+                + (f"\nCalibration: {data.get('calibration')}" if data.get("calibration") else ""),
+            )
+            if has_counts:
+                _total = (
+                    int(data.get("raw_tp") or 0) + int(data.get("raw_fp") or 0)
+                    + int(data.get("raw_fn") or 0) + int(data.get("raw_tn") or 0)
+                )
+                _tip(
+                    "Train / Val",
+                    f"{data.get('n_train')} rows trained on, "
+                    f"{data.get('n_val')} held out and scored here; "
+                    f"TP + FP + FN + TN = {_total}.",
+                )
+
+            # --- overlap ------------------------------------------------------
+            if overlap is not None:
+                # Amber/red as overlap rises — high overlap means weak inhibition.
+                o_item = self._table.item(r, col["Overlap"])
+                if o_item is not None:
+                    if overlap >= 0.15:
+                        o_item.setForeground(QColor("#EF9A9A"))
+                    elif overlap >= 0.05:
+                        o_item.setForeground(QColor("#FFCC80"))
+
+        notes: list[str] = []
+        if suppressed:
+            notes.append(
+                "⚠ Refinement is not evaluable for " + ", ".join(suppressed)
+                + " — their min-bout is longer than the observed held-out windows, so "
+                "every refined score and count for them is withheld rather than "
+                "reported as a model failure. Hover a dash for the measured fraction."
+            )
+        if legacy:
+            notes.append(
+                "⚠ " + ", ".join(legacy) + " predate saved held-out probabilities: "
+                "their scores are macro-averaged (optimistic, floor near 0.50) and "
+                "they have no confusion counts. Retrain to fix."
+            )
+        if notes:
+            self._notes.setText("\n".join(notes))
+            self._notes.show()
 
     # ------------------------------------------------------------------
     # Leave-one-mouse-out cross-validation
@@ -693,7 +1101,7 @@ class ValidationQuizPanel(QWidget):
         )
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setWordWrap(True)
-        self._empty.setStyleSheet("color: #546E7A; font-size: 13px; padding: 30px;")
+        self._empty.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 30px;")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -711,7 +1119,7 @@ class ValidationQuizPanel(QWidget):
         self._settings_panel = QFrame(self, Qt.WindowType.Popup)
         self._settings_panel.setFrameShape(QFrame.Shape.StyledPanel)
         self._settings_panel.setStyleSheet(
-            "QFrame { background: #263238; border: 1px solid #546E7A; border-radius: 6px; }"
+            "QFrame { background: #263238; border: 1px solid #8FA6B4; border-radius: 6px; }"
         )
         v = QVBoxLayout(self._settings_panel)
         v.setContentsMargins(12, 10, 12, 12)
@@ -1142,7 +1550,7 @@ class ValidationResultsPanel(QWidget):
 
         self._delete_btn = QPushButton("Delete Test")
         self._delete_btn.setToolTip("Permanently delete the selected test and all of its reviewer answers.")
-        self._delete_btn.setStyleSheet("QPushButton { color: #EF9A9A; }")
+        self._delete_btn.setObjectName("destructive")
         self._delete_btn.clicked.connect(self._delete)
 
         self._commit_reviewer = QComboBox()
@@ -1386,7 +1794,7 @@ class ValidationResultsPanel(QWidget):
     @staticmethod
     def _metric_color(value: float | None) -> str:
         if value is None:
-            return "#546E7A"
+            return "#8FA6B4"
         if value >= 0.8:
             return "#2E7D32"
         if value >= 0.6:
@@ -1792,32 +2200,23 @@ class BehaviorGridPanel(QWidget):
         self._export_btn.clicked.connect(self._export)
         self._export_btn.setEnabled(False)
 
+        # Eighteen widgets in one QHBoxLayout overlapped their own labels and
+        # clipped "Generate Grid" to "erate" below ~1400 px. Each label stays
+        # welded to its control, and the pairs wrap onto extra rows.
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Behavior:"))
-        controls.addWidget(self._behavior_combo)
-        controls.addSpacing(10)
-        controls.addWidget(QLabel("Before:"))
-        controls.addWidget(self._spin_pre)
-        controls.addWidget(QLabel("After:"))
-        controls.addWidget(self._spin_post)
-        controls.addSpacing(10)
-        controls.addWidget(QLabel("Crop:"))
-        controls.addWidget(self._spin_crop)
-        controls.addSpacing(10)
-        controls.addWidget(QLabel("Resolution:"))
-        controls.addWidget(self._res_combo)
-        controls.addSpacing(10)
-        controls.addWidget(QLabel("Layout:"))
-        controls.addWidget(self._layout_combo)
-        controls.addSpacing(10)
-        controls.addWidget(self._keypoints_chk)
-        controls.addWidget(QLabel("Dot size:"))
-        controls.addWidget(self._spin_kp_size)
-        controls.addWidget(QLabel("Border:"))
-        controls.addWidget(self._spin_kp_border)
-        controls.addStretch()
-        controls.addWidget(self._generate_btn)
-        controls.addWidget(self._export_btn)
+        controls.addWidget(flow_row([
+            labelled("Behavior:", self._behavior_combo),
+            labelled("Before:", self._spin_pre),
+            labelled("After:", self._spin_post),
+            labelled("Crop:", self._spin_crop),
+            labelled("Resolution:", self._res_combo),
+            labelled("Layout:", self._layout_combo),
+            self._keypoints_chk,
+            labelled("Dot size:", self._spin_kp_size),
+            labelled("Border:", self._spin_kp_border),
+            self._generate_btn,
+            self._export_btn,
+        ], h_spacing=10))
 
         self._progress_bar = QProgressBar()
         self._progress_bar.setVisible(False)
@@ -1831,7 +2230,7 @@ class BehaviorGridPanel(QWidget):
         )
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setWordWrap(True)
-        self._empty.setStyleSheet("color: #546E7A; font-size: 13px; padding: 30px;")
+        self._empty.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 30px;")
 
         title_box = QVBoxLayout()
         title_box.setSpacing(2)

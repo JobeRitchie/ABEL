@@ -339,11 +339,57 @@ def prism_video_gain(vv_df: pd.DataFrame) -> pd.DataFrame:
                pd.to_numeric(df["gain"], errors="coerce").to_numpy(),
                pd.to_numeric(df.get("gain_ci95"), errors="coerce").to_numpy(),
                n.to_numpy())
+    verdict = df["verdict"].astype(str).to_numpy() if "verdict" in df.columns         else np.full(len(df), "improved")
+    # Split the bar heights into one dataset per verdict so Prism colours the
+    # series rather than the user recolouring every bar by hand.  Each behavior
+    # appears in exactly one dataset; the others are blank on that row.
+    _VERDICTS = (("Improved (BH q<0.05)", "improved"),
+                 ("Not significant", "ns"),
+                 ("Degraded (BH q<0.05)", "degraded"))
+    # Per-seed paired deltas, so the error bar and the t-test come from the raw
+    # replicates rather than an SD back-computed from a stored CI half-width.
+    no_cols = _seed_cols(df, "f1_no_video_seed")
+    yes_cols = _seed_cols(df, "f1_with_video_seed")
+    n_rep = min(len(no_cols), len(yes_cols))
+    if n_rep:
+        deltas = (pd.DataFrame(df[yes_cols[:n_rep]].to_numpy(dtype=float))
+                  - pd.DataFrame(df[no_cols[:n_rep]].to_numpy(dtype=float)))
+        deltas = deltas.apply(pd.to_numeric, errors="coerce")
+        for label, key in _VERDICTS:
+            mask = verdict == key
+            if not mask.any():
+                continue
+            for i in range(n_rep):
+                out[f"{label}:{i + 1}"] = deltas.iloc[:, i].where(mask).to_numpy()
+    else:
+        # Older exports dropped the seeds; fall back to the mean so the panel is
+        # still plottable, with the SD triple below carrying the error bar.
+        mean = out["Video improvement (dF1):Mean"]
+        for label, key in _VERDICTS:
+            col = mean.where(pd.Series(verdict, index=out.index) == key)
+            if col.notna().any():
+                out[label] = col
+    # Trailing reference columns -- NOT part of the Prism block.  See INDEX.txt.
     if "p_value" in df.columns:
         out["PValue"] = pd.to_numeric(df["p_value"], errors="coerce").to_numpy()
+    if "q_value" in df.columns:
+        out["QValue (BH)"] = pd.to_numeric(df["q_value"], errors="coerce").to_numpy()
     if "significant" in df.columns:
         out["Significant"] = df["significant"].astype(bool).astype(int).to_numpy()
-    return out.sort_values("Video improvement (dF1):Mean", ignore_index=True)
+    if "significant_bh" in df.columns:
+        out["Significant (BH)"] =             df["significant_bh"].astype(bool).astype(int).to_numpy()
+    out["Verdict"] = verdict
+    out = out.sort_values("Video improvement (dF1):Mean", ignore_index=True)
+    # Behavior + the replicate blocks must be CONTIGUOUS -- Prism assigns
+    # subcolumns positionally on paste, so the Mean/SD/N triple is moved behind
+    # them where it reads as reference rather than shifting every dataset.
+    stem = "Video improvement (dF1)"
+    trailing = [c for c in out.columns
+                if c.startswith(f"{stem}:") or c in
+                ("PValue", "QValue (BH)", "Significant",
+                 "Significant (BH)", "Verdict")]
+    lead = [c for c in out.columns if c not in trailing]
+    return out[lead + trailing]
 
 
 # ── Per-behavior metrics: rarity landscape + the per-assay kappa inset ──────
@@ -1169,12 +1215,46 @@ def prism_learning_curve_errors(lc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 
 def prism_learning_curve_knee(knee_df: pd.DataFrame) -> pd.DataFrame:
-    """Column table: the saturation point (knee) and max F1 per behavior."""
+    """Column table: the saturation point (knee) and max F1 per behavior, with the
+    bootstrap interval on both.
+
+    Neither statistic has a standard error — the knee is a discrete argmin over the
+    clip schedule and the ceiling is a max over the mean curve — so the variability
+    is a percentile interval from resampling seeds
+    (:func:`learning_curve.bootstrap_knee_ci`), carried here as **both** absolute
+    bounds and +/- deltas.  The deltas exist because Prism's asymmetric error format
+    ("Enter and plot error values: +Error and -Error") wants distances from the mean,
+    not endpoints; pasting the bounds into those subcolumns would draw bars running
+    from 0 to the endpoint.  The bounds stay because the CSV is also read by people.
+
+    The knee interval is a *grid* interval: it can only land on the clip schedule, so
+    lo == hi means every replicate chose the same schedule step, not that the knee is
+    known to the clip.
+    """
+    def _num(col: str) -> np.ndarray:
+        # Runs predating the bootstrap have no interval columns at all; those export
+        # as blank error bars rather than blocking the whole table.
+        if col not in knee_df.columns:
+            return np.full(len(knee_df), np.nan, dtype=float)
+        return pd.to_numeric(knee_df[col], errors="coerce").to_numpy(dtype=float)
+
+    knee, lo, hi = _num("knee_clips"), _num("knee_lo"), _num("knee_hi")
+    f1, f1_lo, f1_hi = _num("f1_max"), _num("f1_max_lo"), _num("f1_max_hi")
     return pd.DataFrame({
         "Behavior": [_row_title(p, b) for p, b in
                      zip(knee_df["project_id"], knee_df["behavior_name"])],
-        "Knee clips": pd.to_numeric(knee_df["knee_clips"], errors="coerce").to_numpy(),
-        "Max F1": pd.to_numeric(knee_df["f1_max"], errors="coerce").to_numpy(),
+        "Knee clips": knee,
+        "Knee CI low": lo,
+        "Knee CI high": hi,
+        "Knee -error": knee - lo,
+        "Knee +error": hi - knee,
+        "Max F1": f1,
+        "Max F1 CI low": f1_lo,
+        "Max F1 CI high": f1_hi,
+        "Max F1 -error": f1 - f1_lo,
+        "Max F1 +error": f1_hi - f1,
+        "N seeds": _num("boot_n_units"),
+        "N bootstrap": _num("boot_n_reps"),
     })
 
 
@@ -1332,10 +1412,20 @@ _PANEL_NOTES: dict[str, tuple[str, str]] = {
         "XY, Mean/SD/N",
         "The same curve broken out per behavior; the pooled line is dataset A."),
     "fig3_learning_curve_knee.csv": (
-        "Column",
+        "Column (or XY with +/- error)",
         "Saturation point (knee clips) and max target-class F1 per behavior. The "
         "knee is the first clip count reaching 98% of that behavior's own maximum "
-        "F1 with a marginal gain under 0.01 -- quote 98%, not 95%."),
+        "F1 with a marginal gain under 0.01 -- quote 98%, not 95%. Both numbers are "
+        "read off the MEAN curve and have no standard error, so variability is a "
+        "95% percentile interval from resampling the 5 seeds with replacement, "
+        "independently at each budget (2000 replicates; the seeds are independent "
+        "across budgets by construction, so there is nothing to pair). Plot it in Prism "
+        "as XY with 'Enter and plot error values: +Error and -Error' using the "
+        "'-error'/'+error' columns -- the CI low/high columns are endpoints, not "
+        "error bar lengths. The knee interval can only land on the clip schedule: "
+        "low == high means every replicate picked the same step, not knee-to-the-"
+        "clip precision. The held-out set is fixed across replicates, so this covers "
+        "seed/subsample variability only, not sampling of animals or held-out clips."),
     "fig3_ablation_gain_seeds.csv": (
         "Grouped, replicates, 'Enter and plot replicate values'",
         "Per-seed PAIRED dF1 over the pose-only baseline (same seed, same "
@@ -1376,9 +1466,20 @@ _PANEL_NOTES: dict[str, tuple[str, str]] = {
         "positive share of an enriched candidate pool. Behaviors with no measured "
         "prevalence are dropped, not zero-filled."),
     "fig3_video_value.csv": (
-        "Column",
-        "Video dF1 per behavior, sorted ascending, with SD and the exact paired "
-        "p-value. The seed-level table for re-running the test yourself is "
+        "Grouped, replicates, 'Enter and plot replicate values'",
+        "Video dF1 per behavior, sorted ascending, one row per behavior. "
+        "PASTE ONLY the Behavior column plus the 'Improved / Not significant / "
+        "Degraded' replicate blocks -- those subcolumns are the PER-SEED paired "
+        "deltas, so Prism draws the error bar and re-runs the test from the raw "
+        "replicates (Analyze -> t tests -> One sample t test vs 0). Each behavior "
+        "appears in exactly one of the three datasets, which is what gives the "
+        "two-colour bar chart. Everything from 'Video improvement (dF1):Mean' "
+        "rightwards is REFERENCE ONLY -- do not paste it into the Prism table: "
+        "the mean, the SD, the exact paired p and the BH q across the whole "
+        "behavior family. Quote the q, not the raw p -- these are ~45 "
+        "simultaneous tests. The paired test is across SEEDS on one held-out "
+        "split, so it says the gain is reproducible, not that it generalises to "
+        "new animals. Absolute per-arm F1 (pose-only vs +video, per seed) is in "
         "prism_video_value.csv in the parent folder."),
     "fig3_modality_shares.csv": (
         "Grouped / stacked bar",
@@ -1799,7 +1900,10 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
                               out_dir / "prism_learning_curve_knee.csv"))
         sections.append(
             "prism_learning_curve_knee.csv\n    Table: Column. Saturation point\n"
-            "    (knee) in clips and the max F1 reached, per behavior.\n")
+            "    (knee) in clips and the max F1 reached, per behavior, each\n"
+            "    with a 95% bootstrap-over-seeds interval. Plot error bars from\n"
+            "    the -error/+error columns -- Prism wants bar lengths, not\n"
+            "    endpoints.\n")
 
     if time_budget_agreement_df is not None and not time_budget_agreement_df.empty:
       with _guard(errors, "time_budget_agreement"):

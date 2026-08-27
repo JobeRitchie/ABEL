@@ -19,6 +19,7 @@ from abel.models.schemas import CandidateWindow, ReviewDecision, ReviewDecisionT
 from abel.services.behavior_service import BehaviorService
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
+from abel.services.project_merge_service import ProjectMergeService
 from abel.temporal_refinement.bout_postprocess import smooth_probabilities
 
 
@@ -60,6 +61,7 @@ class ExportResult:
     warnings: list[str] = field(default_factory=list)
     success: bool = False
     output_paths: list[Path] = field(default_factory=list)
+    n_merged_projects: int = 0
 
 
 class ExportService:
@@ -371,6 +373,7 @@ class ExportService:
         include_end_frames: bool = False,
         behavior_filter: list[str] | None = None,
         binary_mode: bool = False,
+        include_merged_projects: bool = True,
     ) -> ExportResult:
         """Export bout start frames by subject and behavior into an Excel workbook.
 
@@ -383,6 +386,10 @@ class ExportService:
         - one sheet per subject
         - one row per frame (0 to max_end_frame inclusive)
         - column "frame" plus one column per behavior, values 0 or 1
+
+        When *include_merged_projects* is set, subjects from every project
+        combined into the host project (Behavior Analytics -> Combined
+        Projects) get their own sheets alongside the host's subjects.
         """
         out = ExportResult()
         if not self._project_root:
@@ -390,6 +397,29 @@ class ExportService:
             return out
 
         intervals_by_session = self._confirmed_intervals_by_session(candidates, decisions)
+
+        merged_subjects: dict[str, str] = {}
+        merged_session_types: dict[str, str] = {}
+        if include_merged_projects:
+            try:
+                (
+                    merged_intervals,
+                    merged_subjects,
+                    merged_session_types,
+                    out.n_merged_projects,
+                ) = self.merged_project_intervals()
+            except Exception as exc:  # a broken external project must not kill the export
+                out.warnings.append(f"Combined projects could not be read: {exc}")
+                merged_intervals = {}
+            for session_id, by_behavior in merged_intervals.items():
+                target = intervals_by_session.setdefault(session_id, {})
+                for behavior, intervals in by_behavior.items():
+                    target.setdefault(behavior, []).extend(intervals)
+            if out.n_merged_projects and not merged_intervals:
+                out.warnings.append(
+                    f"{out.n_merged_projects} combined project(s) contributed no bouts."
+                )
+
         if not intervals_by_session:
             out.warnings.append("No confirmed behavior bouts to export.")
             return out
@@ -407,6 +437,7 @@ class ExportService:
             behaviors = all_behaviors
 
         subject_by_session = self._subject_by_session()
+        subject_by_session.update(merged_subjects)
 
         # Detect whether any subject has more than one session in the data.
         # If so, we produce one workbook per distinct session type instead of
@@ -429,6 +460,7 @@ class ExportService:
             session_groups: list[tuple[str, list[str]]] = [("", list(intervals_by_session.keys()))]
         else:
             session_type_by_sid = self._session_type_by_session()
+            session_type_by_sid.update(merged_session_types)
             type_groups: dict[str, list[str]] = {}
             for sid in intervals_by_session:
                 stype = session_type_by_sid.get(sid, "") or ""
@@ -526,6 +558,219 @@ class ExportService:
         out.n_rows = total_rows
         out.success = True
         return out
+
+    # ------------------------------------------------------------------
+    # TRACY position export
+    # ------------------------------------------------------------------
+
+    # Filename marker TRACY keys its ABEL-position special case on.  Changing
+    # this string here means changing ``abel_position_pattern`` in TRACY too.
+    ABEL_POSITION_MARKER = "ABELposition"
+
+    # Body-part choices offered by the export UI, mapped to the candidate name
+    # lists ``PoseProcessingService._keypoint_xy`` resolves against.
+    ABEL_POSITION_TRACK_POINTS: dict[str, list[str]] = {
+        "centroid": [],  # handled separately: mean of all tracked parts
+        "body_center": ["body_center", "center", "centre", "spine2", "spine1", "thorax"],
+        "nose": ["nose", "snout", "head"],
+        "tail_base": ["tail_base", "tailbase", "tail"],
+    }
+
+    def export_abel_position_csv(
+        self,
+        session_filter: list[str] | None = None,
+        track_point: str = "centroid",
+        out_subdir: str = "tracy",
+    ) -> ExportResult:
+        """Write one ``{SubjectID}ABELposition.csv`` per session for TRACY.
+
+        The file is the ABEL analogue of an acquisition AnimalPosition file, but
+        it carries *video* time rather than the photometry rig's computer clock,
+        because ABEL never sees that clock.  TRACY recognises the
+        ``ABELposition`` filename marker and aligns the track to the signal with
+        the same video-frame -> photometry-sample transform it already uses for
+        boutframes, so the position track and the bouts exported from this same
+        project land on the signal at identical places.
+
+        Columns (header row present, names chosen to match TRACY's existing
+        named-column reader so the file still parses if the special case is
+        ever bypassed):
+
+        ``frame``      0-based video frame index — the same numbering ABEL's
+                       boutframes export uses.
+        ``timestamp``  video elapsed seconds (``frame / fps``).  Not a computer
+                       timestamp; TRACY uses it only to verify the frame rate.
+        ``X``/``Y``    tracked point in **pixels**.  TRACY converts to cm itself
+                       from ``maze_width_cm`` and the observed X range, so
+                       pre-scaling here would be undone.
+
+        Subject naming follows the boutframes export: when a subject has more
+        than one session the session type is appended (``CAB01_Alcohol``), which
+        is the ID TRACY derives from ``CAB01_AlcoholFPData.csv``.
+        """
+        out = ExportResult()
+        if not self._project_root:
+            out.warnings.append("No project loaded.")
+            return out
+
+        manifest = self._imports.load_manifest(self._project_root)
+        if manifest is None:
+            out.warnings.append("No import manifest found — import sessions first.")
+            return out
+
+        sessions = list(manifest.linked_sessions)
+        if session_filter is not None:
+            wanted = {str(s).strip() for s in session_filter}
+            sessions = [s for s in sessions if s.session_id in wanted]
+        if not sessions:
+            out.warnings.append("No sessions selected to export.")
+            return out
+
+        subject_by_session = self._subject_by_session()
+        session_type_by_sid = self._session_type_by_session()
+
+        # Append the session type only for subjects recorded more than once,
+        # mirroring export_boutframes_xlsx so both exports agree on subject IDs.
+        sessions_by_subject: dict[str, list[str]] = {}
+        for session in sessions:
+            subj = subject_by_session.get(session.session_id, session.session_id)
+            sessions_by_subject.setdefault(subj, []).append(session.session_id)
+
+        video_by_id = {v.asset_id: v for v in manifest.videos}
+        out_dir = self._project_root / "exports" / out_subdir
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # A name outside the UI's list is still honoured as a literal body part,
+        # so a project with an unusual skeleton can be exported without code
+        # changes -- and reports a warning when that part is not tracked rather
+        # than silently substituting the centroid.
+        track_key = str(track_point or "centroid").strip().lower()
+        candidates = self.ABEL_POSITION_TRACK_POINTS.get(track_key)
+        if candidates is None:
+            candidates = [track_key]
+
+        output_paths: list[Path] = []
+        total_rows = 0
+        used_names: set[str] = set()
+
+        for session in sessions:
+            session_id = session.session_id
+            pose_path = self._imports.pose_path_for_session(manifest, session_id)
+            if not pose_path or not pose_path.exists():
+                out.warnings.append(f"[{session_id}] pose file not found — skipped.")
+                continue
+
+            try:
+                pose = self._pose.load_and_clean(pose_path, manifest.smoothing_settings)
+            except Exception as exc:
+                out.warnings.append(f"[{session_id}] failed to load pose: {exc}")
+                continue
+
+            if candidates:
+                x_vals, y_vals = self._pose._keypoint_xy(pose, candidates)
+                if not np.isfinite(x_vals).any():
+                    out.warnings.append(
+                        f"[{session_id}] body part '{track_point}' not tracked "
+                        f"(available: {', '.join(pose.body_parts)}) — used the centroid instead."
+                    )
+                    x_vals = np.asarray(pose.centroid_x, dtype=float)
+                    y_vals = np.asarray(pose.centroid_y, dtype=float)
+            else:
+                x_vals = np.asarray(pose.centroid_x, dtype=float)
+                y_vals = np.asarray(pose.centroid_y, dtype=float)
+
+            fps = self._session_video_fps(manifest, session_id, video_by_id)
+            if not fps or fps <= 0:
+                out.warnings.append(
+                    f"[{session_id}] video frame rate unknown — skipped "
+                    f"(TRACY needs the frame rate to place the track on the signal)."
+                )
+                continue
+
+            n_frames = int(len(x_vals))
+            if n_frames == 0:
+                out.warnings.append(f"[{session_id}] pose file has no frames — skipped.")
+                continue
+
+            frames = np.arange(n_frames, dtype=np.int64)
+            df = pd.DataFrame(
+                {
+                    "frame": frames,
+                    "timestamp": frames / float(fps),
+                    "X": x_vals,
+                    "Y": y_vals,
+                }
+            )
+
+            subject = str(subject_by_session.get(session_id, session_id) or session_id).strip()
+            if len(sessions_by_subject.get(subject, [])) > 1:
+                stype = (session_type_by_sid.get(session_id) or "").strip()
+                tracy_subject = f"{subject}_{stype}" if stype else f"{subject}_{session_id[:8]}"
+            else:
+                tracy_subject = subject
+
+            safe_subject = self._safe_name(tracy_subject)
+            name = f"{safe_subject}{self.ABEL_POSITION_MARKER}.csv"
+            if name.lower() in used_names:
+                name = f"{safe_subject}_{session_id[:8]}{self.ABEL_POSITION_MARKER}.csv"
+            used_names.add(name.lower())
+
+            output = out_dir / name
+            # 6 decimals, not 4: at 4 the rounded timestamps quantise to 0.0333 s
+            # and TRACY recovers 30.030 fps from a 30.000 fps video, which reads
+            # as a real rate disagreement in its frame-rate cross-check.
+            df.to_csv(output, index=False, float_format="%.6f")
+            output_paths.append(output)
+            total_rows += n_frames
+
+            n_missing = int(np.count_nonzero(~np.isfinite(x_vals)))
+            if n_missing:
+                out.warnings.append(
+                    f"[{session_id}] {n_missing}/{n_frames} frames "
+                    f"({100.0 * n_missing / n_frames:.1f}%) have no tracked position; "
+                    f"they are written blank and stay blank in TRACY."
+                )
+
+        if not output_paths:
+            out.warnings.append("No position files were written.")
+            return out
+
+        out.output_path = output_paths[0]
+        out.output_paths = output_paths
+        out.n_rows = total_rows
+        out.success = True
+        return out
+
+    def _session_video_fps(
+        self,
+        manifest: Any,
+        session_id: str,
+        video_by_id: dict[str, Any] | None = None,
+    ) -> float | None:
+        """Frame rate of a session's video, from the manifest or the file itself."""
+        session = next(
+            (s for s in manifest.linked_sessions if s.session_id == session_id), None
+        )
+        if session is None:
+            return None
+        if video_by_id is None:
+            video_by_id = {v.asset_id: v for v in manifest.videos}
+        video = video_by_id.get(session.video_asset_id)
+        if video is not None and video.fps and float(video.fps) > 0:
+            return float(video.fps)
+
+        video_path = self._imports.video_path_for_session(manifest, session_id)
+        if not video_path or not video_path.exists():
+            return None
+        try:
+            import cv2  # noqa: PLC0415
+
+            cap = cv2.VideoCapture(str(video_path))
+            fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 0.0
+            cap.release()
+            return float(fps) if fps and fps > 0 else None
+        except Exception:
+            return None
 
     def build_behaviogram(
         self,
@@ -934,10 +1179,11 @@ class ExportService:
             result.append((label, sid))
         return result
 
-    def _subject_by_session(self) -> dict[str, str]:
-        if not self._project_root:
+    def _subject_by_session(self, project_root: Path | None = None) -> dict[str, str]:
+        root = project_root or self._project_root
+        if not root:
             return {}
-        manifest = self._imports.load_manifest(self._project_root)
+        manifest = self._imports.load_manifest(root)
         if manifest is None:
             return {}
         mapping: dict[str, str] = {}
@@ -952,19 +1198,20 @@ class ExportService:
             mapping[session.session_id] = subject or session.session_id
         return mapping
 
-    def _session_type_by_session(self) -> dict[str, str]:
+    def _session_type_by_session(self, project_root: Path | None = None) -> dict[str, str]:
         """Derive a session-type label for every session from its video filename.
 
         The label is produced by stripping the subject prefix (and any leading
         ``_-`` separators) from the video stem.  Returns an empty string for
         sessions where no such suffix can be derived.
         """
-        if not self._project_root:
+        root = project_root or self._project_root
+        if not root:
             return {}
-        manifest = self._imports.load_manifest(self._project_root)
+        manifest = self._imports.load_manifest(root)
         if manifest is None:
             return {}
-        subject_by_sid = self._subject_by_session()
+        subject_by_sid = self._subject_by_session(root)
         video_by_id = {v.asset_id: v for v in manifest.videos}
         result: dict[str, str] = {}
         for session in manifest.linked_sessions:
@@ -978,6 +1225,80 @@ class ExportService:
                     stype = stem[len(subject):].lstrip("_- ")
             result[sid] = stype
         return result
+
+    def merged_project_intervals(
+        self,
+        use_cached: bool = False,
+    ) -> tuple[
+        dict[str, dict[str, list[tuple[int, int]]]],
+        dict[str, str],
+        dict[str, str],
+        int,
+    ]:
+        """Return bouts from the projects combined into the host project.
+
+        Combined projects are the ones registered in the Behavior Analytics
+        tab and persisted in ``config/merged_projects.json``.  Each external
+        project's bouts are computed with *its own* saved temporal-review
+        thresholds, exactly as the Analytics tab does.
+
+        Returns ``(intervals_by_session, subject_by_session,
+        session_type_by_session, n_projects)``.  Session IDs are namespaced
+        ``<tag>::<session_id>`` so they can never collide with host sessions,
+        and subjects use the ``<tag>/<subject>`` labels shown in Analytics.
+        """
+        if not self._project_root:
+            return {}, {}, {}, 0
+
+        merge = ProjectMergeService()
+        merge.load(self._project_root)
+        if merge.is_empty():
+            return {}, {}, {}, 0
+
+        host_bid_name_map = {
+            str(b.behavior_id): str(b.name)
+            for b in (self._behaviors.behaviors if self._behaviors else [])
+            if str(b.behavior_id or "").strip()
+        }
+        # Only feeds summary rows we discard here, but it must be non-zero:
+        # the merge service divides bout durations by it.
+        host_fps = ProjectMergeService.project_fps(self._project_root) or 30.0
+
+        _summary, raw_bout_rows, session_label_map, *_rest = merge.load_merged_bouts(
+            host_bid_name_map, host_fps, use_cached=use_cached,
+        )
+
+        intervals: dict[str, dict[str, list[tuple[int, int]]]] = {}
+        for rows in raw_bout_rows.values():
+            for row in rows:
+                session_id = str(row.get("session_id") or "").strip()
+                if not session_id:
+                    continue
+                behavior = self._behavior_name(
+                    str(row.get("behavior") or row.get("behavior_id") or "")
+                )
+                start = int(row.get("start_frame", 0))
+                end = int(row.get("end_frame", start))
+                if end < start:
+                    end = start
+                intervals.setdefault(session_id, {}).setdefault(behavior, []).append((start, end))
+
+        for by_behavior in intervals.values():
+            for behavior, ivs in by_behavior.items():
+                by_behavior[behavior] = sorted(set(ivs), key=lambda x: (x[0], x[1]))
+
+        subject_by_session = {
+            sid: label for sid, label in session_label_map.items() if sid in intervals
+        }
+        for sid in intervals:
+            subject_by_session.setdefault(sid, sid)
+
+        session_type_by_session: dict[str, str] = {}
+        for entry in merge.entries:
+            for sid, stype in self._session_type_by_session(entry.project_root).items():
+                session_type_by_session[f"{entry.tag}::{sid}"] = stype
+
+        return intervals, subject_by_session, session_type_by_session, len(merge.entries)
 
     def _accepted_behavior_intervals_by_session(
         self,
