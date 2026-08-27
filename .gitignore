@@ -47,7 +47,12 @@ Thumbs.db
 # --- Validation run outputs (results live in the workspace, never in-tree) ---
 abel_validation_runs/
 unfiled_runs/
+
+# --- Exported behavior sets (lab/assay-specific; built-in presets live in code) ---
 NSF.behaviors.yaml
+3chamber.behs.yaml
+Fear Conditioning Behaviors.yaml
+homecage.yaml
 
 # --- Manuscript audit reports (kept locally alongside the draft) ---
 _SKEPTIC_*/
@@ -61,6 +66,9 @@ scripts/debug_bouts.py
 scripts/generate_paper_docs.py
 scripts/strip_bom.py
 scripts/verify_fix.py
+scripts/analyze_r3d_features.py
+scripts/check_registry.py
+scripts/run_r3d_sample.py
 
 # --- Local Claude Code workspace artifacts ---
 .claude/

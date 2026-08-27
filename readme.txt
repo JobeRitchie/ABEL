@@ -2,7 +2,7 @@
  ABEL - Active-learning Behavior Estimation and Labeling
 ==============================================================================
 
- Version 0.12.0 | Python 3.10+ | UNC Non-Commercial License
+ Version 0.12.1 | Python 3.10+ | UNC Non-Commercial License
 
  Full documentation is in README.md, next to this file. Open it in any text
  editor or view it on the project page. This file is a quickstart only, so

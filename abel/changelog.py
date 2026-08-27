@@ -11,6 +11,26 @@ VERSION_DATE = "August 27, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.12.1", "August 27, 2026", [
+        "Repository hygiene only — no code changed, and the test suite is "
+        "unchanged at 1468 passing. Four lab-specific behavior-set exports that "
+        "had accumulated at the repository root (3chamber.behs.yaml, Fear "
+        "Conditioning Behaviors.yaml, homecage.yaml, alongside the already-ignored "
+        "NSF.behaviors.yaml) are no longer tracked. Nothing loaded them: built-in "
+        "assay presets are defined in code in behavior_service.py, and presets a "
+        "user saves live in the global config directory, so these were checked-in "
+        "copies of one lab's project data rather than anything the application "
+        "reads. They now sit under their own .gitignore heading instead of filed "
+        "beneath validation run outputs.",
+        "Three one-off diagnostic scripts are likewise untracked and gitignored in "
+        "place, joining the eight already corralled there: analyze_r3d_features.py "
+        "and check_registry.py both hardcode an absolute path to one machine's "
+        "manuscript model folder and cannot run anywhere else, and run_r3d_sample.py "
+        "is a single-video R3D embedding probe. The genuinely reusable contents of "
+        "scripts/ — ast_check.py and regenerate_meta_figures.py — stay tracked. All "
+        "eleven files remain on disk for whoever needs them; they simply no longer "
+        "ship.",
+    ]),
     ("0.12.0", "August 27, 2026", [
         "Motif HMM state counts are now measured rather than assumed, and they "
         "reproduce. EM ran for at most 20 iterations against a tolerance it needed "
