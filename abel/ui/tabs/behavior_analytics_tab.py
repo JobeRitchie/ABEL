@@ -96,6 +96,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QSlider,
@@ -113,14 +114,22 @@ from abel.core.project_manager import ProjectManager
 from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.behavioral_motif_service import (
     MotifSettings,
+    hmm_input_fingerprint,
+    load_hmm_result,
     load_motif_settings,
+    save_hmm_result,
     save_motif_settings,
 )
+from abel.ui.flow_layout import FlowLayout
 from abel.ui.mpl_theme import style_navigation_toolbar
 from abel.services.import_service import ImportService
 from abel.services.project_merge_service import ProjectMergeService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.roi_service import ROIService
+from abel.services import roi_behavior_service
+# ROI occupancy and ROI-scoped behavior must agree on what counts as "inside",
+# down to the boundary debounce, so both use the shared geometry helper.
+from abel.utils.roi_geometry import debounce_bool as _debounce_bool
 from abel.workers.task_worker import TaskWorker
 
 logger = logging.getLogger("abel")
@@ -200,24 +209,6 @@ class _AutoDoubleSpinBox(QDoubleSpinBox):
             return ""
         return super().textFromValue(value)
 
-
-def _debounce_bool(mask: "np.ndarray", min_run: int) -> "np.ndarray":
-    """Merge runs shorter than *min_run* frames into the preceding run.
-
-    Suppresses single-frame flicker at an ROI boundary so tracking jitter
-    doesn't inflate the entry count.  Processes runs left-to-right so merges
-    propagate; the first run is left untouched (nothing precedes it).
-    """
-    if min_run <= 1 or mask.size == 0:
-        return mask
-    out = mask.copy()
-    change_idx = np.flatnonzero(np.diff(out.astype(np.int8))) + 1
-    bounds = np.concatenate(([0], change_idx, [out.size]))
-    for i in range(len(bounds) - 1):
-        s, e = int(bounds[i]), int(bounds[i + 1])
-        if (e - s) < min_run and s > 0:
-            out[s:e] = out[s - 1]
-    return out
 
 # Sentinel for distinguishing "not yet cached" from "cached value of None".
 _MANIFEST_UNSET = object()
@@ -357,6 +348,10 @@ _PALETTE = [
     "#5b9bd5", "#ed7d31", "#70ad47", "#ffc000", "#a855f7",
     "#06b6d4", "#f43f5e", "#6366f1", "#84cc16", "#ec4899",
 ]
+
+#: Backdrop for stretches of an ethogram row the HMM says nothing about (no
+#: bouts at all).  Neutral, so it reads as absence rather than as a state.
+_ETHOGRAM_GAP_COLOR = "#dfe4e8"
 
 
 # ======================================================================
@@ -765,6 +760,14 @@ class BehaviorAnalyticsTab(QWidget):
         self._factor_level_order: dict[str, list[str]] = {}  # factor → ordered levels
         self._group_colors: dict[str, str] = {}  # group name → hex color override
         self._raw_bouts: dict[str, pd.DataFrame] = {}
+        # ROI scope: _raw_bouts is what every view reads, so scoping it to a
+        # zone propagates automatically.  The unscoped copy is kept so the
+        # scope can be changed or cleared without a full reload.
+        self._raw_bouts_unscoped: dict[str, pd.DataFrame] = {}
+        self._roi_scope_zone: int = 0        # 0 = whole arena, else 1-based zone
+        self._roi_scope_inside: bool = True
+        self._roi_scope_attribution: str = roi_behavior_service.ATTRIBUTION_OVERLAP
+        self._roi_mask_cache: dict[tuple[str, int], "np.ndarray | None"] = {}
         # Cross-tab shared backgrounds: the last fully-adjusted RGB plate each
         # analytics tab rendered, at native video resolution.  Keys: "heatmap",
         # "density".  Lets one tab reuse the other's exact background so
@@ -826,12 +829,54 @@ class BehaviorAnalyticsTab(QWidget):
         )
         self._subject_prechop_btn.clicked.connect(self._open_subject_prechop_dialog)
 
-        top_row = QHBoxLayout()
+        # -- ROI scope ------------------------------------------------
+        # Restricting behavior to a zone is a *filter*, not a separate report:
+        # scoping here means the summary table, every chart style, the
+        # statistics and all exports describe the same in-zone behavior, so the
+        # user can never be looking at an ROI chart next to a whole-arena table.
+        self._roi_scope_label = QLabel("ROI scope:")
+        self._roi_scope_combo = QComboBox()
+        self._roi_scope_combo.setToolTip(
+            "Restrict every analysis below to behavior that occurred inside "
+            "(or outside) a defined ROI.\n"
+            "Applies to the summary table, statistics, all graphs and exports.\n"
+            "Define zones in the ROI Definition tab."
+        )
+        self._roi_scope_combo.currentIndexChanged.connect(self._on_roi_scope_changed)
+
+        self._roi_attr_combo = QComboBox()
+        for _key in (
+            roi_behavior_service.ATTRIBUTION_OVERLAP,
+            roi_behavior_service.ATTRIBUTION_ONSET,
+            roi_behavior_service.ATTRIBUTION_MAJORITY,
+        ):
+            self._roi_attr_combo.addItem(
+                roi_behavior_service.ATTRIBUTION_LABELS[_key], _key
+            )
+        self._roi_attr_combo.setToolTip(
+            "How a bout that straddles the ROI boundary is counted:\n"
+            "  • Split at the boundary — exact durations; a crossing bout "
+            "becomes two bouts, so counts rise.\n"
+            "  • By where it started — whole bout kept if it began in the zone; "
+            "counts and latencies stay comparable to the unscoped analysis.\n"
+            "  • If mostly in zone — whole bout kept when >50% of its frames "
+            "are in the zone."
+        )
+        self._roi_attr_combo.currentIndexChanged.connect(self._on_roi_scope_changed)
+
+        # A wrapping toolbar, not a QHBoxLayout: these controls together are
+        # wider than the window at 1366 px, and a QHBoxLayout would push the
+        # last of them off-screen rather than starting a second row.
+        top_row = FlowLayout(h_spacing=6, v_spacing=4)
         top_row.addWidget(self._refresh_btn)
         top_row.addWidget(self._clear_btn)
         top_row.addWidget(QLabel("Behaviors:"))
         top_row.addWidget(self._behavior_filter_btn)
         top_row.addWidget(self._subject_prechop_btn)
+        top_row.addWidget(self._roi_scope_label)
+        top_row.addWidget(self._roi_scope_combo)
+        top_row.addWidget(self._roi_attr_combo)
+        self._set_roi_scope_controls_visible(False)
 
         # -- Merge Projects button (opens a popup panel) --------------
         self._merge_btn = QPushButton("\u229e Merge Projects\u2026")
@@ -842,7 +887,6 @@ class BehaviorAnalyticsTab(QWidget):
         self._merge_btn.setCheckable(True)
         self._merge_btn.toggled.connect(self._toggle_merge_panel)
         top_row.addWidget(self._merge_btn)
-        top_row.addStretch(1)
 
         # Merge panel (hidden by default; shown below top_row when button toggled)
         self._merge_panel = QWidget()
@@ -949,6 +993,8 @@ class BehaviorAnalyticsTab(QWidget):
         self._group_colors.clear()
         self._pose_cache.clear()
         self._pose_vel_cache.clear()
+        self._roi_mask_cache.clear()
+        self._raw_bouts_unscoped.clear()
         self._manifest_cache = _MANIFEST_UNSET
         self._fps_cache = None
         self._tr_bouts_cache = None
@@ -969,6 +1015,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._graphs_tab._refresh_factor_selector()
         self._graphs_tab._refresh_until_behavior_combo()
         self._refresh_behavior_filter()
+        self._refresh_roi_scope_combo()
         self._heatmap_tab._refresh_lists()
         self._density_tab.refresh_selectors()
         self._relationships_tab.set_project(self._project_root)
@@ -1992,6 +2039,8 @@ class BehaviorAnalyticsTab(QWidget):
             # behavior_id, so the current selection survives the rebuild.
             self._behaviors.set_project(self._project_root)
             self._refresh_behavior_filter()
+            self._roi_mask_cache.clear()
+            self._refresh_roi_scope_combo()
             self._graphs_tab._refresh_until_behavior_combo()
             self._subject_by_session = self._build_subject_map()
             self._session_by_subject = self._invert_subject_map()
@@ -2045,6 +2094,10 @@ class BehaviorAnalyticsTab(QWidget):
             }
             self._recompute_summary_stats_from_shifted_bouts()
 
+        # Snapshot the fully-corrected bouts as the unscoped baseline so the
+        # ROI scope can be switched later without another reload.
+        self._raw_bouts_unscoped = {bid: df.copy() for bid, df in self._raw_bouts.items()}
+
         extra_labels: dict = result.get("extra_labels", {})
         if extra_labels:
             self._session_label_by_session.update(extra_labels)
@@ -2089,6 +2142,13 @@ class BehaviorAnalyticsTab(QWidget):
         self._velocity_tab.on_data_loaded()
         QTimer.singleShot(0, self._compute_and_add_distance_rows)
         QTimer.singleShot(0, self._compute_and_add_roi_rows)
+        # Re-apply after the pseudo-behavior rows land, so a scope chosen before
+        # the refresh survives it (the ROI rows themselves are never scoped).
+        QTimer.singleShot(0, self._reapply_roi_scope_after_refresh)
+
+    def _reapply_roi_scope_after_refresh(self) -> None:
+        if self._roi_scope_zone > 0:
+            self._apply_roi_scope()
 
     def _on_refresh_failed(self, traceback_str: str) -> None:
         """Main-thread callback: surface errors and re-enable the button."""
@@ -2650,9 +2710,217 @@ class BehaviorAnalyticsTab(QWidget):
             latency_s = float("nan")
         return time_s, n_entries, mean_s, latency_s
 
+    # ------------------------------------------------------------------
+    # ROI scope — restrict every analysis to behavior inside/outside a zone
+    # ------------------------------------------------------------------
+
+    def _set_roi_scope_controls_visible(self, visible: bool) -> None:
+        for w in (self._roi_scope_label, self._roi_scope_combo, self._roi_attr_combo):
+            w.setVisible(visible)
+
+    def _refresh_roi_scope_combo(self) -> None:
+        """Rebuild the ROI scope choices for the current project's zones.
+
+        Hidden entirely when the project defines no zone with area — an
+        always-visible control that can only say "Whole arena" is noise.
+        """
+        roi_count = self._configured_roi_count()
+        prev_zone, prev_inside = self._roi_scope_zone, self._roi_scope_inside
+
+        self._roi_scope_combo.blockSignals(True)
+        self._roi_scope_combo.clear()
+        self._roi_scope_combo.addItem("Whole arena", (0, True))
+        for zi in range(1, roi_count + 1):
+            zname = "the ROI" if roi_count <= 1 else f"ROI {zi}"
+            self._roi_scope_combo.addItem(f"Inside {zname}", (zi, True))
+            self._roi_scope_combo.addItem(f"Outside {zname}", (zi, False))
+        # Restore the previous selection when the same zone still exists.
+        restored = 0
+        for i in range(self._roi_scope_combo.count()):
+            if self._roi_scope_combo.itemData(i) == (prev_zone, prev_inside):
+                restored = i
+                break
+        self._roi_scope_combo.setCurrentIndex(restored)
+        self._roi_scope_combo.blockSignals(False)
+
+        zone, inside = self._roi_scope_combo.itemData(restored)
+        self._roi_scope_zone, self._roi_scope_inside = int(zone), bool(inside)
+        self._set_roi_scope_controls_visible(roi_count > 0)
+        self._apply_roi_scope_styling()
+
+    def _apply_roi_scope_styling(self) -> None:
+        """Highlight the scope control while a zone filter is active."""
+        active = self._roi_scope_zone > 0
+        self._roi_scope_combo.setStyleSheet(
+            "QComboBox{background:#1565c0;color:#fff;font-weight:bold;}"
+            if active else ""
+        )
+        self._roi_attr_combo.setEnabled(active)
+
+    def roi_scope_label(self) -> str:
+        """Human-readable scope, for status text and export provenance."""
+        if self._roi_scope_zone <= 0:
+            return "Whole arena"
+        attr = roi_behavior_service.ATTRIBUTION_LABELS.get(
+            self._roi_scope_attribution, self._roi_scope_attribution
+        )
+        return f"{self._roi_scope_combo.currentText()} ({attr.lower()})"
+
+    def _on_roi_scope_changed(self) -> None:
+        data = self._roi_scope_combo.currentData()
+        if isinstance(data, tuple) and len(data) == 2:
+            self._roi_scope_zone, self._roi_scope_inside = int(data[0]), bool(data[1])
+        attr = self._roi_attr_combo.currentData()
+        if attr:
+            self._roi_scope_attribution = str(attr)
+        self._apply_roi_scope_styling()
+        self._apply_roi_scope()
+
+    def _roi_mask_for_session(self, session_id: str, zone_index: int) -> "np.ndarray | None":
+        """Per-video-frame inside mask for one session and 1-based zone."""
+        key = (str(session_id), int(zone_index))
+        if key in self._roi_mask_cache:
+            return self._roi_mask_cache[key]
+        mask = None
+        if self._project_root is not None and zone_index > 0:
+            subject = self._subject_by_session.get(str(session_id), str(session_id))
+            try:
+                rois = self._roi_service.resolve_target_rois(
+                    self._project_root, f"{subject}::{session_id}"
+                )
+            except Exception:
+                rois = []
+            roi = rois[zone_index - 1] if zone_index - 1 < len(rois) else None
+            mask = roi_behavior_service.roi_inside_mask(
+                self._get_pose_for_session(str(session_id)), roi, self._project_fps()
+            )
+        self._roi_mask_cache[key] = mask
+        return mask
+
+    def _apply_roi_scope(self) -> None:
+        """Rebuild ``_raw_bouts`` and the summary metrics under the active scope.
+
+        Every analytics view reads ``_raw_bouts`` (and the summary rows derived
+        from it), so rewriting them here is what makes the scope apply to the
+        summary table, statistics, all chart styles, ethograms and exports at
+        once.  The ROI-occupancy and distance pseudo-behaviors are left alone:
+        "Time in ROI 1, restricted to ROI 1" is a tautology, and total distance
+        travelled is an arena-level measure.
+        """
+        if not self._raw_bouts_unscoped:
+            self._raw_bouts_unscoped = {
+                bid: df.copy() for bid, df in self._raw_bouts.items()
+            }
+
+        if self._roi_scope_zone <= 0:
+            self._raw_bouts = {
+                bid: df.copy() for bid, df in self._raw_bouts_unscoped.items()
+            }
+            self._rewrite_summary_from_raw_bouts()
+            self._refresh_all_views()
+            self._status.setText("ROI scope cleared — showing whole-arena behavior.")
+            return
+
+        sessions = sorted({
+            str(sid)
+            for df in self._raw_bouts_unscoped.values()
+            if not df.empty and "session_id" in df.columns
+            for sid in df["session_id"].astype(str).unique()
+        })
+        masks = {
+            sid: self._roi_mask_for_session(sid, self._roi_scope_zone)
+            for sid in sessions
+        }
+        offsets = {sid: self._analysis_prechop_for_session(sid) for sid in sessions}
+        fps = self._project_fps()
+        # A fragment shorter than ~0.1 s is boundary noise, not a behavior.
+        min_frames = max(1, int(round(0.1 * fps))) if fps > 0 else 1
+
+        scoped: dict[str, pd.DataFrame] = {}
+        unscopable: set[str] = set()
+        for bid, df in self._raw_bouts_unscoped.items():
+            out, missing = roi_behavior_service.scope_bouts_to_roi(
+                df, masks, offsets,
+                inside=self._roi_scope_inside,
+                attribution=self._roi_scope_attribution,
+                min_frames=min_frames,
+            )
+            scoped[bid] = out
+            unscopable |= missing
+
+        self._raw_bouts = scoped
+        self._rewrite_summary_from_raw_bouts(drop_sessions=unscopable)
+        self._refresh_all_views()
+
+        n_bouts = sum(len(df) for df in scoped.values())
+        msg = f"ROI scope: {self.roi_scope_label()} — {n_bouts} bout(s)."
+        if unscopable:
+            msg += (
+                f"  {len(unscopable)} session(s) excluded: no pose data or no "
+                f"zone defined for them."
+            )
+        self._status.setText(msg)
+
+    def _rewrite_summary_from_raw_bouts(self, drop_sessions: set[str] | None = None) -> None:
+        """Recompute every real behavior's summary metrics from ``_raw_bouts``.
+
+        Unlike :meth:`_recompute_summary_stats_from_shifted_bouts`, a
+        (session, behavior) pair with no surviving bouts is written down to
+        zero rather than left at its previous value — under an ROI scope
+        "no bouts in the zone" is the answer, not a reason to fall back to the
+        whole-arena number.  Sessions in *drop_sessions* could not be scoped at
+        all and are removed so they can't be read as a genuine zero.
+        """
+        if not self._summary_rows:
+            return
+        drop = {str(s) for s in (drop_sessions or set())}
+        fps = self._project_fps()
+
+        stats_by_key: dict[tuple[str, str], tuple[float, float, float, float]] = {}
+        for bid, bdf in self._raw_bouts.items():
+            stats_by_key.update({
+                (sid, str(bid)): vals
+                for (sid, _b), vals in roi_behavior_service.summarize_bouts(
+                    bdf, fps
+                ).items()
+            })
+
+        rows: list[dict[str, Any]] = []
+        for row in self._summary_rows:
+            bid, sid = str(row.get("behavior_id", "")), str(row.get("session_id", ""))
+            if is_pseudo_behavior_id(bid):
+                rows.append(row)
+                continue
+            if sid in drop:
+                continue
+            updated = dict(row)
+            n_b, time_s, mean_s, lat_s = stats_by_key.get(
+                (sid, bid), (0.0, 0.0, 0.0, float("nan"))
+            )
+            updated["n_bouts"] = n_b
+            updated["time_spent_s"] = time_s
+            updated["mean_bout_s"] = mean_s
+            updated["latency_s"] = lat_s
+            rows.append(updated)
+        self._summary_rows = rows
+
+    def _refresh_all_views(self) -> None:
+        """Redraw every sub-tab after the underlying bout data changed."""
+        self._summary_tab.rebuild()
+        self._graphs_tab._bin_cache = None
+        self._graphs_tab._bin_cache_key = ()
+        self._graphs_tab._ethogram_cache = None
+        self._graphs_tab._ethogram_cache_key = ()
+        self._graphs_tab.update_graph()
+        self._relationships_tab.on_data_loaded()
+        self._sections_tab.on_data_loaded()
+        self._velocity_tab.on_data_loaded()
+
     def _clear_display(self) -> None:
         self._summary_rows.clear()
         self._raw_bouts.clear()
+        self._raw_bouts_unscoped.clear()
+        self._roi_mask_cache.clear()
         self._last_stats_result.clear()
         self._pose_cache.clear()
         self._pose_vel_cache.clear()
@@ -4725,6 +4993,9 @@ class _SummaryStatsWidget(QWidget):
             )
         # Keep backward-compat "group" column from active factor
         df["group"] = df["session_label"].map(self._host._session_groups)
+        # Stamp the ROI scope so an in-zone export is never mistaken for
+        # whole-arena data once it leaves the app.
+        df["roi_scope"] = self._host.roi_scope_label()
         df.to_csv(path, index=False, encoding="utf-8-sig")
         self._host._status.setText(f"Exported summary CSV to {path}")
 
@@ -7813,6 +8084,11 @@ class _GraphsWidget(QWidget):
         present_ids = [c for c in _id_priority if c in data.columns]
         other_cols = [c for c in data.columns if c not in present_ids]
         data = data[present_ids + other_cols]
+
+        # Stamp the ROI scope so an in-zone export is never mistaken for
+        # whole-arena data once it leaves the app.
+        if self._host._roi_scope_zone > 0:
+            data.insert(0, "roi_scope", self._host.roi_scope_label())
 
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Graph Data", "",
@@ -12135,10 +12411,119 @@ class _BehaviorMotifWidget(QWidget):
             "AIC / AICc / BIC / ICL and session-held-out cross-validation each rank the\n"
             "candidate state counts. Nothing is changed until you approve it."
         )
+        self._hmm_min_dwell_spin = QDoubleSpinBox()
+        self._hmm_min_dwell_spin.setRange(0.0, 600.0)
+        self._hmm_min_dwell_spin.setDecimals(1)
+        self._hmm_min_dwell_spin.setSingleStep(0.5)
+        self._hmm_min_dwell_spin.setSuffix(" s")
+        self._hmm_min_dwell_spin.setValue(
+            float(getattr(self._settings, "hmm_state_min_dwell_s", 0.0))
+        )
+        self._hmm_min_dwell_spin.setToolTip(
+            "Minimum time in a state before it counts as having been entered.\n\n"
+            "Applies to the latency view: a state bout shorter than this is\n"
+            "treated as passing through rather than entering, so a single-bout\n"
+            "flicker cannot set the latency. 0 counts every entry.\n"
+            "Takes effect on the next Run HMM."
+        )
+        self._hmm_occ_combo = QComboBox()
+        self._hmm_occ_combo.addItem("Viterbi (hard)",   userData="viterbi")
+        self._hmm_occ_combo.addItem("Posterior (soft)", userData="posterior")
+        self._hmm_occ_combo.setCurrentIndex(
+            1 if str(getattr(self._settings, "hmm_occupancy_method", "viterbi")) == "posterior"
+            else 0
+        )
+        self._hmm_occ_combo.currentIndexChanged.connect(self._sync_hmm_occupancy_method)
+        self._hmm_occ_combo.setToolTip(
+            "How the time a subject spent in each state is measured \u2014 the number"
+            "\nthe occupancy bars and the group comparison are built from."
+            "\n\n"
+            "Viterbi (hard): the fraction of that subject's bouts that the single"
+            "\nmost likely state path assigns to the state. Every bout belongs to"
+            "\nexactly one state."
+            "\n\n"
+            "Posterior (soft): the average probability of being in the state,"
+            "\ntaken over the same bouts. A bout that two states could explain"
+            "\nsplits its weight between them, so the values are expected"
+            "\noccupancy rather than counts. Each subject's states still sum to 1."
+            "\n\n"
+            "They differ most for a state built on a rare behavior. Viterbi"
+            "\ndecoding optimises the whole path at once, so visiting a state for"
+            "\none or two bouts pays the transition cost twice; when that outweighs"
+            "\nthe emission gain the path stays where it is and the subject reports"
+            "\nexactly 0.000 even though the behavior did occur. Posterior"
+            "\noccupancy has no such threshold and returns a small non-zero value."
+            "\n\n"
+            "Choose Viterbi when the claim is about the discrete state sequence,"
+            "\nPosterior when it is about how much evidence there is for each"
+            "\nstate \u2014 and when a run of hard zeros would be misread as absence."
+            "\n\n"
+            "The ethogram, state bouts and latency views always use the Viterbi"
+            "\npath, because a state bout has to be a definite interval."
+            "\nTakes effect on the next Run HMM."
+        )
         ctrl1.addWidget(QLabel("Mode:"))
         ctrl1.addWidget(self._hmm_mode_combo)
         ctrl1.addWidget(QLabel("N states:"))
         ctrl1.addWidget(self._hmm_n_states_spin)
+        ctrl1.addWidget(QLabel("Min dwell:"))
+        ctrl1.addWidget(self._hmm_min_dwell_spin)
+        self._hmm_bf_combo = QComboBox()
+        self._hmm_bf_combo.addItem("Viterbi state bouts", userData="viterbi")
+        self._hmm_bf_combo.addItem("Top-N posterior",     userData="posterior_topn")
+        self._hmm_bf_combo.setCurrentIndex(
+            1 if str(getattr(self._settings, "hmm_state_bout_source", "viterbi"))
+            == "posterior_topn" else 0
+        )
+        self._hmm_bf_combo.currentIndexChanged.connect(self._sync_hmm_bout_source)
+        self._hmm_bf_combo.setToolTip(
+            "Which intervals the Export State Boutframes button writes."
+            "\n\n"
+            "Viterbi state bouts: the stretches the decoded path actually spent"
+            "\nin each state. A subject the path never routes into a state"
+            "\ncontributes no intervals for it, so anything aligned to those"
+            "\nintervals (a photometry mean, say) has no value for that subject"
+            "\n- a missing value, not a zero."
+            "\n\n"
+            "Top-N posterior: for every subject and every state, the N bouts whose"
+            "\nposterior probability of that state is highest, whether or not they"
+            "\nwon the decode. Every subject gets intervals for every state, so a"
+            "\nwithin-subject comparison stays balanced."
+            "\n\n"
+            "Top-N is defensible only because it applies the same rule to every"
+            "\nsubject. Using it to patch only the subjects with no winners would"
+            "\nput two selection rules in one column and confound the group"
+            "\ndifference with which rule each subject got."
+            "\n\n"
+            "Its cost: the output is non-empty by construction, so it cannot tell"
+            "\nyou whether a subject entered the state at all. A subject that never"
+            "\nperformed the behavior still gets N intervals, and theirs will carry"
+            "\na near-zero posterior. The exported evidence CSV reports the mean"
+            "\nposterior and the expected bout count per subject and state - read"
+            "\nit, and drop or flag the rows with no real evidence rather than"
+            "\nreporting them as time in the state."
+            "\n\n"
+            "Both modes also write an HMM_NoState column: the stretches no state"
+            "\nbout covers, usable as a within-subject null condition."
+        )
+        self._hmm_topn_spin = QSpinBox()
+        self._hmm_topn_spin.setRange(1, 50)
+        self._hmm_topn_spin.setValue(int(getattr(self._settings, "hmm_state_bout_top_n", 5)))
+        self._hmm_topn_spin.setVisible(
+            str(getattr(self._settings, "hmm_state_bout_source", "viterbi"))
+            == "posterior_topn"
+        )
+        self._hmm_topn_spin.valueChanged.connect(self._sync_hmm_bout_source)
+        self._hmm_topn_spin.setToolTip(
+            "How many bouts per subject per state the Top-N posterior selection"
+            "\nkeeps. Consecutive selected bouts merge into one interval, so the"
+            "\nnumber of intervals can be smaller than N."
+        )
+        ctrl1.addWidget(QLabel("Occupancy:"))
+        ctrl1.addWidget(self._hmm_occ_combo)
+        ctrl1.addWidget(QLabel("Boutframes:"))
+        ctrl1.addWidget(self._hmm_bf_combo)
+        ctrl1.addWidget(self._hmm_topn_spin)
         ctrl1.addWidget(self._hmm_calib_btn)
         ctrl1.addWidget(self._hmm_run_btn)
         ctrl1.addStretch(1)
@@ -12149,8 +12534,15 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_view_combo.addItem("Emission heatmap",                       userData="emission")
         self._hmm_view_combo.addItem("State occupancy per group",      userData="occupancy")
         self._hmm_view_combo.addItem("State-to-state transition heatmap",      userData="trans_hmm")
+        self._hmm_view_combo.addItem("State ethogram (per subject)",           userData="ethogram")
+        self._hmm_view_combo.addItem("Latency to enter each state",            userData="latency")
         self._hmm_view_combo.setToolTip(
-            "Choose which aspect of the HMM to visualize."
+            "Choose which aspect of the HMM to visualize.\n\n"
+            "'State ethogram' draws one row per subject with the session time "
+            "axis coloured by hidden state, so state sequences can be compared "
+            "animal by animal.\n"
+            "'Latency to enter each state' plots time from assay start to the "
+            "first state bout lasting at least the Min dwell setting."
         )
         self._hmm_view_combo.currentIndexChanged.connect(lambda _=None: self._sync_hmm_split_enabled())
         self._hmm_view_combo.currentIndexChanged.connect(lambda _=None: self._render_hmm())
@@ -12158,6 +12550,26 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_export_fig_btn.clicked.connect(lambda: self._export_figure("hmm"))
         self._hmm_export_csv_btn = QPushButton("Export CSV\u2026")
         self._hmm_export_csv_btn.clicked.connect(lambda: self._export_data_csv("hmm"))
+        self._hmm_export_boutframes_btn = QPushButton("Export State Boutframes\u2026")
+        self._hmm_export_boutframes_btn.setToolTip(
+            "Write the hidden states as a boutframes workbook \u2014 one sheet per "
+            "subject, one column per state, bout start frames in raw video\n"
+            "frame numbering. Identical in shape to the behavior boutframes "
+            "export, so TRACY reads it the same way and the state bouts land\n"
+            "on the photometry signal at the same places as the behavior bouts "
+            "and the ABELposition track from this project."
+        )
+        self._hmm_export_boutframes_btn.clicked.connect(self._export_state_boutframes)
+        self._hmm_export_ethogram_btn = QPushButton("Export Ethogram CSV\u2026")
+        self._hmm_export_ethogram_btn.setToolTip(
+            "Write the state ethogram as a frame-by-frame matrix \u2014 one column\n"
+            "per subject, one row per frame, each cell the state number for that\n"
+            "frame. Frames no state bout covers are left blank, or given a state\n"
+            "number of their own. Choose that, and assay-aligned\n"
+            "frames (the ethogram's own axis) or raw video frames (TRACY numbering)\n"
+            "when exporting."
+        )
+        self._hmm_export_ethogram_btn.clicked.connect(self._export_state_ethogram_csv)
         self._hmm_split_combo = QComboBox()
         self._hmm_split_combo.addItem("By group",   userData="group")
         self._hmm_split_combo.addItem("By session", userData="session")
@@ -12173,6 +12585,8 @@ class _BehaviorMotifWidget(QWidget):
         ctrl2.addWidget(self._hmm_split_combo)
         ctrl2.addWidget(self._hmm_export_fig_btn)
         ctrl2.addWidget(self._hmm_export_csv_btn)
+        ctrl2.addWidget(self._hmm_export_boutframes_btn)
+        ctrl2.addWidget(self._hmm_export_ethogram_btn)
         ctrl2.addStretch(1)
         self._sync_hmm_split_enabled()
         layout.addLayout(ctrl1)
@@ -12273,12 +12687,17 @@ class _BehaviorMotifWidget(QWidget):
         self._sync_settings_to_ui()
         self._transition_result.clear()
         self._motif_result.clear()
-        self._hmm_result.clear()
+        # The HMM fit is the expensive analysis in this tab and is a pure
+        # function of the bouts plus the fit settings, so it is restored from
+        # disk rather than re-run.  It is only rendered once analytics data is
+        # loaded (on_data_loaded), because the figures need the session labels.
+        self._hmm_result = load_hmm_result(project_root)
 
     def on_data_loaded(self) -> None:
         self._transition_result.clear()
         self._motif_result.clear()
-        self._hmm_result.clear()
+        if not self._hmm_result and self._project_root is not None:
+            self._hmm_result = load_hmm_result(self._project_root)
         for fig in (self._tr_fig, self._mo_fig, self._hmm_sel_fig, self._hmm_emit_fig):
             if fig is not None:
                 fig.clear()
@@ -12293,7 +12712,23 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_stats_btn.setEnabled(False)
         # Populate group pickers from newly loaded data
         self._refresh_group_combos()
-        self._status_lbl.setText("Data refreshed. Run an analysis in each sub-tab.")
+
+        # Redraw the restored HMM against the data that just loaded, so the
+        # panel is populated on open instead of demanding a re-fit.
+        restored = ""
+        if self._hmm_result and not self._hmm_result.get("error"):
+            try:
+                self._render_hmm()
+                restored = (
+                    f"  Restored the saved {self._hmm_result.get('n_states', '?')}-state "
+                    f"HMM fit{self._hmm_stale_suffix()}."
+                )
+            except Exception:
+                logger.exception("Could not redraw the restored HMM result.")
+                self._hmm_result = {}
+        self._status_lbl.setText(
+            "Data refreshed. Run an analysis in each sub-tab." + restored
+        )
 
     def _refresh_group_combos(self) -> None:
         """Populate the Group A / Group B dropdowns with current group names."""
@@ -12331,6 +12766,19 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_n_states_spin.setVisible(mode == "manual")
         self._save_settings()
 
+    def _sync_hmm_bout_source(self) -> None:
+        src = str(self._hmm_bf_combo.currentData() or "viterbi")
+        self._settings.hmm_state_bout_source = src
+        self._settings.hmm_state_bout_top_n = int(self._hmm_topn_spin.value())
+        self._hmm_topn_spin.setVisible(src == "posterior_topn")
+        self._save_settings()
+
+    def _sync_hmm_occupancy_method(self) -> None:
+        self._settings.hmm_occupancy_method = str(
+            self._hmm_occ_combo.currentData() or "viterbi"
+        )
+        self._save_settings()
+
     def _sync_settings_to_ui(self) -> None:
         self._tr_gap_spin.setValue(self._settings.max_transition_gap_s)
         self._tr_norm_cb.setChecked(self._settings.normalize_rows)
@@ -12340,6 +12788,17 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_mode_combo.setCurrentIndex(hmm_idx)
         self._hmm_n_states_spin.setValue(self._settings.hmm_n_states)
         self._hmm_n_states_spin.setVisible(self._settings.hmm_n_states_mode == "manual")
+        self._hmm_min_dwell_spin.setValue(
+            float(getattr(self._settings, "hmm_state_min_dwell_s", 0.0))
+        )
+        self._hmm_occ_combo.setCurrentIndex(
+            1 if str(getattr(self._settings, "hmm_occupancy_method", "viterbi")) == "posterior"
+            else 0
+        )
+        _bf_src = str(getattr(self._settings, "hmm_state_bout_source", "viterbi"))
+        self._hmm_bf_combo.setCurrentIndex(1 if _bf_src == "posterior_topn" else 0)
+        self._hmm_topn_spin.setValue(int(getattr(self._settings, "hmm_state_bout_top_n", 5)))
+        self._hmm_topn_spin.setVisible(_bf_src == "posterior_topn")
 
     def _save_settings(self) -> None:
         if self._project_root is not None:
@@ -13941,6 +14400,12 @@ class _BehaviorMotifWidget(QWidget):
         self._settings.hmm_n_states = int(self._hmm_n_states_spin.value())
         self._save_settings()
 
+        self._settings.hmm_state_min_dwell_s = float(self._hmm_min_dwell_spin.value())
+        self._settings.hmm_occupancy_method = str(
+            self._hmm_occ_combo.currentData() or "viterbi"
+        )
+        self._save_settings()
+
         settings_snap = MotifSettings(
             hmm_n_states_mode=self._settings.hmm_n_states_mode,
             hmm_n_states=self._settings.hmm_n_states,
@@ -13951,6 +14416,18 @@ class _BehaviorMotifWidget(QWidget):
             hmm_criterion=self._settings.hmm_criterion,
             hmm_random_seed=getattr(self._settings, "hmm_random_seed", 0),
             bout_overlap_tolerance_s=self._settings.bout_overlap_tolerance_s,
+            hmm_state_bout_max_gap_s=float(
+                getattr(self._settings, "hmm_state_bout_max_gap_s", 0.0)
+            ),
+            hmm_state_min_dwell_s=float(self._settings.hmm_state_min_dwell_s),
+            hmm_occupancy_method=str(self._settings.hmm_occupancy_method),
+            hmm_state_bout_source=str(self._settings.hmm_state_bout_source),
+            hmm_state_bout_top_n=int(self._settings.hmm_state_bout_top_n),
+            # The occupancy permutation test below reads these off the snapshot,
+            # so leaving them out silently ran it at the dataclass defaults and
+            # ignored whatever the user set in Motif Graph Settings.
+            n_permutations=int(self._settings.n_permutations),
+            permutation_seed=int(self._settings.permutation_seed),
         )
         session_group_map = self._build_session_group_map(sequences)
 
@@ -13961,6 +14438,20 @@ class _BehaviorMotifWidget(QWidget):
             for sid, evs in sequences.items()
         }
 
+        # Everything the state-bout layer needs is captured here, on the GUI
+        # thread, so the worker never touches host state.
+        fps = float(self._host._project_fps())
+        frame_offsets = {
+            sid: int(self._host._analysis_prechop_for_session(sid)) for sid in sequences
+        }
+        session_end_s = {
+            sid: self._hmm_session_extent_s(sid, fps, frame_offsets.get(sid, 0))
+            for sid in sequences
+        }
+        input_fingerprint = hmm_input_fingerprint(
+            sequences, bids, settings_snap, self._host._session_groups
+        )
+
         self._hmm_run_btn.setEnabled(False)
         self._hmm_run_btn.setText("Running\u2026")
         self._status_lbl.setText("Fitting HMM\u2026 (this may take a moment)")
@@ -13969,10 +14460,75 @@ class _BehaviorMotifWidget(QWidget):
             hmm_res = fit_hmm(sequences, bids, settings_snap)
             if hmm_res.get("error"):
                 return hmm_res
-            from abel.services.behavioral_motif_service import state_occupancy
+            from abel.services.behavioral_motif_service import (
+                decode_state_spans,
+                merge_state_bouts,
+                state_bout_summary,
+                state_bout_transition_counts,
+                resolve_state_occupancy,
+                state_entry_latency,
+            )
 
-            occ = state_occupancy(hmm_res.get("state_sequences", {}), hmm_res["n_states"])
+            # Viterbi counts or forward-backward posteriors, per the user's
+            # choice; resolve_state_occupancy falls back to Viterbi (and says so
+            # in occ_method) if the fit produced no posteriors, so the label on
+            # the figure always names the measure actually plotted.
+            occ, occ_method = resolve_state_occupancy(
+                hmm_res, settings_snap.hmm_occupancy_method
+            )
+            hmm_res["occupancy_method"] = occ_method
             n_states = hmm_res["n_states"]
+
+            # Put the clock back on the decoded states: bout-indexed states
+            # become timed state bouts that the ethogram, the latency metric
+            # and the TRACY boutframes export all read from.
+            max_gap = float(settings_snap.hmm_state_bout_max_gap_s)
+            spans = decode_state_spans(
+                sequences, bids, hmm_res.get("state_sequences", {})
+            )
+            state_bouts = merge_state_bouts(spans, max_gap_s=max_gap if max_gap > 0 else None)
+            hmm_res["state_bouts"] = state_bouts
+            hmm_res["state_bout_summary"] = state_bout_summary(state_bouts, n_states)
+            hmm_res["state_bout_transitions"] = {
+                sid: mat.tolist()
+                for sid, mat in state_bout_transition_counts(state_bouts, n_states).items()
+            }
+            hmm_res["state_latency"] = state_entry_latency(
+                state_bouts,
+                n_states,
+                min_dwell_s=float(settings_snap.hmm_state_min_dwell_s),
+                censor_at_s=session_end_s,
+            )
+            # Two alternative interval sets, built alongside the Viterbi state
+            # bouts rather than instead of them: the ethogram and the latency
+            # metric need the decoded path, while an export aligned to an
+            # external signal may need every subject represented.
+            from abel.services.behavioral_motif_service import (
+                posterior_selection_summary,
+                posterior_state_intervals,
+                unclaimed_intervals,
+            )
+
+            top_n = int(settings_snap.hmm_state_bout_top_n)
+            cand = posterior_state_intervals(
+                sequences, bids, hmm_res.get("state_posteriors", {}) or {},
+                n_states, top_n=top_n,
+                max_gap_s=max_gap if max_gap > 0 else None,
+            )
+            hmm_res["posterior_state_intervals"] = cand
+            hmm_res["posterior_selection_summary"] = posterior_selection_summary(
+                cand, n_states
+            )
+            hmm_res["unclaimed_intervals"] = unclaimed_intervals(
+                state_bouts, session_end_s=session_end_s, min_duration_s=1.0,
+            )
+            hmm_res["state_bout_source"] = str(settings_snap.hmm_state_bout_source)
+            hmm_res["state_bout_top_n"] = top_n
+            hmm_res["min_dwell_s"] = float(settings_snap.hmm_state_min_dwell_s)
+            hmm_res["state_bout_max_gap_s"] = max_gap
+            hmm_res["fps"] = fps
+            hmm_res["frame_offsets"] = frame_offsets
+            hmm_res["session_end_s"] = session_end_s
             # Per-group occupancy with SEM
             per_group_occ: dict[str, list[list[float]]] = {}
             for sid, fracs in occ.items():
@@ -14019,8 +14575,12 @@ class _BehaviorMotifWidget(QWidget):
             hmm_res["group_occ_sem"] = group_occ_sem
             hmm_res["pval_occ"] = {str(k): v.tolist() for k, v in pval_occ.items()}
             hmm_res["bnames"] = bnames
+            hmm_res["bid_to_name"] = bid_to_name
             hmm_res["session_groups"] = session_group_map
             hmm_res["groups"] = groups
+            # Stamped here, from the exact inputs this fit used, so a restored
+            # result can tell whether the data has moved under it.
+            hmm_res["input_fingerprint"] = input_fingerprint
             return hmm_res
 
         worker = TaskWorker(_compute)
@@ -14245,8 +14805,17 @@ class _BehaviorMotifWidget(QWidget):
             self._status_lbl.setText("HMM failed.")
             return
         self._render_hmm()
+        # Cache the fit so reopening the project restores it instead of
+        # re-running EM.  A save failure is reported but never discards the
+        # result the user is already looking at.
+        saved_note = ""
+        if self._project_root is not None:
+            if save_hmm_result(self._project_root, result) is None:
+                saved_note = " — could not be saved, so it will need re-running next time"
+            else:
+                saved_note = " and saved"
         self._status_lbl.setText(
-            f"HMM complete ({result.get('n_states', '?')} hidden states)."
+            f"HMM complete ({result.get('n_states', '?')} hidden states){saved_note}."
         )
 
     def _render_hmm(self) -> None:
@@ -14327,6 +14896,8 @@ class _BehaviorMotifWidget(QWidget):
             _hmm_bar_spacing = float(_hmm_mgs.get("bar_spacing", 1.0))
             group_occ_mean: dict[str, list[float]] = result.get("group_occ_mean", {})
             session_occ: dict[str, list[float]] = result.get("session_occupancy", {})
+            _occ_method = str(result.get("occupancy_method", "viterbi"))
+            _occ_lbl = "Posterior" if _occ_method == "posterior" else "Viterbi"
             session_grps_occ: dict[str, str] = result.get("session_groups", {})
             pval_occ_raw: dict[str, Any] = result.get("pval_occ", {})
             groups = result.get("groups", sorted(group_occ_mean.keys()))
@@ -14349,7 +14920,8 @@ class _BehaviorMotifWidget(QWidget):
                 ax.set_xticks(x)
                 ax.set_xticklabels([f"State {i}" for i in range(n_states)],
                                    fontsize=gs["tick_fontsize"])
-                ax.set_ylabel("Occupancy Fraction", fontsize=gs["axis_fontsize"])
+                ax.set_ylabel(f"Occupancy Fraction ({_occ_lbl})",
+                              fontsize=gs["axis_fontsize"])
                 ax.set_ylim(0, min(1.0, ax.get_ylim()[1] * 1.2 + 0.05))
                 ax.set_title("State Occupancy per Session",
                              fontsize=gs["title_fontsize"])
@@ -14410,7 +14982,8 @@ class _BehaviorMotifWidget(QWidget):
                 ax.set_xticks(x)
                 ax.set_xticklabels([f"State {i}" for i in range(n_states)],
                                    fontsize=gs["tick_fontsize"])
-                ax.set_ylabel("Mean Occupancy Fraction", fontsize=gs["axis_fontsize"])
+                ax.set_ylabel(f"Mean Occupancy Fraction ({_occ_lbl})",
+                              fontsize=gs["axis_fontsize"])
                 ax.set_ylim(0, min(1.0, ax.get_ylim()[1] * 1.2 + 0.05))
                 _hmm_eb_lbl = f" \u00b1 {_hmm_error_style}" if _hmm_error_style != "None" else ""
                 ax.set_title(f"State Occupancy per Group (mean{_hmm_eb_lbl})",
@@ -14440,17 +15013,31 @@ class _BehaviorMotifWidget(QWidget):
                 ax.text(0.5, 0.5, "No transition matrix data", ha="center", va="center",
                         transform=ax.transAxes)
 
+        elif view == "ethogram":
+            self._render_state_ethogram(result, gs)
+
+        elif view == "latency":
+            self._render_state_latency(result, gs)
+
         try:
             self._hmm_sel_fig.tight_layout(pad=1.0)
         except Exception:
             pass
         # Bar/line views shouldn't grow taller than the viewport; heatmaps
         # (emission, state-transition) keep their aspect ratio.
-        if view in ("occupancy", "model_sel"):
+        if view in ("occupancy", "model_sel", "latency"):
             _autofill_canvas(
                 getattr(self, "_hmm_canvas_scroll", None),
                 self._hmm_sel_canvas, self._hmm_sel_fig,
                 dpi=100, max_h=self._hmm_canvas_scroll.viewport().height(),
+            )
+        elif view == "ethogram":
+            # One row per subject: with a cohort of any size the raster is
+            # taller than the viewport, and squeezing it to fit would collapse
+            # the rows into an unreadable band.  Let it scroll instead.
+            _autofill_canvas(
+                getattr(self, "_hmm_canvas_scroll", None),
+                self._hmm_sel_canvas, self._hmm_sel_fig, dpi=100,
             )
         else:
             self._sync_hmm_canvas_to_viewport()
@@ -14473,7 +15060,31 @@ class _BehaviorMotifWidget(QWidget):
                     f"model fit vs. complexity."
                 )
 
-        lines: list[str] = [
+        lines: list[str] = []
+        if result.get("restored_from_cache"):
+            cache_state = self._hmm_cache_state()
+            saved_at = str(result.get("saved_at") or "")[:16].replace("T", " ")
+            stamp = f" (fitted {saved_at} UTC)" if saved_at else ""
+            if cache_state == "stale":
+                lines += [
+                    "STALE SAVED FIT — the bouts, behaviors, sessions or fit settings",
+                    "have changed since this was fitted. The figures below describe the",
+                    "older data. Click Run HMM to re-fit against what is loaded now.",
+                    "",
+                ]
+            elif cache_state == "current":
+                lines += [
+                    f"Saved fit restored{stamp} — its inputs match the data loaded now, "
+                    "so no re-fit is needed.",
+                    "",
+                ]
+            else:
+                lines += [
+                    f"Saved fit restored{stamp}. Its inputs could not be checked against "
+                    "the current data, so whether it is still up to date is unknown.",
+                    "",
+                ]
+        lines += [
             f"HMM  |  {n_states} hidden states (auto-selected by {sel_criterion}){criterion_reason}",
             f"Log-likelihood={result.get('log_likelihood', float('nan')):.2f}  "
             f"AIC={result.get('aic', float('nan')):.2f}  "
@@ -14495,14 +15106,619 @@ class _BehaviorMotifWidget(QWidget):
                 p = float(pvals[st])
                 sig = "***" if p < 0.001 else "**" if p < 0.01 else "*" if p < 0.05 else "ns"
                 lines.append(f"  State {st}: p={p:.4f} ({sig})")
+        occ_method = str(result.get("occupancy_method", "viterbi"))
+        if occ_method == "posterior":
+            lines.append(
+                "\nOccupancy measure: posterior (soft). Each subject's value is the "
+                "mean forward-backward probability of the state over that subject's "
+                "bouts, so a bout several states could explain splits its weight "
+                "between them."
+            )
+        else:
+            lines.append(
+                "\nOccupancy measure: Viterbi (hard). Each subject's value is the "
+                "fraction of that subject's bouts the single most likely state path "
+                "assigns to the state.\n"
+                "  A state whose defining behavior is rare can read exactly 0.000 for "
+                "a subject that did perform it a few times: the path will not pay the "
+                "transition cost twice to visit a state for one or two bouts. Switch "
+                "the Occupancy control to Posterior if those zeros matter."
+            )
         group_occ_mean: dict[str, list[float]] = result.get("group_occ_mean", {})
         if group_occ_mean:
             lines.append("\nGroup mean occupancy:")
             for grp, fracs in sorted(group_occ_mean.items()):
                 frac_s = "  ".join(f"S{i}:{fracs[i]:.3f}" for i in range(len(fracs)))
                 lines.append(f"  {grp}: {frac_s}")
+
+        state_bouts = result.get("state_bouts", {}) or {}
+        if state_bouts:
+            n_sb = sum(len(v) for v in state_bouts.values())
+            gap = float(result.get("state_bout_max_gap_s", 0.0))
+            gap_note = f"broken by gaps > {gap:g}s" if gap > 0 else "never broken by time"
+            lines.append(
+                f"\nState bouts: {n_sb} across {len(state_bouts)} sessions "
+                f"(runs of consecutive bouts sharing a state, {gap_note}).\n"
+                "  A state bout spans from the first to the last member bout, so the "
+                "silence between them counts as time in the state; its duration is "
+                "therefore not the sum of the member bouts' durations."
+            )
+            summ = result.get("state_bout_summary", {}) or {}
+            if summ:
+                dwell = np.array(
+                    [s["mean_dwell_s"] for s in summ.values()], dtype=float
+                )
+                with np.errstate(invalid="ignore"):
+                    dwell_mean = np.nanmean(dwell, axis=0)
+                lines.append("  Mean dwell per state (s): " + "  ".join(
+                    f"S{i}:{dwell_mean[i]:.1f}" for i in range(len(dwell_mean))
+                ))
+
+        latency = result.get("state_latency", {}) or {}
+        if latency:
+            min_dwell = float(result.get("min_dwell_s", 0.0))
+            lines.append(
+                f"\nLatency to first entry (min dwell "
+                f"{min_dwell:g}s{' — every entry counts' if min_dwell <= 0 else ''}):"
+            )
+            lat_arr = np.array([r["latency_s"] for r in latency.values()], dtype=float)
+            entered = np.array([r["entered"] for r in latency.values()], dtype=bool)
+            for st in range(n_states):
+                col = lat_arr[:, st]
+                n_in = int(entered[:, st].sum())
+                n_out = int(len(col) - n_in)
+                if n_in:
+                    lines.append(
+                        f"  State {st}: {np.nanmean(col):.1f}s mean over {n_in} "
+                        f"session(s); {n_out} never entered (excluded, not censored to "
+                        f"session end)."
+                    )
+                else:
+                    lines.append(f"  State {st}: never entered by any session.")
         self._hmm_stats_text = "\n".join(lines)
         self._hmm_stats_btn.setEnabled(True)
+
+    # ── Cached fit ──────────────────────────────────────────
+
+    def _current_hmm_fingerprint(self) -> str:
+        """Fingerprint of the data and settings a fit would use right now.
+
+        Returns ``""`` when there is nothing to fit — the caller then makes no
+        staleness claim either way, rather than reporting a mismatch against an
+        empty dataset.
+        """
+        if not self._host._raw_bouts:
+            return ""
+        try:
+            from abel.services.behavioral_motif_service import filter_overlapping_events
+
+            bids, _names, _map = self._get_behavior_ids_and_names()
+            sequences = self._get_sequences_for_analysis()
+            if not bids or not sequences:
+                return ""
+            overlap_tol = self._settings.bout_overlap_tolerance_s
+            sequences = {
+                sid: filter_overlapping_events(evs, overlap_tol)
+                for sid, evs in sequences.items()
+            }
+            return hmm_input_fingerprint(
+                sequences, bids, self._settings, self._host._session_groups
+            )
+        except Exception:
+            logger.exception("Could not fingerprint the current HMM inputs.")
+            return ""
+
+    def _hmm_cache_state(self) -> str:
+        """``"stale"`` | ``"current"`` | ``"unverified"`` for the loaded fit.
+
+        Three outcomes, not two: with no analytics data loaded, or a fit saved
+        before fingerprinting existed, there is nothing to compare against.
+        Calling that "current" would tell the user their figures match data
+        nobody checked.
+        """
+        saved = str(self._hmm_result.get("input_fingerprint") or "")
+        if not saved:
+            return "unverified"
+        current = self._current_hmm_fingerprint()
+        if not current:
+            return "unverified"
+        return "current" if current == saved else "stale"
+
+    def _hmm_is_stale(self) -> bool:
+        """True only when the inputs are known to have changed."""
+        return self._hmm_cache_state() == "stale"
+
+    def _hmm_stale_suffix(self) -> str:
+        """Short parenthetical for status lines; empty when the fit is current."""
+        if not self._hmm_result.get("restored_from_cache"):
+            return ""
+        state = self._hmm_cache_state()
+        if state == "stale":
+            return " — STALE: the bouts, behaviors or settings changed since it was fitted"
+        saved_at = str(self._hmm_result.get("saved_at") or "")[:16].replace("T", " ")
+        stamp = f" (fitted {saved_at} UTC)" if saved_at else ""
+        return stamp if state == "current" else f"{stamp}, not checked against the current data"
+
+    # ── State ethogram / latency / boutframes export ──────────────────
+
+    def _hmm_session_extent_s(self, session_id: str, fps: float, prechop: int) -> float:
+        """Recorded length of a session in the *analysis* clock (0 = test onset).
+
+        Deliberately not ``_GraphsWidget._session_analysis_end_s``: that helper
+        returns the raw video duration when a pose file is available but the
+        rebased bout extent when one is not, and the two differ by the prechop.
+        The ethogram and the latency denominator need one consistent clock —
+        the same rebased one the state bouts are in — so the prechop is taken
+        off the pose length explicitly here.
+        """
+        try:
+            pose = self._host._get_pose_for_session(session_id)
+            n_frames = int(getattr(pose, "n_frames", 0) or 0) if pose is not None else 0
+        except Exception:
+            n_frames = 0
+        if n_frames > prechop:
+            return float(n_frames - prechop) / fps
+
+        # No pose to measure: fall back to the last bout, which is already
+        # rebased.  The backdrop then stops at the last bout rather than
+        # claiming a session length nothing observed.
+        last = 0.0
+        for bdf in self._host._raw_bouts.values():
+            if bdf.empty or not {"session_id", "end_frame"}.issubset(bdf.columns):
+                continue
+            grp = bdf[bdf["session_id"].astype(str) == str(session_id)]
+            if grp.empty:
+                continue
+            last = max(last, float(pd.to_numeric(grp["end_frame"], errors="coerce").max()))
+        return (last + 1.0) / fps if last > 0 else 0.0
+
+    def _hmm_ordered_sessions(self, result: dict[str, Any]) -> list[tuple[str, str, str]]:
+        """Sessions as ``(session_id, display_label, group)``, grouped then named.
+
+        Rows are ordered by group so an ethogram reads as blocks of animals
+        that belong together, and the caller can draw a separator wherever the
+        group changes.
+        """
+        label_map = self._host._session_label_by_session
+        group_map = result.get("session_groups", {}) or {}
+        rows: list[tuple[str, str, str]] = []
+        for sid in result.get("state_bouts", {}):
+            label = label_map.get(sid, sid)
+            rows.append((sid, label, str(group_map.get(sid, ""))))
+        rows.sort(key=lambda r: (r[2], r[1]))
+        return rows
+
+    def _render_state_ethogram(self, result: dict[str, Any], gs: dict) -> None:
+        """One row per subject; session time coloured by hidden state.
+
+        Draws the *state bouts* (runs of consecutive bouts sharing a state),
+        not the individual behavior bouts, so a row shows how an animal moved
+        between latent states over the session rather than what it did moment
+        to moment.
+        """
+        from matplotlib.patches import Patch
+
+        ax = self._hmm_sel_fig.add_subplot(111)
+        n_states = int(result.get("n_states", 0))
+        state_bouts: dict[str, list[dict]] = result.get("state_bouts", {}) or {}
+        rows = self._hmm_ordered_sessions(result)
+        if not rows or n_states <= 0:
+            ax.text(0.5, 0.5, "No state bouts to draw — run the HMM first.",
+                    ha="center", va="center", transform=ax.transAxes)
+            return
+
+        session_end = result.get("session_end_s", {}) or {}
+        bar_h = 0.72
+        max_x = 0.0
+        for y, (sid, _label, _grp) in enumerate(rows):
+            end_s = float(session_end.get(sid, 0.0))
+            if end_s <= 0:
+                end_s = max((float(b["end_s"]) for b in state_bouts.get(sid, [])), default=0.0)
+            max_x = max(max_x, end_s)
+            # Session backdrop: makes the stretches with no bouts at all read
+            # as unmodelled rather than as whatever state happens to be
+            # adjacent — the HMM makes no claim about those.  Neutral grey, so
+            # it never competes with a state colour for the reader's attention.
+            if end_s > 0:
+                ax.broken_barh([(0.0, end_s)], (y - bar_h / 2, bar_h),
+                               facecolors=_ETHOGRAM_GAP_COLOR, edgecolors="none",
+                               zorder=1)
+            by_state: dict[int, list[tuple[float, float]]] = {}
+            for b in state_bouts.get(sid, []):
+                st = int(b["state"])
+                by_state.setdefault(st, []).append(
+                    (float(b["start_s"]), max(0.0, float(b["duration_s"])))
+                )
+                max_x = max(max_x, float(b["end_s"]))
+            for st, spans in by_state.items():
+                ax.broken_barh(spans, (y - bar_h / 2, bar_h),
+                               facecolors=_PALETTE[st % len(_PALETTE)],
+                               edgecolors="none", zorder=2)
+
+        # Separators between groups, so blocks of animals read as blocks.
+        for y in range(1, len(rows)):
+            if rows[y][2] != rows[y - 1][2]:
+                ax.axhline(y - 0.5, color="#90a4ae", linewidth=0.8, alpha=0.7, zorder=3)
+
+        ax.set_yticks(range(len(rows)))
+        ax.set_yticklabels(
+            [f"{lbl}  [{grp}]" if grp else lbl for _sid, lbl, grp in rows],
+            fontsize=max(6, int(gs["tick_fontsize"]) - 1),
+        )
+        ax.set_ylim(len(rows) - 0.5, -0.5)
+        ax.set_xlim(0, max(max_x, 1.0))
+        ax.set_xlabel("Time from assay start (s)", fontsize=gs["axis_fontsize"])
+        ax.set_title(f"HMM State Ethogram ({n_states} states)", fontsize=gs["title_fontsize"])
+        ax.tick_params(labelsize=gs["tick_fontsize"])
+        ax.grid(False)
+
+        handles = [
+            Patch(facecolor=_PALETTE[st % len(_PALETTE)], label=f"State {st}")
+            for st in range(n_states)
+        ]
+        handles.append(Patch(facecolor=_ETHOGRAM_GAP_COLOR, label="no bouts"))
+        ax.legend(handles=handles, fontsize="x-small", ncol=min(len(handles), 6),
+                  loc="upper center", bbox_to_anchor=(0.5, -0.12), frameon=False)
+
+        # Height follows the row count; the canvas scrolls rather than squashing.
+        try:
+            self._hmm_sel_fig.set_size_inches(
+                float(self._hmm_sel_fig.get_figwidth()),
+                max(2.4, 0.30 * len(rows) + 1.8),
+            )
+        except Exception:
+            pass
+
+    def _render_state_latency(self, result: dict[str, Any], gs: dict) -> None:
+        """Latency from assay start to the first qualifying bout in each state.
+
+        Non-entering animals are drawn as open markers at the top of the axis
+        and counted in the caption; their latency is undefined, so they are
+        excluded from the group mean rather than folded in at the session
+        length, which would report a number the data never measured.
+        """
+        ax = self._hmm_sel_fig.add_subplot(111)
+        n_states = int(result.get("n_states", 0))
+        latency: dict[str, dict] = result.get("state_latency", {}) or {}
+        if not latency or n_states <= 0:
+            ax.text(0.5, 0.5, "No latency data — run the HMM first.",
+                    ha="center", va="center", transform=ax.transAxes)
+            return
+
+        mgs = self._motif_graph_settings
+        error_style = mgs.get("error_style", "SEM")
+        bar_spacing = float(mgs.get("bar_spacing", 1.0))
+        group_map: dict[str, str] = result.get("session_groups", {}) or {}
+        groups = result.get("groups") or sorted({g for g in group_map.values() if g})
+        if not groups:
+            groups = [""]
+
+        by_group: dict[str, list[list[float]]] = {g: [] for g in groups}
+        censored: dict[str, np.ndarray] = {g: np.zeros(n_states, dtype=int) for g in groups}
+        for sid, rec in latency.items():
+            grp = group_map.get(sid, "") if groups != [""] else ""
+            if grp not in by_group:
+                continue
+            by_group[grp].append([float(v) for v in rec.get("latency_s", [])])
+            for st, entered in enumerate(rec.get("entered", [])):
+                if st < n_states and not entered:
+                    censored[grp][st] += 1
+
+        x = np.arange(n_states)
+        width = min(0.80, 0.70 * bar_spacing) / max(len(groups), 1)
+        max_bar = 0.0
+        for gi, grp in enumerate(groups):
+            arr = np.asarray(by_group.get(grp) or [[np.nan] * n_states], dtype=float)
+            # A state no animal in this group entered is an all-NaN column;
+            # nanmean would warn and return NaN, so compute only where there is
+            # something to average and leave the rest at zero height.
+            n_valid = np.sum(np.isfinite(arr), axis=0)
+            means = np.zeros(n_states)
+            sds = np.zeros(n_states)
+            for st in range(n_states):
+                col = arr[np.isfinite(arr[:, st]), st]
+                if col.size:
+                    means[st] = float(col.mean())
+                if col.size > 1:
+                    sds[st] = float(col.std(ddof=1))
+            sems = np.divide(sds, np.sqrt(np.maximum(n_valid, 1)),
+                             out=np.zeros(n_states), where=n_valid > 0)
+            errs = sds if error_style == "SD" else sems
+            offset = (gi - len(groups) / 2 + 0.5) * width * bar_spacing
+            ax.bar(x + offset, means, width=width * 0.9 * bar_spacing,
+                   yerr=(errs if error_style != "None" else None),
+                   label=grp or "all sessions",
+                   color=_PALETTE[gi % len(_PALETTE)],
+                   capsize=int(mgs.get("eb_capsize", 4)) if error_style != "None" else 0,
+                   error_kw={"elinewidth": float(mgs.get("eb_linewidth", 1.0)),
+                             "capthick": float(mgs.get("eb_linewidth", 1.0))}
+                   if error_style != "None" else {})
+            max_bar = max(max_bar, float((means + errs).max()) if n_states else 0.0)
+            for st in range(n_states):
+                n_cens = int(censored[grp][st])
+                if n_cens:
+                    ax.text(x[st] + offset, 0.0, f"{n_cens}✕",
+                            ha="center", va="bottom", fontsize=6, color="#8d3b00")
+
+        min_dwell = float(result.get("min_dwell_s", 0.0))
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"S{st}" for st in range(n_states)], fontsize=gs["tick_fontsize"])
+        ax.set_xlabel("Hidden state", fontsize=gs["axis_fontsize"])
+        ax.set_ylabel("Latency to first entry (s)", fontsize=gs["axis_fontsize"])
+        dwell_note = f"min dwell {min_dwell:g}s" if min_dwell > 0 else "any duration counts"
+        ax.set_title(f"Latency to Enter Each State ({dwell_note})",
+                     fontsize=gs["title_fontsize"])
+        ax.tick_params(labelsize=gs["tick_fontsize"])
+        if groups != [""]:
+            ax.legend(fontsize="x-small")
+        # Only annotate censoring when there is some — an unconditional caption
+        # would imply missing animals in every dataset.
+        if any(int(c.sum()) for c in censored.values()):
+            ax.set_xlabel(
+                "Hidden state\nn✕ = never entered (excluded from the mean)",
+                fontsize=gs["axis_fontsize"],
+            )
+
+    def _ask_ethogram_csv_options(self, n_states: int) -> tuple[bool, int | None] | None:
+        """Ask how to number the rows and what to put in stateless frames.
+
+        Returns ``(raw_video_frames, no_state_value)``, or ``None`` if the user
+        cancelled.  Both choices change what the numbers in the file mean, so
+        neither can be guessed: the two frame clocks disagree by the per-session
+        prechop, and a "no state" code is a number a reader could otherwise
+        mistake for a state.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Export Ethogram CSV")
+        vbox = QVBoxLayout(dlg)
+
+        intro = QLabel(
+            "One column per subject, one row per frame, each cell the HMM state "
+            "for that frame."
+        )
+        intro.setWordWrap(True)
+        vbox.addWidget(intro)
+
+        clock_box = QGroupBox("Frame numbering")
+        clock_v = QVBoxLayout(clock_box)
+        aligned_rb = QRadioButton("Assay-aligned \u2014 frame 0 is the assay start for every subject")
+        aligned_rb.setToolTip(
+            "The ethogram's own axis: a row is the same moment in every column, "
+            "so subjects can be compared row by row."
+        )
+        raw_rb = QRadioButton("Raw video frames \u2014 each subject keeps its own video numbering")
+        raw_rb.setToolTip(
+            "Matches the state boutframes export and TRACY. Columns are no longer "
+            "aligned in time with each other, and pre-assay frames stay blank."
+        )
+        aligned_rb.setChecked(True)
+        clock_v.addWidget(aligned_rb)
+        clock_v.addWidget(raw_rb)
+        vbox.addWidget(clock_box)
+
+        gap_box = QGroupBox("Frames with no state")
+        gap_v = QVBoxLayout(gap_box)
+        blank_rb = QRadioButton("Leave blank")
+        code_rb = QRadioButton(f"Fill with {int(n_states)} (the next number after the last state)")
+        code_rb.setToolTip(
+            "Gives the stretches the HMM says nothing about a state number of "
+            "their own, for tools that cannot read an empty cell."
+        )
+        blank_rb.setChecked(True)
+        gap_v.addWidget(blank_rb)
+        gap_v.addWidget(code_rb)
+        gap_note = QLabel(
+            "Frames outside a subject's own recording stay blank either way \u2014 "
+            "nothing was observed there to call stateless."
+        )
+        gap_note.setWordWrap(True)
+        gap_note.setStyleSheet("color:#90a4ae;font-size:10px;")
+        gap_v.addWidget(gap_note)
+        vbox.addWidget(gap_box)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        vbox.addWidget(buttons)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return raw_rb.isChecked(), (int(n_states) if code_rb.isChecked() else None)
+
+    def _export_state_ethogram_csv(self) -> None:
+        """Write the ethogram as a frame x subject matrix of state numbers."""
+        result = self._hmm_result
+        if not result or result.get("error") or not result.get("state_bouts"):
+            QMessageBox.information(
+                self, "Export Ethogram CSV", "Run the HMM analysis first."
+            )
+            return
+
+        n_states = int(result.get("n_states") or 0)
+        choice = self._ask_ethogram_csv_options(n_states)
+        if choice is None:
+            return
+        raw_frames, no_state_value = choice
+
+        from abel.services.behavioral_motif_service import state_frame_matrix
+
+        fps = float(result.get("fps") or self._host._project_fps())
+        matrices = state_frame_matrix(
+            result["state_bouts"],
+            fps=fps,
+            session_end_s={
+                str(k): float(v) for k, v in (result.get("session_end_s") or {}).items()
+            },
+            frame_offsets={
+                str(k): int(v) for k, v in (result.get("frame_offsets") or {}).items()
+            },
+            raw_video_frames=raw_frames,
+            no_state_value=no_state_value,
+        )
+        rows = [r for r in self._hmm_ordered_sessions(result) if len(matrices.get(r[0], ())) > 0]
+        if not rows:
+            QMessageBox.information(self, "Export Ethogram CSV", "No state bouts to export.")
+            return
+
+        n_frames = max(len(matrices[sid]) for sid, _lbl, _grp in rows)
+        data: dict[str, Any] = {}
+        for sid, label, grp in rows:
+            col = f"{label} [{grp}]" if grp else str(label)
+            # Session ids are unique, labels are not guaranteed to be.
+            if col in data:
+                col = f"{col} ({sid})"
+            arr = matrices[sid]
+            padded = np.full(n_frames, np.nan, dtype=float)
+            padded[:len(arr)] = arr
+            # Nullable ints: states are numbers, and a frame left without one
+            # stays empty rather than becoming 0 (a real state) or 0.0 (noise).
+            data[col] = pd.Series(padded).astype("Int64")
+
+        df = pd.DataFrame(data, index=pd.RangeIndex(n_frames, name="frame"))
+        df.insert(0, "time_s", np.round(df.index.to_numpy(dtype=float) / fps, 4))
+
+        kind = "rawframes" if raw_frames else "aligned"
+        if no_state_value is not None:
+            kind += f"_nostate{no_state_value}"
+        default_name = f"hmm_state_ethogram_{n_states}states_{kind}.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Ethogram CSV", default_name, "CSV (*.csv);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            df.to_csv(path, index=True, na_rep="", encoding="utf-8-sig")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Ethogram CSV", f"Export failed:\n\n{exc}")
+            return
+        self._host._status.setText(f"Exported HMM state ethogram to {path}")
+
+    def _export_state_boutframes(self) -> None:
+        """Write the HMM state bouts as a TRACY-readable boutframes workbook."""
+        result = self._hmm_result
+        if not result or result.get("error") or not result.get("state_bouts"):
+            QMessageBox.information(
+                self, "Export State Boutframes", "Run the HMM analysis first."
+            )
+            return
+        if self._host._project_root is None:
+            QMessageBox.information(self, "Export State Boutframes", "No project loaded.")
+            return
+
+        from abel.services.behavioral_motif_service import (
+            UNCLAIMED_STATE,
+            default_state_label,
+            state_bouts_to_frames,
+        )
+        from abel.services.export_service import ExportService
+
+        n_states = int(result["n_states"])
+        fps = float(result.get("fps") or self._host._project_fps())
+
+        # Which intervals to write, plus the unclaimed stretches as a null
+        # condition. The null column is always present so every sheet has the
+        # same columns, even for a session with no gaps.
+        source = str(result.get("state_bout_source", "viterbi"))
+        if source == "posterior_topn":
+            chosen_bouts = result.get("posterior_state_intervals") or {}
+            if not chosen_bouts:
+                QMessageBox.information(
+                    self, "Export State Boutframes",
+                    "This fit carries no posterior intervals. Re-run the HMM with "
+                    "Boutframes set to Top-N posterior.",
+                )
+                return
+        else:
+            chosen_bouts = result["state_bouts"]
+        null_bouts = result.get("unclaimed_intervals") or {}
+        merged_bouts = {
+            sid: list(chosen_bouts.get(sid, [])) + list(null_bouts.get(sid, []))
+            for sid in set(chosen_bouts) | set(null_bouts)
+        }
+        # Prechop offsets go back on here: _raw_bouts is rebased so frame 0 is
+        # test onset, but TRACY aligns on raw video frames — the same numbering
+        # the behavior boutframes and ABELposition exports use.
+        intervals = state_bouts_to_frames(
+            merged_bouts,
+            fps=fps,
+            n_states=n_states,
+            frame_offsets={
+                str(k): int(v) for k, v in (result.get("frame_offsets") or {}).items()
+            },
+            include_unclaimed=True,
+        )
+        if not intervals:
+            QMessageBox.information(self, "Export State Boutframes", "No state bouts to export.")
+            return
+
+        tag = (f"posterior_top{int(result.get('state_bout_top_n', 5))}"
+               if source == "posterior_topn" else "viterbi")
+        default_name = f"hmm_state_boutframes_{tag}_{n_states}states.xlsx"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export HMM State Boutframes", default_name, "Excel (*.xlsx);;All Files (*)"
+        )
+        if not path:
+            return
+
+        svc = ExportService()
+        svc.set_project(self._host._project_root)
+        svc.set_behavior_service(self._host._behaviors)
+        chosen = Path(path)
+        out = svc.export_state_boutframes_xlsx(
+            intervals,
+            filename=chosen.name,
+            column_order=(
+                [default_state_label(st) for st in range(n_states)]
+                + [default_state_label(UNCLAIMED_STATE)]
+            ),
+            include_end_frames=True,
+            out_dir=chosen.parent,
+        )
+        if not out.success:
+            QMessageBox.warning(
+                self, "Export State Boutframes",
+                "Export failed:\n\n" + ("\n".join(out.warnings) or "Unknown error"),
+            )
+            return
+        evidence_note = ""
+        if source == "posterior_topn":
+            ev_rows = result.get("posterior_selection_summary") or []
+            if ev_rows:
+                import pandas as _pd
+                ev = _pd.DataFrame(ev_rows)
+                lm = self._host._session_label_by_session
+                ev["session_label"] = ev["session_id"].map(lambda x: lm.get(x, x))
+                ev["group"] = ev["session_label"].map(
+                    lambda x: self._host._session_groups.get(x, "")
+                )
+                ev["state_label"] = ev["state"].map(default_state_label)
+                ev_path = chosen.with_name(chosen.stem + "_evidence.csv")
+                try:
+                    ev.to_csv(ev_path, index=False, encoding="utf-8-sig")
+                    evidence_note = (
+                        f"\n\nEvidence table: {ev_path.name}\n"
+                        "Every subject has intervals for every state by construction. "
+                        "Check mean_posterior / expected_bouts there before reporting "
+                        "a state value: a subject whose selected bouts carry a "
+                        "near-zero posterior did not enter that state."
+                    )
+                except Exception as exc:
+                    evidence_note = f"\n\nCould not write the evidence table: {exc}"
+
+        written = "\n".join(str(p) for p in out.output_paths)
+        self._host._status.setText(f"Exported HMM state boutframes to {out.output_path}")
+        QMessageBox.information(
+            self, "Export State Boutframes",
+            f"Wrote {len(out.output_paths)} workbook(s):\n\n{written}\n\n"
+            "Frames are raw video frames, so TRACY places these state bouts on "
+            "the photometry signal exactly as it places behavior boutframes.\n\n"
+            "The HMM_NoState column holds the stretches no state bout covers - "
+            "no scored behavior and no state - for use as a within-subject null "
+            "condition."
+            + evidence_note,
+        )
 
     # ── Stats popup dialogs ───────────────────────────────────────────
 
@@ -15216,14 +16432,65 @@ class _BehaviorMotifWidget(QWidget):
                 for j in range(n_states):
                     r2[f"to_{j}"] = trans_mat[i][j] if trans_mat and i < len(trans_mat) else 0.0
                 rows3.append(r2)
+            lm = self._host._session_label_by_session
             for sid, fracs in result.get("session_occupancy", {}).items():
-                lm = self._host._session_label_by_session
                 r3: dict[str, Any] = {"state": -1, "type": "occupancy",
+                                       "occupancy_method": str(
+                                           result.get("occupancy_method", "viterbi")),
                                        "session_id": sid, "session_label": lm.get(sid, sid),
                                        "group": self._host._session_groups.get(lm.get(sid, sid), "")}
                 for st, frac in enumerate(fracs):
                     r3[f"state_{st}_frac"] = frac
                 rows3.append(r3)
+
+            # Per-session state-bout records: what the ethogram draws and what
+            # the state boutframes workbook writes, in one flat table.
+            from abel.services.behavioral_motif_service import state_bout_rows
+
+            fps = float(result.get("fps") or self._host._project_fps())
+            offsets = {str(k): int(v) for k, v in (result.get("frame_offsets") or {}).items()}
+            for row in state_bout_rows(
+                result.get("state_bouts", {}) or {},
+                fps=fps,
+                frame_offsets=offsets,
+                session_labels=lm,
+                session_groups=self._host._session_groups,
+                behavior_names=result.get("bid_to_name", {}) or {},
+            ):
+                rows3.append({"type": "state_bout", **row})
+
+            for sid, summ in (result.get("state_bout_summary", {}) or {}).items():
+                r4: dict[str, Any] = {
+                    "state": -1, "type": "state_bout_summary",
+                    "session_id": sid, "session_label": lm.get(sid, sid),
+                    "group": self._host._session_groups.get(lm.get(sid, sid), ""),
+                    "covered_s": summ.get("covered_s", 0.0),
+                }
+                for st in range(n_states):
+                    r4[f"state_{st}_n_bouts"] = summ["n_state_bouts"][st]
+                    r4[f"state_{st}_total_s"] = summ["total_s"][st]
+                    r4[f"state_{st}_mean_dwell_s"] = summ["mean_dwell_s"][st]
+                    r4[f"state_{st}_time_frac"] = summ["time_frac"][st]
+                rows3.append(r4)
+
+            min_dwell = float(result.get("min_dwell_s", 0.0))
+            for sid, rec in (result.get("state_latency", {}) or {}).items():
+                r5: dict[str, Any] = {
+                    "state": -1, "type": "state_latency",
+                    "session_id": sid, "session_label": lm.get(sid, sid),
+                    "group": self._host._session_groups.get(lm.get(sid, sid), ""),
+                    "min_dwell_s": min_dwell,
+                    "observed_s": rec.get("observed_s", float("nan")),
+                }
+                for st in range(n_states):
+                    # Blank, not the session length, for animals that never
+                    # entered: the latency was not observed and must not be
+                    # averaged as if it had been.
+                    r5[f"state_{st}_latency_s"] = rec["latency_s"][st]
+                    r5[f"state_{st}_entered"] = int(bool(rec["entered"][st]))
+                    r5[f"state_{st}_n_entries"] = rec["n_entries"][st]
+                rows3.append(r5)
+
             pd.DataFrame(rows3).to_csv(path, index=False, encoding="utf-8-sig")
             self._host._status.setText(f"Exported to {path}")
 

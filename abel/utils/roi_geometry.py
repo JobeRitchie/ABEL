@@ -472,3 +472,23 @@ def _rdp_open(points: list[list[float]], epsilon: float) -> list[list[float]]:
         right = _rdp_open(points[index:], epsilon)
         return left[:-1] + right
     return [points[0], points[-1]]
+
+
+def debounce_bool(mask: np.ndarray, min_run: int) -> np.ndarray:
+    """Merge runs shorter than *min_run* frames into the preceding run.
+
+    Suppresses single-frame flicker at an ROI boundary so tracking jitter
+    doesn't inflate the entry count or shred a bout into fragments.  Processes
+    runs left-to-right so merges propagate; the first run is left untouched
+    (nothing precedes it).
+    """
+    if min_run <= 1 or mask.size == 0:
+        return mask
+    out = mask.copy()
+    change_idx = np.flatnonzero(np.diff(out.astype(np.int8))) + 1
+    bounds = np.concatenate(([0], change_idx, [out.size]))
+    for i in range(len(bounds) - 1):
+        s, e = int(bounds[i]), int(bounds[i + 1])
+        if (e - s) < min_run and s > 0:
+            out[s:e] = out[s - 1]
+    return out

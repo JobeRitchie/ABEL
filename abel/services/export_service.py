@@ -436,8 +436,114 @@ class ExportService:
         else:
             behaviors = all_behaviors
 
+        output_paths, total_rows = self._write_boutframes_workbooks(
+            intervals_by_session,
+            columns=behaviors,
+            filename=filename,
+            include_end_frames=include_end_frames,
+            binary_mode=binary_mode,
+            extra_subjects=merged_subjects,
+            extra_session_types=merged_session_types,
+        )
+
+        out.output_path = output_paths[0] if output_paths else None
+        out.output_paths = output_paths
+        out.n_rows = total_rows
+        out.success = True
+        return out
+
+    def export_state_boutframes_xlsx(
+        self,
+        intervals_by_session: dict[str, dict[str, list[tuple[int, int]]]],
+        filename: str = "hmm_state_boutframes.xlsx",
+        column_order: list[str] | None = None,
+        include_end_frames: bool = False,
+        binary_mode: bool = False,
+        out_subdir: str = "reports",
+        out_dir: Path | None = None,
+    ) -> ExportResult:
+        """Write a boutframes workbook from pre-computed intervals.
+
+        Same workbook shape, subject naming and session-type splitting as
+        :meth:`export_boutframes_xlsx`, but the intervals come from the caller
+        instead of from review decisions — which is what lets HMM state bouts be
+        exported in the format TRACY already reads.  Because both exports share
+        one writer, a state column and a behavior column land on the photometry
+        signal identically, and the subject IDs match the ``ABELposition.csv``
+        files from :meth:`export_abel_position_csv`.
+
+        *intervals_by_session* is ``{session_id: {column: [(start_frame,
+        end_frame), ...]}}`` in **raw video frame** numbering (the caller must
+        already have undone any analysis prechop).  *out_dir*, when given,
+        overrides the default ``{project}/exports/{out_subdir}`` location so a
+        caller driving a save dialog can write where the user asked.
+        """
+        out = ExportResult()
+        if not self._project_root:
+            out.warnings.append("No project loaded.")
+            return out
+
+        cleaned = {
+            str(sid): {
+                str(col): [(int(s), int(e)) for s, e in ivs]
+                for col, ivs in by_col.items()
+            }
+            for sid, by_col in intervals_by_session.items()
+            if by_col
+        }
+        if not cleaned:
+            out.warnings.append("No state bouts to export.")
+            return out
+
+        if column_order:
+            columns = [c for c in column_order]
+        else:
+            columns = sorted({c for by_col in cleaned.values() for c in by_col})
+
+        output_paths, total_rows = self._write_boutframes_workbooks(
+            cleaned,
+            columns=columns,
+            filename=filename,
+            include_end_frames=include_end_frames,
+            binary_mode=binary_mode,
+            out_subdir=out_subdir,
+            out_dir=out_dir,
+        )
+
+        if not output_paths:
+            out.warnings.append("No workbook was written.")
+            return out
+
+        out.output_path = output_paths[0]
+        out.output_paths = output_paths
+        out.n_rows = total_rows
+        out.success = True
+        return out
+
+    def _write_boutframes_workbooks(
+        self,
+        intervals_by_session: dict[str, dict[str, list[tuple[int, int]]]],
+        columns: list[str],
+        filename: str,
+        include_end_frames: bool = False,
+        binary_mode: bool = False,
+        extra_subjects: dict[str, str] | None = None,
+        extra_session_types: dict[str, str] | None = None,
+        out_subdir: str = "reports",
+        out_dir: Path | None = None,
+    ) -> tuple[list[Path], int]:
+        """Write one workbook per session type; return (paths, total rows).
+
+        The single writer behind every boutframes-shaped export.  *columns* is
+        the column set each sheet carries — behaviors for the review export,
+        HMM states for the state export — and appears on every sheet in the
+        given order even where a subject has none of them, so sheets stay
+        directly comparable.
+        """
+        assert self._project_root is not None
+        behaviors = list(columns)
         subject_by_session = self._subject_by_session()
-        subject_by_session.update(merged_subjects)
+        subject_by_session.update(extra_subjects or {})
 
         # Detect whether any subject has more than one session in the data.
         # If so, we produce one workbook per distinct session type instead of
@@ -448,7 +554,7 @@ class ExportService:
             subject_session_ids.setdefault(subj, []).append(sid)
         multi_session = any(len(ids) > 1 for ids in subject_session_ids.values())
 
-        out_dir = self._project_root / "exports" / "reports"
+        out_dir = out_dir or (self._project_root / "exports" / out_subdir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         p = Path(filename)
@@ -460,7 +566,7 @@ class ExportService:
             session_groups: list[tuple[str, list[str]]] = [("", list(intervals_by_session.keys()))]
         else:
             session_type_by_sid = self._session_type_by_session()
-            session_type_by_sid.update(merged_session_types)
+            session_type_by_sid.update(extra_session_types or {})
             type_groups: dict[str, list[str]] = {}
             for sid in intervals_by_session:
                 stype = session_type_by_sid.get(sid, "") or ""
@@ -553,11 +659,7 @@ class ExportService:
 
             output_paths.append(output)
 
-        out.output_path = output_paths[0] if output_paths else None
-        out.output_paths = output_paths
-        out.n_rows = total_rows
-        out.success = True
-        return out
+        return output_paths, total_rows
 
     # ------------------------------------------------------------------
     # TRACY position export

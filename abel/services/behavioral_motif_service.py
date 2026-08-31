@@ -26,9 +26,11 @@ Optional dependencies (graceful degradation if absent):
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import Counter
+from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from itertools import combinations
 from pathlib import Path
@@ -110,6 +112,67 @@ class MotifSettings:
     """Base seed for HMM EM initialisation.  Restart *r* uses ``seed + r``, so a
     given (data, settings) pair always reproduces the same fit.  Without this the
     reported state count can change between runs of the same analysis."""
+
+    hmm_occupancy_method: str = "viterbi"
+    """How per-session fractional occupancy is measured: 'viterbi' | 'posterior'.
+
+    - 'viterbi': the fraction of a session's bouts that the single most likely
+      state path assigns to each state.  Every bout counts for exactly one
+      state.
+    - 'posterior': the mean over bouts of the forward-backward posterior
+      P(state | whole sequence), i.e. *expected* fractional occupancy.  A bout
+      splits its weight across the states that could plausibly have produced
+      it.
+
+    The two differ most for states whose defining behavior is rare.  Viterbi
+    decoding is a global optimisation, so entering a state for one or two bouts
+    must pay the transition cost twice; when that exceeds the emission gain the
+    path stays put and the session reports exactly 0.0 occupancy even though the
+    behavior occurred.  Posterior occupancy has no such threshold - it returns a
+    small non-zero value - which matters when occupancy is the dependent
+    variable in a group comparison and a run of hard zeros would otherwise be
+    read as "this animal never did it".
+
+    Both are legitimate; they answer different questions.  Use 'viterbi' when
+    the claim is about the discrete state sequence (which state the animal was
+    *in*), 'posterior' when the claim is about how much evidence there is for
+    each state.  The ethogram, state bouts and latency views always use the
+    Viterbi path, because a state bout has to be a definite interval."""
+
+    # -- HMM state bouts (ethogram / boutframes export / latency) -----------
+    hmm_state_bout_source: str = "viterbi"
+    """Which intervals the state-boutframes export writes: 'viterbi' | 'posterior_topn'.
+
+    - 'viterbi': the state bouts the decoded path actually visited.  A subject
+      the path never routes into a state contributes no intervals for it, and
+      therefore no downstream value (a photometry mean over that state, say).
+    - 'posterior_topn': for every subject and every state, the
+      ``hmm_state_bout_top_n`` bouts whose posterior probability of that state
+      is highest, whether or not they won the Viterbi decode.
+
+    'posterior_topn' exists because an empty interval set is not a zero - it is
+    a missing value, and a subject missing from half the states cannot enter a
+    within-subject comparison.  It is defensible only when applied to *every*
+    subject, which is what this option does: one selection rule, the same
+    number of intervals per subject per state, so a group difference cannot be
+    an artefact of which subjects got which rule.  Using it as a patch for only
+    the subjects with no winners would confound the comparison with the rule.
+
+    Its cost is that it is guaranteed non-empty by construction, so it can no
+    longer answer "did this subject enter the state at all".  The intervals
+    carry ``posterior_mean`` and the session's ``expected_bouts`` for exactly
+    that reason: report them, and drop or flag subjects whose selected bouts
+    carry negligible posterior rather than letting them read as state time."""
+    hmm_state_bout_top_n: int = 5
+    """How many bouts per subject per state 'posterior_topn' selects."""
+    hmm_state_bout_max_gap_s: float = 0.0
+    """Gap (seconds) above which a silence breaks a run of same-state bouts.
+    0 means never break on time: a state bout is a maximal run of consecutive
+    bouts sharing a state, however far apart they are."""
+    hmm_state_min_dwell_s: float = 0.0
+    """Minimum state-bout duration for that bout to count as *entering* the
+    state, used by the latency metric.  0 counts every entry, including
+    single-bout flickers through a state."""
 
     # -- Permutation testing ------------------------------------------------
     n_permutations: int = 1000
@@ -690,18 +753,38 @@ def cluster_sessions(
 # HMM analysis
 # ---------------------------------------------------------------------------
 
+def retained_events(
+    sequences: dict[str, list[tuple[float, float, str]]],
+    behavior_ids: list[str],
+) -> dict[str, list[tuple[float, float, str]]]:
+    """The events an HMM fit actually sees, in decode order.
+
+    Events whose behavior is not among *behavior_ids* are dropped, and sessions
+    left with nothing are omitted entirely — exactly what
+    :func:`_encode_sequences` does.  Decoded state sequences are indexed by
+    position in this list, so anything that maps states back onto bout times
+    must filter through here rather than re-deriving the rule; otherwise a
+    single dropped event shifts every later state by one bout.
+    """
+    keep = set(behavior_ids)
+    out: dict[str, list[tuple[float, float, str]]] = {}
+    for sid, events in sequences.items():
+        kept = [e for e in events if e[2] in keep]
+        if kept:
+            out[sid] = kept
+    return out
+
+
 def _encode_sequences(
     sequences: dict[str, list[tuple[float, float, str]]],
     behavior_ids: list[str],
 ) -> dict[str, list[int]]:
     """Map behavior IDs to integer codes per session."""
     bid_code = {bid: i for i, bid in enumerate(behavior_ids)}
-    encoded: dict[str, list[int]] = {}
-    for sid, events in sequences.items():
-        coded = [bid_code[e[2]] for e in events if e[2] in bid_code]
-        if coded:
-            encoded[sid] = coded
-    return encoded
+    return {
+        sid: [bid_code[e[2]] for e in events]
+        for sid, events in retained_events(sequences, behavior_ids).items()
+    }
 
 
 def _posterior_entropy(model: Any, observations: list[np.ndarray]) -> float:
@@ -911,12 +994,39 @@ def fit_hmm(
         state_sequences[sid] = state_seq_all[cursor: cursor + length].tolist()
         cursor += length
 
+    # Expected fractional occupancy, computed here because it needs the fitted
+    # model rather than just the decoded path.  Always returned; which of the
+    # two occupancy measures is actually reported is a display/analysis choice
+    # made by the caller (see MotifSettings.hmm_occupancy_method).
+    try:
+        gamma = np.asarray(
+            best_model.predict_proba(concatenated, lengths), dtype=np.float64
+        )
+        posterior_occupancy = state_occupancy_from_posteriors(
+            gamma, lengths, session_ids, best_n
+        )
+        # The per-bout posteriors themselves, kept because ranking bouts by
+        # P(state | sequence) needs them and the mean has thrown them away.
+        state_posteriors = {}
+        _cur = 0
+        for _sid, _len in zip(session_ids, lengths):
+            state_posteriors[_sid] = np.round(
+                gamma[_cur: _cur + _len], 6
+            ).tolist()
+            _cur += _len
+    except Exception as exc:  # pragma: no cover - hmmlearn internal failure
+        logger.warning("Posterior state occupancy unavailable: %s", exc)
+        posterior_occupancy = {}
+        state_posteriors = {}
+
     return {
         "n_states": best_n,
         "transition_matrix": best_model.transmat_.tolist(),
         "emission_matrix": best_model.emissionprob_.tolist(),
         "start_prob": best_model.startprob_.tolist(),
         "state_sequences": state_sequences,
+        "posterior_occupancy": posterior_occupancy,
+        "state_posteriors": state_posteriors,
         "log_likelihood": float(best_model.score(concatenated, lengths)),
         "aic": next((r["aic"] for r in model_selection if r["n_states"] == best_n), float("nan")),
         "bic": next((r["bic"] for r in model_selection if r["n_states"] == best_n), float("nan")),
@@ -1477,3 +1587,867 @@ def state_occupancy(
         counts = np.bincount(seq, minlength=n_states)
         result[sid] = (counts / len(seq)).tolist()
     return result
+
+
+def state_occupancy_from_posteriors(
+    posteriors: np.ndarray,
+    lengths: list[int],
+    session_ids: list[str],
+    n_states: int,
+) -> dict[str, list[float]]:
+    """Expected fractional occupancy per session from per-bout posteriors.
+
+    *posteriors* is the ``(n_observations, n_states)`` forward-backward
+    posterior P(state | whole sequence) over the concatenated observations, in
+    the same order and with the same per-session *lengths* that were passed to
+    the fit.  Each session's block is averaged down its rows, so the result is
+    the same shape as :func:`state_occupancy` and each row still sums to 1.
+
+    This is the soft counterpart of :func:`state_occupancy`.  Viterbi counts a
+    bout for exactly one state; here a bout distributes its weight over every
+    state that could have produced it.  The practical consequence is that a
+    session containing only one or two bouts of a rare behavior gets a small
+    non-zero occupancy in that behavior's state instead of an exact 0.0 - the
+    Viterbi path will not pay two transition costs to visit a state for a
+    single observation, so it reports zero for animals that did in fact perform
+    the behavior.
+    """
+    out: dict[str, list[float]] = {}
+    cursor = 0
+    for sid, length in zip(session_ids, lengths):
+        block = posteriors[cursor: cursor + length]
+        cursor += length
+        if length <= 0 or block.size == 0:
+            out[sid] = [0.0] * n_states
+            continue
+        means = np.zeros(n_states, dtype=np.float64)
+        k = min(n_states, block.shape[1])
+        means[:k] = block[:, :k].mean(axis=0)
+        out[sid] = means.tolist()
+    return out
+
+
+def resolve_state_occupancy(
+    hmm_result: dict[str, Any],
+    method: str = "viterbi",
+) -> tuple[dict[str, list[float]], str]:
+    """The occupancy table to report, and which measure it actually is.
+
+    Falls back to the Viterbi counts when posterior occupancy was requested but
+    the fit could not produce it, so a caller never silently reports one measure
+    under the other's name.
+    """
+    n_states = int(hmm_result.get("n_states", 0) or 0)
+    viterbi = state_occupancy(hmm_result.get("state_sequences", {}) or {}, n_states)
+    if str(method).lower() != "posterior":
+        return viterbi, "viterbi"
+    posterior = hmm_result.get("posterior_occupancy") or {}
+    if not posterior:
+        logger.warning(
+            "Posterior occupancy was requested but the fit did not produce it; "
+            "reporting Viterbi occupancy instead."
+        )
+        return viterbi, "viterbi"
+    return {sid: list(v) for sid, v in posterior.items()}, "posterior"
+
+
+# ---------------------------------------------------------------------------
+# HMM state bouts and ethogram
+# ---------------------------------------------------------------------------
+#
+# The HMM runs over the *bout index*, not the frame grid: observation t is the
+# t-th bout of a session, and the decoded state sequence is one state per bout.
+# Nothing downstream of the fit knows when those bouts happened.  The functions
+# below put the clock back on: they re-pair each decoded state with the bout it
+# came from, then collapse consecutive bouts sharing a state into a *state
+# bout* - a contiguous stretch of session during which the animal stayed in one
+# latent state.  That object is what the ethogram draws and what the TRACY
+# boutframes export writes, so both views describe the same intervals.
+
+def decode_state_spans(
+    sequences: dict[str, list[tuple[float, float, str]]],
+    behavior_ids: list[str],
+    state_sequences: dict[str, list[int]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Attach each decoded HMM state to the bout that produced it.
+
+    Parameters
+    ----------
+    sequences:
+        The same ``{session_id: [(start_s, end_s, behavior_id), ...]}`` that was
+        passed to :func:`fit_hmm` - including the same overlap filtering, or the
+        states will not line up with the bouts.
+    behavior_ids:
+        The same behavior list passed to :func:`fit_hmm`.
+    state_sequences:
+        ``fit_hmm(...)["state_sequences"]``.
+
+    Returns
+    -------
+    ``{session_id: [{'bout_index', 'start_s', 'end_s', 'behavior_id',
+    'state'}, ...]}`` ordered by start time.  Sessions whose decoded length
+    disagrees with their retained-event count are truncated to the shorter of
+    the two and logged, rather than silently mis-aligning states with bouts.
+    """
+    retained = retained_events(sequences, behavior_ids)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for sid, events in retained.items():
+        states = state_sequences.get(sid)
+        if not states:
+            continue
+        n = len(events)
+        if len(states) != n:
+            logger.warning(
+                "HMM state decoding for session %s has %d states for %d bouts; "
+                "using the first %d.",
+                sid, len(states), n, min(len(states), n),
+            )
+            n = min(len(states), n)
+        out[sid] = [
+            {
+                "bout_index": i,
+                "start_s": float(events[i][0]),
+                "end_s": float(events[i][1]),
+                "behavior_id": str(events[i][2]),
+                "state": int(states[i]),
+            }
+            for i in range(n)
+        ]
+    return out
+
+
+def merge_state_bouts(
+    state_spans: dict[str, list[dict[str, Any]]],
+    max_gap_s: float | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Collapse consecutive same-state bouts into state bouts.
+
+    A state bout runs from the start of the first bout in a same-state run to
+    the end of the last one, so the silent gaps *between* those bouts fall
+    inside the state bout.  That is the intended reading - the state is a
+    property of the stretch of session, not of the individual bouts - but it
+    means a state bout's duration is not the sum of its member bouts'
+    durations.
+
+    Parameters
+    ----------
+    max_gap_s:
+        When set, a gap longer than this between the end of one bout and the
+        start of the next breaks the run even if the state is unchanged.  Use it
+        when a long silence should not be attributed to the state that happened
+        to bracket it.  ``None`` (the default) never breaks on time.
+
+    Returns
+    -------
+    ``{session_id: [{'state', 'start_s', 'end_s', 'duration_s', 'n_bouts',
+    'behavior_ids', 'first_bout_index', 'last_bout_index'}, ...]}``
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    for sid, spans in state_spans.items():
+        if not spans:
+            continue
+        merged: list[dict[str, Any]] = []
+        for span in sorted(spans, key=lambda s: (s["start_s"], s["end_s"])):
+            prev = merged[-1] if merged else None
+            gap_ok = (
+                max_gap_s is None
+                or prev is None
+                or (float(span["start_s"]) - prev["end_s"]) <= max_gap_s
+            )
+            if prev is not None and prev["state"] == int(span["state"]) and gap_ok:
+                prev["end_s"] = max(prev["end_s"], float(span["end_s"]))
+                prev["n_bouts"] += 1
+                prev["behavior_ids"].append(span["behavior_id"])
+                prev["last_bout_index"] = int(span["bout_index"])
+            else:
+                merged.append({
+                    "state": int(span["state"]),
+                    "start_s": float(span["start_s"]),
+                    "end_s": float(span["end_s"]),
+                    "n_bouts": 1,
+                    "behavior_ids": [span["behavior_id"]],
+                    "first_bout_index": int(span["bout_index"]),
+                    "last_bout_index": int(span["bout_index"]),
+                })
+        for m in merged:
+            m["duration_s"] = float(m["end_s"] - m["start_s"])
+        out[sid] = merged
+    return out
+
+
+def default_state_label(state: int) -> str:
+    """Column / sheet name for one HMM state.
+
+    ``-1`` is the unclaimed stretch (no scored behavior, no state), which the
+    boutframes export carries as its own column so it can serve as a
+    within-subject null condition.
+    """
+    state = int(state)
+    if state < 0:
+        return "HMM_NoState"
+    return f"HMM_State_{state}"
+
+
+#: State index used for stretches of session no state bout claims.
+UNCLAIMED_STATE = -1
+
+
+def unclaimed_intervals(
+    state_bouts: dict[str, list[dict[str, Any]]],
+    session_end_s: dict[str, float] | None = None,
+    session_start_s: dict[str, float] | None = None,
+    min_duration_s: float = 0.0,
+) -> dict[str, list[dict[str, Any]]]:
+    """The stretches of each session that no state bout covers.
+
+    A state bout runs from the first to the last bout of a same-state run, so
+    what is left over is: the head of the session before the first scored bout,
+    the silences where the decoded state changes, and the tail after the last
+    bout.  During those stretches the animal is doing none of the behaviors in
+    the fit and the HMM makes no claim at all - which is exactly what makes them
+    usable as a within-subject null condition for a signal aligned to the state
+    intervals.
+
+    Read them as "no scored behavior and no state", not as "baseline": a
+    stretch is unclaimed because nothing was detected in it, so anything the
+    behavior models miss lands here too.  Set *min_duration_s* to drop the
+    sub-second slivers between adjacent bouts, which are too short to average a
+    physiological signal over and would otherwise dominate the interval count.
+
+    Intervals carry ``state = UNCLAIMED_STATE`` (-1) and ``source =
+    "unclaimed"``, in the same shape as the state bouts they complement.
+    """
+    ends = session_end_s or {}
+    starts = session_start_s or {}
+    out: dict[str, list[dict[str, Any]]] = {}
+
+    for sid, bouts in state_bouts.items():
+        covered = sorted(
+            ((float(b["start_s"]), float(b["end_s"])) for b in bouts),
+            key=lambda p: p[0],
+        )
+        # Union the covered spans first: with a max_gap_s setting in play two
+        # state bouts can overlap, and treating them separately would invent a
+        # negative-length gap between them.
+        merged: list[list[float]] = []
+        for st, en in covered:
+            if merged and st <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], en)
+            else:
+                merged.append([st, en])
+
+        gaps: list[tuple[float, float]] = []
+        cursor = float(starts.get(sid, 0.0))
+        for st, en in merged:
+            if st > cursor:
+                gaps.append((cursor, st))
+            cursor = max(cursor, en)
+        end_s = ends.get(sid)
+        if end_s is not None and float(end_s) > cursor:
+            gaps.append((cursor, float(end_s)))
+
+        rows: list[dict[str, Any]] = []
+        for st, en in gaps:
+            dur = en - st
+            if dur < float(min_duration_s):
+                continue
+            rows.append({
+                "state": UNCLAIMED_STATE,
+                "start_s": st,
+                "end_s": en,
+                "duration_s": dur,
+                "n_bouts": 0,
+                "behavior_ids": [],
+                "source": "unclaimed",
+            })
+        out[sid] = rows
+
+    return out
+
+
+def posterior_state_intervals(
+    sequences: dict[str, list[tuple[float, float, str]]],
+    behavior_ids: list[str],
+    state_posteriors: dict[str, list[list[float]]],
+    n_states: int,
+    top_n: int = 5,
+    max_gap_s: float | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Per subject and per state, the *top_n* bouts most consistent with it.
+
+    Bouts are ranked by the forward-backward posterior P(state = k | whole
+    sequence) and the best *top_n* are kept, whether or not the Viterbi decode
+    routed them into k.  Consecutive selected bouts merge into one interval, the
+    same way :func:`merge_state_bouts` collapses a run of same-state bouts.
+
+    Why this exists
+    ---------------
+    Viterbi state bouts can be empty for a subject: the decoded path never
+    enters a state whose defining behavior that subject performed only once or
+    twice, because visiting a state for a single observation has to pay the
+    transition cost twice.  An empty interval set is not a zero, it is a missing
+    value - there is nothing to average a photometry signal over - and a subject
+    missing from half the states drops out of a within-subject comparison.
+
+    What makes it defensible
+    ------------------------
+    One rule, applied to every subject.  Every session yields the same number of
+    intervals for every state, so a group difference cannot be an artefact of
+    which subjects got their real state bouts and which got their near-misses.
+    Applying this only to the subjects with no winners would mix two selection
+    rules in one column and confound the comparison with the rule.
+
+    What it cannot do
+    -----------------
+    The output is non-empty by construction, so it no longer answers "did this
+    subject enter the state at all" - :func:`decode_state_spans` does that.  A
+    subject that never performed the behavior still gets *top_n* intervals, and
+    theirs will carry a negligible ``posterior_mean``.  Every interval therefore
+    reports ``posterior_mean`` (the mean posterior over its member bouts) and
+    ``expected_bouts`` (the session's total posterior mass for that state, i.e.
+    how many bouts the model thinks were in it).  Report those, and drop or flag
+    subjects whose selection carries no real evidence rather than letting it
+    read as time in the state.
+
+    Returns
+    -------
+    ``{session_id: [interval, ...]}`` sorted by start time.  Unlike
+    :func:`merge_state_bouts`, intervals from *different* states may overlap in
+    time - each state's selection is made independently - so this is a set of
+    per-state interval lists flattened into one list, not a partition of the
+    session.
+    """
+    top_n = int(top_n)
+    if top_n <= 0:
+        return {}
+    retained = retained_events(sequences, behavior_ids)
+    out: dict[str, list[dict[str, Any]]] = {}
+
+    for sid, events in retained.items():
+        post_raw = state_posteriors.get(sid)
+        if not post_raw:
+            continue
+        post = np.asarray(post_raw, dtype=np.float64)
+        n = min(len(events), post.shape[0])
+        if len(events) != post.shape[0]:
+            logger.warning(
+                "Posterior selection for session %s has %d posterior rows for "
+                "%d bouts; using the first %d.",
+                sid, post.shape[0], len(events), n,
+            )
+        if n <= 0:
+            continue
+        post = post[:n]
+        events = events[:n]
+
+        intervals: list[dict[str, Any]] = []
+        for state in range(min(n_states, post.shape[1])):
+            col = post[:, state]
+            expected = float(col.sum())
+            # Stable sort so equal posteriors resolve to the earlier bout and
+            # the selection reproduces across runs.
+            order = np.argsort(-col, kind="stable")[: min(top_n, n)]
+            picked = sorted(int(i) for i in order)
+
+            run: list[int] = []
+
+            def _flush(run: list[int]) -> None:
+                if not run:
+                    return
+                first, last = run[0], run[-1]
+                start_s = float(events[first][0])
+                end_s = float(events[last][1])
+                intervals.append({
+                    "state": int(state),
+                    "start_s": start_s,
+                    "end_s": end_s,
+                    "duration_s": max(0.0, end_s - start_s),
+                    "n_bouts": len(run),
+                    "behavior_ids": [str(events[i][2]) for i in run],
+                    "first_bout_index": first,
+                    "last_bout_index": last,
+                    "posterior_mean": float(np.mean([col[i] for i in run])),
+                    "posterior_min": float(np.min([col[i] for i in run])),
+                    "expected_bouts": expected,
+                    "source": "posterior_topn",
+                })
+
+            for idx in picked:
+                if not run:
+                    run = [idx]
+                    continue
+                contiguous = idx == run[-1] + 1
+                gap_ok = True
+                if max_gap_s is not None and max_gap_s > 0:
+                    gap_ok = (
+                        float(events[idx][0]) - float(events[run[-1]][1])
+                    ) <= max_gap_s
+                if contiguous and gap_ok:
+                    run.append(idx)
+                else:
+                    _flush(run)
+                    run = [idx]
+            _flush(run)
+
+        intervals.sort(key=lambda b: (b["start_s"], b["state"]))
+        out[sid] = intervals
+
+    return out
+
+
+def posterior_selection_summary(
+    intervals: dict[str, list[dict[str, Any]]],
+    n_states: int,
+) -> list[dict[str, Any]]:
+    """Per session and state, the evidence behind a top-N posterior selection.
+
+    One row per (session, state) with the number of intervals and bouts chosen,
+    the mean posterior across the chosen bouts, and the session's total
+    posterior mass for that state.  This is the table to read before trusting a
+    per-state value: a row with ``expected_bouts`` near zero means the selection
+    found nothing that resembles the state, and its intervals should not be
+    reported as time in it.
+    """
+    rows: list[dict[str, Any]] = []
+    for sid in sorted(intervals):
+        by_state: dict[int, list[dict[str, Any]]] = {}
+        for b in intervals[sid]:
+            by_state.setdefault(int(b["state"]), []).append(b)
+        for state in range(n_states):
+            picked = by_state.get(state, [])
+            n_bouts = sum(int(b["n_bouts"]) for b in picked)
+            weights = [int(b["n_bouts"]) for b in picked]
+            mean_post = (
+                float(np.average([b["posterior_mean"] for b in picked], weights=weights))
+                if picked else 0.0
+            )
+            rows.append({
+                "session_id": sid,
+                "state": state,
+                "n_intervals": len(picked),
+                "n_bouts": n_bouts,
+                "total_s": round(sum(float(b["duration_s"]) for b in picked), 4),
+                "mean_posterior": round(mean_post, 6),
+                "expected_bouts": round(
+                    float(picked[0]["expected_bouts"]) if picked else 0.0, 4
+                ),
+            })
+    return rows
+
+
+def state_bouts_to_frames(
+    state_bouts: dict[str, list[dict[str, Any]]],
+    fps: float,
+    n_states: int,
+    frame_offsets: dict[str, int] | None = None,
+    state_label: Any = None,
+    include_unclaimed: bool = False,
+) -> dict[str, dict[str, list[tuple[int, int]]]]:
+    """Convert state bouts to ``{session: {state_label: [(start, end), ...]}}``.
+
+    Frame numbers are recovered with the *same* fps that built the sequences, so
+    the round trip through seconds is exact.  *frame_offsets* adds a per-session
+    analysis prechop back on, returning bouts in raw video frame numbering - the
+    numbering ABEL's behavior boutframes and ABELposition exports use, and
+    therefore the numbering TRACY expects.
+
+    Every state gets a key in every session, empty list included, so the
+    exported workbook has the same columns on every sheet.
+    """
+    fps = float(fps)
+    if fps <= 0:
+        raise ValueError("fps must be positive to convert state bouts to frames.")
+    label = state_label or default_state_label
+    offsets = frame_offsets or {}
+    out: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    for sid, bouts in state_bouts.items():
+        off = int(offsets.get(sid, 0))
+        seeded = list(range(n_states))
+        if include_unclaimed:
+            # Seeded for every session, not only the ones that have gaps, so the
+            # workbook keeps the same columns on every sheet.
+            seeded.append(UNCLAIMED_STATE)
+        by_state: dict[str, list[tuple[int, int]]] = {
+            str(label(st)): [] for st in seeded
+        }
+        for b in bouts:
+            key = str(label(int(b["state"])))
+            start = max(0, int(round(float(b["start_s"]) * fps)) + off)
+            end = max(start, int(round(float(b["end_s"]) * fps)) + off)
+            by_state.setdefault(key, []).append((start, end))
+        out[sid] = {k: sorted(v) for k, v in by_state.items()}
+    return out
+
+
+def state_frame_matrix(
+    state_bouts: dict[str, list[dict[str, Any]]],
+    fps: float,
+    session_end_s: dict[str, float] | None = None,
+    frame_offsets: dict[str, int] | None = None,
+    raw_video_frames: bool = False,
+    no_state_value: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Expand state bouts into one state number per frame, per session.
+
+    Returns ``{session_id: array}`` of float, one element per frame, holding
+    the state index for frames a state bout covers and ``NaN`` for frames it
+    does not - the stretches the HMM makes no claim about, which the ethogram
+    draws as the neutral backdrop.  Float, not int, because "no state" has to
+    survive into the export as a blank rather than as a state number.
+
+    Frames run start..end *inclusive*, the same convention as the bout frames
+    the sequences were built from (``end_frame`` is the bout's last frame), and
+    the same rounding as :func:`state_bouts_to_frames`, so a frame here and a
+    frame in the boutframes workbook mean the same frame.
+
+    *raw_video_frames* shifts each session by its analysis prechop, so index
+    ``i`` is frame ``i`` of that session's video and the pre-assay frames are
+    NaN; the default keeps the analysis clock (index 0 = assay start), which is
+    the only numbering under which two sessions' columns line up in time.
+
+    Sessions are padded to their recorded length from *session_end_s* when that
+    reaches past the last state bout, so a column stops where the recording
+    stops rather than where the animal last did something.
+
+    *no_state_value* replaces the NaNs inside the session with a code of its
+    own - pass ``n_states`` to give the unmodelled frames the next number after
+    the last state.  It fills only frames the session actually covers: the
+    pre-assay head in *raw_video_frames* mode stays NaN, because the HMM was
+    never shown those frames at all and coding them as observed-but-stateless
+    would be a different claim.
+    """
+    fps = float(fps)
+    if fps <= 0:
+        raise ValueError("fps must be positive to convert state bouts to frames.")
+    ends = session_end_s or {}
+    offsets = frame_offsets or {}
+    out: dict[str, np.ndarray] = {}
+    for sid, bouts in state_bouts.items():
+        off = int(offsets.get(sid, 0)) if raw_video_frames else 0
+        n_frames = int(round(float(ends.get(sid, 0.0)) * fps)) + off
+        spans: list[tuple[int, int, int]] = []
+        for b in bouts:
+            start = max(0, int(round(float(b["start_s"]) * fps)) + off)
+            end = max(start, int(round(float(b["end_s"]) * fps)) + off)
+            spans.append((start, end, int(b["state"])))
+            n_frames = max(n_frames, end + 1)
+        arr = np.full(max(n_frames, 0), np.nan, dtype=float)
+        # Start order, so that where two state bouts touch on a frame the
+        # later one wins - the same frame the ethogram paints last.
+        for start, end, st in sorted(spans):
+            arr[start:end + 1] = float(st)
+        if no_state_value is not None:
+            head = arr[off:]
+            head[np.isnan(head)] = float(no_state_value)
+        out[sid] = arr
+    return out
+
+
+def state_bout_rows(
+    state_bouts: dict[str, list[dict[str, Any]]],
+    fps: float,
+    frame_offsets: dict[str, int] | None = None,
+    session_labels: dict[str, str] | None = None,
+    session_groups: dict[str, str] | None = None,
+    behavior_names: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Flatten state bouts into one row per state bout, for CSV export."""
+    offsets = frame_offsets or {}
+    labels = session_labels or {}
+    groups = session_groups or {}
+    bnames = behavior_names or {}
+    rows: list[dict[str, Any]] = []
+    for sid in sorted(state_bouts):
+        off = int(offsets.get(sid, 0))
+        for order, b in enumerate(state_bouts[sid]):
+            member = [bnames.get(x, x) for x in b.get("behavior_ids", [])]
+            label = labels.get(sid, sid)
+            rows.append({
+                "session_id": sid,
+                "session_label": label,
+                "group": groups.get(label, ""),
+                "state": int(b["state"]),
+                "state_bout_index": order,
+                "start_s": round(float(b["start_s"]), 4),
+                "end_s": round(float(b["end_s"]), 4),
+                "duration_s": round(float(b["duration_s"]), 4),
+                "start_frame": int(round(float(b["start_s"]) * fps)) + off,
+                "end_frame": int(round(float(b["end_s"]) * fps)) + off,
+                "n_bouts": int(b["n_bouts"]),
+                "behaviors": " > ".join(member),
+            })
+    return rows
+
+
+def state_bout_summary(
+    state_bouts: dict[str, list[dict[str, Any]]],
+    n_states: int,
+) -> dict[str, dict[str, Any]]:
+    """Per-session, per-state bout count, total time and mean dwell duration.
+
+    ``time_frac`` is each state's share of the *covered* time (the sum of state
+    bout durations), not of the whole session: the HMM says nothing about
+    stretches with no bouts at all, so charging them to a state would invent
+    occupancy the model never claimed.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for sid, bouts in state_bouts.items():
+        counts = np.zeros(n_states, dtype=np.int64)
+        totals = np.zeros(n_states, dtype=np.float64)
+        for b in bouts:
+            st = int(b["state"])
+            if 0 <= st < n_states:
+                counts[st] += 1
+                totals[st] += float(b["duration_s"])
+        covered = float(totals.sum())
+        out[sid] = {
+            "n_state_bouts": counts.tolist(),
+            "total_s": totals.tolist(),
+            "mean_dwell_s": [
+                (float(totals[i]) / int(counts[i])) if counts[i] else 0.0
+                for i in range(n_states)
+            ],
+            "time_frac": (totals / covered).tolist() if covered > 0 else [0.0] * n_states,
+            "covered_s": covered,
+        }
+    return out
+
+
+def state_bout_transition_counts(
+    state_bouts: dict[str, list[dict[str, Any]]],
+    n_states: int,
+) -> dict[str, np.ndarray]:
+    """Per-session state-bout -> state-bout transition counts.
+
+    Distinct from ``fit_hmm``'s ``transition_matrix``, which is the model's
+    per-observation transition probability and is dominated by its diagonal
+    (states persist across successive bouts).  This counts *switches* between
+    state bouts, so its diagonal is zero by construction and the off-diagonal
+    reads directly as "how the animal moved between states".
+    """
+    out: dict[str, np.ndarray] = {}
+    for sid, bouts in state_bouts.items():
+        mat = np.zeros((n_states, n_states), dtype=np.int64)
+        for a, b in zip(bouts, bouts[1:]):
+            i, j = int(a["state"]), int(b["state"])
+            if 0 <= i < n_states and 0 <= j < n_states:
+                mat[i, j] += 1
+        out[sid] = mat
+    return out
+
+
+def state_entry_latency(
+    state_bouts: dict[str, list[dict[str, Any]]],
+    n_states: int,
+    min_dwell_s: float = 0.0,
+    session_start_s: dict[str, float] | None = None,
+    censor_at_s: dict[str, float] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Time from assay start until the animal first settles into each state.
+
+    A state bout counts as an entry only when it lasts at least *min_dwell_s*.
+    Without that floor the latency is dominated by one-bout flickers: the HMM
+    can pass through a state for a single bout on its way somewhere else, and
+    the first such flicker would be reported as the moment the animal "entered"
+    the state.  The threshold is a parameter and not a fixed default because
+    what counts as settled depends on the assay's bout rate.
+
+    Parameters
+    ----------
+    session_start_s:
+        Assay start for each session, in the same clock as the state bouts.
+        Defaults to 0.0, which is correct when bouts are prechop-rebased so
+        frame 0 is test onset.
+    censor_at_s:
+        Session end, used to report how long a non-entering animal was actually
+        observed.  Latency itself stays NaN for those animals - substituting the
+        session length would turn "never entered" into a measured time and bias
+        every group mean toward whoever was recorded longest.
+
+    Returns
+    -------
+    ``{session_id: {'latency_s': [...], 'entered': [...], 'n_entries': [...],
+    'first_entry_duration_s': [...], 'observed_s': float}}`` with one entry per
+    state; ``latency_s`` is NaN for states never entered.
+    """
+    starts = session_start_s or {}
+    censor = censor_at_s or {}
+    out: dict[str, dict[str, Any]] = {}
+    for sid, bouts in state_bouts.items():
+        t0 = float(starts.get(sid, 0.0))
+        latency = [float("nan")] * n_states
+        first_dur = [float("nan")] * n_states
+        n_entries = [0] * n_states
+        for b in sorted(bouts, key=lambda x: float(x["start_s"])):
+            st = int(b["state"])
+            if not (0 <= st < n_states):
+                continue
+            if float(b["duration_s"]) < float(min_dwell_s):
+                continue
+            n_entries[st] += 1
+            if n_entries[st] == 1:
+                latency[st] = max(0.0, float(b["start_s"]) - t0)
+                first_dur[st] = float(b["duration_s"])
+        observed = float(censor.get(sid, 0.0)) - t0
+        if observed <= 0:
+            observed = max(
+                (float(b["end_s"]) for b in bouts), default=t0
+            ) - t0
+        out[sid] = {
+            "latency_s": latency,
+            "entered": [n > 0 for n in n_entries],
+            "n_entries": n_entries,
+            "first_entry_duration_s": first_dur,
+            "observed_s": max(0.0, observed),
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# HMM result persistence
+# ---------------------------------------------------------------------------
+#
+# Fitting is the slow step (restarts x state counts x EM iterations), and the
+# result is a pure function of the bout sequences plus the fit settings.  Both
+# are known at save time, so the fit is cached to disk with a fingerprint of its
+# inputs: reopening a project restores the last fit instead of re-running it,
+# and a fingerprint mismatch marks the restored fit stale rather than silently
+# showing a figure that no longer matches the data on screen.
+
+HMM_RESULT_FILENAME = "hmm_result.json"
+
+#: Settings that change the numbers a saved result carries.  A change to any of
+#: these invalidates a cached result; display-only settings (error bars, bar
+#: spacing) do not.  ``hmm_occupancy_method`` is here even though it does not
+#: change the fit: it changes the occupancy table and the permutation p-values
+#: computed from it, so a result saved under one measure must not be redisplayed
+#: as though it were the other.
+HMM_FIT_SETTING_KEYS = (
+    "hmm_n_states_mode",
+    "hmm_n_states",
+    "hmm_n_states_min",
+    "hmm_n_states_max",
+    "hmm_n_iter",
+    "hmm_n_restarts",
+    "hmm_criterion",
+    "hmm_random_seed",
+    "hmm_occupancy_method",
+    "bout_overlap_tolerance_s",
+    "hmm_state_bout_source",
+    "hmm_state_bout_top_n",
+    "hmm_state_bout_max_gap_s",
+    "hmm_state_min_dwell_s",
+    "n_permutations",
+    "permutation_seed",
+)
+
+
+def hmm_result_path(project_root: Path) -> Path:
+    """Where a project's cached HMM fit lives."""
+    return Path(project_root) / "derived" / "motif_hmm" / HMM_RESULT_FILENAME
+
+
+def hmm_input_fingerprint(
+    sequences: dict[str, list[tuple[float, float, str]]],
+    behavior_ids: list[str],
+    settings: MotifSettings,
+    session_groups: dict[str, str] | None = None,
+) -> str:
+    """Hash of everything a fit depends on.
+
+    Covers the behaviors in the fit, the sessions and their bout structure, the
+    fit settings, and the group assignment (which the permutation tests use).
+    Bout *times* are included at 3 decimals, so re-running temporal refinement
+    and getting different bouts invalidates the cache even when the counts
+    happen to match.
+    """
+    parts: list[str] = [
+        "b:" + "|".join(sorted(str(b) for b in behavior_ids)),
+    ]
+    for sid in sorted(sequences):
+        evs = sequences[sid]
+        digest = hashlib.sha1(
+            "".join(f"{s:.3f},{e:.3f},{b};" for s, e, b in evs).encode("utf-8")
+        ).hexdigest()[:16]
+        parts.append(f"s:{sid}:{len(evs)}:{digest}")
+    for key in HMM_FIT_SETTING_KEYS:
+        parts.append(f"c:{key}={getattr(settings, key, None)!r}")
+    for label, group in sorted((session_groups or {}).items()):
+        parts.append(f"g:{label}={group}")
+    return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def save_hmm_result(project_root: Path, result: dict[str, Any]) -> Path | None:
+    """Persist a completed fit.  Returns the path, or None if it could not be written.
+
+    A failure here must never break the analysis the user just ran, so the
+    error is logged and swallowed — the result stays live in memory either way.
+    """
+    path = hmm_result_path(project_root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": 1,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "result": _json_safe(result),
+        }
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+        return path
+    except Exception:
+        logger.warning("Could not save the HMM result to %s.", path, exc_info=True)
+        return None
+
+
+def load_hmm_result(project_root: Path) -> dict[str, Any]:
+    """Restore the cached fit, or ``{}`` when there is none or it is unreadable."""
+    path = hmm_result_path(project_root)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Could not read the cached HMM result at %s.", path)
+        return {}
+    if not isinstance(payload, dict) or int(payload.get("schema", 0)) != 1:
+        return {}
+    result = payload.get("result")
+    if not isinstance(result, dict) or not result.get("n_states"):
+        return {}
+    result["restored_from_cache"] = True
+    result["saved_at"] = payload.get("saved_at", "")
+    return result
+
+
+def clear_hmm_result(project_root: Path) -> None:
+    """Delete the cached fit (used when the project's behaviors change)."""
+    try:
+        hmm_result_path(project_root).unlink(missing_ok=True)
+    except Exception:
+        logger.warning("Could not delete the cached HMM result.")
+
+
+def _json_safe(value: Any) -> Any:
+    """Convert numpy scalars/arrays and tuple keys into JSON-representable data.
+
+    ``fit_hmm`` and the state-bout layer already return lists, but the UI adds
+    numpy values (occupancy means, p-values) before the result is saved, and
+    ``json`` refuses those outright.
+    """
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return str(value)
+    # NaN and inf are left alone deliberately.  Python's json writes them as the
+    # non-standard ``NaN``/``Infinity`` tokens and reads them straight back, so
+    # the round trip is exact; mapping them to null instead would hand ``None``
+    # to the ``:.2f`` formatting in the stats panel and crash every restored
+    # fit whose AIC/BIC was undefined.  This file is only ever read back by us.
+    return value

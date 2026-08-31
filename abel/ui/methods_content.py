@@ -446,6 +446,22 @@ FORMULAS: list[Formula] = [
         "abel.services.social_analysis_service",
         ("rabiner1989",),
     ),
+    Formula(
+        "Motif HMM state occupancy", "Calibration & models",
+        "Viterbi:&nbsp; occ<sub>k</sub> = |{t : z*<sub>t</sub> = k}| / T,&nbsp; "
+        "z* = argmax<sub>z</sub> P(z | O, λ)"
+        "<br>Posterior:&nbsp; occ<sub>k</sub> = (1/T) Σ<sub>t</sub> "
+        "γ<sub>t</sub>(k),&nbsp; γ<sub>t</sub>(k) = P(z<sub>t</sub> = k | O, λ)",
+        "Fractional occupancy of each hidden state of the categorical bout-sequence "
+        "HMM, where t indexes bouts rather than frames. The Viterbi form assigns "
+        "every bout to one state; the posterior (forward-backward) form reports "
+        "expected occupancy and is preferred when a state's defining behavior is "
+        "rare, because the maximum-likelihood path will not pay the transition cost "
+        "twice to enter a state for one or two bouts and so reports exactly zero for "
+        "subjects that did perform the behavior.",
+        "abel.services.behavioral_motif_service",
+        ("rabiner1989",),
+    ),
 ]
 
 

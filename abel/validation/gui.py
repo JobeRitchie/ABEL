@@ -533,6 +533,121 @@ class _ReviewEffortWorker(QRunnable):
             self.signals.error.emit(traceback.format_exc())
 
 
+class _UmapWorker(QRunnable):
+    """Build the all-project embedding, then draw it — both off the UI thread."""
+
+    def __init__(self, projects, behaviors, emb_settings, plot_settings, out_dir) -> None:
+        super().__init__()
+        self.projects = projects
+        self.behaviors = behaviors
+        self.emb = emb_settings
+        self.plot = plot_settings
+        self.out_dir = Path(out_dir)
+        self.signals = _JobSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from abel.validation.analyses import all_project_umap as apu  # noqa: PLC0415
+
+            result = apu.build_all_project_umap(
+                self.projects, self.behaviors, self.emb,
+                progress_cb=lambda m, f: self.signals.progress.emit(m, f))
+            tables = apu.save_embedding(result, self.out_dir)
+            summary = apu.qc_summary(result)
+
+            self.signals.progress.emit("Drawing the map…", 0.95)
+            images = _render_umap(result.frame, result.qc, self.plot, self.out_dir,
+                                  result.reducer_used, summary)
+            self.signals.progress.emit("All-project map complete.", 1.0)
+            self.signals.finished.emit({
+                "images": images,
+                # The panel's data viewer reads CSV; the parquet and the settings
+                # JSON are reachable through "Open Data Folder".
+                "tables": {k: v for k, v in tables.items()
+                           if v.suffix.lower() == ".csv"},
+                "summary": summary, "out_dir": self.out_dir,
+                "embedding": tables.get("embedding")})
+        except Exception:
+            self.signals.error.emit(traceback.format_exc())
+
+
+class _UmapRenderWorker(QRunnable):
+    """Redraw a saved embedding with new plot settings — no reducer, no training.
+
+    Split from :class:`_UmapWorker` because that is the whole workflow of this tab:
+    the coordinates cost minutes, the picture costs a second, and tuning label
+    distance should never pay for the former.
+    """
+
+    def __init__(self, embedding_path, plot_settings, out_dir) -> None:
+        super().__init__()
+        self.embedding_path = Path(embedding_path)
+        self.plot = plot_settings
+        self.out_dir = Path(out_dir)
+        self.signals = _JobSignals()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            from abel.validation.analyses import all_project_umap as apu  # noqa: PLC0415
+
+            self.signals.progress.emit("Reading saved embedding…", 0.2)
+            frame, meta = apu.load_embedding(self.embedding_path)
+            qc = dict(meta.get("qc") or {})
+            summary = _umap_summary_from_meta(frame, meta)
+            self.signals.progress.emit("Drawing the map…", 0.6)
+            images = _render_umap(frame, qc, self.plot, self.out_dir,
+                                  str(meta.get("reducer_used") or "umap"), summary)
+            self.signals.progress.emit("Re-render complete.", 1.0)
+            self.signals.finished.emit({
+                "images": images, "tables": None, "summary": summary,
+                "out_dir": self.out_dir, "embedding": self.embedding_path})
+        except Exception:
+            self.signals.error.emit(traceback.format_exc())
+
+
+def _render_umap(frame, qc, plot_settings, out_dir, reducer, summary):
+    """Main map + the behavior-vs-project QC panel.  Returns the PNGs written."""
+    from abel.validation import umap_plot  # noqa: PLC0415
+
+    if not plot_settings.subtitle:
+        # Carry the "is this a behavior map or a project map?" line onto the
+        # figure itself, so a PNG lifted out of the folder keeps its caveat.
+        lines = [ln for ln in summary.splitlines() if ln.startswith("Feature-space")]
+        plot_settings.subtitle = lines[0] if lines else ""
+    written = umap_plot.render(frame, plot_settings, out_dir, reducer=reducer)
+    images = [p for p in written if p.suffix.lower() == ".png"]
+    qc_png = umap_plot.render_qc(frame, qc, out_dir, plot_settings)
+    if qc_png is not None:
+        images.append(qc_png)
+    return images
+
+
+def _umap_summary_from_meta(frame, meta: dict) -> str:
+    """Rebuild the QC paragraph for an embedding read back from disk."""
+    qc = dict(meta.get("qc") or {})
+    lines = [
+        f"{len(frame):,} points · {len(meta.get('feature_cols') or []):,} features · "
+        f"{frame['group'].nunique()} groups from {frame['project_id'].nunique()} "
+        f"project(s) · reducer: {meta.get('reducer_used', '?')}"
+    ]
+    sb, sp = qc.get("silhouette_behavior_feat"), qc.get("silhouette_project_feat")
+    if sb is not None and sp is not None:
+        verdict = ("behavior structure dominates" if sb > sp else
+                   "PROJECT identity dominates — the clusters are largely assays, "
+                   "not acts")
+        lines.append(f"Feature-space silhouette: behavior {sb:+.3f} vs "
+                     f"project {sp:+.3f} → {verdict}.")
+    kb, kp = qc.get("knn_purity_behavior_feat"), qc.get("knn_purity_project_feat")
+    kc = qc.get("knn_purity_project_chance")
+    if kb is not None and kp is not None:
+        lines.append(f"kNN purity (k=15, feature space): behavior {kb:.2f}, "
+                     f"project {kp:.2f}"
+                     + (f" (chance {kc:.2f})." if kc is not None else "."))
+    return "\n".join(lines)
+
+
 # ── Pop-out figure viewer ────────────────────────────────────────────────────
 
 class _FigurePopout(QMainWindow):
@@ -1185,6 +1300,441 @@ def _split_tab(left_items: list, panel: QWidget, *, left_chars: int = 64) -> QWi
     return w
 
 
+# ── All-project map: the settings spec ──────────────────────────────────────
+#
+# Declared as data rather than seventy hand-written widget blocks, because that is
+# what keeps every one of them carrying an explanation: the tooltip sits next to
+# the range in the same tuple, so a setting cannot be added without one.
+#
+#   (field, label, kind, options, tooltip)
+#   kinds: "bool" · "int" (lo, hi, step) · "float" (lo, hi, step, decimals)
+#          "choice" ([(shown, value), …]) · "text" (placeholder,)
+
+_UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
+    ("Rows — what goes into the map", [
+        ("include_no_behavior", "Include 'no behavior' background", "bool", (),
+         "Add the unlabelled background class. It is usually the biggest group and\n"
+         "swamps the legend — but it is the only way to see whether a behavior is\n"
+         "separable from 'nothing in particular' rather than just from other behaviors."),
+        ("max_rows_per_behavior", "Max clips per (project · behavior)", "int",
+         (0, 50000, 100),
+         "Cap on how many labelled clips each behavior contributes. 0 = no cap.\n"
+         "Without a cap the map is dominated by whichever assay labelled the most,\n"
+         "and UMAP's local structure follows density."),
+        ("max_rows_total", "Max clips overall", "int", (0, 500000, 1000),
+         "Global cap, applied after the per-behavior one, proportionally by group so\n"
+         "small clusters survive. 0 = no cap. UMAP on ~50k points × 1300 features\n"
+         "takes a few minutes."),
+        ("min_rows_per_behavior", "Drop groups with fewer clips than", "int",
+         (0, 5000, 5),
+         "A cluster of three points still gets a colour, a label and a hull, and\n"
+         "means nothing. Groups below this are dropped and reported."),
+        ("min_confidence", "Minimum reviewer confidence", "float", (0.0, 1.0, 0.1, 2),
+         "Keep only clips at or above this confidence. 0 keeps everything, which is\n"
+         "usually what a map wants; the held-out accuracy analyses use 1.0."),
+        ("exclude_imported", "Exclude imported clips", "bool", (),
+         "Drop 'imported:*' rows — clips copied in from another project. Leaving them\n"
+         "in plots the same clip twice under two different project names."),
+        ("exclude_refine_only", "Exclude temporal-feedback corrections", "bool", (),
+         "Drop reviewer FP/FN correction rows. They are deliberately atypical examples,\n"
+         "so they sit at cluster edges and stretch every hull."),
+        ("sample_seed", "Subsampling seed", "int", (0, 999999, 1),
+         "Fixes which clips are drawn when a cap applies, so a map is reproducible."),
+    ]),
+    ("Feature space — what describes a point", [
+        ("use_pose", "Pose geometry", "bool", (),
+         "Body-part angles, curvature, positions and pairwise distances."),
+        ("use_kinematics", "Kinematics", "bool", (),
+         "Pose-derived motion: velocity, speed, acceleration, jerk."),
+        ("use_video", "Video (optical flow / surface motion)", "bool", (),
+         "Pixel-derived motion. Switch it off to ask whether the map is driven by\n"
+         "appearance rather than posture."),
+        ("use_r3d", "R3D appearance embedding (512 dims)", "bool", (),
+         "The learned appearance embedding. 512 columns — enough to outvote every\n"
+         "handcrafted feature combined, so try the map both ways."),
+        ("use_context", "Context (ROI / object / zone)", "bool", (),
+         "Distances and angles to objects, ROIs and arena features. Off by default:\n"
+         "these are what an assay's *apparatus* looks like, so switching them on is\n"
+         "the surest way to turn a behavior map into a project map."),
+        ("use_social", "Social (inter-animal)", "bool", (),
+         "Distance to nearest animal, approach velocity, heading alignment, contact.\n"
+         "Present only in multi-animal projects."),
+        ("feature_space", "Feature space across projects", "choice",
+         ([("Shared — intersect columns (comparable)", "shared"),
+           ("Union — every column, gaps filled", "union")],),
+         "Projects do not share a column set. 'Shared' embeds on the intersection so\n"
+         "every point is described by the same measurements. 'Union' keeps everything\n"
+         "and fills what a project lacks — faster to set up, and it guarantees a\n"
+         "project-shaped blob you can mistake for biology."),
+        ("nan_policy", "Missing values", "choice",
+         ([("Fill with the column median", "median"),
+           ("Fill with zero", "zero"),
+           ("Drop the whole column", "drop_columns")],),
+         "How gaps are filled — mostly relevant under 'Union', where a project simply\n"
+         "lacks a column. 'Drop the whole column' is the safe option and collapses\n"
+         "union back to roughly the shared set."),
+        ("drop_zero_variance", "Drop constant columns", "bool", (),
+         "A column that never varies costs distance computation and contributes nothing."),
+        ("drop_zero_r3d_rows", "Drop clips with an all-zero R3D block", "bool", (),
+         "Two known paths write 512 zeros instead of an appearance embedding. Those\n"
+         "rows are identical to each other and pull into one dense fake cluster.\n"
+         "Only applies when the R3D family is on."),
+        ("max_features", "Keep only the N most variable columns", "int",
+         (0, 5000, 50),
+         "0 = keep all. A blunt way to stop one large family (the 512 R3D dims)\n"
+         "dominating the distance simply by column count."),
+    ]),
+    ("Scaling — putting the columns on a common footing", [
+        ("scaler", "Column scaling", "choice",
+         ([("Z-score (mean / SD)", "zscore"),
+           ("Robust (median / IQR)", "robust"),
+           ("Min-max to [0, 1]", "minmax"),
+           ("None — raw units", "none")],),
+         "Never leave this at 'None' with mixed units: whichever feature happens to be\n"
+         "measured in the largest numbers then decides the whole map. 'Robust' is the\n"
+         "better choice when a few extreme clips are stretching everything."),
+        ("per_project_zscore", "Standardize within each project first", "bool", (),
+         "Centres each project on its own mean before pooling, removing per-rig offsets\n"
+         "(lighting, camera height, arena scale) — and removing any genuine between-assay\n"
+         "difference with them. Run it both ways and compare the QC numbers."),
+        ("pca_components", "PCA components before the reducer", "int", (0, 500, 5),
+         "0 = off. 50 is the conventional pre-reduction: it denoises, makes UMAP several\n"
+         "times faster, and barely changes the layout. The run reports how much variance\n"
+         "it kept — raise it if that number is low."),
+        ("pca_whiten", "Whiten the PCA components", "bool", (),
+         "Rescale every component to unit variance. Stops the first component dominating\n"
+         "the distance; also amplifies noisy trailing components."),
+    ]),
+    ("Reducer", [
+        ("reducer", "Algorithm", "choice",
+         ([("UMAP (needs umap-learn)", "umap"),
+           ("t-SNE (scikit-learn)", "tsne"),
+           ("PCA (linear, instant)", "pca")],),
+         "UMAP is the intended one. t-SNE and PCA are fallbacks so this tab still\n"
+         "produces a map without umap-learn installed; neither preserves global\n"
+         "structure the way UMAP claims to, so distances between distant clusters\n"
+         "mean even less than usual."),
+        ("n_neighbors", "n_neighbors (local ↔ global)", "int", (2, 500, 1),
+         "The single most consequential UMAP setting. Low (5-15) = fine local detail\n"
+         "and fragmented clusters; high (50-200) = global structure, blobs merge.\n"
+         "Change this before you change anything else."),
+        ("min_dist", "min_dist (cluster tightness)", "float", (0.0, 0.99, 0.01, 3),
+         "How tightly points may pack within a cluster. Low = dense knots, good for\n"
+         "counting clusters. High = evenly spread, good for reading labels."),
+        ("spread", "spread (overall scale)", "float", (0.1, 10.0, 0.1, 2),
+         "The scale the embedding is spread over. With min_dist it sets how much empty\n"
+         "space separates clusters."),
+        ("metric", "Distance metric", "choice",
+         ([("euclidean", "euclidean"), ("cosine", "cosine"),
+           ("correlation", "correlation"), ("manhattan", "manhattan"),
+           ("chebyshev", "chebyshev")],),
+         "Euclidean after z-scoring is standard. Cosine ignores overall magnitude and\n"
+         "often behaves better when the R3D embedding dominates the column count."),
+        ("n_components", "Output dimensions", "int", (2, 3, 1),
+         "2 for a figure. 3 only if you want the coordinates for something else — the\n"
+         "figure always plots the first two."),
+        ("set_op_mix_ratio", "set_op_mix_ratio", "float", (0.0, 1.0, 0.05, 2),
+         "Fuzzy union (1.0) vs fuzzy intersection (0.0) of the local neighbourhoods.\n"
+         "Below 1.0 breaks weakly-connected regions apart."),
+        ("local_connectivity", "local_connectivity", "float", (0.5, 10.0, 0.5, 1),
+         "How many neighbours are assumed fully connected. Raise to 2-4 if a\n"
+         "high-dimensional feature space shatters into speckle."),
+        ("repulsion_strength", "repulsion_strength", "float", (0.1, 10.0, 0.1, 2),
+         "Weight on negative samples during layout. Higher = more empty space between\n"
+         "clusters, and more distortion of the distances *within* them."),
+        ("negative_sample_rate", "negative_sample_rate", "int", (1, 50, 1),
+         "Negative samples per positive edge. Higher = cleaner gaps, slower."),
+        ("n_epochs", "Optimization epochs", "int", (0, 5000, 50),
+         "0 = UMAP's own default (500 for a small set, 200 for a large one). Raise to\n"
+         "500-1000 if the layout still looks stringy or half-formed."),
+        ("init", "Initialization", "choice",
+         ([("spectral (deterministic)", "spectral"), ("random", "random")],),
+         "Spectral gives better global structure and the same answer every time;\n"
+         "random is faster to start and occasionally escapes a bad spectral layout."),
+        ("densmap", "densMAP (preserve local density)", "bool", (),
+         "Make a tight cluster *look* tight. Off by default because it changes what\n"
+         "area on the page means — with it on, a large blob is a diffuse behavior\n"
+         "rather than simply a common one."),
+        ("dens_lambda", "densMAP λ", "float", (0.0, 20.0, 0.5, 1),
+         "How strongly densMAP enforces the density match. Only used when densMAP is on."),
+        ("random_state", "Random seed (−1 = none)", "int", (-1, 999999, 1),
+         "Fixes the layout across runs. UMAP disables its own parallelism when a seed\n"
+         "is set, so −1 is faster but no longer reproducible — don't publish from −1."),
+        ("tsne_perplexity", "t-SNE perplexity", "float", (5.0, 200.0, 5.0, 1),
+         "Effective neighbourhood size for t-SNE (5-50 typical). Ignored by UMAP and PCA;\n"
+         "automatically lowered if the point count cannot support it."),
+    ]),
+    ("Grouping", [
+        ("pool_behaviors_by_name", "Pool same-named behaviors across projects", "bool", (),
+         "OFF (default): groups are 'Project · Behavior', so an EPM Rear and an\n"
+         "open-field Rear stay separate — the convention the rest of this suite\n"
+         "enforces, because they are different measurements of arguably different acts.\n"
+         "ON: they merge, which is how you ask whether the two land in the same place."),
+    ]),
+]
+
+_UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
+    ("Colour & points", [
+        ("color_by", "Colour points by", "choice",
+         ([("Project · Behavior (assay-scoped)", "group"),
+           ("Project", "project"),
+           ("Behavior name (pooled across projects)", "behavior")],),
+         "Colouring by Project is the fastest check on whether the map is really a\n"
+         "behavior map. This also decides what gets labelled."),
+        ("palette", "Palette", "choice",
+         ([("Distinct — best above ~15 groups", "distinct"),
+           ("ABEL suite palette", "abel"),
+           ("One hue per project, shades within", "assay_shades"),
+           ("Matplotlib tab20", "tab20"),
+           ("Turbo gradient", "turbo")],),
+         "'One hue per project' is the one to reach for on an all-project map: it reads\n"
+         "as 'these five clusters are the same assay' at a glance."),
+        ("point_size", "Point size", "float", (0.3, 200.0, 0.5, 1),
+         "Marker area in points². 3-8 for a dense map, 15+ when there are few clips."),
+        ("point_alpha", "Point opacity", "float", (0.02, 1.0, 0.05, 2),
+         "Below ~0.4, overlapping clusters blend into their true density instead of\n"
+         "showing whichever group happened to be drawn last."),
+        ("edge_width", "Marker outline width", "float", (0.0, 3.0, 0.1, 2),
+         "0 = none. Non-zero costs a lot of render time at tens of thousands of points."),
+        ("shuffle_draw", "Draw points in random order", "bool", (),
+         "Otherwise the last group plotted sits on top of every other and looks larger\n"
+         "than it is."),
+        ("plot_max_points", "Max points drawn", "int", (0, 500000, 1000),
+         "0 = all. Purely cosmetic: it thins the render, never the embedding, and\n"
+         "labels and overlays are still computed from every point."),
+        ("rasterize_points", "Rasterize the markers in the PDF", "bool", (),
+         "Keeps a 50k-point PDF openable while leaving text and lines as vectors."),
+    ]),
+    ("Cluster labels", [
+        ("label_mode", "Label mode", "choice",
+         ([("Offset — pushed off the cluster, with a leader line", "offset"),
+           ("On the cluster", "anchor"),
+           ("No labels (legend only)", "none")],),
+         "On a dense map an on-cluster label sits inside the points it names and\n"
+         "collides with its neighbours. Offset is the readable choice."),
+        ("label_anchor", "Anchor point of each cluster", "choice",
+         ([("Medoid — a real clip, always inside the cluster", "medoid"),
+           ("Centroid — the mean position", "centroid"),
+           ("Density peak — the visual centre of mass", "density")],),
+         "Where the label refers to and the leader line starts. A centroid can land in\n"
+         "the empty middle of a crescent-shaped cluster; a medoid never does."),
+        ("label_offset", "Label distance from its cluster", "float",
+         (0.0, 0.6, 0.01, 3),
+         "How far the label sits from the cluster, as a fraction of the plot's width\n"
+         "(0.10 ≈ a tenth of the map). 0 puts the text on the anchor.\n\n"
+         "Under the 'Perimeter' push below this means something different: it is the\n"
+         "inset of the label ring from the figure edge, so smaller = further out."),
+        ("label_push", "Direction the label is pushed", "choice",
+         ([("Radial — straight out from the map's centre", "radial"),
+           ("Sparse — toward the emptiest nearby direction", "sparse"),
+           ("Perimeter — fan every label out to the figure's rim", "perimeter"),
+           ("Up", "up"), ("No push", "none")],),
+         "'Sparse' keeps labels near their clusters and is best when clusters are\n"
+         "interleaved. 'Perimeter' moves every label clear of the data and packs them\n"
+         "around the edge in bearing order — the readable choice when 30+ clusters\n"
+         "pile into one dense region."),
+        ("label_repel_iters", "Overlap-resolution passes", "int", (0, 3000, 50),
+         "0 disables repulsion, and labels may then sit on top of each other.\n"
+         "300-800 for a crowded map. (Not used by the Perimeter push, which packs\n"
+         "labels exactly instead of iterating.)"),
+        ("label_min_gap", "Minimum gap between labels", "float", (0.0, 0.2, 0.002, 3),
+         "Clear space required between two label boxes, as a fraction of the plot.\n"
+         "Raise it if labels end up merely touching."),
+        ("label_spring", "Pull back toward the ideal position", "float",
+         (0.0, 1.0, 0.005, 3),
+         "How hard each label is dragged back to its offset position each pass.\n"
+         "LOW (0.01-0.03) lets crowded labels spread out properly; HIGH (0.1+) keeps\n"
+         "them near their clusters and accepts overlap. Turn this DOWN when labels\n"
+         "still collide after raising the pass count."),
+        ("label_leash", "Maximum drift from that position", "float",
+         (0.0, 1.0, 0.02, 3),
+         "The tether that stops a label in a crowded region from wandering across the\n"
+         "map and appearing to name a different cluster."),
+        ("label_avoid_points", "Push labels off dense point regions", "bool", (),
+         "Also repel each label away from the data, so text does not land on top of a\n"
+         "cluster it does not name."),
+        ("label_font_size", "Font size", "float", (3.0, 40.0, 0.5, 1),
+         "Also the main lever on crowding: label footprints scale with this, so\n"
+         "dropping a point or two can resolve overlaps nothing else will."),
+        ("label_font_weight", "Font weight", "choice",
+         ([("bold", "bold"), ("normal", "normal")],),
+         "Bold survives being drawn over scattered points; normal is calmer on a\n"
+         "sparse map."),
+        ("label_color", "Label colour", "choice",
+         ([("Match the cluster", "cluster"),
+           ("Plain foreground colour", "foreground")],),
+         "Matching the cluster is what lets a reader follow a label to its points\n"
+         "without tracing the leader line."),
+        ("label_halo", "Outline (halo) width behind the text", "float",
+         (0.0, 10.0, 0.5, 1),
+         "A background-coloured stroke around the glyphs — the cheapest way to keep\n"
+         "text legible over points without an opaque box. Ignored when the box is on."),
+        ("label_box", "Draw a box behind each label", "bool", (),
+         "Very legible, and it takes up more room, which makes the repulsion push\n"
+         "labels further apart."),
+        ("label_box_alpha", "Box opacity", "float", (0.0, 1.0, 0.05, 2),
+         "Below ~0.6 the points show through the box."),
+        ("max_label_chars", "Truncate labels to N characters", "int", (0, 200, 1),
+         "0 = never truncate. 'Project · Behavior' names get long, and label width is\n"
+         "what runs the rim out of room."),
+        ("label_show_counts", "Append the clip count", "bool", (),
+         "e.g. 'EPM · Head Dip (n=412)'. Honest, and it makes every label wider."),
+        ("label_min_points", "Only label groups with at least N clips", "int",
+         (0, 10000, 5),
+         "0 = label everything. Small groups produce the most crowding for the least\n"
+         "information; they stay coloured and in the legend either way."),
+    ]),
+    ("Leader lines", [
+        ("leader_lines", "Draw leader lines", "bool", (),
+         "The line from the cluster to its label. Without it a large offset is\n"
+         "ambiguous — leave it on whenever the offset is non-zero."),
+        ("leader_width", "Line width", "float", (0.0, 4.0, 0.1, 2), "Line width in points."),
+        ("leader_alpha", "Line opacity", "float", (0.0, 1.0, 0.05, 2),
+         "Keep it below 1.0 so the lines read as annotation rather than data."),
+        ("leader_style", "Line style", "choice",
+         ([("solid", "-"), ("dashed", "--"), ("dotted", ":"), ("dash-dot", "-.")],),
+         "Dotted reads as annotation most clearly on a dense map."),
+        ("leader_color_by_cluster", "Colour the line like its cluster", "bool", (),
+         "Otherwise every line is the theme's muted grey, which is calmer but harder\n"
+         "to follow when lines cross."),
+    ]),
+    ("Cluster overlays", [
+        ("overlay", "Cluster shading", "choice",
+         ([("None", "none"),
+           ("Convex hull", "hull"),
+           ("Covariance ellipse (2 SD)", "ellipse"),
+           ("Density contour (needs scipy)", "density")],),
+         "Shows each cluster's extent. The ellipse is the most robust to stragglers;\n"
+         "a hull is exact but one outlier stretches it across the figure."),
+        ("overlay_alpha", "Shading opacity", "float", (0.0, 1.0, 0.02, 2),
+         "Keep it low (0.08-0.15) — with 30+ overlapping clusters this is the setting\n"
+         "that decides whether the figure is readable at all."),
+        ("overlay_edge_width", "Outline width", "float", (0.0, 4.0, 0.1, 2),
+         "0 = fill only. An outline helps when the fill is very faint."),
+        ("overlay_quantile", "Fraction of points enclosed", "float",
+         (0.1, 1.0, 0.05, 2),
+         "For a hull, the most central fraction of the cluster to enclose — trimming\n"
+         "the outliers a convex hull would otherwise stretch to. For a density\n"
+         "contour, the fraction of probability mass inside the line."),
+        ("centroid_marker", "Mark each cluster's anchor", "bool", (),
+         "A ringed dot where the label's leader line starts."),
+    ]),
+    ("Frame, legend & export", [
+        ("facet_by", "Split into panels by", "choice",
+         ([("None — one map", "none"),
+           ("Project", "project"), ("Behavior name", "behavior")],),
+         "One small panel per project or behavior, all sharing the single embedding's\n"
+         "axes so panels are directly comparable. The best answer to a map too crowded\n"
+         "to label."),
+        ("facet_cols", "Panels per row", "int", (1, 8, 1), "Grid width when faceting."),
+        ("facet_context", "Grey context points behind each panel", "bool", (),
+         "Draws the rest of the map in grey so each panel is read against the whole."),
+        ("legend", "Legend", "choice",
+         ([("Right of the map", "right"), ("Below the map", "below"),
+           ("None", "none")],),
+         "With labels on the map itself the legend is often redundant — turning it off\n"
+         "gives the figure back a third of its width."),
+        ("legend_cols", "Legend columns", "int", (1, 8, 1),
+         "Multiple columns keep a 40-group legend from running off the page."),
+        ("legend_font_size", "Legend font size", "float", (4.0, 20.0, 0.5, 1), ""),
+        ("theme", "Theme", "choice", ([("Light", "light"), ("Dark", "dark")],),
+         "Light is what a journal wants; dark reads better on screen."),
+        ("show_axes", "Show axes", "bool", (),
+         "UMAP axes carry no units and no meaning, which is why they are off by default."),
+        ("equal_aspect", "Lock the aspect ratio", "bool", (),
+         "Keeps a unit of distance the same in x and y. Turning it off lets the map\n"
+         "fill the page and silently distorts every cluster's shape."),
+        ("fig_width", "Figure width (inches)", "float", (3.0, 40.0, 0.5, 1),
+         "Also the cheapest fix for crowded labels: more page, more room."),
+        ("fig_height", "Figure height (inches)", "float", (3.0, 40.0, 0.5, 1), ""),
+        ("dpi", "PNG resolution (dpi)", "int", (72, 900, 50),
+         "300+ for print. The PDF is vector regardless."),
+        ("save_pdf", "Also write a PDF", "bool", (),
+         "Vector text and lines, for figure assembly."),
+        ("title", "Figure title", "text", ("(optional)",),
+         "Leave empty for no title."),
+    ]),
+]
+
+
+def _build_setting_rows(title: str, rows: list[tuple], store: dict) -> QGroupBox:
+    """One settings group from the spec, registering each widget under its field."""
+    box = QGroupBox(title)
+    form = QFormLayout(box)
+    for field, label, kind, opts, *rest in rows:
+        tip = rest[0] if rest else ""
+        if kind == "bool":
+            w = QCheckBox(label)
+            form.addRow(w)
+        elif kind == "int":
+            lo, hi, step = opts
+            w = QSpinBox()
+            w.setRange(int(lo), int(hi))
+            w.setSingleStep(int(step))
+            form.addRow(label + ":", w)
+        elif kind == "float":
+            lo, hi, step, dec = opts
+            w = QDoubleSpinBox()
+            w.setDecimals(int(dec))
+            w.setRange(float(lo), float(hi))
+            w.setSingleStep(float(step))
+            form.addRow(label + ":", w)
+        elif kind == "choice":
+            w = QComboBox()
+            for shown, value in opts[0]:
+                w.addItem(shown, userData=value)
+            form.addRow(label + ":", w)
+        else:  # text
+            w = QLineEdit()
+            if opts:
+                w.setPlaceholderText(str(opts[0]))
+            form.addRow(label + ":", w)
+        if tip:
+            w.setToolTip(tip)
+        store[field] = w
+    return box
+
+
+def _apply_settings_to_widgets(spec: list, store: dict, values: dict) -> None:
+    """Push a settings dataclass' current values into the widgets."""
+    for _title, rows in spec:
+        for field, _label, kind, *_ in rows:
+            w = store.get(field)
+            if w is None or field not in values:
+                continue
+            v = values[field]
+            if kind == "bool":
+                w.setChecked(bool(v))
+            elif kind == "int":
+                w.setValue(int(v))
+            elif kind == "float":
+                w.setValue(float(v))
+            elif kind == "choice":
+                idx = w.findData(v)
+                w.setCurrentIndex(idx if idx >= 0 else 0)
+            else:
+                w.setText(str(v))
+
+
+def _read_settings_widgets(spec: list, store: dict) -> dict:
+    """Widgets → a plain dict a settings dataclass can be built from."""
+    out: dict = {}
+    for _title, rows in spec:
+        for field, _label, kind, *_ in rows:
+            w = store.get(field)
+            if w is None:
+                continue
+            if kind == "bool":
+                out[field] = w.isChecked()
+            elif kind in ("int", "float"):
+                out[field] = w.value()
+            elif kind == "choice":
+                out[field] = w.currentData()
+            else:
+                out[field] = w.text().strip()
+    return out
+
+
 # ── Main window ─────────────────────────────────────────────────────────────
 
 class ValidationWindow(QMainWindow):
@@ -1236,6 +1786,8 @@ class ValidationWindow(QMainWindow):
         self._tabs.addTab(self._build_rare_discovery_tab(), "Rare Discovery")
         self._tabs.addTab(self._build_cross_tab(), "Cross-Project")
         self._tabs.addTab(self._bscape_tab, "Behaviorscape")
+        # After Behaviorscape: the map reuses that tab's behavior-pooling aliases.
+        self._tabs.addTab(self._build_umap_tab(), "All-Project Map")
         self._tabs.addTab(self._build_video_value_tab(), "Video Features")
         self._tabs.addTab(self._build_r3d_value_tab(), "R3D Value")
         self._tabs.addTab(self._build_review_effort_tab(), "Review Effort")
@@ -2305,6 +2857,188 @@ class ValidationWindow(QMainWindow):
         self._bscape_status.setText("Behaviorscape failed — see Log tab.")
         self._log_msg("BEHAVIORSCAPE ERROR:\n" + tb)
         QMessageBox.critical(self, "Behaviorscape failed",
+                             tb.splitlines()[-1] if tb else "Unknown error")
+
+    # ── All-project map (UMAP) tab ───────────────────────────────────────
+    def _build_umap_tab(self) -> QWidget:
+        from abel.validation import umap_plot  # noqa: PLC0415
+        from abel.validation.analyses import all_project_umap as apu  # noqa: PLC0415
+
+        intro = _explain(
+            "One map holding every labelled clip from every checked project. Each point is\n"
+            "one clip; the reducer places it by its features; the figure colours and labels\n"
+            "the clusters. Use it to ask where the assays' behaviors sit relative to each\n"
+            "other — does an EPM Rear land on an open-field Rear, is Groom one region or\n"
+            "several, does a rare behavior have a place of its own?\n\n"
+            "Two things to know before reading one. Projects do not share a column set, so\n"
+            "the map is built on the columns they have in common (the 'Shared' feature\n"
+            "space) — otherwise a cluster can be an artifact of a column only one project\n"
+            "has. And project identity is a confound: rigs, lighting and arenas differ, so\n"
+            "every run reports behavior structure and project structure side by side. If the\n"
+            "project number is the larger one, the clusters are assays, not acts.\n\n"
+            "Workflow: 'Compute Embedding' is the slow step (minutes). Everything under\n"
+            "'Colour', 'Cluster labels', 'Overlays' and 'Frame' is a re-render of the saved\n"
+            "coordinates — hit 'Re-render Figure' and it comes back in a second. Tune label\n"
+            "distance there, not by recomputing.")
+
+        self._umap_embed_w: dict = {}
+        self._umap_plot_w: dict = {}
+        self._umap_embedding: Path | None = None
+        self._umap_worker = None
+
+        groups: list = []
+        for title, rows in _UMAP_EMBED_SPEC:
+            groups.append(_build_setting_rows("Embedding · " + title, rows,
+                                              self._umap_embed_w))
+        for title, rows in _UMAP_PLOT_SPEC:
+            groups.append(_build_setting_rows("Figure · " + title, rows,
+                                              self._umap_plot_w))
+
+        _apply_settings_to_widgets(_UMAP_EMBED_SPEC, self._umap_embed_w,
+                                   apu.EmbeddingSettings().to_dict())
+        _apply_settings_to_widgets(_UMAP_PLOT_SPEC, self._umap_plot_w,
+                                   umap_plot.PlotSettings().to_dict())
+
+        run = QPushButton("Compute Embedding"); run.setObjectName("runBtn")
+        run.setToolTip("Read every checked project's labelled clips, build the shared\n"
+                       "feature matrix and run the reducer. Minutes, not seconds.")
+        run.clicked.connect(self._run_umap)
+        self._umap_run_btn = run
+
+        rerender = QPushButton("Re-render Figure (fast)")
+        rerender.setToolTip(
+            "Redraw the LAST computed (or loaded) embedding with the current figure\n"
+            "settings. No reducer, no training — this is how you tune label distance.")
+        rerender.clicked.connect(self._rerender_umap)
+        self._umap_rerender_btn = rerender
+        rerender.setEnabled(False)
+
+        load = QPushButton("Load Saved Embedding…")
+        load.setToolTip("Open an embedding.parquet from an earlier run (or its folder)\n"
+                        "so it can be restyled without recomputing.")
+        load.clicked.connect(self._load_umap_embedding)
+
+        btns = QHBoxLayout()
+        btns.addWidget(rerender)
+        btns.addWidget(load)
+
+        self._umap_status = QLabel("")
+        self._umap_status.setWordWrap(True)
+        self._umap_status.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._umap_status.setStyleSheet("color:#a6adc8; font-size:11px;")
+
+        self._umap_panel = _ResultPanel(title="All-project map")
+        left = [intro, *groups, run, btns, self._umap_status]
+        return _split_tab(left, self._umap_panel, left_chars=72)
+
+    def _umap_embed_settings(self):
+        from abel.validation.analyses import all_project_umap as apu  # noqa: PLC0415
+
+        data = _read_settings_widgets(_UMAP_EMBED_SPEC, self._umap_embed_w)
+        # Reuse the behaviorscape alias table: pooling "Rearing" with "Rear" is the
+        # same question there, and asking the user to type it twice invites drift.
+        data["alias_map"] = self._bscape_alias_map()
+        return apu.EmbeddingSettings.from_dict(data)
+
+    def _umap_plot_settings(self):
+        from abel.validation import umap_plot  # noqa: PLC0415
+
+        return umap_plot.PlotSettings.from_dict(
+            _read_settings_widgets(_UMAP_PLOT_SPEC, self._umap_plot_w))
+
+    def _run_umap(self) -> None:
+        if self._busy:
+            QMessageBox.information(self, "Busy", "A run is already in progress.")
+            return
+        behaviors = self._collect_behaviors()
+        if not behaviors:
+            QMessageBox.warning(
+                self, "Nothing selected",
+                "Add a project and check at least one behavior on the Projects tab.")
+            return
+        projects = [self._projects[pid] for pid in behaviors]
+        emb = self._umap_embed_settings()
+        if emb.reducer == "umap":
+            try:
+                import umap  # noqa: F401, PLC0415
+            except ImportError:
+                if QMessageBox.question(
+                    self, "umap-learn not installed",
+                    "The UMAP reducer needs the umap-learn package, which is not "
+                    "installed:\n\n    pip install umap-learn\n\n"
+                    "Build the map with PCA instead? (Linear structure only — fine "
+                    "for a smoke test, not for a figure.)",
+                ) != QMessageBox.StandardButton.Yes:
+                    return
+
+        base = self._output_dir or Path(tempfile.gettempdir()) / "abel_all_project_umap"
+        out_dir = Path(base) / f"all_project_umap_{datetime.now():%Y%m%d_%H%M%S}"
+
+        self._set_busy(True)
+        self._umap_status.setText("Building the shared feature matrix…")
+        self._log_msg(f"All-project map: projects={[p.name for p in projects]}, "
+                      f"reducer={emb.reducer}, out={out_dir}")
+        worker = _UmapWorker(projects, behaviors, emb, self._umap_plot_settings(),
+                             out_dir)
+        worker.signals.progress.connect(self._on_progress)
+        worker.signals.finished.connect(self._on_umap_finished)
+        worker.signals.error.connect(self._on_umap_error)
+        self._umap_worker = worker  # keep alive
+        QThreadPool.globalInstance().start(worker)
+
+    def _rerender_umap(self) -> None:
+        if self._busy:
+            QMessageBox.information(self, "Busy", "A run is already in progress.")
+            return
+        if not self._umap_embedding or not Path(self._umap_embedding).exists():
+            QMessageBox.information(
+                self, "No embedding",
+                "Compute an embedding first, or load a saved one.")
+            return
+        self._set_busy(True)
+        self._umap_status.setText("Re-rendering…")
+        worker = _UmapRenderWorker(self._umap_embedding, self._umap_plot_settings(),
+                                   Path(self._umap_embedding).parent)
+        worker.signals.progress.connect(self._on_progress)
+        worker.signals.finished.connect(self._on_umap_finished)
+        worker.signals.error.connect(self._on_umap_error)
+        self._umap_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _load_umap_embedding(self) -> None:
+        start = str(self._output_dir or Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open a saved embedding", start, "Embedding (embedding.parquet)")
+        if not path:
+            return
+        self._umap_embedding = Path(path)
+        self._umap_rerender_btn.setEnabled(True)
+        self._umap_status.setText(
+            f"Loaded {self._umap_embedding}.\nAdjust the figure settings and hit "
+            f"'Re-render Figure'.")
+        self._log_msg(f"All-project map: loaded embedding {path}")
+
+    def _on_umap_finished(self, result: object) -> None:
+        self._set_busy(False)
+        self._progress.setValue(100)
+        if not isinstance(result, dict):
+            return
+        images = result.get("images") or []
+        self._umap_panel.set_simple(images, result.get("tables"),
+                                    folder=result.get("out_dir"))
+        self._umap_status.setText(str(result.get("summary", "")))
+        emb = result.get("embedding")
+        if emb:
+            self._umap_embedding = Path(emb)
+            self._umap_rerender_btn.setEnabled(True)
+        self._log_msg(f"All-project map complete: {len(images)} figure(s).")
+        self.statusBar().showMessage("All-project map ready.", 8000)
+
+    def _on_umap_error(self, tb: str) -> None:
+        self._set_busy(False)
+        self._umap_status.setText("All-project map failed — see Log tab.")
+        self._log_msg("ALL-PROJECT MAP ERROR:\n" + tb)
+        QMessageBox.critical(self, "All-project map failed",
                              tb.splitlines()[-1] if tb else "Unknown error")
 
     # ── Video-feature value tab ──────────────────────────────────────────
@@ -3743,11 +4477,17 @@ class ValidationWindow(QMainWindow):
         buttons = [self._lc_run_btn, self._abl_run_btn, self._disc_run_btn,
                    self._gen_run_btn, self._al_run_btn, self._rare_run_btn]
         for attr in ("_bscape_run_btn", "_vv_run_btn", "_r3d_run_btn",
-                     "_bench_run_btn", "_suite_run_btn", "_rare_check_btn"):
+                     "_bench_run_btn", "_suite_run_btn", "_rare_check_btn",
+                     "_umap_run_btn"):
             if hasattr(self, attr):
                 buttons.append(getattr(self, attr))
         for b in buttons:
             b.setEnabled(not busy)
+        # Re-render is only meaningful once an embedding exists, so it must not be
+        # switched on again just because some other tab's run finished.
+        if hasattr(self, "_umap_rerender_btn"):
+            self._umap_rerender_btn.setEnabled(
+                not busy and bool(getattr(self, "_umap_embedding", None)))
         if not busy:
             self._progress_lbl.setText("Idle.")
 

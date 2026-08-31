@@ -129,9 +129,14 @@ def test_truncated_em_breaks_loglikelihood_monotonicity():
 
 
 def test_calibration_recommends_settings_with_evidence():
-    seqs = _synthetic_sequences()
+    # Sized so the cross-validation stage fits inside the budget and actually
+    # runs: with a larger fixture the estimator skips CV (cv_folds=0), which
+    # both costs a minute of suite time and leaves that branch untested.
+    seqs = _synthetic_sequences(n_sessions=6, n_bouts=30)
     settings = MotifSettings(hmm_n_iter=20, hmm_n_restarts=2, hmm_n_states_min=4)
-    res = calibrate_hmm_settings(seqs, BEHAVIORS, settings, time_budget_s=30.0)
+    res = calibrate_hmm_settings(seqs, BEHAVIORS, settings, time_budget_s=10.0)
+
+    assert res["cv_folds"] > 0, "the cross-validation stage should have run"
 
     assert res["error"] is None
     prop = res["proposed"]
