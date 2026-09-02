@@ -396,6 +396,46 @@ def scale_roi(roi: Any, factor: float) -> dict[str, Any]:
     })
 
 
+def translate_roi(
+    roi: Any,
+    dx: float,
+    dy: float,
+    max_x: float | None = None,
+    max_y: float | None = None,
+) -> dict[str, Any]:
+    """Return a copy of *roi* shifted by ``(dx, dy)`` pixels, shape preserved.
+
+    Backs "drag an ROI to reposition it" in the ROI canvases: the whole shape
+    moves rigidly, so a freehand arm outline keeps its exact outline instead of
+    having to be retraced.  When *max_x*/*max_y* are given the shift is clamped
+    so the ROI's bounding box stays inside ``[0, max_x] x [0, max_y]`` -- the
+    ROI slides along the frame edge rather than disappearing off it.
+    """
+    x, y, w, h = roi_bbox(roi)
+    if max_x is not None:
+        dx = min(max(dx, -float(x)), float(max_x) - float(x + w))
+    if max_y is not None:
+        dy = min(max(dy, -float(y)), float(max_y) - float(y + h))
+
+    shape = roi_shape(roi)
+    if shape == "circle":
+        return normalize_roi({
+            "shape": "circle",
+            "cx": float(roi.get("cx", 0) or 0) + dx,
+            "cy": float(roi.get("cy", 0) or 0) + dy,
+            "r": float(roi.get("r", 0) or 0),
+        })
+    if shape == "polygon":
+        pts = [[p[0] + dx, p[1] + dy] for p in _polygon_points(roi)]
+        return normalize_roi({"shape": "polygon", "points": pts})
+    return normalize_roi({
+        "x": int(round(x + dx)),
+        "y": int(round(y + dy)),
+        "w": w,
+        "h": h,
+    })
+
+
 # ── Polygon post-processing (freehand cleanup) ────────────────────────────────
 
 def chaikin_smooth(points: list[list[float]], iterations: int = 2) -> list[list[float]]:

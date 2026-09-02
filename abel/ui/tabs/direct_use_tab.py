@@ -537,7 +537,8 @@ class DirectUseTab(QWidget):
         roi_desc = QLabel(
             "Define the environment ROIs for your new data. These are used by "
             "context features (target-relative distance, angle, etc.). "
-            "Draw on the video frame below, or copy ROIs from the source project."
+            "Draw on the video frame below (drag an existing ROI to move it; "
+            "hold Shift to redraw one), or copy ROIs from the source project."
         )
         roi_desc.setWordWrap(True)
         roi_desc.setStyleSheet("font-size: 11px; color: #78909C;")

@@ -90,3 +90,34 @@ def test_chaikin_and_rdp_shapes():
     assert len(smoothed) > len(pts)  # corner-cutting adds vertices
     simplified = g.rdp_simplify(pts, 2.0)
     assert 3 <= len(simplified) <= len(pts)
+
+
+def test_translate_roi_preserves_shape_and_size():
+    r = g.translate_roi({"x": 10, "y": 20, "w": 30, "h": 40}, 5, -7)
+    assert g.roi_bbox(r) == (15, 13, 30, 40)
+
+    c = g.translate_roi(
+        g.normalize_roi({"shape": "circle", "cx": 50, "cy": 50, "r": 10}), -20, 5
+    )
+    assert g.roi_shape(c) == "circle"
+    assert (c["cx"], c["cy"], c["r"]) == (30.0, 55.0, 10.0)
+
+    poly = g.normalize_roi(
+        {"shape": "polygon", "points": [[0, 0], [10, 0], [10, 10], [0, 10]]}
+    )
+    moved = g.translate_roi(poly, 3, 4)
+    assert g.roi_shape(moved) == "polygon"
+    # Every vertex shifts by the same amount -- the outline is rigid.
+    assert {(n[0] - o[0], n[1] - o[1]) for o, n in zip(poly["points"], moved["points"])} == {
+        (3.0, 4.0)
+    }
+
+
+def test_translate_roi_clamps_to_frame():
+    roi = {"x": 10, "y": 10, "w": 100, "h": 50}
+    # Dragged far past the top-left: slides to the edge, keeping its size.
+    assert g.roi_bbox(g.translate_roi(roi, -500, -500, 640, 480)) == (0, 0, 100, 50)
+    # Dragged far past the bottom-right.
+    assert g.roi_bbox(g.translate_roi(roi, 5000, 5000, 640, 480)) == (540, 430, 100, 50)
+    # Unclamped when no frame bounds are supplied.
+    assert g.roi_bbox(g.translate_roi(roi, -500, -500)) == (-490, -490, 100, 50)

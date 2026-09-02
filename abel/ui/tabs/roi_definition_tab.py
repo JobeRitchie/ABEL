@@ -81,6 +81,11 @@ class _ROICanvas(QWidget):
     Supports up to MAX_ROIS named target zones and one *subject_crop* zone.
     The active drawing slot is selected via :py:meth:`set_draw_mode`.
 
+    Pressing inside an existing overlay *moves* that ROI instead of starting a
+    new one, so repositioning a zone between subjects is a drag rather than a
+    retrace (which matters most for freehand polygons).  Hold Shift to force a
+    fresh draw over an ROI that is already there.
+
     Signals
     -------
     roi_n_changed(index, roi_dict)
@@ -106,6 +111,12 @@ class _ROICanvas(QWidget):
         self._shape_mode: str = "rect"
         self._drag_origin: QPoint | None = None
         self._drag_rect: QRect | None = None
+        # Move-by-drag state: which overlay is being dragged ("roi_<i>" or
+        # "subject_crop"), the geometry it had when the drag started, and the
+        # canvas point the press landed on.
+        self._move_target: str | None = None
+        self._move_origin_roi: dict | None = None
+        self._move_anchor: QPoint | None = None
         # In-progress freehand polygon trace (canvas-space QPoints).
         self._freehand_pts: list[QPoint] | None = None
         self._scale: float = 1.0
@@ -311,10 +322,86 @@ class _ROICanvas(QWidget):
         """Shape to draw for the current target (crop is always a rectangle)."""
         return "rect" if self._draw_mode == "subject_crop" else self._shape_mode
 
+    # -- Move-by-drag --------------------------------------------------
+
+    @staticmethod
+    def _target_index(target: str) -> int:
+        """0-based ROI slot for a ``roi_<i>`` target string."""
+        if target.startswith("roi_"):
+            try:
+                return int(target[4:])
+            except ValueError:
+                return 0
+        return 0
+
+    def _roi_for_target(self, target: str) -> dict:
+        if target == "subject_crop":
+            return self._crop
+        idx = self._target_index(target)
+        return self._rois[idx] if idx < len(self._rois) else {}
+
+    def _hit_test(self, pt: QPoint) -> str | None:
+        """Return the overlay target under *pt*, or None for empty frame area.
+
+        The active draw target wins when overlays overlap, so the zone the user
+        is working on stays grabbable underneath the others; the remaining ROIs
+        are tested in reverse paint order (topmost first), the subject crop last.
+        """
+        if self._scale == 0:
+            return None
+        ix = (pt.x() - self._offset_x) / self._scale
+        iy = (pt.y() - self._offset_y) / self._scale
+
+        def _hits(roi: dict) -> bool:
+            if not roi_geometry.roi_has_area(roi):
+                return False
+            return bool(roi_geometry.roi_contains(roi, ix, iy))
+
+        candidates = [self._draw_mode]
+        candidates += [f"roi_{i}" for i in reversed(range(len(self._rois)))]
+        candidates.append("subject_crop")
+        for target in candidates:
+            if _hits(self._roi_for_target(target)):
+                return target
+        return None
+
+    def _apply_move(self, pt: QPoint) -> None:
+        """Shift the dragged overlay so it follows the cursor."""
+        if self._move_origin_roi is None or self._move_anchor is None or self._scale == 0:
+            return
+        dx = (pt.x() - self._move_anchor.x()) / self._scale
+        dy = (pt.y() - self._move_anchor.y()) / self._scale
+        moved = roi_geometry.translate_roi(
+            self._move_origin_roi, dx, dy, self._img_w, self._img_h
+        )
+        target = self._move_target or "roi_0"
+        if target == "subject_crop":
+            self._crop = moved
+        else:
+            idx = self._target_index(target)
+            while len(self._rois) <= idx:
+                self._rois.append({"x": 0, "y": 0, "w": 0, "h": 0})
+            self._rois[idx] = moved
+        self.update()
+
+    # -- Qt mouse events -----------------------------------------------
+
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pt = event.position().toPoint()
+
+        # Shift forces a fresh draw -- the only way to redraw an ROI that sits
+        # underneath the cursor.
+        if not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            target = self._hit_test(pt)
+            if target is not None:
+                self._move_target = target
+                self._move_origin_roi = dict(self._roi_for_target(target))
+                self._move_anchor = pt
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                return
+
         if self._active_shape() == "polygon":
             self._freehand_pts = [pt]
         else:
@@ -324,7 +411,9 @@ class _ROICanvas(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         pt = event.position().toPoint()
-        if self._freehand_pts is not None:
+        if self._move_target is not None:
+            self._apply_move(pt)
+        elif self._freehand_pts is not None:
             # Sample the trace, skipping near-duplicate points to bound size.
             last = self._freehand_pts[-1]
             if abs(pt.x() - last.x()) + abs(pt.y() - last.y()) >= 2:
@@ -333,19 +422,22 @@ class _ROICanvas(QWidget):
         elif self._drag_origin is not None:
             self._drag_rect = QRect(self._drag_origin, pt).normalized()
             self.update()
+        else:
+            # Hover feedback: an open hand means "this one is draggable".
+            grabbable = self._hit_test(pt) is not None
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor if grabbable
+                else Qt.CursorShape.CrossCursor
+            )
 
-    def _emit_roi(self, roi: dict) -> None:
-        """Store *roi* into the active target and emit the matching signal."""
-        if self._draw_mode == "subject_crop":
+    def _emit_roi(self, roi: dict, target: str | None = None) -> None:
+        """Store *roi* into *target* (default: the active one) and emit."""
+        target = target or self._draw_mode
+        if target == "subject_crop":
             self._crop = roi
             self.crop_changed.emit(dict(roi))
             return
-        idx = 0
-        if self._draw_mode.startswith("roi_"):
-            try:
-                idx = int(self._draw_mode[4:])
-            except ValueError:
-                idx = 0
+        idx = self._target_index(target)
         while len(self._rois) <= idx:
             self._rois.append({"x": 0, "y": 0, "w": 0, "h": 0})
         self._rois[idx] = roi
@@ -355,6 +447,19 @@ class _ROICanvas(QWidget):
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # -- Finish a move-by-drag ----------------------------------------
+        if self._move_target is not None:
+            target = self._move_target
+            self._apply_move(event.position().toPoint())
+            moved = dict(self._roi_for_target(target))
+            self._move_target = None
+            self._move_origin_roi = None
+            self._move_anchor = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            self._emit_roi(moved, target)
+            self.update()
             return
 
         # ── Freehand polygon ──────────────────────────────────────────────
@@ -545,8 +650,10 @@ class ROIDefinitionTab(QWidget):
         frame_slider_row.addWidget(self._frame_label)
 
         canvas_hint = QLabel(
-            "Drag on the frame to draw the selected ROI type. "
-            "The outline updates the spinboxes on release."
+            "Drag on empty frame area to draw the selected ROI type; drag an "
+            "existing ROI to move it without redrawing. Hold Shift to draw a "
+            "new ROI on top of an existing one. The outline updates the "
+            "spinboxes on release."
         )
         canvas_hint.setWordWrap(True)
         canvas_hint.setStyleSheet("font-size: 11px; color: #78909C; padding: 2px 0;")
@@ -641,6 +748,14 @@ class ROIDefinitionTab(QWidget):
         nav_row.addWidget(self._subject_counter, 1)
         nav_row.addWidget(self._next_btn)
 
+        self._copy_all_btn = QPushButton("Copy Current ROI to All Subjects")
+        self._copy_all_btn.setToolTip(
+            "Copy the target zones and Subject Crop currently shown to every\n"
+            "subject / session entry. Useful when all subjects share the same\n"
+            "camera position."
+        )
+        self._copy_all_btn.clicked.connect(self._copy_to_all_subjects)
+
         self._auto_load_video_cb = QPushButton("Auto-load subject video")
         self._auto_load_video_cb.setCheckable(True)
         self._auto_load_video_cb.setChecked(True)
@@ -653,6 +768,7 @@ class ROIDefinitionTab(QWidget):
         subject_layout = QVBoxLayout(subject_box)
         subject_layout.addWidget(self._subject_list)
         subject_layout.addLayout(nav_row)
+        subject_layout.addWidget(self._copy_all_btn)
         subject_layout.addWidget(self._auto_load_video_cb)
         self._subject_box = subject_box
 
@@ -765,12 +881,6 @@ class ROIDefinitionTab(QWidget):
         save_btn.clicked.connect(self._save)
         reload_btn = QPushButton("Reload")
         reload_btn.clicked.connect(self._reload)
-        copy_all_btn = QPushButton("Copy to All Subjects")
-        copy_all_btn.setToolTip(
-            "Copy the current Target Zone and Subject Crop values to every subject.\n"
-            "Useful when all subjects share the same camera position."
-        )
-        copy_all_btn.clicked.connect(self._copy_to_all_subjects)
         clear_all_btn = QPushButton("Clear All ROI Data")
         clear_all_btn.setToolTip(
             "Remove all project and per-subject ROI settings and start fresh."
@@ -780,7 +890,6 @@ class ROIDefinitionTab(QWidget):
         button_row = QHBoxLayout()
         button_row.addWidget(save_btn)
         button_row.addWidget(reload_btn)
-        button_row.addWidget(copy_all_btn)
         button_row.addStretch(1)
         button_row2 = QHBoxLayout()
         button_row2.addWidget(clear_all_btn)
