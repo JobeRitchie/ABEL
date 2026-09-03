@@ -468,6 +468,10 @@ class _ROICanvas(QWidget):
             self._freehand_pts = None
             if len(pts_canvas) >= 3:
                 img_pts = [list(self._canvas_to_image(p)) for p in pts_canvas]
+                # Decimate before storing: the raw trace is mostly collinear
+                # filler, and every one of those vertices is re-parsed out of
+                # environment_rois.yaml on each subject switch.
+                img_pts = roi_geometry.simplify_freehand(img_pts)
                 roi = roi_geometry.normalize_roi({"shape": "polygon", "points": img_pts})
                 if roi_geometry.roi_has_area(roi):
                     self._emit_roi(roi)
@@ -891,8 +895,18 @@ class ROIDefinitionTab(QWidget):
         button_row.addWidget(save_btn)
         button_row.addWidget(reload_btn)
         button_row.addStretch(1)
+        compact_btn = QPushButton("Compact Polygon ROIs")
+        compact_btn.setToolTip(
+            "Strip redundant vertices from freehand ROIs drawn before\n"
+            "capture-time decimation shipped. The outlines do not move; the\n"
+            "file gets much smaller, which is what makes switching subjects\n"
+            "slow on hand-drawn projects."
+        )
+        compact_btn.clicked.connect(self._compact_polygons)
+
         button_row2 = QHBoxLayout()
         button_row2.addWidget(clear_all_btn)
+        button_row2.addWidget(compact_btn)
         button_row2.addStretch(1)
 
         # ── Settings scroll panel (right side) ───────────────────────
@@ -967,7 +981,16 @@ class ROIDefinitionTab(QWidget):
         return [x for x in out if x]
 
     def _subject_sessions(self) -> list[tuple[str, str]]:
-        """Return (subject_id, session_id) pairs for every linked session, sorted."""
+        """Return (subject_id, session_id) pairs for every linked session, sorted.
+
+        A session whose subject name never got parsed out of its filename has
+        ``subject_id`` unset in the manifest.  Feature extraction still gives
+        it an ROI, keyed ``session_id::session_id`` — ``_build_prep_jobs``
+        falls back to the session id for ``subject_id`` — so fall back the same
+        way here instead of dropping the row.  Dropping it left projects with
+        no parsed subject names showing an empty list under "Subject override",
+        with no way to reach the very sessions that need per-session zones.
+        """
         if not self._project_root:
             return []
         manifest = self._imports.load_manifest(self._project_root)
@@ -976,9 +999,11 @@ class ROIDefinitionTab(QWidget):
         seen: set[tuple[str, str]] = set()
         pairs: list[tuple[str, str]] = []
         for s in manifest.linked_sessions:
-            sid = str(s.subject_id or "").strip()
             sess = str(s.session_id or "").strip()
-            if sid and sess and (sid, sess) not in seen:
+            if not sess:
+                continue
+            sid = str(s.subject_id or "").strip() or sess
+            if (sid, sess) not in seen:
                 seen.add((sid, sess))
                 pairs.append((sid, sess))
         pairs.sort(key=lambda p: (p[0], p[1]))
@@ -988,6 +1013,17 @@ class ROIDefinitionTab(QWidget):
     def _subject_session_key(subject_id: str, session_id: str) -> str:
         """Composite key used as the subject_rois dict key and list UserRole."""
         return f"{subject_id}::{session_id}"
+
+    @staticmethod
+    def _subject_item_label(subject_id: str, session_id: str) -> str:
+        """Row text for one subject/session pair.
+
+        An unnamed subject falls back to its own session id, so printing both
+        halves would repeat it.
+        """
+        if not session_id or subject_id == session_id:
+            return subject_id or session_id
+        return f"{subject_id}  /  {session_id}"
 
     @staticmethod
     def _split_subject_key(key: str) -> tuple[str, str]:
@@ -1081,7 +1117,7 @@ class ROIDefinitionTab(QWidget):
 
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, key)
-            label = f"{subject_id}  /  {session_id}"
+            label = self._subject_item_label(subject_id, session_id)
             if has_roi:
                 item.setText(f"  ✓  {label}")
                 item.setForeground(QColor("#66BB6A"))
@@ -1092,6 +1128,14 @@ class ROIDefinitionTab(QWidget):
             font.setPointSize(10)
             item.setFont(font)
             self._subject_list.addItem(item)
+
+        if not pairs:
+            hint = QListWidgetItem(
+                "  No imported sessions — import videos and poses first."
+            )
+            hint.setFlags(Qt.ItemFlag.NoItemFlags)
+            hint.setForeground(QColor("#78909C"))
+            self._subject_list.addItem(hint)
 
         self._subject_list.blockSignals(False)
 
@@ -1110,13 +1154,20 @@ class ROIDefinitionTab(QWidget):
         self._update_subject_counter()
 
     def _update_subject_counter(self) -> None:
-        total = self._subject_list.count()
+        # The placeholder row shown for an empty project carries no key, so
+        # count keyed rows rather than list rows.
+        keyed = [
+            i for i in range(self._subject_list.count())
+            if (it := self._subject_list.item(i)) is not None
+            and it.data(Qt.ItemDataRole.UserRole)
+        ]
+        total = len(keyed)
         current = self._subject_list.currentRow() + 1 if total > 0 else 0
         # Count how many have ROIs configured
         cfg = self._rois.load(self._project_root) if self._project_root else {}
         subject_rois = cfg.get("subject_rois", {})
         done = 0
-        for i in range(total):
+        for i in keyed:
             item = self._subject_list.item(i)
             if item:
                 sid = item.data(Qt.ItemDataRole.UserRole)
@@ -1252,7 +1303,7 @@ class ROIDefinitionTab(QWidget):
         has_roi = bool(zones) and (zones[0].get("w", 0) or 0) > 0 and (zones[0].get("h", 0) or 0) > 0
 
         subject_id, session_id = self._split_subject_key(key)
-        label = f"{subject_id}  /  {session_id}" if session_id else subject_id
+        label = self._subject_item_label(subject_id, session_id)
 
         for i in range(self._subject_list.count()):
             item = self._subject_list.item(i)
@@ -1657,6 +1708,30 @@ class ROIDefinitionTab(QWidget):
         self._canvas.set_frame(bgr if ok else None)
 
     # ── Clear all ROI data ─────────────────────────────────────────
+
+    def _compact_polygons(self) -> None:
+        """Rewrite stored freehand ROIs without their redundant vertices."""
+        if not self._project_root:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        stats = self._rois.compact_polygons(self._project_root)
+        if not stats["polygons"]:
+            QMessageBox.information(
+                self, "Nothing to Compact",
+                "No freehand polygon ROI in this project has redundant "
+                "vertices to remove.",
+            )
+            return
+        before_kb = stats["bytes_before"] / 1024
+        after_kb = stats["bytes_after"] / 1024
+        QMessageBox.information(
+            self, "Polygon ROIs Compacted",
+            f"{stats['polygons']} polygon(s) rewritten.\n"
+            f"Vertices: {stats['points_before']:,} → {stats['points_after']:,}\n"
+            f"File size: {before_kb:,.0f} KB → {after_kb:,.0f} KB\n\n"
+            "The outlines are unchanged.",
+        )
+        self._reload()
 
     def _clear_all_roi_data(self) -> None:
         """Wipe all project and per-subject ROI settings back to defaults."""

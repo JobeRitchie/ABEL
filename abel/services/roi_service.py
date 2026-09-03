@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import copy
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
 from abel.storage.file_store import read_yaml, write_yaml
-from abel.utils.roi_geometry import normalize_roi as _normalize_roi_geom
+from abel.utils.roi_geometry import (
+    normalize_roi as _normalize_roi_geom,
+    roi_shape,
+    simplify_freehand,
+)
 
 # Per-ROI overlay colours (index 0 = ROI 1, index 1 = ROI 2, …).
 # Eight slots covers reasonable multi-zone experiments.
@@ -37,6 +43,25 @@ def is_roi_column(name: str) -> bool:
     deciding that a missing zone matters.
     """
     return bool(_ROI_COLUMN_RE.search(str(name)))
+
+
+# Parsed-config cache, keyed by (resolved path, mtime_ns, size).
+#
+# Every tab and service builds its own ROIService, and the ROI Definition tab
+# alone calls load() four times per subject switch.  Re-reading and re-parsing
+# the whole file each time is invisible for a rectangles-only project (~10 KB)
+# and crippling for hand-drawn polygon ROIs, where the file runs to megabytes.
+# The cache is module-level so those separate instances share one parse, and is
+# keyed on the file's mtime+size so an edit from anywhere (another process, a
+# hand-edited YAML) invalidates it without any explicit notification.
+_CONFIG_CACHE: dict[Path, tuple[int, int, dict[str, Any]]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def clear_roi_config_cache() -> None:
+    """Drop every cached ROI config (tests, and project teardown)."""
+    with _CACHE_LOCK:
+        _CONFIG_CACHE.clear()
 
 
 class ROIService:
@@ -146,18 +171,109 @@ class ROIService:
         ]
         return cfg
 
-    def load(self, project_root: Path) -> dict[str, Any]:
-        raw = read_yaml(project_root / self.ROI_FILE, {})
-        cfg = self._normalize(raw)
+    def load(self, project_root: Path, *, mutable: bool = True) -> dict[str, Any]:
+        """Return the project's ROI config.
+
+        ``mutable=False`` hands back the cached object itself instead of a copy.
+        On a megabyte-scale file the defensive deep copy costs more than
+        everything else put together, so read-only callers — which build fresh
+        dicts out of what they read — opt out.  Anyone who edits the result and
+        saves it must take the default.
+        """
+        path = (project_root / self.ROI_FILE).resolve()
+        stamp = self._file_stamp(path)
+        if stamp is not None:
+            with _CACHE_LOCK:
+                hit = _CONFIG_CACHE.get(path)
+            if hit is not None and (hit[0], hit[1]) == stamp:
+                # Callers mutate what they get back (edit a subject, then save),
+                # so hand out a copy and keep the cached parse pristine.
+                return copy.deepcopy(hit[2]) if mutable else hit[2]
+
+        cfg = self._normalize(read_yaml(path, {}))
+        # Re-stat after reading: if the file changed underneath us, the stamp we
+        # would cache no longer describes the bytes we parsed.
+        if stamp is not None and self._file_stamp(path) == stamp:
+            with _CACHE_LOCK:
+                _CONFIG_CACHE[path] = (stamp[0], stamp[1], copy.deepcopy(cfg))
         return cfg
 
     def save(self, project_root: Path, config: dict[str, Any]) -> None:
+        path = (project_root / self.ROI_FILE).resolve()
         clean = self._normalize(config)
-        write_yaml(project_root / self.ROI_FILE, clean)
+        write_yaml(path, clean)
+        stamp = self._file_stamp(path)
+        with _CACHE_LOCK:
+            if stamp is None:
+                _CONFIG_CACHE.pop(path, None)
+            else:
+                # We just produced the canonical form — cache it rather than
+                # making the next load() re-parse what we only now wrote out.
+                _CONFIG_CACHE[path] = (stamp[0], stamp[1], copy.deepcopy(clean))
+
+    @staticmethod
+    def _file_stamp(path: Path) -> tuple[int, int] | None:
+        """``(mtime_ns, size)`` for *path*, or None when it cannot be stat'd."""
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
+    def compact_polygons(self, project_root: Path) -> dict[str, int]:
+        """Decimate every stored freehand polygon in place; report what it saved.
+
+        Projects drawn before capture-time decimation shipped carry the full raw
+        traces, so the file stays slow until it is rewritten once.  Returns
+        ``{"polygons", "points_before", "points_after", "bytes_before",
+        "bytes_after"}``; ``polygons == 0`` means there was nothing to do and
+        the file is left untouched.
+        """
+        path = (project_root / self.ROI_FILE).resolve()
+        stats = {"polygons": 0, "points_before": 0, "points_after": 0,
+                 "bytes_before": 0, "bytes_after": 0}
+        try:
+            stats["bytes_before"] = path.stat().st_size
+        except OSError:
+            return stats
+        cfg = self.load(project_root)
+
+        def _compact(block: dict) -> None:
+            zones = block.get("target_zones")
+            if not isinstance(zones, list):
+                return
+            for i, zone in enumerate(zones):
+                if roi_shape(zone) != "polygon":
+                    continue
+                pts = zone.get("points") or []
+                simplified = simplify_freehand(pts)
+                if len(simplified) >= len(pts):
+                    continue
+                stats["polygons"] += 1
+                stats["points_before"] += len(pts)
+                stats["points_after"] += len(simplified)
+                zones[i] = _normalize_roi_geom(
+                    {"shape": "polygon", "points": simplified}
+                )
+
+        proj = cfg.get("project_rois")
+        if isinstance(proj, dict):
+            _compact(proj)
+        for block in (cfg.get("subject_rois") or {}).values():
+            if isinstance(block, dict):
+                _compact(block)
+
+        if stats["polygons"]:
+            self.save(project_root, cfg)
+        try:
+            stats["bytes_after"] = path.stat().st_size
+        except OSError:
+            stats["bytes_after"] = stats["bytes_before"]
+        return stats
 
     def get_roi_count(self, project_root: Path) -> int:
         """Return the number of target zones configured for this project."""
-        cfg = self.load(project_root)
+        cfg = self.load(project_root, mutable=False)
         return max(1, int(cfg.get("roi_count", 1)))
 
     def resolve_target_rois(
@@ -170,7 +286,7 @@ class ROIService:
         For each slot, the subject/session override is used when it has non-zero
         dimensions; otherwise the project default fills the slot.
         """
-        cfg = self.load(project_root)
+        cfg = self.load(project_root, mutable=False)
         roi_count = max(1, int(cfg.get("roi_count", 1)))
         proj_zones: list[dict] = cfg.get("project_rois", {}).get("target_zones", [])
         subject_rois = cfg.get("subject_rois", {})
@@ -204,7 +320,7 @@ class ROIService:
 
     def get_roi_excluded_days(self, project_root: Path) -> list[str]:
         """Return day labels for which ROI features should be suppressed."""
-        cfg = self.load(project_root)
+        cfg = self.load(project_root, mutable=False)
         return list(cfg.get("roi_excluded_day_labels", []))
 
     def resolve_target_roi(
@@ -242,7 +358,7 @@ class ROIService:
     def resolve_subject_crop_roi(
         self, project_root: Path, subject_id: str | None = None
     ) -> dict[str, int]:
-        cfg = self.load(project_root)
+        cfg = self.load(project_root, mutable=False)
         if subject_id:
             subject_rois = cfg.get("subject_rois", {})
             key = str(subject_id)
@@ -256,6 +372,6 @@ class ROIService:
         return self._normalize_roi(cfg.get("project_rois", {}).get("subject_crop", {}))
 
     def local_motion_radius(self, project_root: Path) -> int:
-        cfg = self.load(project_root)
+        cfg = self.load(project_root, mutable=False)
         motion = cfg.get("motion", {})
         return max(8, int(motion.get("local_radius_px", 36) or 36))

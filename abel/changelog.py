@@ -7,10 +7,54 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "August 31, 2026"
+VERSION_DATE = "September 3, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.14.0", "September 3, 2026", [
+        "Target zones can be repositioned by dragging them. Moving a zone between "
+        "subjects previously meant redrawing it from scratch, which is destructive "
+        "for a freehand outline — a fresh trace is never the old shape, so every "
+        "subject's zone differed by however steady the hand was that day. A left "
+        "press inside an existing overlay now grabs it and the drag translates the "
+        "whole shape rigidly, rect, circle and polygon alike, clamped so the bounding "
+        "box stays on the frame; holding Shift forces a fresh draw over a zone that "
+        "is already there, and hovering a grabbable zone shows an open hand. This "
+        "works in both the ROI Definition tab and the Direct Use tab. \"Copy Current "
+        "ROI to All Subjects\" moved out of the bottom of the settings scroll pane "
+        "into the Subjects box, next to the subject list and the prev/next buttons "
+        "where per-subject work actually happens.",
+        "Hand-drawn ROIs no longer make the tab crawl. A freehand trace arrives as "
+        "one sample per ~2 pixels of mouse travel, and storing it verbatim put "
+        "hundreds to thousands of near-collinear vertices per zone per subject into "
+        "config/environment_rois.yaml — a project drawn by hand went from a 10 KB "
+        "config to megabytes, and from a 125 ms subject switch to tens of seconds. "
+        "Rectangle projects, which is everything drawn before, stayed fast and hid "
+        "the problem. Three defences: traces are decimated at capture with a 1 px "
+        "tolerance, which sits at the integer storage floor so the outline cannot "
+        "visibly move; the parsed config is cached across every service and tab, "
+        "keyed on the file's mtime and size so an edit from anywhere invalidates it; "
+        "and a \"Compact Polygon ROIs\" button rewrites the files already written, "
+        "reporting the vertex and byte counts before and after. YAML reading and "
+        "writing now use libyaml where the installed PyYAML provides it, which is "
+        "5-10x faster on any large config, not just this one.",
+        "Subject override reaches every imported session again. The subject list "
+        "required both a parsed subject name and a session id, so a project whose "
+        "names never got extracted from the filenames — every linked session "
+        "carrying a null subject_id — had all of its rows dropped and showed an "
+        "empty box under Subject override, with no way to reach the very sessions "
+        "that per-session zones exist for. Feature extraction does not drop them: it "
+        "falls back to the session id and keys the ROI session::session, so the list "
+        "now falls back the same way and the key it writes is the key extraction "
+        "reads back. An unnamed subject is labelled by its session id once rather "
+        "than twice, and a project with no imported sessions at all says so instead "
+        "of showing a blank panel.",
+        "The raw-data availability warning no longer hangs a headless run. Its dialog "
+        "spins a nested event loop that never returns without a click, so under an "
+        "offscreen platform — the test suite, the benchmark and validation drivers — "
+        "an unreachable video or pose file deadlocked the process instead of warning "
+        "anyone. Non-interactive callers log the same summary and carry on.",
+    ]),
     ("0.13.0", "August 31, 2026", [
         "Behavior analytics can now be restricted to a region of interest. The tab "
         "already reported where the animal was (ROI occupancy) and what it did (bout "

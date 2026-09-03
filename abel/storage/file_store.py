@@ -11,6 +11,16 @@ from typing import Any
 
 import yaml
 
+# PyYAML's pure-Python scanner is the bottleneck on any large config — a 1 MB
+# environment_rois.yaml (hand-drawn polygon ROIs are thousands of vertices)
+# takes seconds to parse, and the ROI tab parses it several times per subject
+# switch.  libyaml is 5-10x faster and ships with the wheel; fall back to the
+# Python implementation only where the C extension is genuinely absent.
+try:
+    from yaml import CSafeDumper as _SafeDumper, CSafeLoader as _SafeLoader
+except ImportError:  # pragma: no cover - depends on the installed PyYAML build
+    from yaml import SafeDumper as _SafeDumper, SafeLoader as _SafeLoader
+
 
 def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,14 +71,14 @@ def read_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, An
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> None:
-    text = yaml.safe_dump(data, sort_keys=False, allow_unicode=False)
+    text = yaml.dump(data, Dumper=_SafeDumper, sort_keys=False, allow_unicode=False)
     atomic_write_text(path, text)
 
 
 def read_yaml(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
     if not path.exists():
         return {} if default is None else default
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    loaded = yaml.load(path.read_text(encoding="utf-8"), Loader=_SafeLoader)
     return loaded or {}
 
 

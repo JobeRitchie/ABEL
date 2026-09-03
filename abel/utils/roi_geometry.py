@@ -491,6 +491,32 @@ def rdp_simplify(points: list[list[float]], epsilon: float) -> list[list[float]]
     return merged
 
 
+# Tolerance for decimating a raw freehand trace at capture time, in image
+# pixels.  Vertices are stored as integers, so a 1 px tolerance sits at the
+# storage quantisation floor: the outline cannot visibly move, while the long
+# runs of near-collinear samples a mouse drag produces collapse away.
+FREEHAND_SIMPLIFY_EPS_PX = 1.0
+
+
+def simplify_freehand(points: list[list[float]]) -> list[list[float]]:
+    """Strip redundant vertices from a raw freehand trace.
+
+    A hand-drawn ROI arrives as one sample per ~2 canvas pixels of mouse travel
+    — hundreds to thousands of vertices, nearly all of them collinear filler.
+    Stored verbatim they make ``environment_rois.yaml`` grow by tens of KB per
+    zone per subject, and that file is parsed several times per subject switch,
+    so the trace length shows up directly as UI lag.  Decimating at capture
+    keeps the outline the user drew and drops the filler.
+    """
+    pts = [[float(p[0]), float(p[1])] for p in points if _finite2(p)]
+    if len(pts) <= 3:
+        return pts
+    simplified = rdp_simplify(pts, FREEHAND_SIMPLIFY_EPS_PX)
+    # RDP bails out (returning its input) on degenerate rings; never let the
+    # cleanup step be the reason a zone loses its area.
+    return simplified if len(simplified) >= 3 else pts
+
+
 def _rdp_open(points: list[list[float]], epsilon: float) -> list[list[float]]:
     if len(points) < 3:
         return points

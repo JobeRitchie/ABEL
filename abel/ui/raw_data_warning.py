@@ -206,6 +206,14 @@ class RawDataWarningPresenter:
         return report
 
     def _show(self, report: RawDataReport, project_root: Path) -> None:
+        # ``exec`` spins a nested event loop that never returns without a click,
+        # so under an offscreen platform (headless tests, benchmark/validation
+        # drivers) showing this would hang the process instead of warning
+        # anyone.  Log it and carry on -- same reasoning as the run gate.
+        if _is_non_interactive():
+            logger.warning("Raw data unavailable for %s: %s",
+                           project_root, report.summary())
+            return
         dlg = RawDataWarningDialog(report, self._parent)
         dlg.exec()
         if dlg.muted():
@@ -296,5 +304,9 @@ def warn_if_raw_data_missing(
     except Exception:
         return None
     if not report.ok:
+        if _is_non_interactive():
+            logger.warning("Raw data unavailable for %s: %s",
+                           project_root, report.summary())
+            return report
         RawDataWarningDialog(report, parent, allow_mute=False).exec()
     return report
