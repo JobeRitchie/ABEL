@@ -2,17 +2,13 @@
 
 **ABEL — Active-learning Behavior Estimation and Labeling**
 
-Version 0.14.0 · Python ≥ 3.10 · UNC academic-use license (UNC Ref. No. 26-0187)
+Version 0.15.0 · Python ≥ 3.10 · UNC academic-use license (UNC Ref. No. 26-0187)
 
 ABEL is a graphical user interface (GUI)-based, no-coding required platform for
 human-in-the-loop annotation and training of predictive models for behavior
-analysis. It adapts the frame-level active-learning approach introduced by
-A-SOiD to a clip-level pipeline with a built-in annotation platform.
-Temporally- and contextually-aware feature extraction adds pose, video, and
-region of interest (ROI)-context features that pose alone does not provide,
-which yields models with high precision on held-out subjects and improved
-differentiation of like behaviors. ABEL takes the user from raw pose-tracked
-data to refined exports in a single pipeline.
+analysis. It adapts the frame-level active-learning approach to a clip-level
+pipeline with a built-in annotation platform. ABEL takes the user from raw
+pose-tracked data to refined exports in a single pipeline.
 
 Alongside the supervised loop, ABEL includes a suite of data analysis,
 visualization, and validation tools for group-based analyses, graphing,
@@ -23,18 +19,11 @@ photometry data.
 
 ## Citation
 
-Ritchie JL, George BE, Roland AV, Krieman CG, Bender BN, Eberle MR, Der WC,
-Kooyman LS, Lawes AM, Scott RT, O'Buckley TK, McLean MMR, Gallagher CJ, Besheer
-J, Kash TL. *ABEL: an active-learning behavior estimation and labeling
+Ritchie JL, George BE, Roland AV, Krieman CG, Bender BN, Eberle MR, Stys GA,
+Der WC, Kooyman LS, Lawes AM, Scott RT, O'Buckley TK, McLean MMR, Gallagher CJ,
+Besheer J, Kash TL. *ABEL: an active-learning behavior estimation and labeling
 platform.* bioRxiv 2026.08.30.748115.
 [doi:10.64898/2026.08.30.748115](https://doi.org/10.64898/2026.08.30.748115)
-
-The version used for the analyses reported there is v0.11.0. Across eight assays
-and 45 behaviors, model training required 19.5 hours of human annotation in
-total, with the reviewer scoring ~8% of available video. Models achieved a mean
-precision-recall area under the curve (PR-AUC) of 0.90 (SD 0.09, range
-0.60–0.99) and a mean Cohen's kappa of 0.79, with no detected association between
-performance and behavior prevalence (r = 0.20).
 
 ---
 
@@ -50,42 +39,22 @@ computation.
 
 ## Installation
 
-ABEL requires **Python 3.10 or newer**.
+ABEL requires **Python 3.10 or newer** and an installation of **Git**.
 
-### Option A — one-click launcher (Windows)
+Install the latest NVIDIA graphics drivers and CUDA drivers that are compatible
+with your graphics drivers. If you already have drivers installed and working
+for GPU compute in other software, you should be good to go.
 
-Double-click **`run_abel.bat`**. It creates a virtual environment, installs the
-app in editable mode, runs a PySide6 self-test, and launches the GUI. Re-run it
-any time to update.
+### One-click launcher (Windows)
 
-### Option B — manual install
+1. Open a command prompt and `git clone` this repository where you wish to
+   install ABEL.
+2. Double-click **`run_abel.bat`**. It creates a virtual environment, installs
+   the app, and launches the GUI.
+3. Once the GUI opens, click **Dependencies** and check that all dependencies
+   are installed. If any are not, click **Install All Dependencies**.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS / Linux
-pip install -e .
-abel
-```
-
-### Optional dependency groups
-
-Heavy or task-specific dependencies are opt-in and can also be managed from the
-in-app **Dependencies** tab:
-
-```bash
-pip install -e ".[preprocessing]"   # video features: opencv, scipy, imageio, imageio-ffmpeg
-pip install -e ".[gpu]"             # torch (CUDA backend for R3D-18 appearance features)
-pip install -e ".[benchmarks]"      # xgboost
-pip install -e ".[clustering]"      # scikit-learn, umap-learn, hdbscan: UMAP + motif clustering
-pip install -e ".[dev]"             # pytest
-pip install -e ".[all]"             # everything above
-```
-
-R3D-18 appearance features download Kinetics-pretrained weights from
-`download.pytorch.org` on first use and cache them locally. That is the only
-network access ABEL performs; video, pose, and derived data stay in the project
-folder.
+That's it! ABEL is now ready for use by double-clicking `run_abel.bat`.
 
 ---
 
@@ -99,7 +68,126 @@ folder.
 
 ---
 
-## Pipeline
+## Basic Workflow
+
+**Note before you start:** ABEL works best if pose and video files are named
+consistently in this format `AB123_conditioning` — where `AB` is experiment
+name, `123` is subject name, and `conditioning` is the session type (if
+applicable). Also note that most options in ABEL have popup helper dialogues
+when hovering them.
+
+1. Track body part key points in external software (e.g., DeepLabCut, SLEAP),
+   and put the tracking files in the same folder as the videos.
+2. Create a new project in ABEL. Set the assay and species, and the default
+   clip duration and crop margin.
+3. **Data import tab**
+   - Import videos
+   - Import DLC
+   - Click auto match — this reads subject and session type from the filenames,
+     so you do not have to assign them as groups later
+   - Calibrate pixels vs known distance
+     - Can apply to all or a selection if recordings are the same setup
+     - If sessions were recorded in different rooms or on different cameras,
+       calibrate each and apply to selected, so every context carries its own
+       pixel scale
+4. **Behaviors tab**
+   - Click new
+   - Add behavior name, short name, color, and hotkey
+   - Repeat for all behaviors
+   - Note that "no behavior" is a default bucket for ambiguous or not defined
+     behavior and is required for all projects
+5. **ROI tab**
+   - Add optional ROI
+     - ROI can be defined per subject or across the whole project if recording
+       setup allows. For a target that moves between subjects, set
+       **Apply to → Subject override** and draw per subject.
+     - Draw one subject, then use **Copy Current ROI to All Subjects**. If the
+       maze shifted between recording days, draw those sessions individually.
+6. **Features tab**
+   - Recommended defaults: .5 window, .5 stride, .5 min likelihood, 3 frame
+     smooth, interpolate on, local radius 10 (depends on video resolution), all
+     features enabled.
+   - Click preview and adjust the local radius, min likelihood, and BG subtract
+     sensitivity if needed. Tune BG subtract so a still animal shows almost no
+     green — the right value depends on the video.
+   - Click extract pose features
+   - This can take minutes to hours depending on the size of your data set and
+     compute power available.
+7. **Active Learning tab**
+   - Seeds: optionally add discrete start and end frame windows for select
+     behaviors
+   - Learning subtab: for first run, generate pseudorandom clips. They will be
+     approximately evenly distributed among subject and across session duration
+     - Change selection mode to "random low-prob (absent)"
+     - Click settings
+     - Change Query size to 500
+     - Click save
+     - Click run pipeline
+   - Clips subtab: For first run, we will extract all clips for review
+     - change top candidates to 500 — with "All subjects" selected, top
+       candidates applies per subject, so set it at or above the query size to
+       get everything
+     - click extract clips
+   - Review subtab: where the labeling effort is put in
+     - Click refresh
+     - Optionally turn on loop and increase video speed (for faster scoring)
+     - Use assigned hotkeys to label each clip with a behavior or "no behavior".
+       The pop-out Behavior Soundboard shows which key is which.
+       - General rule is if the behavior occurring in the clip is not clear,
+         skip the clip or label it no behavior
+   - Learning subtab
+     - Change selection mode to uncertainty
+     - Click pipeline all
+   - Clips subtab
+     - Extract the amount of clips you wish to review.
+     - Review clips
+   - Learning subtab
+     - Retrain all
+     - Repeat the iterative refinement loop until you have approximately 200
+       positive clips per behavior
+       - Number of reviewed clips can be viewed by visiting the validation tab
+         or using the show reviewed clips filter option in review subtab
+8. **Temporal tab**
+   - Refinement subtab
+     - Click **Select Behavior Models** and set "no behavior" to **Exclude from
+       competition**, so the ambiguous bucket does not compete with the real
+       behaviors
+     - Recommended defaults: .1s inference step, .2 inhibition weight.
+     - Click run inference
+     - If you add reviewed clips and retrain, click **Clear Temporal Cache**
+       before running inference again, or the previous traces are reused
+   - Review subtab
+     - Click refresh
+     - Review your labeling and set desired confidence thresholds and min bout
+       length settings in the "per behavior thresholds" menu. Set thresholds
+       from the probability spikes across time, and scale min bout length to how
+       long the behavior actually lasts — longer for sustained behaviors like
+       freezing, grooming and eating, shorter for brief ones like rearing.
+     - Use **Session Quality…** to flag sessions that are inconsistent with the
+       rest of the group, then send the flagged ones to clip review.
+     - If a behavior needs more examples, lower its threshold, click **Send All
+       Bouts to Clip Review**, then filter the Clips subtab source to temporal
+       bout review, extract, and review those clips.
+9. **Analytics tab**
+   - Summary subtab
+     - Click refresh analytics
+     - Add factors for group assignment if desired
+   - Graphs subtab
+     - Choose a metric — Bout Count, Duration, Mean Duration, Latency or
+       Distance — and click apply. Spatial Heatmap, Density Analysis, Behavior
+       Relationships, Session Sections, Velocity and Social Interaction are
+       separate subtabs of the Analytics tab.
+     - Export raw data or graphs if desired
+10. **Export tab**
+    - Optionally export tracked videos, for a representative labeled video
+    - Optionally export behavior bout start and end frames for alignment with
+      fiber photometry. Tick **Include end-frame columns**, select the behaviors
+      and deselect "no behavior", then **Export Boutframes Workbook** — this is
+      what TRACY reads.
+
+---
+
+## Pipeline Details
 
 **Segmentation and feature extraction.** Raw data are segmented into user-defined
 clip lengths, depending on the length of the behaviors of interest — the reported
@@ -291,9 +379,6 @@ An ablation benchmark suite is included:
 ```bash
 abel-benchmark          # or: python -m abel.benchmark
 ```
-
-On Windows you can also double-click `run_benchmark.bat` (run `run_abel.bat`
-first to set up the environment).
 
 ---
 

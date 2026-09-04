@@ -7,10 +7,50 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 3, 2026"
+VERSION_DATE = "September 4, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.15.0", "September 4, 2026", [
+        "The Methods tab gained a Write-up Helper. The References and Formulas "
+        "subtabs document what ABEL does in general; they cannot say what a "
+        "particular project did, so every methods section was still assembled by "
+        "hand from settings scattered across six tabs. The new subtab reads the open "
+        "project — window and stride, filtering and interpolation, the behaviors and "
+        "their models, per-behavior metrics, bout thresholds, inhibition, HMM "
+        "settings, imported label sources — and drafts plain-text paragraphs from "
+        "them. The user ticks which facts to cover, and gathering runs on a worker "
+        "thread because per-behavior metrics read every model directory and the "
+        "saved probability traces. Two rules are enforced in the code: no number is "
+        "ever invented, and anything ABEL cannot know — the pose tracker and its "
+        "version, the animals, the apparatus — comes out as an explicit "
+        "\"[FILL IN: ...]\" placeholder rather than a plausible guess. The output is "
+        "a draft to edit and verify, not manuscript text, and the warning is a red "
+        "banner above the controls, prepended to the generated text, and repeated "
+        "when the text is saved.",
+        "The README was rewritten around how ABEL is actually used. It previously "
+        "described the pipeline but never walked anyone through it, so new users had "
+        "the architecture and none of the order of operations. A Basic Workflow "
+        "section now steps through the whole run tab by tab, from tracking files to "
+        "the boutframes workbook TRACY reads, drawing on how the software is being "
+        "run in practice: what auto-match reads out of the filenames, that top "
+        "candidates applies per subject, tuning BG subtract in the preview, "
+        "excluding \"no behavior\" from competition before inference, clearing the "
+        "temporal cache before re-running it, Session Quality for outlier sessions, "
+        "and sending bouts back to clip review when a behavior needs more examples. "
+        "Installation dropped to the path that people use — clone, run_abel.bat, "
+        "then the in-app Dependencies tab — with the Git and GPU-driver "
+        "prerequisites stated up front.",
+        "readme.txt now mirrors README.md in full instead of pointing at it. It had "
+        "drifted into a quickstart that documented an install path the README no "
+        "longer described. scripts/generate_readme_txt.py renders the mirror — "
+        "ASCII-only and wrapped to 78 columns, so it reads correctly in any editor "
+        "or console — which makes README.md the single source and keeps the two from "
+        "diverging again.",
+        "run_benchmark.bat was removed. The abel-benchmark entry point and "
+        "python -m abel.benchmark both still launch the suite, so the extra "
+        "launcher was one more file to keep current for no additional reach.",
+    ]),
     ("0.14.0", "September 3, 2026", [
         "Target zones can be repositioned by dragging them. Moving a zone between "
         "subjects previously meant redrawing it from scratch, which is destructive "

@@ -1,16 +1,20 @@
-"""Methods tab: literature references and raw formulas for ABEL's analyses.
+"""Methods tab: references, formulas, and a methods-section write-up helper.
 
-A static, project-independent tab documenting the statistical rigor of ABEL for
-users and reviewers. Two subtabs, both rendered from :mod:`abel.ui.methods_content`
-(the single source of truth):
+Documents the statistical rigor of ABEL for users and reviewers. Three subtabs:
 
 * **References** — the peer-reviewed sources justifying each procedure, with links.
 * **Formulas** — the raw formulas ABEL evaluates, each tied to its code.
+* **Write-up Helper** — a draft methods section assembled from the open project's
+  own settings and results.
 
-Content is static, so this tab needs no ``set_project`` / refresh wiring.
+The first two render from :mod:`abel.ui.methods_content` (the single source of
+truth) and are static; only the write-up helper is project-scoped, so
+``set_project`` forwards to it alone.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from PySide6.QtWidgets import (
     QTabWidget,
@@ -20,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from abel.ui.methods_content import render_formulas_html, render_references_html
+from abel.ui.tabs.methods_writeup_tab import MethodsWriteupTab
 
 
 def _doc_browser(html: str) -> QTextBrowser:
@@ -31,16 +36,23 @@ def _doc_browser(html: str) -> QTextBrowser:
 
 
 class MethodsTab(QWidget):
-    """Top-level tab hosting References and Formulas subtabs."""
+    """Top-level tab hosting the References, Formulas and Write-up subtabs."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+
+        self.writeup_tab = MethodsWriteupTab()
 
         self._tabs = QTabWidget()
         self._tabs.setTabPosition(QTabWidget.TabPosition.North)
         self._tabs.addTab(_doc_browser(render_references_html()), "References")
         self._tabs.addTab(_doc_browser(render_formulas_html()), "Formulas")
+        self._tabs.addTab(self.writeup_tab, "Write-up Helper")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tabs)
+
+    def set_project(self, project_root: Path) -> None:
+        """Point the write-up helper at the open project (the docs are static)."""
+        self.writeup_tab.set_project(project_root)
