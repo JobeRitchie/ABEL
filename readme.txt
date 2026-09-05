@@ -335,12 +335,21 @@
  The in-app Validation tab supports blind quizzes against held-out clips,
  reliability metrics, and leave-one-subject-out evaluation.
 
- A separate meta-analysis suite (abel/validation/) compares models across
- projects: leave-one-subject-out validation with subject-level bootstrap CIs,
- learning curves, cross-project discrimination, rare-behavior discovery, and
- Prism-ready exports. Launch it with run_validation.bat, or:
+ A separate suite (abel/validation/) measures model performance across
+ projects. Launch it with run_validation.bat, or:
 
      python -m abel.validation
+
+ - Learning curves (optimal clips)
+ - Feature / pipeline ablation
+ - Pairwise behavior discrimination
+ - Generalization, biological readout & calibration
+ - Active learning vs. random
+ - Rare-behavior discovery (clip hunting)
+ - Behaviorscape (feature modalities)
+ - Video-feature value (paired)
+ - Human review effort (labeling time)
+ - Pipeline throughput
 
  Runs and saved setups are stored outside the repository, in the validation
  workspace you choose on first launch.
@@ -375,13 +384,6 @@
  - Bouts: derived/behavior_bouts/<behavior_id>_bouts.parquet
  - Validation: derived/validation/ (assembled tests, per-reviewer answers,
    extracted quiz clips)
-
- BENCHMARKS
-------------------------------------------------------------------------------
-
- An ablation benchmark suite is included:
-
-     abel-benchmark          # or: python -m abel.benchmark
 
  TESTS
 ------------------------------------------------------------------------------
