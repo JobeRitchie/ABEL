@@ -2,6 +2,8 @@
  ABEL - Active-learning Behavior Estimation and Labeling
 ==============================================================================
 
+ ABEL - Active-learning Behavior Estimation and Labeling
+
  Version 0.15.0 | Python >= 3.10 | UNC academic-use license (UNC Ref. No.
  26-0187)
 
@@ -72,20 +74,21 @@
  Also note that most options in ABEL have popup helper dialogues when hovering
  them.
 
- 1. Track body part key points in external software (e.g., DeepLabCut, SLEAP),
-    and put the tracking files in the same folder as the videos.
- 2. Create a new project in ABEL. Set the assay and species, and the default
-    clip duration and crop margin.
+ 1. Track body part key points in external software (e.g., DeepLabCut, SLEAP).
+    Put the pose tracking files into the folder where the video files are.
+ 2. Create a new project in ABEL. Set the assay, species, default clip
+    duration, and crop margin.
  3. Data import tab
     - Import videos
     - Import DLC
-    - Click auto match - this reads subject and session type from the
-      filenames, so you do not have to assign them as groups later
+    - Click auto match. Grabs subjects and session type so that you don't have
+      to assign it as a group later
     - Calibrate pixels vs known distance
       - Can apply to all or a selection if recordings are the same setup
-      - If sessions were recorded in different rooms or on different cameras,
-        calibrate each and apply to selected, so every context carries its own
-        pixel scale
+      - Recordings in different rooms or on different cameras have to be
+        calibrated twice. Select those sessions and click apply to selected,
+        so each context is calibrated to different pixels for different
+        cameras
  4. Behaviors tab
     - Click new
     - Add behavior name, short name, color, and hotkey
@@ -95,17 +98,21 @@
  5. ROI tab
     - Add optional ROI
       - ROI can be defined per subject or across the whole project if
-        recording setup allows. For a target that moves between subjects, set
-        Apply to -> Subject override and draw per subject.
-      - Draw one subject, then use Copy Current ROI to All Subjects. If the
-        maze shifted between recording days, draw those sessions individually.
+        recording setup allows. If the target is normally not in the exact
+        same spot, choose subject override on the "Apply to" drop down menu
+        and draw it for each subject.
+      - Once you draw the ROI(s), you can copy and paste this to all subjects
+        using "Copy current ROI to all subjects". If you have videos run on
+        different days and the maze has shifted even slightly, you will have
+        to draw in individual ROIs for those videos.
  6. Features tab
     - Recommended defaults: .5 window, .5 stride, .5 min likelihood, 3 frame
       smooth, interpolate on, local radius 10 (depends on video resolution),
       all features enabled.
     - Click preview and adjust the local radius, min likelihood, and BG
-      subtract sensitivity if needed. Tune BG subtract so a still animal shows
-      almost no green - the right value depends on the video.
+      subtract sensitivity if needed. Hover over BG subtract and lower it to a
+      more sensitive number. When the mouse is not moving, you want little
+      green.
     - Click extract pose features
     - This can take minutes to hours depending on the size of your data set
       and compute power available.
@@ -121,15 +128,14 @@
       - Click save
       - Click run pipeline
     - Clips subtab: For first run, we will extract all clips for review
-      - change top candidates to 500 - with "All subjects" selected, top
-        candidates applies per subject, so set it at or above the query size
-        to get everything
+      - change top candidates to 500. This is per subject, so choose a number
+        at or above your query size
       - click extract clips
     - Review subtab: where the labeling effort is put in
       - Click refresh
       - Optionally turn on loop and increase video speed (for faster scoring)
       - Use assigned hotkeys to label each clip with a behavior or "no
-        behavior". The pop-out Behavior Soundboard shows which key is which.
+        behavior". Behavior soundboard shows which keys are which.
         - General rule is if the behavior occurring in the clip is not clear,
           skip the clip or label it no behavior
     - Learning subtab
@@ -146,42 +152,46 @@
           tab or using the show reviewed clips filter option in review subtab
  8. Temporal tab
     - Refinement subtab
-      - Click Select Behavior Models and set "no behavior" to Exclude from
-        competition, so the ambiguous bucket does not compete with the real
-        behaviors
+      - Click select behavior models. On "no behavior" select exclude from
+        competition
       - Recommended defaults: .1s inference step, .2 inhibition weight.
       - Click run inference
-      - If you add reviewed clips and retrain, click Clear Temporal Cache
-        before running inference again, or the previous traces are reused
+      - If you need to do more clips, do clear temporal cache before running
+        inference
     - Review subtab
       - Click refresh
       - Review your labeling and set desired confidence thresholds and min
-        bout length settings in the "per behavior thresholds" menu. Set
-        thresholds from the probability spikes across time, and scale min bout
-        length to how long the behavior actually lasts - longer for sustained
-        behaviors like freezing, grooming and eating, shorter for brief ones
-        like rearing.
-      - Use Session Quality... to flag sessions that are inconsistent with the
-        rest of the group, then send the flagged ones to clip review.
-      - If a behavior needs more examples, lower its threshold, click Send All
-        Bouts to Clip Review, then filter the Clips subtab source to temporal
-        bout review, extract, and review those clips.
+        bout length settings in the "per behavior thresholds" menu.
+        - Set thresholds based on the spikes in probability across time.
+          Threshold is how easy it is for the model to detect the behavior,
+          and merge gap can merge the gap between two events that it is saying
+          are separate.
+        - Longer behaviors like freezing, grooming and eating run about 30
+          frames; shorter ones like rearing run 10-15.
+      - Session quality flags sessions that are inconsistent between mice.
+        Click analyze, look at the flagged sessions, then select and send to
+        clip review.
+      - If you need more clips, set low thresholds to 0.3, apply, and then
+        send all bouts to clip review. It puts the clips back in the active
+        learning clips tab; filter to temporal bout review, extract clips, and
+        now review.
  9. Analytics tab
     - Summary subtab
       - Click refresh analytics
       - Add factors for group assignment if desired
     - Graphs subtab
-      - Choose a metric - Bout Count, Duration, Mean Duration, Latency or
-        Distance - and click apply. Spatial Heatmap, Density Analysis,
-        Behavior Relationships, Session Sections, Velocity and Social
-        Interaction are separate subtabs of the Analytics tab.
+      - Select graph type and click apply. Bout count, duration, mean
+        duration, latency, and distance. Data range can be set (600 s is 10
+        min) and you can change bins.
+      - Spatial heatmap, density analysis, behavior relationships, session
+        sections, velocity, and social interaction are their own subtabs.
       - Export raw data or graphs if desired
  10. Export tab
-    - Optionally export tracked videos, for a representative labeled video
+    - Optionally export tracked videos, for a representative video
     - Optionally export behavior bout start and end frames for alignment with
-      fiber photometry. Tick Include end-frame columns, select the behaviors
-      and deselect "no behavior", then Export Boutframes Workbook - this is
-      what TRACY reads.
+      fiber photometry. Include end frame, select behaviors, deselect no
+      behavior, hit ok, export boutframes workbook. You can input these bout
+      frames for each mouse in TRACY.
 
  PIPELINE DETAILS
 ------------------------------------------------------------------------------
@@ -341,10 +351,11 @@
  The in-app Methods tab lists the formulas ABEL evaluates, each tagged with
  the function that implements it, and the sources behind them. Its Write-up
  Helper subtab drafts a methods section from the open project's own settings
- and results - model metrics, behaviors, window sizes, bout thresholds, HMM
- settings - with a [FILL IN: ...] placeholder wherever ABEL cannot know the
- answer. The draft is a guide to edit and verify, not text to paste into a
- manuscript.
+ and results
+
+ - model metrics, behaviors, window sizes, bout thresholds, HMM settings -
+   with a [FILL IN: ...] placeholder wherever ABEL cannot know the answer. The
+   draft is a guide to edit and verify, not text to paste into a manuscript.
 
  Runs record reproducibility manifests with app version, git hash, model
  version, feature version, config hash, and timestamp.
