@@ -3346,15 +3346,18 @@ class TemporalReviewTab(QWidget):
         token = str(col).removeprefix("prob_") if str(col).startswith("prob_") else str(col)
         if not token or token == "probability":
             return "Target"
-        low = token.lower()
-        if low == "no_behavior":
-            return "No Behavior"
+        # The project's own definition wins over the built-in name: a project made
+        # before the reserved-label guard may still have "no_behavior" bound to a
+        # renamed behaviour, and showing "No Behavior" there hides which behaviour
+        # the trace actually belongs to.
         for behavior in self._behaviors.behaviors:
             bid = str(behavior.behavior_id or "").strip()
             safe = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in bid.strip())
             name = str(behavior.name or "").strip() or bid
             if token == bid or token == safe:
                 return name
+        if token.lower() == "no_behavior":
+            return "No Behavior"
         return token
 
     def _threshold_for_col(self, col: str, cfg: TemporalRefinementConfig) -> float:

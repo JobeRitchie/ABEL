@@ -31,7 +31,11 @@ from PySide6.QtWidgets import (
 )
 
 from abel.models.schemas import BehaviorDefinition
-from abel.services.behavior_service import NO_BEHAVIOR_ID, BehaviorService
+from abel.services.behavior_service import (
+    NO_BEHAVIOR_ID,
+    BehaviorService,
+    ReservedBehaviorError,
+)
 from abel.storage.file_store import read_yaml, write_yaml
 
 logger = logging.getLogger("abel")
@@ -131,7 +135,25 @@ class BehaviorTab(QWidget):
         )
         self._co_occurring_chk.toggled.connect(self._on_co_occurring_toggled)
 
+        # Repair banner for projects made before the reserved-label guard, where
+        # the built-in "No Behavior" was renamed into a real behaviour.
+        self._conflict_label = QLabel()
+        self._conflict_label.setWordWrap(True)
+        self._conflict_label.setStyleSheet(
+            "background-color: #FFF3CD; color: #7A5B00; border: 1px solid #E0B400;"
+            " border-radius: 4px; padding: 6px;"
+        )
+        self._repair_btn = QPushButton("Repair “No Behavior”…")
+        self._repair_btn.clicked.connect(self._repair_no_behavior)
+        self._conflict_bar = QWidget()
+        conflict_layout = QVBoxLayout(self._conflict_bar)
+        conflict_layout.setContentsMargins(0, 0, 0, 0)
+        conflict_layout.addWidget(self._conflict_label)
+        conflict_layout.addWidget(self._repair_btn)
+        self._conflict_bar.setVisible(False)
+
         left = QVBoxLayout()
+        left.addWidget(self._conflict_bar)
         left.addLayout(btn_bar)
         left.addLayout(preset_bar)
         left.addWidget(self._table)
@@ -212,6 +234,16 @@ class BehaviorTab(QWidget):
         self._f_directionality.setEnabled(False)
 
         form_layout.addRow("Name *", self._f_name)
+
+        self._reserved_hint = QLabel(
+            "“No Behavior” is the built-in negative label every model is trained "
+            "against. Its name cannot be changed and it cannot be deleted — add a "
+            "new behavior instead. Color, shortcut and notes are still editable."
+        )
+        self._reserved_hint.setWordWrap(True)
+        self._reserved_hint.setStyleSheet("color: #7A5B00;")
+        self._reserved_hint.setVisible(False)
+        form_layout.addRow("", self._reserved_hint)
 
         short_row = QHBoxLayout()
         short_row.addWidget(self._f_short)
@@ -294,6 +326,8 @@ class BehaviorTab(QWidget):
 
             self._table.setItem(row, 3, QTableWidgetItem(b.keyboard_shortcut or ""))
             self._table.setItem(row, 4, QTableWidgetItem("✓" if b.is_active else "✗"))
+
+        self._refresh_conflict_banner()
 
         # Notify dependent tabs (e.g. Active Learning) that behavior options changed.
         self.behaviors_changed.emit()
@@ -402,6 +436,20 @@ class BehaviorTab(QWidget):
             self._save_btn, self._cancel_btn, self._delete_btn,
         ):
             w.setEnabled(enabled)
+        self._apply_reserved_lock(enabled)
+
+    def _apply_reserved_lock(self, enabled: bool) -> None:
+        """Lock the identity of the built-in negative label.
+
+        "No Behavior" is not an ordinary behaviour: every trainer collapses the
+        other labels onto it, so renaming it silently turns whatever it is renamed
+        to into "nothing happened" for training, refinement and export. Colour,
+        shortcut and notes stay editable; name, short name and delete do not.
+        """
+        reserved = enabled and str(self._selected_id or "").strip() == NO_BEHAVIOR_ID
+        for w in (self._f_name, self._f_short, self._delete_btn):
+            w.setEnabled(enabled and not reserved)
+        self._reserved_hint.setVisible(reserved)
 
     # ------------------------------------------------------------------
     # Actions
@@ -433,11 +481,16 @@ class BehaviorTab(QWidget):
             description=self._f_description.toPlainText().strip(),
         )
 
-        if self._selected_id:
-            self._service.update(self._selected_id, b)
-        else:
-            b = self._service.add(b)
-            self._selected_id = b.behavior_id
+        try:
+            if self._selected_id:
+                self._service.update(self._selected_id, b)
+            else:
+                b = self._service.add(b)
+                self._selected_id = b.behavior_id
+        except ReservedBehaviorError as exc:
+            QMessageBox.warning(self, "Reserved Label", str(exc))
+            self._cancel_edit()
+            return
         self.refresh()
         logger.info("Behavior saved: %s", name)
 
@@ -450,11 +503,82 @@ class BehaviorTab(QWidget):
             self._clear_form()
             self._set_form_enabled(False)
 
+    def _refresh_conflict_banner(self) -> None:
+        """Show the repair prompt when this project's negative label is repurposed."""
+        conflict = None
+        if self._project_root is not None:
+            try:
+                conflict = self._service.no_behavior_conflict()
+            except Exception:
+                logger.warning("Could not check the No Behavior label", exc_info=True)
+        if conflict is None:
+            self._conflict_bar.setVisible(False)
+            return
+        self._conflict_label.setText(
+            conflict.describe()
+            + " Repairing gives it its own behavior id and restores the negative label."
+        )
+        self._conflict_bar.setVisible(True)
+
+    def _repair_no_behavior(self) -> None:
+        from abel.services.no_behavior_repair import NoBehaviorRepair  # noqa: PLC0415
+
+        if self._project_root is None:
+            return
+        repair = NoBehaviorRepair(self._project_root, self._service.behaviors)
+        if repair.conflict is None:
+            self._refresh_conflict_banner()
+            return
+        try:
+            preview = repair.plan()
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Repair “No Behavior”", f"Could not plan the repair:\n{exc}"
+            )
+            return
+
+        answer = QMessageBox.question(
+            self, "Repair “No Behavior”",
+            "\n".join(preview.summary_lines())
+            + "\n\nEverything touched is copied into derived/backups first. Proceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            report = repair.apply()
+        except Exception as exc:
+            QMessageBox.critical(self, "Repair “No Behavior”", f"The repair failed:\n{exc}")
+            logger.exception("No Behavior repair failed")
+            return
+
+        if self._project_root is not None:
+            self._service.set_project(self._project_root)
+        self._selected_id = None
+        self._clear_form()
+        self._set_form_enabled(False)
+        self.refresh()
+        QMessageBox.information(
+            self, "Repair “No Behavior”",
+            "\n".join(report.summary_lines())
+            + f"\n\nBackup: {report.backup_dir}"
+            + "\n\nRetrain the affected behaviors before using their models again.",
+        )
+        logger.info("No Behavior repair applied: %s", report.counts)
+
     def _delete_selected(self) -> None:
         if not self._selected_id:
             return
         behavior = self._service.get(self._selected_id)
         if not behavior:
+            return
+        if str(self._selected_id).strip() == NO_BEHAVIOR_ID:
+            QMessageBox.warning(
+                self, "Reserved Label",
+                "“No Behavior” is the built-in negative label every model is trained "
+                "against and cannot be deleted.",
+            )
             return
         result = QMessageBox.question(
             self, "Delete Behavior",

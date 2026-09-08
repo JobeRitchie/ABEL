@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import re
@@ -378,38 +379,115 @@ class BehaviorRepresentationService:
             df = df.drop(columns=drop)
         return df
 
+    # Frame tables larger than this (as float64) are converted to float32.
+    # Below it, behaviour is unchanged — typical projects keep float64.
+    DOWNCAST_THRESHOLD_BYTES = 2 * 1024**3
+
+    @classmethod
+    def _downcast_large_float_table(
+        cls,
+        df: pd.DataFrame,
+        label: str,
+        progress: Callable[[str], None] | None = None,
+    ) -> pd.DataFrame:
+        """Convert float64 columns to float32 when the table is very large.
+
+        Frame-level pose/context tables scale with (frames x features), so a
+        long multi-session project runs into hard allocation failures during
+        z-scoring and segment building purely from float64 overhead.  float32
+        halves that at ~7 significant digits of precision — well beyond what
+        pose estimates and pixel statistics actually resolve.  Columns are
+        converted one at a time so the conversion itself does not need a second
+        full copy of the table.
+        """
+        if df.empty:
+            return df
+        f64 = [c for c in df.columns if df[c].dtype == np.float64]
+        if not f64:
+            return df
+        nbytes = 8 * len(df) * len(f64)
+        if nbytes <= cls.DOWNCAST_THRESHOLD_BYTES:
+            return df
+        for col in f64:
+            df[col] = df[col].astype(np.float32)
+        gc.collect()
+        if progress is not None:
+            progress(
+                f"Representation: {label} frame table is {nbytes / 1024**3:.1f} GiB as float64 — "
+                f"storing {len(f64)} feature column(s) as float32 to fit in memory."
+            )
+        return df
+
     ZSCORE_STATS_FILENAME = "zscore_stats.parquet"
 
     @classmethod
     def _zscore_by_group_with_stats(
-        cls, df: pd.DataFrame, feature_cols: list[str]
+        cls, df: pd.DataFrame, feature_cols: list[str], copy: bool = True
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Per-(animal_id, session_id) standardisation, returning the stats too.
 
-        Vectorised via ``groupby(...).transform`` instead of a per-group Python
-        loop with ``.loc`` assignment — same result, dramatically faster on the
-        ~5M-frame / 93-session tables this runs on.  The per-group mean/std are
-        deterministic and small, so they are returned for persistence and reuse
-        (e.g. Direct-Use inference on new data).
+        Computed one column at a time from group codes (``np.bincount``) rather
+        than ``groupby(...).transform``, which materialises a full
+        ``n_rows x n_features`` float64 frame *per statistic* — 11.4 GiB on a
+        9.4M-frame project, with the copy, the mean, the std and the arithmetic
+        result all alive at once.  Here the only extra allocations are a few
+        single-column temporaries.  Results match the per-group loop; the
+        per-group mean/std are deterministic and small, so they are returned for
+        persistence and reuse (e.g. Direct-Use inference on new data).
+
+        ``copy=False`` scales the caller's frame in place — used by ``build()``,
+        where the frame table is already the largest object in the process.
         """
-        out = df.copy()
+        out = df.copy() if copy else df
         if not feature_cols:
             return out, pd.DataFrame(columns=["animal_id", "session_id"])
 
-        grp = out.groupby(["animal_id", "session_id"])[feature_cols]
-        mu = grp.transform("mean")
-        # std() returns NaN for single-row groups; treat both NaN and 0 as 1 to
-        # avoid producing NaN/Inf in the scaled features.
-        sigma = grp.transform("std").fillna(1.0).replace(0.0, 1.0)
-        out[feature_cols] = (out[feature_cols] - mu) / sigma
+        grouper = out.groupby(["animal_id", "session_id"], sort=True)
+        # ``ngroup`` numbers groups in sorted key order, matching ``size``'s index.
+        codes = grouper.ngroup().to_numpy()
+        group_index = grouper.size().index
+        n_groups = len(group_index)
+        # groupby drops rows with a missing group key, and ngroup() marks them
+        # (-1 or NaN, depending on the key dtype); as before, they come out NaN
+        # rather than being scaled against some other group's statistics.
+        keyed = np.nan_to_num(codes, nan=-1.0) >= 0 if codes.dtype.kind == "f" else codes >= 0
+        all_keyed = bool(keyed.all())
+        codes = np.where(keyed, codes, 0).astype(np.intp, copy=False)
 
-        mu_g = grp.mean()
-        sigma_g = grp.std().fillna(1.0).replace(0.0, 1.0)
-        stats = (
-            mu_g.add_suffix("__mean")
-            .join(sigma_g.add_suffix("__std"))
-            .reset_index()
-        )
+        mu_by_col: dict[str, np.ndarray] = {}
+        sigma_by_col: dict[str, np.ndarray] = {}
+        for col in feature_cols:
+            src_dtype = out[col].dtype
+            x = out[col].to_numpy(dtype=np.float64, copy=True)
+            valid = ~np.isnan(x) if all_keyed else (~np.isnan(x) & keyed)
+            vcodes = codes[valid]
+            xv = x[valid]
+            count = np.bincount(vcodes, minlength=n_groups).astype(np.float64)
+            total = np.bincount(vcodes, weights=xv, minlength=n_groups)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                mu = total / count  # all-NaN group -> NaN, as pandas' mean gives
+            dev = xv - mu[vcodes]
+            sum_sq = np.bincount(vcodes, weights=dev * dev, minlength=n_groups)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                sigma = np.sqrt(sum_sq / (count - 1.0))  # ddof=1, like Series.std
+            # std() is NaN for single-row groups; treat both NaN and 0 as 1 to
+            # avoid producing NaN/Inf in the scaled features.
+            sigma[~np.isfinite(sigma)] = 1.0
+            sigma[sigma == 0.0] = 1.0
+            del dev, xv, vcodes, valid
+
+            scaled = (x - mu[codes]) / sigma[codes]
+            del x
+            if not all_keyed:
+                scaled[~keyed] = np.nan
+            # Preserve a float32 source column's dtype so downcast frames stay
+            # downcast; anything else standardises to float64 as before.
+            out[col] = scaled.astype(src_dtype, copy=False) if src_dtype == np.float32 else scaled
+            mu_by_col[f"{col}__mean"] = mu
+            sigma_by_col[f"{col}__std"] = sigma
+
+        # Column order matches the previous implementation: all means, then all stds.
+        stats = pd.DataFrame({**mu_by_col, **sigma_by_col}, index=group_index).reset_index()
         return out, stats
 
     @classmethod
@@ -649,6 +727,12 @@ class BehaviorRepresentationService:
 
             pose_df = pd.concat(pose_parts, ignore_index=True) if pose_parts else pd.DataFrame()
             ctx_df = pd.concat(ctx_parts, ignore_index=True) if ctx_parts else pd.DataFrame()
+            # The concatenated copies are what we keep; releasing the per-session
+            # parts here halves peak memory on large projects (80 sessions x
+            # 118k frames x 113 float columns is ~8 GiB per copy).
+            pose_parts.clear()
+            ctx_parts.clear()
+            gc.collect()
             _progress(
                 f"Representation: loaded {len(load_pose)} pose session file(s) and "
                 f"{len(load_ctx)} context session file(s) "
@@ -672,8 +756,23 @@ class BehaviorRepresentationService:
                 )
 
         join_cols = ["frame", "animal_id", "session_id"]
+        # Very large frame tables are stored as float32 from here on.  float64
+        # frame features cost 8 bytes x n_frames x n_features (11.4 GiB for a
+        # 9.4M-frame, 163-feature project) and every downstream step — merge,
+        # z-scoring, the segment builder — needs headroom on top of that.
+        # float32 keeps ~7 significant digits, far more than pose/context
+        # features carry, and small projects are left untouched so their
+        # numbers are bit-for-bit what they were.
+        pose_df = self._downcast_large_float_table(pose_df, "pose", _progress)
+        ctx_df = self._downcast_large_float_table(ctx_df, "context", _progress)
         _progress("Representation: merging pose and context frame tables...")
-        frame_df = pose_df.merge(ctx_df, on=join_cols, how="inner") if not ctx_df.empty else pose_df.copy()
+        # ``pose_df`` is handed over rather than copied when there is no context
+        # table: it is released immediately below either way.
+        frame_df = pose_df.merge(ctx_df, on=join_cols, how="inner") if not ctx_df.empty else pose_df
+        # Neither source is used again; releasing them before the (memory-heavy)
+        # z-scoring and segment-building steps keeps only one full copy alive.
+        del pose_df, ctx_df
+        gc.collect()
 
         # Collapse symmetric pairwise-distance duplicates (dist_a_to_b /
         # dist_b_to_a) onto the canonical sorted name before any statistics are
@@ -708,15 +807,17 @@ class BehaviorRepresentationService:
                 "No numeric feature columns available after merging pose and context features."
             )
         _progress(f"Representation: z-scoring {len(feature_cols)} numeric feature columns by session...")
-        frame_df, zscore_stats = self._zscore_by_group_with_stats(frame_df, feature_cols)
+        frame_df, zscore_stats = self._zscore_by_group_with_stats(frame_df, feature_cols, copy=False)
 
         from abel.utils.gpu_feature_ops import build_segment_df_fast, gpu_available
         from abel.models.schemas import InvariantFeatureConfig
 
         posture_deltas = InvariantFeatureConfig.load_from_project(project_root).enable_clipwise_deltas
         backend = "GPU (CUDA)" if gpu_available() else "vectorised CPU"
-        grouped = list(frame_df.groupby(["animal_id", "session_id"]))
-        n_groups = len(grouped)
+        # Iterated lazily: ``list(...)`` on the groupby materialises a copy of
+        # every group at once, i.e. a second full copy of the frame table.
+        grouped = frame_df.groupby(["animal_id", "session_id"])
+        n_groups = grouped.ngroups
         _progress(
             f"Representation: building segments via {backend} ({n_groups} group(s))"
             + (" with clip-wise deltas" if posture_deltas else "")

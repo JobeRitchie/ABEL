@@ -8,6 +8,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from abel.core.constants import GLOBAL_CONFIG_DIR
 from abel.models.schemas import BehaviorDefinition
@@ -16,7 +17,38 @@ from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from abel.services.no_behavior_repair import NoBehaviorConflict
+
 NO_BEHAVIOR_ID = "no_behavior"
+NO_BEHAVIOR_NAME = "No Behavior"
+NO_BEHAVIOR_SHORT_NAME = "none"
+
+# Every downstream trainer/scorer decides "is this row a negative?" by
+# normalising the stored label and testing it against these tokens (see
+# ``abel.services.behavior_representation_service.is_no_behavior_label``).  That
+# makes both the reserved id *and* the reserved name part of the data format:
+# renaming the built-in behaviour, or adding a second one called "No Behavior",
+# silently aliases a real behaviour onto the universal negative class.  The
+# guards below keep that identity unforgeable; the local copy of the token set
+# avoids importing the pandas/numpy-heavy representation service here.
+_NO_BEHAVIOR_NAME_TOKENS = frozenset({
+    "no_behavior", "no_behaviour", "nobehavior", "nobehaviour",
+})
+
+
+def normalize_behavior_token(value: object) -> str:
+    """Lower-case, punctuation-collapsed form of a behavior name/label."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def is_no_behavior_name(value: object) -> bool:
+    """True if *value* reads as the reserved universal-negative label."""
+    return normalize_behavior_token(value) in _NO_BEHAVIOR_NAME_TOKENS
+
+
+class ReservedBehaviorError(ValueError):
+    """Raised when an edit would repurpose the reserved ``No Behavior`` label."""
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
@@ -350,28 +382,43 @@ class BehaviorService:
         if self._ensure_system_behaviors() and self._project_root:
             self.save()
 
+    @staticmethod
+    def system_no_behavior_definition() -> BehaviorDefinition:
+        """The built-in universal-negative label every project carries."""
+        return BehaviorDefinition(
+            behavior_id=NO_BEHAVIOR_ID,
+            name=NO_BEHAVIOR_NAME,
+            short_name=NO_BEHAVIOR_SHORT_NAME,
+            description="Universal negative label indicating none of the defined behaviors.",
+            operational_definition=(
+                "Use when the clip does not contain any behavior currently defined in this project."
+            ),
+            inclusion_criteria="No defined target behavior is present.",
+            exclusion_criteria="Any clip where a defined behavior is clearly present.",
+            min_duration_sec=0.0,
+            review_priority=999,
+            color="#90A4AE",
+            keyboard_shortcut="n",
+        )
+
     def _ensure_system_behaviors(self) -> bool:
         """Ensure required built-in behavior labels exist in every project."""
         if any(str(b.behavior_id).strip() == NO_BEHAVIOR_ID for b in self._behaviors):
             return False
-        self._behaviors.append(
-            BehaviorDefinition(
-                behavior_id=NO_BEHAVIOR_ID,
-                name="No Behavior",
-                short_name="none",
-                description="Universal negative label indicating none of the defined behaviors.",
-                operational_definition=(
-                    "Use when the clip does not contain any behavior currently defined in this project."
-                ),
-                inclusion_criteria="No defined target behavior is present.",
-                exclusion_criteria="Any clip where a defined behavior is clearly present.",
-                min_duration_sec=0.0,
-                review_priority=999,
-                color="#90A4AE",
-                keyboard_shortcut="n",
-            )
-        )
+        self._behaviors.append(self.system_no_behavior_definition())
         return True
+
+    def no_behavior_conflict(self) -> "NoBehaviorConflict | None":
+        """Describe a repurposed ``No Behavior`` label, or ``None`` when healthy.
+
+        Projects created before the reserved-name guard could rename the built-in
+        negative into a real behaviour (and add a second one called
+        "No Behavior"), which makes the ``no_behavior`` token mean two different
+        things at once.  The UI surfaces this so the user can repair it.
+        """
+        from abel.services.no_behavior_repair import detect_no_behavior_conflict  # noqa: PLC0415
+
+        return detect_no_behavior_conflict(self._behaviors)
 
     def save(self) -> None:
         if not self._project_root:
@@ -386,13 +433,56 @@ class BehaviorService:
     # ------------------------------------------------------------------
 
     def add(self, behavior: BehaviorDefinition) -> BehaviorDefinition:
+        self._guard_reserved_name(behavior.behavior_id, behavior.name)
         if not behavior.behavior_id:
             behavior = behavior.model_copy(update={"behavior_id": str(uuid.uuid4())})
         self._behaviors.append(behavior)
         self.save()
         return behavior
 
+    def _guard_reserved_name(self, behavior_id: object, name: object) -> None:
+        """Reject any behaviour that claims the reserved negative identity.
+
+        ``No Behavior`` is the universal negative class: training collapses every
+        alternate label onto it, so a second behaviour wearing that name (or the
+        built-in one renamed to something else) makes the same token mean both a
+        positive and a negative and quietly corrupts every model trained after.
+        """
+        if str(behavior_id or "").strip() == NO_BEHAVIOR_ID:
+            return
+        if is_no_behavior_name(name):
+            raise ReservedBehaviorError(
+                f"'{NO_BEHAVIOR_NAME}' is reserved for the built-in negative label "
+                "and cannot be used as a behavior name. Every project already has "
+                "one; pick a different name."
+            )
+
     def update(self, behavior_id: str, updated: BehaviorDefinition) -> bool:
+        current = self.get(behavior_id)
+        renamed = current is None or normalize_behavior_token(
+            current.name
+        ) != normalize_behavior_token(updated.name)
+        if str(behavior_id).strip() == NO_BEHAVIOR_ID:
+            # A project that already repurposed the label (made before this guard)
+            # is left alone here: blocking its edits would only break unrelated
+            # dialogs that re-save every definition. The Behaviors tab offers the
+            # repair instead — see :mod:`abel.services.no_behavior_repair`.
+            if current is not None and is_no_behavior_name(current.name):
+                if renamed:
+                    raise ReservedBehaviorError(
+                        f"The built-in '{NO_BEHAVIOR_NAME}' label cannot be renamed — it is "
+                        "the universal negative every model is trained against. Add a new "
+                        "behavior instead."
+                    )
+                # Pin the stored identity even when the name only differs
+                # cosmetically ("no behaviour", "No_Behavior"), so name-based
+                # lookups stay exact.
+                updated = updated.model_copy(update={
+                    "name": NO_BEHAVIOR_NAME,
+                    "short_name": NO_BEHAVIOR_SHORT_NAME,
+                })
+        elif renamed:
+            self._guard_reserved_name(behavior_id, updated.name)
         for i, b in enumerate(self._behaviors):
             if b.behavior_id == behavior_id:
                 history = list(b.version_history) + [
@@ -642,6 +732,9 @@ class BehaviorService:
             name = str(raw.get("name", "")).strip()
             if not name:
                 continue
+            if is_no_behavior_name(name):
+                # Every project already has the built-in negative label.
+                continue
             if skip_existing and name.lower() in existing_names:
                 continue
             fields = {k: v for k, v in raw.items() if k not in ("behavior_id", "version_history")}
@@ -723,6 +816,10 @@ class BehaviorService:
         for item in raw.get("behaviors", []):
             try:
                 b = BehaviorDefinition.model_validate(item)
+                if is_no_behavior_name(b.name) or str(b.behavior_id).strip() == NO_BEHAVIOR_ID:
+                    # The reserved negative label is per-project and always
+                    # present; importing another copy would alias two ids onto it.
+                    continue
                 if b.behavior_id in existing_ids:
                     b = b.model_copy(update={"behavior_id": str(uuid.uuid4())})
                 self._behaviors.append(b)

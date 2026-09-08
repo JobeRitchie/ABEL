@@ -344,10 +344,12 @@ def build_segment_df_fast(
         return pd.DataFrame()
 
     frames = work["frame"].to_numpy(dtype=int)
-    data = work[feature_cols].to_numpy(dtype=np.float64)
+    # Read straight to float32 — the summary runs in float32 anyway, and the
+    # float64 intermediate is a full extra copy of the group's feature block.
+    data = work[feature_cols].to_numpy(dtype=np.float32)
 
     stats = windowed_feature_summary(
-        data.astype(np.float32),
+        data,
         window_size,
         stride,
         include_periodicity=include_periodicity,

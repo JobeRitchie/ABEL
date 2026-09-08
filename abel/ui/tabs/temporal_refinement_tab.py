@@ -2169,13 +2169,15 @@ class TemporalRefinementTab(QWidget):
 
         low = raw.lower()
 
-        if low == "no_behavior":
-
-            return "No Behavior"
-
         if low == "target_behavior":
 
             return "Target Behavior"
+
+        # Definitions win over the built-in name so a project whose "no_behavior"
+
+        # id is still bound to a renamed behaviour shows that behaviour, not the
+
+        # generic negative label.
 
         for behavior in self._behaviors.behaviors:
 
@@ -2186,6 +2188,10 @@ class TemporalRefinementTab(QWidget):
             if raw == bid or raw == self._safe_name(bid):
 
                 return name
+
+        if low == "no_behavior":
+
+            return "No Behavior"
 
         return raw
 

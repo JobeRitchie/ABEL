@@ -7,10 +7,63 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 4, 2026"
+VERSION_DATE = "September 8, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.16.0", "September 8, 2026", [
+        "\"No Behavior\" is now a reserved label that cannot be renamed or "
+        "duplicated. It was editable like any other behavior, but it is not one: "
+        "\"no_behavior\" is the universal negative class, so training collapses "
+        "every alternate label onto it, dense refinement skips it in the "
+        "competition, and exports drop it. Renaming it therefore did not create a "
+        "new behavior — it aliased a real one onto the negative class, which is "
+        "how a renamed \"No Behavior\" surfaced in temporal review as a behavior "
+        "that was really something else. Adding a second behavior named \"No "
+        "Behavior\" compounded it, because several code paths match the negative "
+        "class on the normalized name as well as the id. The Behaviors tab now "
+        "locks that row's name, short name and delete button (color, shortcut and "
+        "notes stay editable), the service refuses either edit, and presets and "
+        "imports skip a definition that would claim the reserved identity.",
+        "Projects that already made that mistake get a repair. The Behaviors tab "
+        "shows a banner explaining what the label currently means and offers a "
+        "one-click repair that previews its counts first, then gives the "
+        "repurposed behavior its own id and restores the negative class — carrying "
+        "reviewer labels, review decisions, candidate and clip rows, seeds, "
+        "soundboard payloads and per-behavior threshold/suppression settings "
+        "across in a single swap. Hard negatives the app wrote itself "
+        "(temporal-review rejections) are recognized by their provenance and stay "
+        "negative. Rows recorded through the review tab's built-in \"No Behavior\" "
+        "button are stored identically to a label for the repurposed behavior and "
+        "cannot be told apart; those are counted and reported rather than guessed "
+        "at silently. Everything the repair touches is copied into "
+        "derived/backups first, and models trained while the conflict existed are "
+        "retired into that backup because they were fitted against a contaminated "
+        "negative class — those behaviors must be retrained. The guard only fires "
+        "on an actual rename, so an unrepaired project still opens and every "
+        "dialog that re-saves definitions keeps working.",
+        "Temporal review and temporal refinement now name a probability trace from "
+        "the project's own behavior definitions before falling back to the built-in "
+        "label, so a project still carrying the conflict shows which behavior the "
+        "trace actually belongs to instead of the generic \"No Behavior\".",
+        "Representation building no longer dies of memory pressure on long "
+        "projects. Per-session z-scoring used groupby(...).transform, which "
+        "materializes a full frames x features float64 frame per statistic — 11.4 "
+        "GiB on a 9.4M-frame project, with the copy, the mean, the std and the "
+        "result all alive at once — and raised MemoryError before any features "
+        "were written. It is now computed one column at a time from group codes, "
+        "so the only extra allocations are single-column temporaries, and build() "
+        "scales its frame in place rather than copying it. Frame tables above 2 "
+        "GiB as float64 also store their feature columns as float32, which is "
+        "still ~7 significant digits — far beyond what pose estimates and pixel "
+        "statistics resolve — and the segment builder reads straight to float32 "
+        "instead of making a float64 intermediate. Results are unchanged: the new "
+        "path is tested for parity against the old one, including the NaN, "
+        "zero-variance and single-row edge cases.",
+        "New application icon and logo, rendered from the Illustrator original so "
+        "the soft-masked gradient survives (a plain SVG export dropped it). The "
+        "SVG asset it replaces is gone, along with its packaging entry.",
+    ]),
     ("0.15.0", "September 4, 2026", [
         "The Methods tab gained a Write-up Helper. The References and Formulas "
         "subtabs document what ABEL does in general; they cannot say what a "
