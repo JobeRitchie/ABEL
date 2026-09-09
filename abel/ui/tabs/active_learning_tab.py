@@ -3347,9 +3347,137 @@ class ActiveLearningTab(QWidget):
         self._segment_stride_value.setText(str(stride))
         self._segment_settings_hint.setText(f"Auto-synced source: {source}.")
 
+    # ------------------------------------------------------------------
+    # Legacy feature-cache preflight
+    # ------------------------------------------------------------------
+
+    def _preflight_representation_dtype(self) -> bool:
+        """Warn before running against a pre-v5 (float64) segment feature cache.
+
+        Segment summary statistics are stored as float32 from representation_v5
+        on.  A project cached by an earlier version still holds them as float64,
+        which is twice the size and — because a full-table copy consolidates
+        every numeric column into one contiguous block — is what made large
+        projects fail with "Unable to allocate N GiB" partway through a run,
+        after the first behavior had already trained.
+
+        The cache signature invalidates such a cache automatically on the next
+        build, so this dialog exists to say what is about to happen (and what it
+        costs) rather than to unblock anything.  Returns True to proceed.
+        """
+        if self._project_root is None:
+            return True
+        try:
+            from abel.services.behavior_representation_service import (
+                BehaviorRepresentationService as _BRS,
+            )
+
+            info = _BRS.legacy_float64_segment_cache(self._project_root)
+        except Exception:
+            # A check that cannot run must never block a run.
+            logger.debug("Representation dtype preflight failed", exc_info=True)
+            return True
+        if not info:
+            return True
+
+        # The rebuild derives segments from the extracted frame-level features.
+        # Those are only unavailable if extraction never ran or was cleaned out,
+        # and only then does the user actually have to re-extract from video.
+        pose_dir = self._project_root / "derived" / "pose_features"
+        can_rebuild = False
+        if pose_dir.exists():
+            can_rebuild = (pose_dir / "frame_pose.parquet").exists() or any(
+                (pose_dir / "sessions").glob("*.parquet")
+            )
+
+        detail = "\n".join([
+            "This project's cached segment features were built by an older version "
+            "of ABEL, which stored them as 64-bit floats.",
+            "",
+            f"    Windows:           {info['n_rows']:,}",
+            f"    64-bit columns:    {info['n_float64_cols']:,}",
+            f"    Size in memory:    {info['current_gib']:.1f} GiB "
+            f"(peak copy {info['peak_copy_gib']:.1f} GiB)",
+            f"    After rebuilding:  {info['rebuilt_gib']:.1f} GiB",
+            "",
+            "The statistics were always computed at 32-bit precision, so rebuilding "
+            "halves the memory without changing what the features measure. Until it "
+            "is rebuilt, long runs on this project can fail partway through with an "
+            "out-of-memory error.",
+            "",
+        ])
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Feature Cache Uses the Old 64-bit Format")
+        rebuild_btn = None
+        if can_rebuild:
+            box.setText("This project's feature cache should be rebuilt before running.")
+            box.setInformativeText(
+                detail
+                + "Your extracted features are still on disk, so this does NOT require "
+                "re-extracting from video — ABEL rebuilds the segment table from "
+                "them. Rebuilding happens automatically on the next run and adds a few "
+                "minutes to it."
+            )
+            rebuild_btn = box.addButton(
+                "Clear Cache and Continue", QMessageBox.ButtonRole.AcceptRole
+            )
+            cont_btn = box.addButton("Continue Anyway", QMessageBox.ButtonRole.AcceptRole)
+            cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(rebuild_btn)
+        else:
+            box.setText("This project's feature cache is outdated and cannot be rebuilt.")
+            box.setInformativeText(
+                detail
+                + "The extracted frame-level features this project was built from are "
+                "no longer on disk, so the segment table cannot be rebuilt from them. "
+                "Go to the Features tab, run Extract Features again to regenerate "
+                "them, then re-run this step."
+            )
+            cont_btn = box.addButton("Continue Anyway", QMessageBox.ButtonRole.AcceptRole)
+            cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(cancel_btn)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked is cancel_btn:
+            return False
+        if rebuild_btn is not None and clicked is rebuild_btn:
+            self._clear_representation_cache()
+        return True
+
+    def _clear_representation_cache(self) -> None:
+        """Delete the cached representation so the next build regenerates it."""
+        if self._project_root is None:
+            return
+        out_dir = self._project_root / "derived" / "representations"
+        removed: list[str] = []
+        for name in (
+            "segment_features.parquet",
+            "frame_features.parquet",
+            "representations.manifest.json",
+        ):
+            target = out_dir / name
+            try:
+                if target.exists():
+                    target.unlink()
+                    removed.append(name)
+            except Exception:
+                logger.warning("Could not remove %s", target, exc_info=True)
+        if removed:
+            self._append_log(
+                "Cleared outdated representation cache ("
+                + ", ".join(removed)
+                + "); it will be rebuilt as 32-bit segment features."
+            )
+
     def _run_pipeline(self) -> None:
         if not self._project_root:
             QMessageBox.warning(self, "No project", "Open a project first.")
+            return
+
+        if not self._preflight_representation_dtype():
             return
 
         target_behavior = self._selected_target_behavior_id()
@@ -3395,6 +3523,8 @@ class ActiveLearningTab(QWidget):
         if not self._project_root:
             QMessageBox.warning(self, "No project", "Open a project first.")
             return
+        if not self._preflight_representation_dtype():
+            return
         self._persist_ui_settings_to_project()
         self._set_busy(True)
         self._cancel_flag[0] = False
@@ -3438,6 +3568,8 @@ class ActiveLearningTab(QWidget):
         trainable = [b for b in behaviors if b.is_active]
         if not trainable:
             QMessageBox.warning(self, "No trainable behaviors", "No active behaviors to retrain.")
+            return
+        if not self._preflight_representation_dtype():
             return
         # ----- behaviour-selection dialog -----
         dlg = QDialog(self)
@@ -3929,6 +4061,8 @@ class ActiveLearningTab(QWidget):
         ]
         if not behaviors:
             QMessageBox.warning(self, "No behaviors", "No active behaviors are defined in this project.")
+            return
+        if not self._preflight_representation_dtype():
             return
         # ----- behaviour-selection dialog -----
         dlg = QDialog(self)
@@ -7611,7 +7745,10 @@ class ActiveLearningTab(QWidget):
                     logger.warning("Enrichment: failed to persist R3D backfill to %s", cache_path, exc_info=True)
             return self._merge_enriched(segment_df, cached_enriched_df)
 
-        new_df = pd.DataFrame(new_rows)
+        # _segment_summary yields Python floats, so the frame lands in float64.
+        # Store it at the segment dtype instead: these rows are appended to the
+        # segment table, and a width mismatch there upcasts the whole merge.
+        new_df = _BRS.downcast_segment_features(pd.DataFrame(new_rows))
 
         # Combine cached + newly computed rows, then attach real R3D embeddings
         # (this function can only recompute pose/context stats from cached
@@ -7644,13 +7781,26 @@ class ActiveLearningTab(QWidget):
 
     @staticmethod
     def _merge_enriched(segment_df: pd.DataFrame, enriched_df: pd.DataFrame) -> pd.DataFrame:
-        """Append enriched rows to *segment_df*, aligned to its columns."""
+        """Append enriched rows to *segment_df*, aligned to its columns.
+
+        The alignment pads columns the enriched rows lack.  ``reindex(...,
+        fill_value=0.0)`` types those pads from a Python float, i.e. float64,
+        which then upcasts the matching float32 columns when the two frames are
+        concatenated — the concat consolidates every numeric column into one
+        contiguous block, so on a large project that single allocation was
+        9.2 GiB and failed outright.  Padding per column at the target's own
+        dtype keeps the block as narrow as the inputs already are.
+        """
         if enriched_df is None or enriched_df.empty:
             return segment_df
-        merged = pd.concat(
-            [segment_df, enriched_df.reindex(columns=segment_df.columns, fill_value=0.0)],
-            ignore_index=True,
-        )
+        aligned = enriched_df.reindex(columns=segment_df.columns)
+        for col, dtype in segment_df.dtypes.items():
+            if aligned[col].isna().all() and pd.api.types.is_float_dtype(dtype):
+                # Column absent from the enriched rows: pad at the target width.
+                aligned[col] = np.zeros(len(aligned), dtype=dtype)
+            elif pd.api.types.is_float_dtype(dtype) and aligned[col].dtype != dtype:
+                aligned[col] = aligned[col].astype(dtype, copy=False)
+        merged = pd.concat([segment_df, aligned], ignore_index=True)
         return merged.drop_duplicates(subset=["segment_id"], keep="first")
 
     def _backfill_r3d_for_enriched(

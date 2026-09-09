@@ -545,14 +545,31 @@ class ExportService:
         subject_by_session = self._subject_by_session()
         subject_by_session.update(extra_subjects or {})
 
-        # Detect whether any subject has more than one session in the data.
-        # If so, we produce one workbook per distinct session type instead of
-        # merging all sessions for a subject into a single file.
         subject_session_ids: dict[str, list[str]] = {}
         for sid in intervals_by_session:
             subj = subject_by_session.get(sid, sid)
             subject_session_ids.setdefault(subj, []).append(sid)
-        multi_session = any(len(ids) > 1 for ids in subject_session_ids.values())
+        n_multi_session = sum(1 for ids in subject_session_ids.values() if len(ids) > 1)
+
+        session_type_by_sid = self._session_type_by_session()
+        session_type_by_sid.update(extra_session_types or {})
+
+        type_groups: dict[str, list[str]] = {}
+        for sid in intervals_by_session:
+            stype = session_type_by_sid.get(sid, "") or ""
+            type_groups.setdefault(stype, []).append(sid)
+
+        # Split into one workbook per session type only when multiple sessions
+        # per subject are the design rather than the exception — most subjects
+        # ran every session type.  A lone subject with a duplicate or stale
+        # session must not shatter the export: where video filenames carry
+        # timestamps each session derives its own unique "type", which would
+        # turn one combined workbook into one file per subject.
+        split_by_type = (
+            len(type_groups) > 1
+            and subject_session_ids
+            and n_multi_session * 2 >= len(subject_session_ids)
+        )
 
         out_dir = out_dir or (self._project_root / "exports" / out_subdir)
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -561,27 +578,34 @@ class ExportService:
         stem = p.stem
         suffix = p.suffix or ".xlsx"
 
-        # Build (session_type, [session_ids]) groups to export.
-        if not multi_session:
-            session_groups: list[tuple[str, list[str]]] = [("", list(intervals_by_session.keys()))]
-        else:
-            session_type_by_sid = self._session_type_by_session()
-            session_type_by_sid.update(extra_session_types or {})
-            type_groups: dict[str, list[str]] = {}
-            for sid in intervals_by_session:
-                stype = session_type_by_sid.get(sid, "") or ""
-                type_groups.setdefault(stype, []).append(sid)
+        if split_by_type:
             session_groups = sorted(type_groups.items(), key=lambda x: x[0])
+        else:
+            session_groups = [("", list(intervals_by_session.keys()))]
+
+        # Sheet label per session.  A subject with one session keeps its bare
+        # name; one with several gets the session appended so its sessions land
+        # on separate sheets rather than silently merging into one.
+        label_by_session: dict[str, str] = {}
+        for sid in intervals_by_session:
+            subj = subject_by_session.get(sid, sid)
+            if not split_by_type and len(subject_session_ids.get(subj, [])) > 1:
+                stype = (session_type_by_sid.get(sid) or "").strip()
+                label_by_session[sid] = f"{subj} {stype}" if stype else f"{subj} {sid[:8]}"
+            else:
+                label_by_session[sid] = subj
 
         total_rows = 0
         output_paths: list[Path] = []
 
         for session_type, session_ids in session_groups:
             by_subject: dict[str, dict[str, list[tuple[int, int]]]] = {}
+            subject_of_label: dict[str, str] = {}
             for session_id in session_ids:
                 by_behavior_data = intervals_by_session[session_id]
-                subject = subject_by_session.get(session_id, session_id)
-                subject_block = by_subject.setdefault(subject, {})
+                label = label_by_session.get(session_id, session_id)
+                subject_of_label[label] = subject_by_session.get(session_id, session_id)
+                subject_block = by_subject.setdefault(label, {})
                 for behavior, intervals in by_behavior_data.items():
                     if behavior not in behaviors:
                         continue
@@ -592,12 +616,19 @@ class ExportService:
             if not by_subject:
                 continue
 
+            # Subject order first, then the subject's own sessions.
+            ordered_labels: list[str] = []
+            for subj in self._ordered_subjects({subject_of_label[lab] for lab in by_subject}):
+                ordered_labels.extend(
+                    sorted(lab for lab in by_subject if subject_of_label[lab] == subj)
+                )
+
             out_filename = f"{stem}_{session_type}{suffix}" if session_type else filename
             output = out_dir / out_filename
 
             used_sheet_names_lower: set[str] = set()
             with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                for subject in self._ordered_subjects(by_subject):
+                for subject in ordered_labels:
                     intervals_by_behavior: dict[str, list[tuple[int, int]]] = {
                         b: sorted(by_subject[subject].get(b, []), key=lambda x: (x[0], x[1]))
                         for b in behaviors
@@ -644,7 +675,7 @@ class ExportService:
 
                 # Summary sheet for bout counts by subject and behavior.
                 count_rows: list[dict[str, Any]] = []
-                for subject in self._ordered_subjects(by_subject):
+                for subject in ordered_labels:
                     row: dict[str, Any] = {"subject": subject}
                     total_bouts = 0
                     for b in behaviors:

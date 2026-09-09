@@ -677,7 +677,9 @@ class TemporalRefinementService:
                 window["session_id"] = session_id
                 seg_id = f"dense_{session_id}_0_{n_frames - 1}"
                 summary = _BRS._segment_summary(window, feature_cols, seg_id)
-                return pd.DataFrame([summary])
+                # Match the width build_segment_df_fast produces on the normal
+                # path, so this fallback's rows are not the odd float64 one out.
+                return _BRS.downcast_segment_features(pd.DataFrame([summary]))
             return pd.DataFrame()
 
         # Rename segment_id prefix to match the dense naming convention

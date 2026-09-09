@@ -7,10 +7,51 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 8, 2026"
+VERSION_DATE = "September 9, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.17.0", "September 9, 2026", [
+        "Segment features are now stored as 32-bit floats (representation_v5), "
+        "which halves the segment table and fixes the \"Unable to allocate N GiB\" "
+        "failures that killed long runs partway through, after the first behavior "
+        "had already trained. The statistics were always computed in float32 and "
+        "then widened to float64 on assembly — 7.9 GiB instead of 4.0 GiB on a "
+        "628k-window project — and because a full-table copy consolidates every "
+        "numeric column into one contiguous block, a routine append asked the "
+        "allocator for a single 9.2 GiB block and failed. The width is now pinned "
+        "at every producer: the fast segment builder, the CPU statistics path "
+        "(np.percentile returns float64 even from a float32 input, so p10/p90 were "
+        "re-widening the block), the on-the-fly enrichment rows, and temporal "
+        "refinement's single-window fallback. Enriched rows are also padded at the "
+        "target's own dtype rather than with a Python float, which was upcasting "
+        "the whole merge. A mixed-width table is worse than a uniformly wide one, "
+        "so nothing is left float64. Values are unchanged: the tests pin parity "
+        "against the old path alongside the widths.",
+        "Projects cached by an older version are caught before a run rather than "
+        "hours into one. Starting a pipeline, retrain, or Pipeline-All now reads "
+        "the cached segment table's parquet footer and, if it is still float64, "
+        "reports how many windows and 64-bit columns it holds, what it costs in "
+        "memory now, and what it will cost rebuilt. Because the extracted "
+        "frame-level features are still on disk, the rebuild does not require "
+        "re-extracting from video, and the dialog says so and offers to clear the "
+        "cache on the spot; if those features are gone it says that instead and "
+        "points at the Features tab. The check never blocks a run on its own "
+        "failure.",
+        "The boutframes export no longer breaks into one file per subject. It "
+        "wrote a separate workbook per session type as soon as any one subject had "
+        "more than one session — and where video filenames carry timestamps, every "
+        "session derives a unique session type, so a single duplicate or stale "
+        "session shattered the whole export. Measured on real projects, that turned "
+        "one combined workbook into 5 files for a 56-subject project and 43 for a "
+        "105-subject one, in both cases because exactly one animal had a second "
+        "session. Splitting now happens only where multiple sessions per subject "
+        "are the design rather than the exception, so phase-based projects "
+        "(conditioning / extinction / recall) still get their per-phase files "
+        "unchanged. When the export stays combined, each session keeps its own "
+        "sheet — labeled with the session type for the few subjects that have "
+        "several — so nothing silently merges into one sheet.",
+    ]),
     ("0.16.0", "September 8, 2026", [
         "\"No Behavior\" is now a reserved label that cannot be renamed or "
         "duplicated. It was editable like any other behavior, but it is not one: "

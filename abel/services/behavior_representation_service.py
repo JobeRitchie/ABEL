@@ -194,9 +194,13 @@ class RepresentationConfig:
     # longer produce duplicate, half-populated "dead" distance columns.
     # v4: per-segment R3D-18 appearance embeddings (``r3d_000``…``r3d_511``) are
     # merged into the segment features as a video feature family.
+    # v5: segment summary statistics are stored as float32.  They were always
+    # *computed* in float32 and then widened to float64 on assembly, which
+    # doubled the segment table (7.9 -> 4.0 GiB on a 628k-window project) and
+    # made every downstream full-table copy allocate a 9.2 GiB contiguous block.
     # Bumping the version invalidates the content/config-hash representation cache
     # so segment features are rebuilt with the current feature definitions.
-    feature_version: str = "representation_v4"
+    feature_version: str = "representation_v5"
     # R3D appearance embeddings.  Gated additionally on context/video features
     # being present at all — no pixels means no appearance features.
     use_r3d_features: bool = True
@@ -417,6 +421,71 @@ class BehaviorRepresentationService:
                 f"storing {len(f64)} feature column(s) as float32 to fit in memory."
             )
         return df
+
+    # Segment summary statistics are stored at this width.  They are derived
+    # from frame features by mean/std/percentile/FFT reductions over a window,
+    # so they carry far fewer than float32's ~7 significant digits; storing them
+    # as float64 doubled the table and every copy made of it for no resolvable
+    # precision.  Frame tables keep the size-gated policy above.
+    SEGMENT_FEATURE_DTYPE = np.float32
+
+    @classmethod
+    def downcast_segment_features(cls, df: pd.DataFrame) -> pd.DataFrame:
+        """Store a segment table's float feature columns at ``SEGMENT_FEATURE_DTYPE``.
+
+        Applied to segment rows built outside ``build_segment_df_fast`` (the
+        on-the-fly enrichment path and temporal refinement), so rows from every
+        producer share one dtype.  A mixed-width table is worse than a uniformly
+        wide one: concatenating float32 and float64 columns upcasts the result
+        and materialises a single consolidated float64 block.
+        """
+        if df is None or df.empty:
+            return df
+        for col in df.columns:
+            if df[col].dtype == np.float64:
+                df[col] = df[col].astype(cls.SEGMENT_FEATURE_DTYPE, copy=False)
+        return df
+
+    @classmethod
+    def legacy_float64_segment_cache(cls, project_root: Path) -> dict[str, Any] | None:
+        """Describe a cached segment table still written in the pre-v5 float64 format.
+
+        Reads only the parquet footer, so this is cheap enough to run as an
+        up-front check before a long training run.  Returns ``None`` when there
+        is no cache, when it is already float32, or when the footer cannot be
+        read (a missing or corrupt cache is the rebuild path's problem, not
+        this check's).
+        """
+        seg_path = project_root / "derived" / "representations" / "segment_features.parquet"
+        if not seg_path.exists():
+            return None
+        try:
+            import pyarrow.parquet as pq
+
+            meta = pq.ParquetFile(seg_path)
+            schema = meta.schema_arrow
+            n_rows = int(meta.metadata.num_rows)
+        except Exception:
+            return None
+        f64 = [n for n, t in zip(schema.names, schema.types) if str(t) == "double"]
+        if not f64 or n_rows <= 0:
+            return None
+        n_f32 = sum(1 for t in schema.types if str(t) == "float")
+        current_bytes = n_rows * (len(f64) * 8 + n_f32 * 4)
+        # After the rebuild every numeric feature column is float32.
+        rebuilt_bytes = n_rows * (len(f64) + n_f32) * 4
+        return {
+            "path": seg_path,
+            "n_rows": n_rows,
+            "n_float64_cols": len(f64),
+            "n_float32_cols": n_f32,
+            "current_gib": current_bytes / 1024 ** 3,
+            "rebuilt_gib": rebuilt_bytes / 1024 ** 3,
+            # The worst single allocation downstream: one consolidated float64
+            # block covering every numeric column, which is what a full-table
+            # copy (e.g. appending enriched rows) asks the allocator for.
+            "peak_copy_gib": n_rows * (len(f64) + n_f32) * 8 / 1024 ** 3,
+        }
 
     ZSCORE_STATS_FILENAME = "zscore_stats.parquet"
 

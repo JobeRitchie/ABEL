@@ -231,6 +231,13 @@ def _windowed_stats_cpu(
             peak = np.zeros((windows.shape[0], windows.shape[1]))
         out["periodicity"] = peak
 
+    # np.percentile returns float64 even for a float32 input, so p10/p90 would
+    # otherwise re-widen the block the caller deliberately kept narrow.  Every
+    # statistic is normalised to float32 here so the CPU and GPU paths agree.
+    for _k, _v in out.items():
+        if _v.dtype != np.float32:
+            out[_k] = _v.astype(np.float32, copy=False)
+
     return out
 
 
@@ -380,7 +387,9 @@ def build_segment_df_fast(
 
     for j, col in enumerate(feature_cols):
         for stat_name in stat_names:
-            result[f"{col}_{stat_name}"] = stats[stat_name][:, j].astype(float)
+            result[f"{col}_{stat_name}"] = stats[stat_name][:, j].astype(
+                np.float32, copy=False
+            )
 
     # ── Directional trajectory features (delta / trend) ─────────────────────
     # For selected columns we add two extra statistics that capture directional
@@ -433,7 +442,7 @@ def build_segment_df_fast(
 
         for local_idx, feat_idx in enumerate(_delta_indices):
             col = feature_cols[feat_idx]
-            result[f"{col}_delta"] = sub_delta[:, local_idx].astype(float)
-            result[f"{col}_trend"] = sub_trend[:, local_idx].astype(float)
+            result[f"{col}_delta"] = sub_delta[:, local_idx].astype(np.float32, copy=False)
+            result[f"{col}_trend"] = sub_trend[:, local_idx].astype(np.float32, copy=False)
 
     return pd.DataFrame(result)
