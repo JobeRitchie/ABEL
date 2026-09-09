@@ -11,6 +11,57 @@ VERSION_DATE = "September 9, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.18.0", "September 9, 2026", [
+        "The Session Sections chart no longer freezes on many-section presets. "
+        "The bar and line draw routines read each value with a pair of "
+        "full-column comparisons per (session x section) pair and added one "
+        "matplotlib Rectangle per bar, so a 101-section preset across 80 "
+        "sessions ran roughly 16,000 column scans per behavior and then asked "
+        "matplotlib to autoscale once per bar - about 25 s on the UI thread per "
+        "redraw, long enough for Windows to gray the window out as "
+        "unresponsive. Values now come from one pivot per behavior, and each "
+        "individual-mode series is drawn as a single PolyCollection instead of "
+        "N patches. A legend with more than a dozen entries also stops using "
+        "matplotlib's loc='best', whose placement search rescans every artist "
+        "in the axes for each candidate corner and cost seconds on its own. "
+        "The geometry, colors and legend text are unchanged, and the tests pin "
+        "the pivot against the old per-section scan and the collection against "
+        "ax.bar. Missing (session, section) pairs stay distinguishable from a "
+        "real zero, so they are still excluded from group means rather than "
+        "dragging them down.",
+        "Distance and ROI occupancy rows are cached and computed off the UI "
+        "thread. Both are derived from pose files, which the behavior analytics "
+        "cache never stored, so every refresh re-read every pose file on the "
+        "main thread - about 7 s of frozen window on a 69-session project - "
+        "even when the behavior rows themselves came straight from cache. They "
+        "now have their own cache keyed by the pose files, the ROI definitions, "
+        "the analysis prechop and the project fps, so any change to an input "
+        "misses it; on a miss the work runs on a worker thread and a refresh "
+        "started while an earlier job is still running supersedes it rather "
+        "than letting a stale result overwrite newer rows.",
+        "The Velocity chart is no longer drawn for a sub-tab nobody is looking "
+        "at. It reads the pose file of every session, which is the same ~7 s on "
+        "a 69-session project, and it is rarely the sub-tab on screen when a "
+        "refresh lands. Its selectors still rebuild immediately so they reflect "
+        "the new data; the chart itself is drawn when the tab is first shown.",
+        "Opening a project and refreshing analytics now say so. Both read "
+        "enough from disk on a large project that the window simply looked "
+        "hung, with no cursor change and no message. A shared modal popup with "
+        "an indeterminate bar is held open across the deferred stages of the "
+        "work and names the stage it is in - opening the project, loading "
+        "analytics data, building tables and graphs, computing distance and ROI "
+        "measures. It is dismissed on the error paths too, so a failure cannot "
+        "leave it stranded on screen, and it is skipped entirely under headless "
+        "Qt so the test suite cannot deadlock on it.",
+        "The analytics cache fingerprint stopped walking the whole derived "
+        "tree. It globbed for the import manifest and, finding nothing, fell "
+        "back to a recursive '**' search across thousands of cache files on "
+        "every refresh - a full directory traversal that never matched, because "
+        "the manifest lives at exactly one known path. It now stats that path.",
+        "Added LPT Conditioning 1, LPT Conditioning 2 and LPT Extinction "
+        "session-section presets, each a 3-minute baseline followed by 50 "
+        "tone/ITI trials with the shock tones marked.",
+    ]),
     ("0.17.0", "September 9, 2026", [
         "Segment features are now stored as 32-bit floats (representation_v5), "
         "which halves the segment table and fixes the \"Unable to allocate N GiB\" "

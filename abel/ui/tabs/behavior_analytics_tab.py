@@ -110,6 +110,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from abel.ui.busy_dialog import close_busy, show_busy
 from abel.core.project_manager import ProjectManager
 from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.behavioral_motif_service import (
@@ -782,6 +783,12 @@ class BehaviorAnalyticsTab(QWidget):
         self._manifest_cache: Any = _MANIFEST_UNSET  # ImportManifest | None
         self._fps_cache: float | None = None
         self._tr_bouts_cache: dict[str, pd.DataFrame] | None = None
+        # Distance/ROI pseudo-row job: the popup it drives and a token so a
+        # superseded job's result is discarded instead of overwriting a newer one.
+        self._loading_popup: Any = None
+        self._pseudo_rows_token: int = 0
+        self._pseudo_rows_worker: Any = None
+        self._refresh_worker: Any = None
         self._graph_settings: dict[str, Any] = {
             "title_fontsize": 12,
             "axis_fontsize": 10,
@@ -1919,15 +1926,16 @@ class BehaviorAnalyticsTab(QWidget):
                     except OSError:
                         pass
 
-        import_manifests = sorted(derived.glob("*.import_manifest*.json"))
-        if not import_manifests:
-            import_manifests = sorted(derived.glob("**/*.import_manifest*.json"))
-        for p in import_manifests[:1]:
-            try:
-                st = p.stat()
-                parts.append(f"{p}:{st.st_mtime:.3f}:{st.st_size}")
-            except OSError:
-                pass
+        # The manifest lives at exactly one path (ImportService.load_manifest).
+        # This used to glob for it and fall back to a recursive walk of the whole
+        # derived tree — thousands of cache files on a real project — which never
+        # matched anything and cost a full directory traversal on every refresh.
+        manifest_path = derived / "review_tables" / "import_manifest.json"
+        try:
+            st = manifest_path.stat()
+            parts.append(f"{manifest_path}:{st.st_mtime:.3f}:{st.st_size}")
+        except OSError:
+            pass
 
         raw = "|".join(sorted(parts))
         return hashlib.md5(raw.encode()).hexdigest()
@@ -2022,11 +2030,33 @@ class BehaviorAnalyticsTab(QWidget):
     # Data loading  (async)
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Loading popup
+    # ------------------------------------------------------------------
+
+    def _open_loading_popup(self, message: str) -> None:
+        """Show the modal wait popup, reusing one that is already up."""
+        if self._loading_popup is not None:
+            self._loading_popup.set_message(message)
+            return
+        self._loading_popup = show_busy(
+            self.window(), "Refreshing Analytics", message,
+        )
+
+    def _set_loading_message(self, message: str) -> None:
+        if self._loading_popup is not None:
+            self._loading_popup.set_message(message)
+
+    def _close_loading_popup(self) -> None:
+        close_busy(self._loading_popup)
+        self._loading_popup = None
+
     def _refresh(self) -> None:
         """Start an asynchronous analytics refresh (non-blocking)."""
         self._refresh_btn.setEnabled(False)
         self._refresh_btn.setText("Refreshing\u2026")
         self._status.setText("Loading analytics data \u2013 please wait\u2026")
+        self._open_loading_popup("Loading analytics data\u2026")
         self._manifest_cache = _MANIFEST_UNSET
         self._fps_cache = None
         self._tr_bouts_cache = None
@@ -2049,6 +2079,9 @@ class BehaviorAnalyticsTab(QWidget):
         worker = TaskWorker(self._run_refresh_background)
         worker.signals.finished.connect(self._on_refresh_done)
         worker.signals.failed.connect(self._on_refresh_failed)
+        # Same lifetime hazard as the pseudo-row worker below: the pool deletes
+        # a finished QRunnable, taking its signal object with it.
+        self._refresh_worker = worker
         QThreadPool.globalInstance().start(worker)
 
     def _on_refresh_done(self, result: dict) -> None:
@@ -2067,6 +2100,7 @@ class BehaviorAnalyticsTab(QWidget):
             self._graphs_tab.update_graph()
             return
 
+        self._set_loading_message("Building tables and graphs…")
         self._summary_rows = result["summary_rows"]
         self._raw_bouts = result["raw_bouts"]
         self._graphs_tab._session_end_s_cache.clear()
@@ -2140,8 +2174,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._density_tab.refresh_selectors()
         self._sections_tab.on_data_loaded()
         self._velocity_tab.on_data_loaded()
-        QTimer.singleShot(0, self._compute_and_add_distance_rows)
-        QTimer.singleShot(0, self._compute_and_add_roi_rows)
+        QTimer.singleShot(0, self._start_pseudo_rows_job)
         # Re-apply after the pseudo-behavior rows land, so a scope chosen before
         # the refresh survives it (the ROI rows themselves are never scoped).
         QTimer.singleShot(0, self._reapply_roi_scope_after_refresh)
@@ -2154,6 +2187,7 @@ class BehaviorAnalyticsTab(QWidget):
         """Main-thread callback: surface errors and re-enable the button."""
         self._refresh_btn.setText("Refresh Analytics")
         self._refresh_btn.setEnabled(True)
+        self._close_loading_popup()
         self._status.setText("Error loading analytics \u2014 see log for details.")
         logger.error("Analytics refresh failed:\n%s", traceback_str)
         # Surface the top-level exception in the UI so failures are not silent.
@@ -2542,21 +2576,190 @@ class BehaviorAnalyticsTab(QWidget):
 
 
 
-    def _compute_and_add_distance_rows(self) -> None:
-        """Compute session-level distance and add pseudo-behavior rows.
+    # ------------------------------------------------------------------
+    # Pseudo-behavior rows (distance + ROI occupancy)
+    #
+    # Both are derived from pose files, which the behaviour analytics cache
+    # does not store — so before this cache they were re-read in full on every
+    # refresh, on the main thread, even on a cache hit (~7 s of frozen UI for a
+    # 69-session project).  They now have their own on-disk cache keyed by the
+    # pose files and the settings that feed them, and the miss path runs on a
+    # worker thread.
+    # ------------------------------------------------------------------
 
-        Called via QTimer.singleShot so the UI shows behavior data
-        immediately while pose files are loaded in the background.
+    def _pose_path_for_session(self, session_id: str) -> Path | None:
+        """Resolve the pose file a session reads, without loading it."""
+        manifest = self._manifest()
+        if manifest is None:
+            return None
+        session = next(
+            (s for s in manifest.linked_sessions if str(s.session_id) == session_id),
+            None,
+        )
+        if session is None:
+            return None
+        pa = next(
+            (p for p in manifest.poses if p.asset_id == session.pose_asset_id), None,
+        )
+        if pa is None:
+            return None
+        if pa.local_path:
+            lp = Path(pa.local_path)
+            if lp.exists():
+                return lp
+        return Path(pa.source_path)
+
+    def _pseudo_rows_fingerprint(self, session_ids: list[str]) -> str:
+        """Hash every input the distance/ROI rows depend on.
+
+        Pose files, the ROI definitions, the analysis prechop and the project
+        fps.  A change to any of them must produce different rows, so a change
+        to any of them must miss the cache.
         """
-        existing_sids = {r["session_id"] for r in self._summary_rows}
-        if not existing_sids:
+        parts: list[str] = [f"fps={self._project_fps():.6f}"]
+        if self._project_root is not None:
+            roi_path = self._project_root / "config" / "environment_rois.yaml"
+            try:
+                st = roi_path.stat()
+                parts.append(f"roi:{st.st_mtime:.3f}:{st.st_size}")
+            except OSError:
+                parts.append("roi:none")
+        for sid in sorted(session_ids):
+            pre = self._analysis_prechop_for_session(sid)
+            pp = self._pose_path_for_session(sid)
+            if pp is None:
+                parts.append(f"{sid}:nopose:{pre}")
+                continue
+            try:
+                st = pp.stat()
+                parts.append(f"{sid}:{pp}:{st.st_mtime:.3f}:{st.st_size}:{pre}")
+            except OSError:
+                parts.append(f"{sid}:{pp}:missing:{pre}")
+        return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+    def _pseudo_rows_cache_path(self) -> Path | None:
+        if self._project_root is None:
+            return None
+        return self._analytics_cache_dir(self._project_root) / "pseudo_rows.json"
+
+    def _try_load_pseudo_rows(self, fingerprint: str) -> list[dict] | None:
+        path = self._pseudo_rows_cache_path()
+        if path is None or not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if payload.get("version") != 1 or payload.get("fingerprint") != fingerprint:
+            return None
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            return None
+        # NaN is written as null (JSON has no NaN literal); restore it so the
+        # downstream latency statistics see a missing value, not a zero.
+        for row in rows:
+            if row.get("latency_s") is None:
+                row["latency_s"] = float("nan")
+        return rows
+
+    def _save_pseudo_rows(self, fingerprint: str, rows: list[dict]) -> None:
+        path = self._pseudo_rows_cache_path()
+        if path is None:
             return
-        # Remove any stale distance rows from a previous run
+        try:
+            import math  # noqa: PLC0415
+            path.parent.mkdir(parents=True, exist_ok=True)
+            clean = [
+                {k: (None if isinstance(v, float) and math.isnan(v) else v)
+                 for k, v in row.items()}
+                for row in rows
+            ]
+            path.write_text(
+                json.dumps({"version": 1, "fingerprint": fingerprint, "rows": clean}),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("Failed to save pseudo-behavior row cache: %s", exc)
+
+    def _start_pseudo_rows_job(self) -> None:
+        """Add the distance/ROI rows, from cache when possible.
+
+        Replaces the two synchronous ``QTimer.singleShot`` passes that used to
+        read every pose file on the main thread after each refresh.
+        """
+        session_ids = sorted({r["session_id"] for r in self._summary_rows})
+        if not session_ids or self._project_root is None:
+            self._close_loading_popup()
+            return
+
+        fingerprint = self._pseudo_rows_fingerprint(session_ids)
+        cached = self._try_load_pseudo_rows(fingerprint)
+        if cached is not None:
+            logger.debug("Distance/ROI rows loaded from cache (fp %s).", fingerprint[:8])
+            self._apply_pseudo_rows(cached)
+            self._close_loading_popup()
+            return
+
+        # Miss: compute off the UI thread.  A refresh started while an earlier
+        # job is still running supersedes it — the token check on completion
+        # drops the stale result.
+        self._pseudo_rows_token += 1
+        token = self._pseudo_rows_token
+        self._set_loading_message(
+            "Computing distance and ROI measures from pose data…"
+        )
+        worker = TaskWorker(self._compute_pseudo_rows_background, session_ids)
+        worker.signals.finished.connect(
+            lambda rows: self._on_pseudo_rows_done(rows, fingerprint, token)
+        )
+        worker.signals.failed.connect(
+            lambda tb: self._on_pseudo_rows_failed(tb, token)
+        )
+        # Hold the worker alive: QThreadPool deletes a finished QRunnable, and
+        # with it the WorkerSignals object carrying the still-undelivered queued
+        # signal, so a short job's result is otherwise dropped silently.
+        self._pseudo_rows_worker = worker
+        QThreadPool.globalInstance().start(worker)
+
+    def _on_pseudo_rows_done(
+        self, rows: list[dict], fingerprint: str, token: int,
+    ) -> None:
+        if token != self._pseudo_rows_token:
+            return
+        self._apply_pseudo_rows(rows)
+        self._save_pseudo_rows(fingerprint, rows)
+        self._close_loading_popup()
+
+    def _on_pseudo_rows_failed(self, traceback_str: str, token: int) -> None:
+        if token != self._pseudo_rows_token:
+            return
+        logger.error("Distance/ROI row computation failed:\n%s", traceback_str)
+        self._close_loading_popup()
+
+    def _apply_pseudo_rows(self, rows: list[dict]) -> None:
+        """Swap in a fresh set of distance/ROI rows and repaint."""
         self._summary_rows[:] = [
             r for r in self._summary_rows
-            if r["behavior_id"] != DISTANCE_BEHAVIOR_ID
+            if not is_pseudo_behavior_id(r["behavior_id"])
         ]
-        for sid in sorted(existing_sids):
+        self._summary_rows.extend(rows)
+        self._summary_tab.rebuild()
+        self._graphs_tab.update_graph()
+
+    def _compute_pseudo_rows_background(self, session_ids: list[str]) -> list[dict]:
+        """Worker thread: build the distance and ROI rows for *session_ids*.
+
+        Touches no widgets — it reads pose files and the (already loaded)
+        manifest and returns plain dicts for the main thread to install.
+        """
+        rows: list[dict] = []
+        rows.extend(self._build_distance_rows(session_ids))
+        rows.extend(self._build_roi_rows(session_ids))
+        return rows
+
+    def _build_distance_rows(self, session_ids: list[str]) -> list[dict]:
+        rows: list[dict] = []
+        for sid in session_ids:
             dist_px = self._compute_session_distance(sid)
             ppm = self._pixels_per_mm_for_session(sid)
             # ppm is pixels-per-mm; divide by ppm to get mm, then by 10 for cm
@@ -2564,7 +2767,7 @@ class BehaviorAnalyticsTab(QWidget):
             subject = self._subject_by_session.get(sid, sid)
             session_label = self._session_label_by_session.get(sid, subject)
             session_type = self._session_type_by_session.get(sid, "")
-            self._summary_rows.append({
+            rows.append({
                 "session_id": sid,
                 "subject": subject,
                 "session_label": session_label,
@@ -2577,8 +2780,7 @@ class BehaviorAnalyticsTab(QWidget):
                 "latency_s": float("nan"),
                 "distance_cm": dist_cm,
             })
-        self._summary_tab.rebuild()
-        self._graphs_tab.update_graph()
+        return rows
 
     def _configured_roi_count(self) -> int:
         """Number of ROI zones to expose as pseudo-behaviors (0 if none defined).
@@ -2612,31 +2814,22 @@ class BehaviorAnalyticsTab(QWidget):
                 return count
         return 0
 
-    def _compute_and_add_roi_rows(self) -> None:
-        """Compute per-session ROI occupancy and add pseudo-behavior rows.
+    def _build_roi_rows(self, session_ids: list[str]) -> list[dict]:
+        """Per-session ROI occupancy as pseudo-behavior rows.
 
         One synthetic behavior per configured zone; the standard summary
         columns carry the ROI metrics (time in zone, entries, mean visit
-        duration, latency to first entry).  Called via QTimer.singleShot so
-        behavior data renders before pose files are loaded.
+        duration, latency to first entry).
         """
+        rows: list[dict] = []
         if self._project_root is None:
-            return
-        existing_sids = {r["session_id"] for r in self._summary_rows}
-        if not existing_sids:
-            return
-        # Drop any stale ROI rows from a previous run.
-        self._summary_rows[:] = [
-            r for r in self._summary_rows
-            if not is_roi_behavior_id(r["behavior_id"])
-        ]
+            return rows
         roi_count = self._configured_roi_count()
         if roi_count <= 0:
-            self._summary_tab.rebuild()
-            return
+            return rows
 
         fps = self._project_fps()
-        for sid in sorted(existing_sids):
+        for sid in session_ids:
             subject = self._subject_by_session.get(sid, sid)
             session_label = self._session_label_by_session.get(sid, subject)
             session_type = self._session_type_by_session.get(sid, "")
@@ -2653,7 +2846,7 @@ class BehaviorAnalyticsTab(QWidget):
                 if stats is None:
                     continue
                 time_s, n_entries, mean_s, latency_s = stats
-                self._summary_rows.append({
+                rows.append({
                     "session_id": sid,
                     "subject": subject,
                     "session_label": session_label,
@@ -2666,8 +2859,7 @@ class BehaviorAnalyticsTab(QWidget):
                     "latency_s": latency_s,
                     "distance_cm": 0.0,
                 })
-        self._summary_tab.rebuild()
-        self._graphs_tab.update_graph()
+        return rows
 
     def _compute_session_roi_stats(
         self, session_id: str, pose: Any, roi: dict | None, fps: float,
@@ -16682,6 +16874,324 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 20", "duration": 60},
             ],
         },
+        {
+            "name": "LPT Conditioning 1",
+            "sections": [
+                {"name": "Baseline",  "duration": 180},
+                {"name": "Tone 1", "duration": 15},
+                {"name": "ITI 1", "duration": 60},
+                {"name": "Tone 2", "duration": 15},
+                {"name": "ITI 2", "duration": 60},
+                {"name": "Tone 3", "duration": 15},
+                {"name": "ITI 3", "duration": 60},
+                {"name": "Tone 4 (Shock)", "duration": 15},
+                {"name": "ITI 4", "duration": 60},
+                {"name": "Tone 5", "duration": 15},
+                {"name": "ITI 5", "duration": 60},
+                {"name": "Tone 6", "duration": 15},
+                {"name": "ITI 6", "duration": 60},
+                {"name": "Tone 7", "duration": 15},
+                {"name": "ITI 7", "duration": 60},
+                {"name": "Tone 8", "duration": 15},
+                {"name": "ITI 8", "duration": 60},
+                {"name": "Tone 9", "duration": 15},
+                {"name": "ITI 9", "duration": 60},
+                {"name": "Tone 10", "duration": 15},
+                {"name": "ITI 10", "duration": 60},
+                {"name": "Tone 11", "duration": 15},
+                {"name": "ITI 11", "duration": 60},
+                {"name": "Tone 12", "duration": 15},
+                {"name": "ITI 12", "duration": 60},
+                {"name": "Tone 13 (Shock)", "duration": 15},
+                {"name": "ITI 13", "duration": 60},
+                {"name": "Tone 14", "duration": 15},
+                {"name": "ITI 14", "duration": 60},
+                {"name": "Tone 15", "duration": 15},
+                {"name": "ITI 15", "duration": 60},
+                {"name": "Tone 16", "duration": 15},
+                {"name": "ITI 16", "duration": 60},
+                {"name": "Tone 17", "duration": 15},
+                {"name": "ITI 17", "duration": 60},
+                {"name": "Tone 18", "duration": 15},
+                {"name": "ITI 18", "duration": 60},
+                {"name": "Tone 19", "duration": 15},
+                {"name": "ITI 19", "duration": 60},
+                {"name": "Tone 20", "duration": 15},
+                {"name": "ITI 20", "duration": 60},
+                {"name": "Tone 21", "duration": 15},
+                {"name": "ITI 21", "duration": 60},
+                {"name": "Tone 22", "duration": 15},
+                {"name": "ITI 22", "duration": 60},
+                {"name": "Tone 23", "duration": 15},
+                {"name": "ITI 23", "duration": 60},
+                {"name": "Tone 24", "duration": 15},
+                {"name": "ITI 24", "duration": 60},
+                {"name": "Tone 25", "duration": 15},
+                {"name": "ITI 25", "duration": 60},
+                {"name": "Tone 26 (Shock)", "duration": 15},
+                {"name": "ITI 26", "duration": 60},
+                {"name": "Tone 27", "duration": 15},
+                {"name": "ITI 27", "duration": 60},
+                {"name": "Tone 28", "duration": 15},
+                {"name": "ITI 28", "duration": 60},
+                {"name": "Tone 29", "duration": 15},
+                {"name": "ITI 29", "duration": 60},
+                {"name": "Tone 30", "duration": 15},
+                {"name": "ITI 30", "duration": 60},
+                {"name": "Tone 31 (Shock)", "duration": 15},
+                {"name": "ITI 31", "duration": 60},
+                {"name": "Tone 32", "duration": 15},
+                {"name": "ITI 32", "duration": 60},
+                {"name": "Tone 33", "duration": 15},
+                {"name": "ITI 33", "duration": 60},
+                {"name": "Tone 34", "duration": 15},
+                {"name": "ITI 34", "duration": 60},
+                {"name": "Tone 35", "duration": 15},
+                {"name": "ITI 35", "duration": 60},
+                {"name": "Tone 36", "duration": 15},
+                {"name": "ITI 36", "duration": 60},
+                {"name": "Tone 37", "duration": 15},
+                {"name": "ITI 37", "duration": 60},
+                {"name": "Tone 38", "duration": 15},
+                {"name": "ITI 38", "duration": 60},
+                {"name": "Tone 39", "duration": 15},
+                {"name": "ITI 39", "duration": 60},
+                {"name": "Tone 40", "duration": 15},
+                {"name": "ITI 40", "duration": 60},
+                {"name": "Tone 41", "duration": 15},
+                {"name": "ITI 41", "duration": 60},
+                {"name": "Tone 42", "duration": 15},
+                {"name": "ITI 42", "duration": 60},
+                {"name": "Tone 43", "duration": 15},
+                {"name": "ITI 43", "duration": 60},
+                {"name": "Tone 44", "duration": 15},
+                {"name": "ITI 44", "duration": 60},
+                {"name": "Tone 45 (Shock)", "duration": 15},
+                {"name": "ITI 45", "duration": 60},
+                {"name": "Tone 46", "duration": 15},
+                {"name": "ITI 46", "duration": 60},
+                {"name": "Tone 47", "duration": 15},
+                {"name": "ITI 47", "duration": 60},
+                {"name": "Tone 48", "duration": 15},
+                {"name": "ITI 48", "duration": 60},
+                {"name": "Tone 49", "duration": 15},
+                {"name": "ITI 49", "duration": 60},
+                {"name": "Tone 50", "duration": 15},
+                {"name": "ITI 50", "duration": 60},
+            ],
+        },
+        {
+            "name": "LPT Conditioning 2",
+            "sections": [
+                {"name": "Baseline",  "duration": 180},
+                {"name": "Tone 1", "duration": 15},
+                {"name": "ITI 1", "duration": 60},
+                {"name": "Tone 2", "duration": 15},
+                {"name": "ITI 2", "duration": 60},
+                {"name": "Tone 3 (Shock)", "duration": 15},
+                {"name": "ITI 3", "duration": 60},
+                {"name": "Tone 4", "duration": 15},
+                {"name": "ITI 4", "duration": 60},
+                {"name": "Tone 5", "duration": 15},
+                {"name": "ITI 5", "duration": 60},
+                {"name": "Tone 6", "duration": 15},
+                {"name": "ITI 6", "duration": 60},
+                {"name": "Tone 7", "duration": 15},
+                {"name": "ITI 7", "duration": 60},
+                {"name": "Tone 8", "duration": 15},
+                {"name": "ITI 8", "duration": 60},
+                {"name": "Tone 9", "duration": 15},
+                {"name": "ITI 9", "duration": 60},
+                {"name": "Tone 10", "duration": 15},
+                {"name": "ITI 10", "duration": 60},
+                {"name": "Tone 11 (Shock)", "duration": 15},
+                {"name": "ITI 11", "duration": 60},
+                {"name": "Tone 12", "duration": 15},
+                {"name": "ITI 12", "duration": 60},
+                {"name": "Tone 13", "duration": 15},
+                {"name": "ITI 13", "duration": 60},
+                {"name": "Tone 14", "duration": 15},
+                {"name": "ITI 14", "duration": 60},
+                {"name": "Tone 15", "duration": 15},
+                {"name": "ITI 15", "duration": 60},
+                {"name": "Tone 16", "duration": 15},
+                {"name": "ITI 16", "duration": 60},
+                {"name": "Tone 17", "duration": 15},
+                {"name": "ITI 17", "duration": 60},
+                {"name": "Tone 18", "duration": 15},
+                {"name": "ITI 18", "duration": 60},
+                {"name": "Tone 19", "duration": 15},
+                {"name": "ITI 19", "duration": 60},
+                {"name": "Tone 20", "duration": 15},
+                {"name": "ITI 20", "duration": 60},
+                {"name": "Tone 21 (Shock)", "duration": 15},
+                {"name": "ITI 21", "duration": 60},
+                {"name": "Tone 22", "duration": 15},
+                {"name": "ITI 22", "duration": 60},
+                {"name": "Tone 23", "duration": 15},
+                {"name": "ITI 23", "duration": 60},
+                {"name": "Tone 24", "duration": 15},
+                {"name": "ITI 24", "duration": 60},
+                {"name": "Tone 25", "duration": 15},
+                {"name": "ITI 25", "duration": 60},
+                {"name": "Tone 26", "duration": 15},
+                {"name": "ITI 26", "duration": 60},
+                {"name": "Tone 27", "duration": 15},
+                {"name": "ITI 27", "duration": 60},
+                {"name": "Tone 28", "duration": 15},
+                {"name": "ITI 28", "duration": 60},
+                {"name": "Tone 29", "duration": 15},
+                {"name": "ITI 29", "duration": 60},
+                {"name": "Tone 30", "duration": 15},
+                {"name": "ITI 30", "duration": 60},
+                {"name": "Tone 31", "duration": 15},
+                {"name": "ITI 31", "duration": 60},
+                {"name": "Tone 32", "duration": 15},
+                {"name": "ITI 32", "duration": 60},
+                {"name": "Tone 33", "duration": 15},
+                {"name": "ITI 33", "duration": 60},
+                {"name": "Tone 34", "duration": 15},
+                {"name": "ITI 34", "duration": 60},
+                {"name": "Tone 35 (Shock)", "duration": 15},
+                {"name": "ITI 35", "duration": 60},
+                {"name": "Tone 36", "duration": 15},
+                {"name": "ITI 36", "duration": 60},
+                {"name": "Tone 37", "duration": 15},
+                {"name": "ITI 37", "duration": 60},
+                {"name": "Tone 38", "duration": 15},
+                {"name": "ITI 38", "duration": 60},
+                {"name": "Tone 39", "duration": 15},
+                {"name": "ITI 39", "duration": 60},
+                {"name": "Tone 40", "duration": 15},
+                {"name": "ITI 40", "duration": 60},
+                {"name": "Tone 41", "duration": 15},
+                {"name": "ITI 41", "duration": 60},
+                {"name": "Tone 42 (Shock)", "duration": 15},
+                {"name": "ITI 42", "duration": 60},
+                {"name": "Tone 43", "duration": 15},
+                {"name": "ITI 43", "duration": 60},
+                {"name": "Tone 44", "duration": 15},
+                {"name": "ITI 44", "duration": 60},
+                {"name": "Tone 45", "duration": 15},
+                {"name": "ITI 45", "duration": 60},
+                {"name": "Tone 46", "duration": 15},
+                {"name": "ITI 46", "duration": 60},
+                {"name": "Tone 47", "duration": 15},
+                {"name": "ITI 47", "duration": 60},
+                {"name": "Tone 48", "duration": 15},
+                {"name": "ITI 48", "duration": 60},
+                {"name": "Tone 49", "duration": 15},
+                {"name": "ITI 49", "duration": 60},
+                {"name": "Tone 50", "duration": 15},
+                {"name": "ITI 50", "duration": 60},
+            ],
+        },
+        {
+            "name": "LPT Extinction",
+            "sections": [
+                {"name": "Baseline",  "duration": 180},
+                {"name": "Tone 1", "duration": 15},
+                {"name": "ITI 1", "duration": 60},
+                {"name": "Tone 2", "duration": 15},
+                {"name": "ITI 2", "duration": 60},
+                {"name": "Tone 3", "duration": 15},
+                {"name": "ITI 3", "duration": 60},
+                {"name": "Tone 4", "duration": 15},
+                {"name": "ITI 4", "duration": 60},
+                {"name": "Tone 5", "duration": 15},
+                {"name": "ITI 5", "duration": 60},
+                {"name": "Tone 6", "duration": 15},
+                {"name": "ITI 6", "duration": 60},
+                {"name": "Tone 7", "duration": 15},
+                {"name": "ITI 7", "duration": 60},
+                {"name": "Tone 8", "duration": 15},
+                {"name": "ITI 8", "duration": 60},
+                {"name": "Tone 9", "duration": 15},
+                {"name": "ITI 9", "duration": 60},
+                {"name": "Tone 10", "duration": 15},
+                {"name": "ITI 10", "duration": 60},
+                {"name": "Tone 11", "duration": 15},
+                {"name": "ITI 11", "duration": 60},
+                {"name": "Tone 12", "duration": 15},
+                {"name": "ITI 12", "duration": 60},
+                {"name": "Tone 13", "duration": 15},
+                {"name": "ITI 13", "duration": 60},
+                {"name": "Tone 14", "duration": 15},
+                {"name": "ITI 14", "duration": 60},
+                {"name": "Tone 15", "duration": 15},
+                {"name": "ITI 15", "duration": 60},
+                {"name": "Tone 16", "duration": 15},
+                {"name": "ITI 16", "duration": 60},
+                {"name": "Tone 17", "duration": 15},
+                {"name": "ITI 17", "duration": 60},
+                {"name": "Tone 18", "duration": 15},
+                {"name": "ITI 18", "duration": 60},
+                {"name": "Tone 19", "duration": 15},
+                {"name": "ITI 19", "duration": 60},
+                {"name": "Tone 20", "duration": 15},
+                {"name": "ITI 20", "duration": 60},
+                {"name": "Tone 21", "duration": 15},
+                {"name": "ITI 21", "duration": 60},
+                {"name": "Tone 22", "duration": 15},
+                {"name": "ITI 22", "duration": 60},
+                {"name": "Tone 23", "duration": 15},
+                {"name": "ITI 23", "duration": 60},
+                {"name": "Tone 24", "duration": 15},
+                {"name": "ITI 24", "duration": 60},
+                {"name": "Tone 25", "duration": 15},
+                {"name": "ITI 25", "duration": 60},
+                {"name": "Tone 26", "duration": 15},
+                {"name": "ITI 26", "duration": 60},
+                {"name": "Tone 27", "duration": 15},
+                {"name": "ITI 27", "duration": 60},
+                {"name": "Tone 28", "duration": 15},
+                {"name": "ITI 28", "duration": 60},
+                {"name": "Tone 29", "duration": 15},
+                {"name": "ITI 29", "duration": 60},
+                {"name": "Tone 30", "duration": 15},
+                {"name": "ITI 30", "duration": 60},
+                {"name": "Tone 31", "duration": 15},
+                {"name": "ITI 31", "duration": 60},
+                {"name": "Tone 32", "duration": 15},
+                {"name": "ITI 32", "duration": 60},
+                {"name": "Tone 33", "duration": 15},
+                {"name": "ITI 33", "duration": 60},
+                {"name": "Tone 34", "duration": 15},
+                {"name": "ITI 34", "duration": 60},
+                {"name": "Tone 35", "duration": 15},
+                {"name": "ITI 35", "duration": 60},
+                {"name": "Tone 36", "duration": 15},
+                {"name": "ITI 36", "duration": 60},
+                {"name": "Tone 37", "duration": 15},
+                {"name": "ITI 37", "duration": 60},
+                {"name": "Tone 38", "duration": 15},
+                {"name": "ITI 38", "duration": 60},
+                {"name": "Tone 39", "duration": 15},
+                {"name": "ITI 39", "duration": 60},
+                {"name": "Tone 40", "duration": 15},
+                {"name": "ITI 40", "duration": 60},
+                {"name": "Tone 41", "duration": 15},
+                {"name": "ITI 41", "duration": 60},
+                {"name": "Tone 42", "duration": 15},
+                {"name": "ITI 42", "duration": 60},
+                {"name": "Tone 43", "duration": 15},
+                {"name": "ITI 43", "duration": 60},
+                {"name": "Tone 44", "duration": 15},
+                {"name": "ITI 44", "duration": 60},
+                {"name": "Tone 45", "duration": 15},
+                {"name": "ITI 45", "duration": 60},
+                {"name": "Tone 46", "duration": 15},
+                {"name": "ITI 46", "duration": 60},
+                {"name": "Tone 47", "duration": 15},
+                {"name": "ITI 47", "duration": 60},
+                {"name": "Tone 48", "duration": 15},
+                {"name": "ITI 48", "duration": 60},
+                {"name": "Tone 49", "duration": 15},
+                {"name": "ITI 49", "duration": 60},
+                {"name": "Tone 50", "duration": 15},
+                {"name": "ITI 50", "duration": 60},
+            ],
+        },
     ]
 
     def __init__(self, host: "BehaviorAnalyticsTab") -> None:
@@ -17592,6 +18102,78 @@ class _SessionSectionsWidget(QWidget):
         return "section"
 
     @staticmethod
+    def _section_pivot(
+        beh_df: "pd.DataFrame", metric: str, section_names: list[str]
+    ) -> "pd.DataFrame":
+        """Sum *metric* per (session_label × section), aligned to *section_names*.
+
+        One pivot replaces the per-session × per-section boolean scans the draw
+        routines used to run: with a 101-section preset across 80 sessions that
+        was ~16 000 full-column comparisons per behaviour, which froze the UI
+        for tens of seconds.  Missing (session, section) pairs stay NaN so the
+        callers can tell "no data" (excluded from group means) from a real 0.
+        """
+        if beh_df.empty:
+            return pd.DataFrame(columns=section_names, dtype=float)
+        piv = beh_df.pivot_table(
+            index="session_label", columns="section_name",
+            values=metric, aggfunc="sum",
+        )
+        # Unique columns only: a user may name two sections the same, and the
+        # per-section lookups below must stay 1-D Series.
+        return piv.reindex(columns=list(dict.fromkeys(section_names)))
+
+    @staticmethod
+    def _fast_bars(
+        ax: Any, lefts: "np.ndarray", heights: "np.ndarray", width: float,
+        color: str, alpha: float, label: str,
+    ) -> None:
+        """Draw a bar series as one PolyCollection instead of N Rectangles.
+
+        ``ax.bar`` adds one patch per bar and re-derives the data limits for
+        each; at 101 sections × 80 sessions that alone cost ~20 s per redraw.
+        The geometry, colour and legend entry are the same — only the artist
+        count changes (one per series instead of one per bar).
+        """
+        from matplotlib.collections import PolyCollection
+
+        lefts = np.asarray(lefts, dtype=float)
+        heights = np.asarray(heights, dtype=float)
+        x0 = lefts - width / 2.0
+        x1 = lefts + width / 2.0
+        verts = np.empty((len(lefts), 4, 2), dtype=float)
+        verts[:, 0, 0] = x0
+        verts[:, 1, 0] = x1
+        verts[:, 2, 0] = x1
+        verts[:, 3, 0] = x0
+        verts[:, 0, 1] = 0.0
+        verts[:, 1, 1] = 0.0
+        verts[:, 2, 1] = heights
+        verts[:, 3, 1] = heights
+        pc = PolyCollection(
+            verts, facecolors=color, edgecolors="none", alpha=alpha, label=label,
+        )
+        # ax.bar pins the baseline to the axis with a sticky edge; without this
+        # the collection's autoscale would add a margin below y=0.
+        pc.sticky_edges.y.append(0.0)
+        ax.add_collection(pc)
+        # add_collection's autolim only grows the data limits; the y=0 baseline
+        # and the bar tops are both in the verts, so this covers the series.
+        ax.update_datalim(verts.reshape(-1, 2))
+        ax.autoscale_view()
+
+    @staticmethod
+    def _legend_loc_for(n_entries: int, preferred: Any) -> Any:
+        """Fall back from ``loc='best'`` once a legend has many entries.
+
+        Matplotlib's "best" placement scans every artist in the axes for each
+        candidate corner; with thousands of bars that search alone took seconds.
+        """
+        if str(preferred) == "best" and n_entries > 12:
+            return "upper right"
+        return preferred
+
+    @staticmethod
     def _section_base_type(name: str) -> str:
         """Strip trailing number from a section name to get the trial type.
 
@@ -18058,40 +18640,29 @@ class _SessionSectionsWidget(QWidget):
             beh_df = df[df["behavior"] == beh_name]
             x = np.arange(len(section_names))
 
+            piv = self._section_pivot(beh_df, metric, section_names)
+
             if mode == "individual":
                 sess_order = self._host.ordered_session_labels()
-                sessions_here = [
-                    s for s in sess_order
-                    if s in beh_df["session_label"].unique()
-                ]
+                sessions_here = [s for s in sess_order if s in piv.index]
                 bar_w = 0.8 / max(len(sessions_here), 1)
                 for s_idx, sess in enumerate(sessions_here):
-                    sess_df = beh_df[beh_df["session_label"] == sess]
-                    vals = [
-                        float(
-                            sess_df[sess_df["section_name"] == sn][metric].sum()
-                        )
-                        if sn in sess_df["section_name"].values
-                        else 0.0
-                        for sn in section_names
-                    ]
+                    vals = np.nan_to_num(
+                        piv.loc[sess].reindex(section_names).to_numpy(dtype=float),
+                        nan=0.0,
+                    )
                     offset = (s_idx - len(sessions_here) / 2 + 0.5) * bar_w
                     color = _PALETTE[s_idx % len(_PALETTE)]
-                    ax.bar(
-                        x + offset, vals, bar_w * 0.9,
-                        color=color, alpha=0.85, label=sess,
+                    self._fast_bars(
+                        ax, x + offset, vals, bar_w * 0.9,
+                        color, 0.85, str(sess),
                     )
             else:
                 if not host_groups:
                     vals = []
                     errs = []
                     for sn in section_names:
-                        sec_vals = (
-                            beh_df[beh_df["section_name"] == sn]
-                            .groupby("session_label")[metric]
-                            .sum()
-                            .to_numpy(float)
-                        )
+                        sec_vals = piv[sn].dropna().to_numpy(dtype=float)
                         vals.append(
                             float(sec_vals.mean()) if len(sec_vals) > 0 else 0.0
                         )
@@ -18118,18 +18689,11 @@ class _SessionSectionsWidget(QWidget):
                             for lbl, g in host_groups.items()
                             if g == grp_name
                         }
-                        grp_df = beh_df[
-                            beh_df["session_label"].isin(grp_sessions)
-                        ]
+                        grp_piv = piv.loc[piv.index.isin(grp_sessions)]
                         vals = []
                         errs = []
                         for sn in section_names:
-                            sec_vals = (
-                                grp_df[grp_df["section_name"] == sn]
-                                .groupby("session_label")[metric]
-                                .sum()
-                                .to_numpy(float)
-                            )
+                            sec_vals = grp_piv[sn].dropna().to_numpy(dtype=float)
                             vals.append(
                                 float(sec_vals.mean())
                                 if len(sec_vals) > 0
@@ -18178,7 +18742,9 @@ class _SessionSectionsWidget(QWidget):
                 if _h:
                     _a.legend(
                         fontsize=gs.get("legend_fontsize", "small"),
-                        loc=gs.get("legend_loc", "best"),
+                        loc=self._legend_loc_for(
+                            len(_h), gs.get("legend_loc", "best")
+                        ),
                     )
             try:
                 self._figure.tight_layout(pad=1.5)
@@ -18227,22 +18793,16 @@ class _SessionSectionsWidget(QWidget):
             ax = self._figure.add_subplot(nrows, ncols, beh_idx + 1)
             beh_df = df[df["behavior"] == beh_name]
 
+            piv = self._section_pivot(beh_df, metric, section_names)
+
             if mode == "individual":
                 sess_order = self._host.ordered_session_labels()
-                sessions_here = [
-                    s for s in sess_order
-                    if s in beh_df["session_label"].unique()
-                ]
+                sessions_here = [s for s in sess_order if s in piv.index]
                 for s_idx, sess in enumerate(sessions_here):
-                    sess_df = beh_df[beh_df["session_label"] == sess]
-                    vals = [
-                        float(
-                            sess_df[sess_df["section_name"] == sn][metric].sum()
-                        )
-                        if sn in sess_df["section_name"].values
-                        else 0.0
-                        for sn in section_names
-                    ]
+                    vals = np.nan_to_num(
+                        piv.loc[sess].reindex(section_names).to_numpy(dtype=float),
+                        nan=0.0,
+                    )
                     color = _PALETTE[s_idx % len(_PALETTE)]
                     ax.plot(
                         x, vals, color=color, linewidth=1.8,
@@ -18254,12 +18814,7 @@ class _SessionSectionsWidget(QWidget):
                     vals = []
                     errs = []
                     for sn in section_names:
-                        sec_vals = (
-                            beh_df[beh_df["section_name"] == sn]
-                            .groupby("session_label")[metric]
-                            .sum()
-                            .to_numpy(float)
-                        )
+                        sec_vals = piv[sn].dropna().to_numpy(dtype=float)
                         vals.append(
                             float(sec_vals.mean()) if len(sec_vals) > 0 else 0.0
                         )
@@ -18282,18 +18837,11 @@ class _SessionSectionsWidget(QWidget):
                             for lbl, g in host_groups.items()
                             if g == grp_name
                         }
-                        grp_df = beh_df[
-                            beh_df["session_label"].isin(grp_sessions)
-                        ]
+                        grp_piv = piv.loc[piv.index.isin(grp_sessions)]
                         vals = []
                         errs = []
                         for sn in section_names:
-                            sec_vals = (
-                                grp_df[grp_df["section_name"] == sn]
-                                .groupby("session_label")[metric]
-                                .sum()
-                                .to_numpy(float)
-                            )
+                            sec_vals = grp_piv[sn].dropna().to_numpy(dtype=float)
                             vals.append(
                                 float(sec_vals.mean())
                                 if len(sec_vals) > 0
@@ -18337,7 +18885,9 @@ class _SessionSectionsWidget(QWidget):
                 if _h:
                     _a.legend(
                         fontsize=gs.get("legend_fontsize", "small"),
-                        loc=gs.get("legend_loc", "best"),
+                        loc=self._legend_loc_for(
+                            len(_h), gs.get("legend_loc", "best")
+                        ),
                     )
             try:
                 self._figure.tight_layout(pad=1.5)
@@ -19184,6 +19734,9 @@ class _VelocityWidget(QWidget):
         self._updating = False
         # Per-behavior cache of velocity records, keyed by (bid, smooth_window).
         self._vel_cache: dict[tuple[str, int], list[dict]] = {}
+        # Set when a refresh lands while this sub-tab is hidden; the chart
+        # is then drawn on first show instead (see on_data_loaded).
+        self._pending_update = False
 
         def _toggle_row(
             options: list[tuple[str, str]], default_idx: int = 0
@@ -19788,14 +20341,32 @@ class _VelocityWidget(QWidget):
     # ── Public interface ──────────────────────────────────────────────
 
     def on_data_loaded(self) -> None:
-        """Called by the host after each analytics refresh."""
+        """Called by the host after each analytics refresh.
+
+        Drawing the chart reads the pose file of every session — about 7 s on a
+        69-session project, on the UI thread — and this is rarely the sub-tab on
+        screen when a refresh finishes.  The selectors are rebuilt immediately
+        (they are cheap and must reflect the new data), but the chart itself
+        waits until the tab is actually shown.
+        """
         self._vel_cache.clear()
         self._rebuild_behavior_combo()
         self._rebuild_session_list()
         self._refresh_vel_factor_selector()
         self._refresh_vel_group_filter()
         self._on_chart_type_toggled()
-        self._update()
+        if self.isVisible():
+            self._pending_update = False
+            self._update()
+        else:
+            self._pending_update = True
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        """Draw the chart that on_data_loaded deferred while this tab was hidden."""
+        super().showEvent(event)
+        if self._pending_update:
+            self._pending_update = False
+            self._update()
 
     def on_groups_updated(self) -> None:
         """Called by the host when group/factor definitions change."""

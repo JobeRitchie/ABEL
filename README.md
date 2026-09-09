@@ -2,7 +2,7 @@
 
 **ABEL - Active-learning Behavior Estimation and Labeling**
 
-Version 0.17.0 · Python ≥ 3.10 · UNC academic-use license (UNC Ref. No. 26-0187)
+Version 0.18.0 · Python ≥ 3.10 · UNC academic-use license (UNC Ref. No. 26-0187)
 
 ABEL is a graphical user interface (GUI)-based, no-coding required platform for
 human-in-the-loop annotation and training of predictive models for behavior

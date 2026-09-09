@@ -35,6 +35,7 @@ from abel.services.roi_service import ROIService
 from abel.services.seed_service import SeedService
 from abel.services.settings_service import SettingsService
 from abel.ui.assets import icon_path
+from abel.ui.busy_dialog import close_busy, show_busy
 from abel.ui.dialogs import ProjectWizardDialog
 from abel.ui.raw_data_warning import RawDataWarningPresenter
 from abel.ui.startup_widget import StartupWidget
@@ -96,6 +97,9 @@ class MainWindow(QMainWindow):
         # Shared across every tab so the "raw data unreachable" warning has one
         # voice and one cadence (once per distinct problem) app-wide.
         self._raw_data_warning = RawDataWarningPresenter(self)
+        # Modal "please wait" popup held open across the deferred stages of
+        # opening a project (see _set_project / _update_home_stats).
+        self._open_popup = None
 
         self.stack = QStackedWidget()
         self.startup = StartupWidget()
@@ -444,11 +448,24 @@ class MainWindow(QMainWindow):
 
     def open_recent_project(self, path: str) -> None:
         project_root = Path(path)
+        # Opening a large project reads the manifest, the behaviour definitions
+        # and several derived tables before anything repaints, which looks like
+        # a hang. The popup is closed by _update_home_stats, the last deferred
+        # stage of the open, or by the error path here.
+        self._open_popup = show_busy(
+            self, "Opening Project",
+            f"Opening {project_root.name}…",
+        )
         try:
             context = self._project_service.open_project(project_root)
             self._set_project(context)
         except Exception as exc:
+            self._close_open_popup()
             self._error(f"Could not open project: {exc}")
+
+    def _close_open_popup(self) -> None:
+        close_busy(self._open_popup)
+        self._open_popup = None
 
     def _set_project(self, context: ProjectContext) -> None:
         previous_root = self._project.project_root if self._project is not None else None
@@ -513,9 +530,11 @@ class MainWindow(QMainWindow):
     def _update_home_stats(self, project_root: Path) -> None:
         """Deferred: update home-tab stats after the window has painted."""
         if self._project is None or self._project.project_root != project_root:
+            self._close_open_popup()
             return
         self.home_tab.update_stats(self._compute_project_stats(project_root))
         self._logger.info("Project loaded: %s", project_root)
+        self._close_open_popup()
 
     def _lazy_init_tab(self, widget: QWidget) -> None:
         """Call set_project on *widget* exactly once; no-op if already done."""
