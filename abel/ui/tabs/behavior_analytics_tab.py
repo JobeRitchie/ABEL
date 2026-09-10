@@ -128,6 +128,13 @@ from abel.services.project_merge_service import ProjectMergeService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.roi_service import ROIService
 from abel.services import roi_behavior_service
+from abel.services.subject_rename_service import (
+    ANCHORS_KEY,
+    SessionLabels,
+    anchor_group_state,
+    remap_group_state,
+    session_labels,
+)
 # ROI occupancy and ROI-scoped behavior must agree on what counts as "inside",
 # down to the boundary debounce, so both use the shared geometry helper.
 from abel.utils.roi_geometry import debounce_bool as _debounce_bool
@@ -760,6 +767,14 @@ class BehaviorAnalyticsTab(QWidget):
         self._group_order: list[str] = []  # user-defined group display order
         self._factor_level_order: dict[str, list[str]] = {}  # factor → ordered levels
         self._group_colors: dict[str, str] = {}  # group name → hex color override
+        # False from set_project until _load_group_state has read the file.
+        # Saving in that window would write the just-cleared state over the
+        # user's factor assignments (see _save_group_state).
+        self._group_state_loaded: bool = False
+        # Session ids behind every label/subject key of the saved group state,
+        # so the state can follow a subject rename (subject_rename_service).
+        self._session_labels = SessionLabels()
+        self._group_state_anchors: dict[str, Any] = {}
         self._raw_bouts: dict[str, pd.DataFrame] = {}
         # ROI scope: _raw_bouts is what every view reads, so scoping it to a
         # zone propagates automatically.  The unscoped copy is kept so the
@@ -985,6 +1000,9 @@ class BehaviorAnalyticsTab(QWidget):
     def set_project(self, project_root: Path) -> None:
         self._project_root = project_root
         self._manager = ProjectManager(project_root)
+        self._group_state_loaded = False
+        self._session_labels = SessionLabels()
+        self._group_state_anchors = {}
         self._session_groups.clear()
         self._factor_definitions.clear()
         self._session_factors.clear()
@@ -1042,6 +1060,15 @@ class BehaviorAnalyticsTab(QWidget):
         """Persist group assignments to {project_root}/derived/analytics_groups.json."""
         if self._project_root is None:
             return
+        if not self._group_state_loaded:
+            # set_project cleared the in-memory factors; until the file has been
+            # read back, a save (a preset load, a table rebuild) would replace
+            # every factor assignment on disk with nothing.
+            logger.warning(
+                "Skipped saving analytics group state: not loaded yet for %s.",
+                self._project_root,
+            )
+            return
         state = {
             "schema_version": "1.0",
             "factor_definitions": list(self._factor_definitions),
@@ -1055,12 +1082,44 @@ class BehaviorAnalyticsTab(QWidget):
             "group_colors": dict(self._group_colors),
             "section_definitions": self._sections_tab.get_sections_state(),
             "section_custom_presets": self._sections_tab.get_custom_presets(),
+            ANCHORS_KEY: self._group_state_anchors,
         }
+        anchor_group_state(state, self._session_labels)
+        self._group_state_anchors = state[ANCHORS_KEY]
         out_path = self._project_root / "derived" / "analytics_groups.json"
+        self._backup_group_state_if_dropping_factors(out_path, state)
         try:
             out_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
         except Exception:
             logger.warning("Failed to save analytics group state.")
+
+    @staticmethod
+    def _backup_group_state_if_dropping_factors(out_path: Path, state: dict) -> None:
+        """Keep a timestamped copy of the file when a save removes a factor.
+
+        Factor assignments are typed in by hand and exist nowhere else, so a
+        save that drops a whole factor column — deliberately via Remove Factor,
+        or by any bug — leaves a recoverable copy next to the original.
+        """
+        try:
+            old = json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        old_factors = [str(f) for f in (old.get("factor_definitions") or [])]
+        dropped = [f for f in old_factors if f not in state["factor_definitions"]]
+        if not dropped:
+            return
+        from datetime import datetime  # noqa: PLC0415
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = out_path.with_name(f"analytics_groups.backup-{stamp}.json")
+        try:
+            backup.write_text(json.dumps(old, indent=2), encoding="utf-8")
+            logger.info(
+                "Analytics factor(s) %s removed; previous state kept at %s",
+                dropped, backup,
+            )
+        except Exception as exc:
+            logger.warning("Failed to back up analytics group state: %s", exc)
 
     def _load_group_state(self) -> None:
         """Restore group assignments from {project_root}/derived/analytics_groups.json."""
@@ -1068,12 +1127,21 @@ class BehaviorAnalyticsTab(QWidget):
             return
         state_path = self._project_root / "derived" / "analytics_groups.json"
         if not state_path.exists():
+            self._group_state_loaded = True  # nothing on disk to protect
             return
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except Exception:
+            # Leave _group_state_loaded False: overwriting a file we could not
+            # read would destroy whatever it still holds.
             logger.warning("Failed to load analytics group state.")
             return
+        self._group_state_loaded = True
+        # Entries saved under labels a rename has since replaced follow their
+        # anchored sessions onto the current labels.
+        for note in remap_group_state(state, self._session_labels):
+            logger.warning("Analytics subject rename: %s", note)
+        self._group_state_anchors = state.get(ANCHORS_KEY) or {}
         self._factor_definitions[:] = [str(f) for f in (state.get("factor_definitions") or [])]
         self._session_factors.clear()
         for label, facs in (state.get("session_factors") or {}).items():
@@ -1401,54 +1469,47 @@ class BehaviorAnalyticsTab(QWidget):
         manifest = self._manifest()
         if manifest is None:
             return {}
-        video_by_id = {v.asset_id: v for v in manifest.videos}
-        out: dict[str, str] = {}
-        session_types: dict[str, str] = {}
-        for session in manifest.linked_sessions:
-            sid = str(session.session_id)
-            subject = (session.subject_id or "").strip()
-            if not subject:
-                video = video_by_id.get(session.video_asset_id)
-                subject = (video.subject_id or "").strip() if video else ""
-            out[sid] = subject or sid
-            # Extract session type from video filename first, then fall back to
-            # splitting the subject label on the first "_" (e.g. "m10_cond1"
-            # → session type "cond1").
-            video = video_by_id.get(session.video_asset_id)
-            stype = ""
-            if video:
-                stem = Path(video.source_path).stem
-                subj = out[sid]
-                if subj and stem.startswith(subj):
-                    remainder = stem[len(subj):].lstrip("_- ")
-                    # Strip DLC suffix if present (e.g. "ConditioningDLC_...")
-                    if remainder and not remainder.upper().startswith("DLC"):
-                        stype = remainder
-            # Fallback: parse "{subject}_{session_type}" convention from the
-            # subject label itself (e.g. "m10_cond1" → "cond1").
-            if not stype and "_" in out[sid]:
-                stype = out[sid].split("_", 1)[1]
-            session_types[sid] = stype
-        self._session_type_by_session = session_types
-        # Determine if any subject has multiple sessions
-        subject_session_count: dict[str, int] = {}
-        for sid, subj in out.items():
-            subject_session_count[subj] = subject_session_count.get(subj, 0) + 1
-        # Build session labels
-        labels: dict[str, str] = {}
-        for sid, subj in out.items():
-            stype = session_types.get(sid, "")
-            if subject_session_count.get(subj, 1) > 1 and stype:
-                labels[sid] = f"{subj} \u2013 {stype}"
-            else:
-                labels[sid] = subj
-        self._session_label_by_session = labels
-        # Build reverse map: label → [session_ids]
-        sessions_by_label: dict[str, list[str]] = {}
-        for sid, label in labels.items():
-            sessions_by_label.setdefault(label, []).append(sid)
-        self._sessions_by_label = sessions_by_label
-        return out
+        labels = session_labels(manifest)
+        self._session_labels = labels
+        self._session_type_by_session = dict(labels.session_type_by_session)
+        self._session_label_by_session = dict(labels.label_by_session)
+        self._sessions_by_label = labels.sessions_by_label()
+        return dict(labels.subject_by_session)
+
+    def _remap_group_state_to_labels(self, previous: SessionLabels) -> None:
+        """Re-key in-memory factors/order/prechop after the session labels changed.
+
+        A subject renamed in Data Import while this tab is open changes the
+        labels on the next refresh; without this the assignments made under the
+        old labels would sit on keys nothing displays, and the next save would
+        write them back that way.
+        """
+        state = {
+            "session_factors": self._session_factors,
+            "subject_order": self._subject_order,
+            "subject_prechop_frames": self._subject_prechop_frames,
+            ANCHORS_KEY: self._group_state_anchors,
+        }
+        anchor_group_state(state, previous)
+        notes = remap_group_state(state, self._session_labels)
+        self._group_state_anchors = state[ANCHORS_KEY]
+        if (
+            state["session_factors"] == self._session_factors
+            and state["subject_order"] == self._subject_order
+            and state["subject_prechop_frames"] == self._subject_prechop_frames
+        ):
+            return
+        new_factors = dict(state["session_factors"])
+        self._session_factors.clear()
+        self._session_factors.update(new_factors)
+        self._subject_order[:] = state["subject_order"]
+        new_prechop = dict(state["subject_prechop_frames"])
+        self._subject_prechop_frames.clear()
+        self._subject_prechop_frames.update(new_prechop)
+        for note in notes:
+            logger.warning("Analytics subject rename: %s", note)
+        self._sync_session_groups()
+        self._save_group_state()
 
     def _invert_subject_map(self) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
@@ -2072,8 +2133,11 @@ class BehaviorAnalyticsTab(QWidget):
             self._roi_mask_cache.clear()
             self._refresh_roi_scope_combo()
             self._graphs_tab._refresh_until_behavior_combo()
+            previous_labels = self._session_labels
             self._subject_by_session = self._build_subject_map()
             self._session_by_subject = self._invert_subject_map()
+            if self._group_state_loaded and previous_labels != self._session_labels:
+                self._remap_group_state_to_labels(previous_labels)
             self._heatmap_tab._refresh_lists()
             self._density_tab.refresh_selectors()
         worker = TaskWorker(self._run_refresh_background)

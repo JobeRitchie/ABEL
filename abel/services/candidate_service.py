@@ -1332,7 +1332,7 @@ class CandidateGenerationService:
                 continue
             out[sid] = {
                 "n_frames": n_frames,
-                "animal_id": str(sess.get("subject_id") or sid),
+                "animal_id": str(sess.get("subject_key") or sess.get("subject_id") or sid),
                 "video_id": video_id or sid,
             }
 

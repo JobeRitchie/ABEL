@@ -36,7 +36,6 @@ PROJECT_DIRS = [
     "derived/review_tables",
     "derived/thumbnails",
     "derived/caches",
-    "derived/analysis/benchmarks",
     "derived/analysis/diagnostics",
     "derived/temporal_refinement",
     "exports/csv",
@@ -54,7 +53,6 @@ PROJECT_CONFIG_FILES = {
     "export_settings": "config/export_settings.yaml",
     "experiment": "config/experiment.yaml",
     "environment_rois": "config/environment_rois.yaml",
-    "behavior_adaptive_settings": "config/behavior_adaptive_settings.yaml",
 }
 
 DEFAULT_REQUIRED_MINIMAL_DEPENDENCIES = {

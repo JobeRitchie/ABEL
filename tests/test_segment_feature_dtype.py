@@ -134,6 +134,30 @@ def test_legacy_cache_detector_flags_float64_and_ignores_float32(tmp_path) -> No
     assert BehaviorRepresentationService.legacy_float64_segment_cache(tmp_path) is None
 
 
+def test_detector_ignores_float64_scoring_columns(tmp_path) -> None:
+    # A v5 cache after a scored run: float32 features plus the float64
+    # prediction/uncertainty columns written back by scoring. Not legacy.
+    repr_dir = tmp_path / "derived" / "representations"
+    repr_dir.mkdir(parents=True)
+    rng = np.random.default_rng(4)
+    n_rows = 30
+    scored = pd.DataFrame(
+        {
+            "segment_id": [f"seg_{i}" for i in range(n_rows)],
+            **{f"f{i}_mean": rng.normal(size=n_rows).astype(np.float32) for i in range(6)},
+            **{c: rng.random(n_rows) for c in BehaviorRepresentationService.SCORING_COLUMNS},
+        }
+    )
+    scored.to_parquet(repr_dir / "segment_features.parquet", index=False)
+    assert BehaviorRepresentationService.legacy_float64_segment_cache(tmp_path) is None
+
+    # A genuinely float64 feature column still trips it.
+    scored["f0_mean"] = scored["f0_mean"].astype(np.float64)
+    scored.to_parquet(repr_dir / "segment_features.parquet", index=False)
+    info = BehaviorRepresentationService.legacy_float64_segment_cache(tmp_path)
+    assert info is not None and info["n_float64_cols"] == 1
+
+
 def test_detector_returns_none_without_a_cache(tmp_path) -> None:
     assert BehaviorRepresentationService.legacy_float64_segment_cache(tmp_path) is None
 

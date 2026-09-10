@@ -66,6 +66,37 @@ def test_contrastive_essence_is_discriminative_and_tight():
     assert _match_frac(bg, crits) < 0.15
 
 
+def test_saturating_feature_still_yields_k_distinct_signals():
+    """An extreme behaviour (freezing) is isolated by one feature alone; the box
+    must still describe it with up to k features rather than stopping at that
+    one, skipping other statistics of the same signal and correlated copies."""
+    rng = np.random.default_rng(1)
+    n_pos, n_bg = 30, 1000
+
+    def frame(n, shift, prefix):
+        a = rng.normal(shift, 0.3, n)  # the saturating axis
+        return pd.DataFrame({
+            "feat:speed_mean": a,
+            "feat:speed_p10": a + rng.normal(0, 0.05, n),  # same signal, other stat
+            "feat:speed_copy_mean": a * 2.0 + rng.normal(0, 0.02, n),  # correlated copy
+            "feat:jerk_mean": rng.normal(shift, 0.6, n),  # independent, separating
+            "feat:turn_mean": rng.normal(shift, 0.6, n),  # independent, separating
+            "noise": rng.normal(0, 1.0, n),
+        }, index=[f"{prefix}_{i}" for i in range(n)])
+
+    pos, bg = frame(n_pos, -4.0, "pos"), frame(n_bg, 0.0, "bg")
+    crits = ClipMetricsService.extract_contrastive_essence(pos, bg, k=5)
+    chosen = [c.metric_id for c in crits]
+    assert len(chosen) >= 3, chosen
+    assert {"feat:jerk_mean", "feat:turn_mean"} <= set(chosen)
+    speed_family = {"feat:speed_mean", "feat:speed_p10", "feat:speed_copy_mean"}
+    assert len(speed_family & set(chosen)) == 1, chosen
+    assert "noise" not in chosen
+    # The filled criteria stay inside the exemplar recall budget.
+    res_pos = ClipMetricsService.mine(pos, crits, match_all=True)
+    assert len(res_pos.matched_ids) >= 0.8 * n_pos
+
+
 def test_contrastive_beats_legacy_minmax_breadth():
     pos, bg = _make_pool()
     full = pd.concat([pos, bg])

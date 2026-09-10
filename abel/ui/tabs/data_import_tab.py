@@ -1246,8 +1246,10 @@ class DataImportTab(QWidget):
             if not silent:
                 self._append_log("Cannot save manifest: no project loaded.")
             return
-        self._import_service.save_manifest(self._project_root, self._manifest)
+        rename_notes = self._import_service.save_manifest(self._project_root, self._manifest)
         self._append_log("Import manifest saved automatically.")
+        for note in rename_notes or []:
+            self._append_log(f"Subject rename: {note}")
         self._logger.info("Import manifest saved for project %s", self._project_root)
 
         # Auto-copy when the project is configured for copy mode.

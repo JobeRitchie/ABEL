@@ -1486,6 +1486,7 @@ class PoseFeaturesTab(QWidget):
                 individuals=individuals,
                 individual_subject_map=ind_map,
                 identity_corrections=corrections,
+                subject_key=getattr(sess, "subject_key", None) if sess else None,
             ))
         return jobs
 

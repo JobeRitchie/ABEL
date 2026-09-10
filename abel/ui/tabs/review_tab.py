@@ -1272,7 +1272,7 @@ class ReviewTab(QWidget):
 
         The first tuple element MUST be the *resolved* animal id used to key the
         per-individual segment features — ``individual_subject_map[ind]`` when a
-        subject mapping exists, else ``f"{subject_id or session_id}:{ind}"`` — so
+        subject mapping exists, else ``f"{subject_key}:{ind}"`` — so
         that committed soundboard labels (segment id ``seg_{animal_id}_…``) join
         to the correct segment rows. Using the raw individual key here would make
         every label miss the training join. Mirrors
@@ -1293,7 +1293,7 @@ class ReviewTab(QWidget):
         if sess is None or not getattr(sess, "individuals", None):
             return []
         imap = dict(getattr(sess, "individual_subject_map", {}) or {})
-        subject_id = getattr(sess, "subject_id", None) or sess.session_id
+        subject_id = getattr(sess, "subject_key", None) or getattr(sess, "subject_id", None) or sess.session_id
         return [
             (
                 imap.get(ind) or f"{subject_id}:{ind}",   # resolved animal_id (join key)

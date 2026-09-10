@@ -44,7 +44,6 @@ from abel.ui.tabs.behavior_tab import BehaviorTab
 from abel.ui.tabs.data_import_tab import DataImportTab
 from abel.ui.tabs.dependencies_tab import DependenciesTab
 from abel.ui.tabs.export_tab import ExportTab
-from abel.ui.tabs.feature_audit_tab import FeatureAuditTab
 from abel.ui.tabs.help_tab import HelpTab
 from abel.ui.tabs.info_tab import InfoTab
 from abel.ui.tabs.methods_tab import MethodsTab
@@ -170,7 +169,6 @@ class MainWindow(QMainWindow):
         learning_tabs.addTab(self.seed_tab, "Seeds")
         learning_tabs.addTab(self.active_learning_tab, "Learning")
         learning_tabs.addTab(self.clip_extraction_tab, "Clips")
-        learning_tabs.addTab(self.feature_audit_tab, "Feature Audit")
         learning_tabs.addTab(self.review_tab, "Review")
         return learning_tabs
 
@@ -248,7 +246,6 @@ class MainWindow(QMainWindow):
             self._import_service,
             self._behavior_service,
         )
-        self.feature_audit_tab = FeatureAuditTab()
         self.active_learning_tab.edge_case_candidates_requested.connect(self._load_edge_cases_in_clip_extraction)
         self.active_learning_tab.uncertainty_candidates_updated.connect(self._update_clip_extraction_uncertainty_candidates)
         self.active_learning_tab.uncertainty_candidates_appended.connect(self._append_clip_extraction_uncertainty_candidates)

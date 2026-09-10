@@ -57,7 +57,6 @@ from PySide6.QtWidgets import (
 from abel.models.schemas import BehaviorModelConfig, CandidateWindow
 from abel.services.active_learning_scheduler import ActiveLearningScheduler
 from abel.services.active_learning_trainer_service import ActiveLearningTrainerService, TrainingConfig
-from abel.services.behavior_adaptive_benchmark_service import BehaviorAdaptiveBenchmarkService
 from abel.services.behavior_awareness_ablation_service import BehaviorAwarenessAblationService
 from abel.services.behavior_representation_service import (
     align_model_feature_columns,
@@ -70,6 +69,7 @@ from abel.services.representation_reuse import reuse_or_build_representation
 from abel.services.context_feature_service import ContextFeatureConfig, ContextFeatureService
 from abel.services.evaluation_service import BoutMergeConfig, EvaluationService
 from abel.services.import_service import ImportService
+from abel.services.subject_rename_service import current_subjects
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.roi_service import ROIService
 from abel.services.seed_service import SeedService
@@ -98,7 +98,6 @@ _AL_PIPELINE_STAGES: tuple[tuple[str, str, float, tuple[str, ...]], ...] = (
     ("inference", "Score & uncertainty", 2.0, ("uncertainty", "Scoring")),
     ("candidates", "Generate candidates", 1.0, ("candidates", "Selecting")),
     ("evaluation", "Evaluate & report", 2.0, ("Evaluat", "report")),
-    ("phase1", "Phase 1 diagnostics", 1.0, ("Phase 1", "phase1")),
 )
 
 logger = logging.getLogger("abel")
@@ -177,7 +176,6 @@ class ActiveLearningTab(QWidget):
         self._rois = ROIService()
         self._evaluation = EvaluationService()
         self._scheduler = ActiveLearningScheduler()
-        self._phase1 = BehaviorAdaptiveBenchmarkService()
         self._project_root: Path | None = None
         self._loading_ui_settings: bool = False
         self._applying_quick_profile: bool = False
@@ -424,36 +422,10 @@ class ActiveLearningTab(QWidget):
         )
         self._guided_settings_btn.clicked.connect(self._run_guided_settings_helper)
 
-        self._phase1_enable = QCheckBox("Enable adaptive benchmarks")
-        self._phase1_enable.setChecked(False)
-        self._phase1_enable.setToolTip(
-            "Opt-in Phase 1 benchmarking and diagnostics. Baseline workflow remains unchanged when disabled."
-        )
-
-        self._phase1_modality = QCheckBox("Benchmark feature families")
-        self._phase1_modality.setChecked(True)
-        self._phase1_modality.setToolTip("Compare pose, visual, motion, context, and fused experts.")
-
-        self._phase1_confound = QCheckBox("Run confound analysis")
-        self._phase1_confound.setChecked(False)
-        self._phase1_confound.setToolTip("Estimate top non-target confounds when labels are available.")
-
-        self._phase1_diagnostics = QCheckBox("Generate diagnostics")
-        self._phase1_diagnostics.setChecked(True)
-        self._phase1_diagnostics.setToolTip(
-            "Create baseline-vs-adaptive comparison charts only when enabled."
-        )
-
-        self._phase1_regenerate = QCheckBox("Regenerate cached diagnostics")
-        self._phase1_regenerate.setChecked(False)
-
-        self._phase1_export_hires = QCheckBox("Export publication quality (PNG+SVG)")
-        self._phase1_export_hires.setChecked(True)
-
         self._queue_weighted_enable = QCheckBox("Enable weighted queue scoring")
         self._queue_weighted_enable.setChecked(False)
         self._queue_weighted_enable.setToolTip(
-            "Phase 2 opt-in: combine modular queue scores (candidate, uncertainty, disagreement, diversity, confound, hard-negative, exploration)."
+            "Opt-in: combine modular queue scores (candidate, uncertainty, disagreement, diversity, confound, hard-negative, exploration)."
         )
 
         self._queue_enable_disagreement = QCheckBox("Use disagreement component")
@@ -606,20 +578,37 @@ class ActiveLearningTab(QWidget):
             "QPushButton:hover { background: #1976D2; }"
             "QPushButton:disabled { background: #263238; color: #8FA6B4; }"
         )
+        self._run_btn.setToolTip(
+            "Full run for the selected behavior: extract features for any uncached\n"
+            "sessions, build segments (applies quick-test / segment caps), train,\n"
+            "score, pick review candidates, and evaluate.\n\n"
+            "Use after importing new sessions or changing feature/window settings.\n"
+            "With no labels yet, offers random starter windows."
+        )
         self._run_btn.clicked.connect(self._run_pipeline)
 
         self._retrain_btn = QPushButton("↻ Retrain")
-        self._retrain_btn.setToolTip("Retrain using project review labels without re-running the full pipeline.")
+        self._retrain_btn.setToolTip(
+            "Retrain the selected behavior on the cached segment features with your\n"
+            "latest seeds + reviewed clips, then score, pick candidates, and evaluate.\n\n"
+            "Use after a review round when only the labels changed. Skips feature\n"
+            "extraction and segment caps. Cannot be stopped once started."
+        )
         self._retrain_btn.clicked.connect(self._run_retrain)
 
         self._retrain_all_btn = QPushButton("↻ Retrain All")
         self._retrain_all_btn.setToolTip(
-            "Retrain each behavior individually in sequence using the current settings."
+            "Retrain every behavior you tick, one after another (like Retrain).\n"
+            "Each behavior's old model folder is replaced. Review clips are made\n"
+            "only if 'Generate Review Clips' is on. Cannot be stopped once started."
         )
         self._retrain_all_btn.clicked.connect(self._run_retrain_all)
 
         self._run_existing_btn = QPushButton("⏵ Run Existing Model")
-        self._run_existing_btn.setToolTip("Run inference using a previously saved model.")
+        self._run_existing_btn.setToolTip(
+            "Score this project's data with the saved model chosen above.\n"
+            "No training — the model is used as-is."
+        )
         self._run_existing_btn.clicked.connect(self._run_existing_model)
 
         self._run_models_btn = QPushButton("⏵ Run Models…")
@@ -639,8 +628,9 @@ class ActiveLearningTab(QWidget):
             "QPushButton:disabled { background: #263238; color: #8FA6B4; }"
         )
         self._run_pipeline_all_btn.setToolTip(
-            "Run the full active-learning pipeline for every defined behavior in sequence.\n"
-            "Features are extracted once and reused for subsequent behaviors."
+            "Run Pipeline for every behavior you tick, one after another.\n"
+            "Features and segments are prepared once and reused for the rest.\n"
+            "Review clips are made only if 'Generate Review Clips' is on."
         )
         self._run_pipeline_all_btn.clicked.connect(self._run_pipeline_all_behaviors)
 
@@ -662,6 +652,10 @@ class ActiveLearningTab(QWidget):
         self._gen_clips_btn.toggled.connect(self._on_gen_clips_toggled)
 
         self._stop_btn = QPushButton("■ Stop")
+        self._stop_btn.setToolTip(
+            "Cancel the running pipeline, Pipeline All, or model run.\n"
+            "Retrain and Retrain All cannot be interrupted."
+        )
         self._stop_btn.clicked.connect(self._confirm_stop)
         self._stop_btn.setEnabled(False)
         self._stop_btn.setStyleSheet(
@@ -719,9 +713,6 @@ class ActiveLearningTab(QWidget):
         self._viz_selector.addItem("Behavior Separation (UMAP)", userData="umap")
         self._viz_selector.addItem("Confusion Matrix", userData="confusion")
         self._viz_selector.addItem("PR Curve", userData="pr")
-        self._viz_selector.addItem("Feature Family Comparison", userData="feature_family")
-        self._viz_selector.addItem("Target-vs-Confound Margin", userData="margin")
-        self._viz_selector.addItem("Calibration", userData="calibration")
         self._viz_selector.addItem("Queue Composition", userData="queue")
         self._viz_selector.addItem("Pipeline Timing", userData="timing")
         self._viz_selector.addItem("Cross-Behaviour Confounds", userData="confound_cross")
@@ -757,7 +748,7 @@ class ActiveLearningTab(QWidget):
         self._table.setHorizontalHeaderLabels(["Subject", "Frames", "Segment ID", "Model Prob", "Uncertainty"])
         self._table.hide()
 
-        # Also keep edge-case/configure-features/phase1 buttons for settings dialog access
+        # Also keep edge-case/configure-features buttons for settings dialog access
         self._edge_case_btn = QPushButton("Find Edge Cases…")
         self._edge_case_btn.setToolTip(
             "Find windows that are difficult to differentiate between two behaviors."
@@ -769,9 +760,6 @@ class ActiveLearningTab(QWidget):
             "Choose which feature columns are included in model training."
         )
         self._configure_features_btn.clicked.connect(self._show_feature_config_dialog)
-
-        self._phase1_run_btn = QPushButton("Run Phase 1 Feature Test")
-        self._phase1_run_btn.clicked.connect(self._run_phase1_benchmarks)
 
         self._confound_graph_btn = QPushButton("Confound Analysis")
         self._confound_graph_btn.setToolTip(
@@ -1033,12 +1021,6 @@ class ActiveLearningTab(QWidget):
         idx_split = self._split_strategy.findData("group_shuffle_session")
         if idx_split >= 0:
             self._split_strategy.setCurrentIndex(idx_split)
-        self._phase1_enable.setChecked(False)
-        self._phase1_modality.setChecked(True)
-        self._phase1_confound.setChecked(False)
-        self._phase1_diagnostics.setChecked(True)
-        self._phase1_regenerate.setChecked(False)
-        self._phase1_export_hires.setChecked(True)
         self._candidate_focus_pct.setValue(50)
         self._queue_weighted_enable.setChecked(False)
         self._queue_enable_disagreement.setChecked(True)
@@ -1077,12 +1059,6 @@ class ActiveLearningTab(QWidget):
         self._all_behavior_competition_margin.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._validation_pct.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._split_strategy.currentIndexChanged.connect(lambda _i: self._persist_ui_settings_to_project())
-        self._phase1_enable.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._phase1_modality.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._phase1_confound.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._phase1_diagnostics.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._phase1_regenerate.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
-        self._phase1_export_hires.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._queue_weighted_enable.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._queue_enable_disagreement.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._queue_enable_diversity.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
@@ -1170,7 +1146,6 @@ class ActiveLearningTab(QWidget):
                 "query_size": 100,
                 "validation_pct": 25,
                 "max_train_samples_per_class": 1000,
-                "phase1_enable": False,
             },
         }
 
@@ -1195,8 +1170,6 @@ class ActiveLearningTab(QWidget):
             self._enable_umap.setChecked(bool(cfg.get("enable_umap", self._enable_umap.isChecked())))
             self._query_size.setValue(int(cfg.get("query_size", self._query_size.value())))
             self._validation_pct.setValue(int(cfg.get("validation_pct", self._validation_pct.value())))
-            if "phase1_enable" in cfg:
-                self._phase1_enable.setChecked(bool(cfg["phase1_enable"]))
         finally:
             self._applying_quick_profile = False
 
@@ -1274,7 +1247,6 @@ class ActiveLearningTab(QWidget):
                 "skip_evaluation": True,
                 "query_size": 60,
                 "validation_pct": 20,
-                "phase1_enable": False,
                 "queue_weighted_enable": False,
             },
             "standard": {
@@ -1286,7 +1258,6 @@ class ActiveLearningTab(QWidget):
                 "skip_evaluation": False,
                 "query_size": 120,
                 "validation_pct": 25,
-                "phase1_enable": False,
                 "queue_weighted_enable": False,
             },
             "complete": {
@@ -1298,10 +1269,6 @@ class ActiveLearningTab(QWidget):
                 "skip_evaluation": False,
                 "query_size": 200,
                 "validation_pct": 30,
-                "phase1_enable": True,
-                "phase1_diagnostics": True,
-                "phase1_modality": True,
-                "phase1_confound": True,
                 "queue_weighted_enable": True,
                 "queue_enable_disagreement": True,
                 "queue_enable_diversity": True,
@@ -1325,14 +1292,6 @@ class ActiveLearningTab(QWidget):
             self._enable_umap.setChecked(bool(cfg.get("enable_umap", True)))
             self._query_size.setValue(int(cfg.get("query_size", 100)))
             self._validation_pct.setValue(int(cfg.get("validation_pct", 25)))
-            if "phase1_enable" in cfg:
-                self._phase1_enable.setChecked(bool(cfg["phase1_enable"]))
-            if "phase1_diagnostics" in cfg:
-                self._phase1_diagnostics.setChecked(bool(cfg["phase1_diagnostics"]))
-            if "phase1_modality" in cfg:
-                self._phase1_modality.setChecked(bool(cfg["phase1_modality"]))
-            if "phase1_confound" in cfg:
-                self._phase1_confound.setChecked(bool(cfg["phase1_confound"]))
             if "queue_weighted_enable" in cfg:
                 self._queue_weighted_enable.setChecked(bool(cfg["queue_weighted_enable"]))
             if "queue_enable_disagreement" in cfg:
@@ -1524,8 +1483,6 @@ class ActiveLearningTab(QWidget):
             parts.append("Eval: <b>OFF</b>")
         if self._all_behavior_aware.isChecked():
             parts.append("Multi-behavior: <b>ON</b>")
-        if self._phase1_enable.isChecked():
-            parts.append("Benchmarks: <b>ON</b>")
         if self._queue_weighted_enable.isChecked():
             parts.append("Weighted queue: <b>ON</b>")
 
@@ -1603,12 +1560,6 @@ class ActiveLearningTab(QWidget):
             "umap_pred_ratio": float(self._umap_pred_ratio.value()),
             "validation_pct": int(self._validation_pct.value()),
             "split_strategy": str(self._split_strategy.currentData() or "group_shuffle_session"),
-            "phase1_enable": bool(self._phase1_enable.isChecked()),
-            "phase1_modality": bool(self._phase1_modality.isChecked()),
-            "phase1_confound": bool(self._phase1_confound.isChecked()),
-            "phase1_diagnostics": bool(self._phase1_diagnostics.isChecked()),
-            "phase1_regenerate": bool(self._phase1_regenerate.isChecked()),
-            "phase1_export_hires": bool(self._phase1_export_hires.isChecked()),
             "candidate_focus_pct": int(self._candidate_focus_pct.value()),
             "queue_weighted_enable": bool(self._queue_weighted_enable.isChecked()),
             "queue_enable_disagreement": bool(self._queue_enable_disagreement.isChecked()),
@@ -1660,7 +1611,6 @@ class ActiveLearningTab(QWidget):
         raw["feature_extraction"] = fx
 
         write_yaml(path, raw)
-        self._persist_phase1_settings_to_config(payload)
         self._refresh_active_settings_summary()
 
     def _load_ui_settings_from_project(self) -> None:
@@ -1736,12 +1686,6 @@ class ActiveLearningTab(QWidget):
                 if idx_split >= 0:
                     self._split_strategy.setCurrentIndex(idx_split)
 
-            self._phase1_enable.setChecked(bool(ui.get("phase1_enable", False)))
-            self._phase1_modality.setChecked(bool(ui.get("phase1_modality", True)))
-            self._phase1_confound.setChecked(bool(ui.get("phase1_confound", True)))
-            self._phase1_diagnostics.setChecked(bool(ui.get("phase1_diagnostics", True)))
-            self._phase1_regenerate.setChecked(bool(ui.get("phase1_regenerate", False)))
-            self._phase1_export_hires.setChecked(bool(ui.get("phase1_export_hires", True)))
             self._candidate_focus_pct.setValue(int(ui.get("candidate_focus_pct", 50)))
             self._queue_weighted_enable.setChecked(bool(ui.get("queue_weighted_enable", False)))
             self._queue_enable_disagreement.setChecked(bool(ui.get("queue_enable_disagreement", True)))
@@ -1761,7 +1705,6 @@ class ActiveLearningTab(QWidget):
             )
         finally:
             self._loading_ui_settings = False
-        self._load_phase1_settings_from_config()
         self._refresh_quick_mode_summary()
         self._refresh_session_scope_summary()
 
@@ -2147,7 +2090,11 @@ class ActiveLearningTab(QWidget):
             try:
                 seg = pd.read_parquet(seg_path, columns=["animal_id", "session_id"])
                 if "animal_id" in seg.columns:
-                    stats["subjects"] = int(seg["animal_id"].astype(str).nunique())
+                    # animal_id holds each session's frozen subject_key; count
+                    # the subjects' current names so a rename shows up here.
+                    pairs = seg[["animal_id", "session_id"]].astype(str).drop_duplicates()
+                    manifest = self._imports.load_manifest(self._project_root)
+                    stats["subjects"] = int(current_subjects(pairs, manifest).nunique())
                 if stats["sessions"] <= 0 and "session_id" in seg.columns:
                     stats["sessions"] = int(seg["session_id"].astype(str).nunique())
             except Exception:
@@ -2302,95 +2249,6 @@ class ActiveLearningTab(QWidget):
         self._append_log(summary)
         self._status.setText("Guided active-learning settings applied.")
         QMessageBox.information(self, "Guided Settings Applied", summary)
-
-    def _persist_phase1_settings_to_config(self, payload: dict[str, Any]) -> None:
-        if self._project_root is None:
-            return
-        settings = self._phase1.load_or_init_settings(self._project_root)
-        phase1 = dict(settings.get("phase1") or {})
-        phase1.update(
-            {
-                "enabled": bool(payload.get("phase1_enable", False)),
-                "enable_modality_benchmarking": bool(payload.get("phase1_modality", True)),
-                "enable_confound_analysis": bool(payload.get("phase1_confound", True)),
-                "diagnostics_enabled": bool(payload.get("phase1_diagnostics", True)),
-                "regenerate_diagnostics": bool(payload.get("phase1_regenerate", False)),
-                "export_high_resolution": bool(payload.get("phase1_export_hires", True)),
-                # Keep Phase 1 subset/quick behavior consistent with the main
-                # pipeline quick-test toggle visible in the UI.
-                "quick_feature_test": bool(payload.get("quick_test", False)),
-            }
-        )
-        settings["phase1"] = phase1
-        self._phase1.save_settings(self._project_root, settings)
-
-    def _load_phase1_settings_from_config(self) -> None:
-        if self._project_root is None:
-            return
-        settings = self._phase1.load_or_init_settings(self._project_root)
-        phase1 = dict(settings.get("phase1") or {})
-        self._loading_ui_settings = True
-        try:
-            self._phase1_enable.setChecked(bool(phase1.get("enabled", self._phase1_enable.isChecked())))
-            self._phase1_modality.setChecked(bool(phase1.get("enable_modality_benchmarking", self._phase1_modality.isChecked())))
-            self._phase1_confound.setChecked(bool(phase1.get("enable_confound_analysis", self._phase1_confound.isChecked())))
-            self._phase1_diagnostics.setChecked(bool(phase1.get("diagnostics_enabled", self._phase1_diagnostics.isChecked())))
-            self._phase1_regenerate.setChecked(bool(phase1.get("regenerate_diagnostics", self._phase1_regenerate.isChecked())))
-            self._phase1_export_hires.setChecked(bool(phase1.get("export_high_resolution", self._phase1_export_hires.isChecked())))
-        finally:
-            self._loading_ui_settings = False
-
-    def _run_phase1_benchmarks(self) -> None:
-        if not self._project_root:
-            QMessageBox.warning(self, "No project", "Open a project first.")
-            return
-        target_behavior = self._selected_target_behavior_id()
-        target_behavior_label = self._behavior_display_name(target_behavior)
-        self._persist_ui_settings_to_project()
-        self._set_busy(True)
-        self._progress.setRange(0, 0)
-        self._progress.setFormat("Running…")
-        self._status.setText(f"Running Phase 1 benchmarks for '{target_behavior_label}'…")
-        self._append_log(f"Starting Phase 1 benchmarks for {target_behavior_label}.")
-        worker = TaskWorker(self._run_phase1_benchmarks_task, target_behavior, self._pipeline_progress_updated.emit)
-        worker.signals.finished.connect(self._on_phase1_finished)
-        worker.signals.failed.connect(self._on_failed)
-        self._pool.start(worker)
-
-    def _run_phase1_benchmarks_task(
-        self,
-        target_behavior: str,
-        progress_cb: Callable[[int, int, str, str], None] | None = None,
-    ) -> dict[str, Any]:
-        assert self._project_root is not None
-
-        def _phase1_progress(msg: str) -> None:
-            if progress_cb is not None:
-                progress_cb(0, 1, msg, "Running Phase 1 benchmarks…")
-
-        result = self._phase1.run_phase1(
-            project_root=self._project_root,
-            target_behavior=target_behavior,
-            progress_cb=_phase1_progress,
-            force=True,
-        )
-        return result
-
-    def _on_phase1_finished(self, payload: dict[str, Any]) -> None:
-        self._set_busy(False)
-        if not payload or not bool(payload.get("enabled", False)):
-            self._status.setText("Phase 1 benchmarks are disabled.")
-            self._append_log("Phase 1 run skipped because the module is disabled.")
-            return
-        cards = list(payload.get("summary_cards") or [])
-        self._progress.setRange(0, 1)
-        self._progress.setValue(1)
-        self._progress.setFormat("Complete")
-        self._status.setText("Phase 1 benchmarking complete. Diagnostics and summaries were saved.")
-        self._append_log(f"Phase 1 benchmark summary: {payload.get('benchmark_summary_path', '')}")
-        for card in cards:
-            self._append_log(f"- {card}")
-        self._refresh_visualization_preview()
 
     def _open_settings_dialog(self) -> None:
         dlg = QDialog(self)
@@ -2663,50 +2521,8 @@ class ActiveLearningTab(QWidget):
               "Negligible — applied only during candidate ranking.")
         form.addRow("Competition margin:", competition_margin)
 
-        # ── Phase 1 Benchmarks ──
-        form.addRow(_section("Adaptive Benchmarks (Phase 1)"))
-
-        phase1_enable = QCheckBox("Enable adaptive benchmarks", dlg)
-        phase1_enable.setChecked(bool(self._phase1_enable.isChecked()))
-        _info(phase1_enable,
-              "Runs diagnostic tests comparing feature families (pose, motion, context). "
-              "Valuable for understanding which features drive your model. "
-              "Most useful for publication or when model performance plateaus.",
-              "High — adds 5-20 min. Run only when you need diagnostic insight.")
-        form.addRow(phase1_enable)
-
-        phase1_modality = QCheckBox("Benchmark feature families", dlg)
-        phase1_modality.setChecked(bool(self._phase1_modality.isChecked()))
-        _info(phase1_modality,
-              "Compare pose, visual, motion, context, and fused expert accuracy.",
-              "Moderate — trains multiple sub-models.")
-        form.addRow(phase1_modality)
-
-        phase1_confound = QCheckBox("Confound analysis", dlg)
-        phase1_confound.setChecked(bool(self._phase1_confound.isChecked()))
-        _info(phase1_confound,
-              "Identifies the top non-target confounders. Requires existing review labels.",
-              "Moderate — statistical analysis on existing predictions.")
-        form.addRow(phase1_confound)
-
-        phase1_diagnostics = QCheckBox("Generate diagnostics", dlg)
-        phase1_diagnostics.setChecked(bool(self._phase1_diagnostics.isChecked()))
-        form.addRow(phase1_diagnostics)
-
-        phase1_regenerate = QCheckBox("Regenerate cached", dlg)
-        phase1_regenerate.setChecked(bool(self._phase1_regenerate.isChecked()))
-        form.addRow(phase1_regenerate)
-
-        phase1_export_hires = QCheckBox("Export publication quality (PNG+SVG)", dlg)
-        phase1_export_hires.setChecked(bool(self._phase1_export_hires.isChecked()))
-        form.addRow(phase1_export_hires)
-
-        phase1_run_btn = QPushButton("Run Phase 1 Benchmarks Now", dlg)
-        phase1_run_btn.clicked.connect(lambda: (dlg.accept(), self._run_phase1_benchmarks()))
-        form.addRow("", phase1_run_btn)
-
-        # ── Weighted Queue (Phase 2) ──
-        form.addRow(_section("Weighted Queue Composition (Phase 2)"))
+        # ── Weighted Queue ──
+        form.addRow(_section("Weighted Queue Composition"))
 
         candidate_focus_pct = QSpinBox(dlg)
         candidate_focus_pct.setRange(0, 100)
@@ -2828,12 +2644,6 @@ class ActiveLearningTab(QWidget):
             self._flow_temporal_stride.setValue(int(flow_temporal_stride.value()))
             self._all_behavior_aware.setChecked(bool(all_behavior_aware.isChecked()))
             self._all_behavior_competition_margin.setValue(float(competition_margin.value()))
-            self._phase1_enable.setChecked(bool(phase1_enable.isChecked()))
-            self._phase1_modality.setChecked(bool(phase1_modality.isChecked()))
-            self._phase1_confound.setChecked(bool(phase1_confound.isChecked()))
-            self._phase1_diagnostics.setChecked(bool(phase1_diagnostics.isChecked()))
-            self._phase1_regenerate.setChecked(bool(phase1_regenerate.isChecked()))
-            self._phase1_export_hires.setChecked(bool(phase1_export_hires.isChecked()))
             self._candidate_focus_pct.setValue(int(candidate_focus_pct.value()))
             self._queue_weighted_enable.setChecked(bool(queue_weighted_enable.isChecked()))
             self._queue_enable_disagreement.setChecked(bool(queue_enable_disagreement.isChecked()))
@@ -3035,24 +2845,6 @@ class ActiveLearningTab(QWidget):
                 try:
                     dst = dst_root / name
                     dst.write_bytes(src.read_bytes())
-                except Exception:
-                    continue
-
-        behavior_id = str(target_behavior or self._selected_target_behavior_id() or "").strip()
-        safe_behavior = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in behavior_id) or "target_behavior"
-        diag_root = self._project_root / "derived" / "analysis" / "diagnostics" / safe_behavior
-        latest_diag = read_json(diag_root / "latest.json", {}) if (diag_root / "latest.json").exists() else {}
-        latest_diag_dir = Path(str(latest_diag.get("diagnostic_dir", ""))) if latest_diag.get("diagnostic_dir") else None
-        diag_src_root = latest_diag_dir if (latest_diag_dir is not None and latest_diag_dir.exists()) else diag_root
-        for name in [
-            "feature_family_comparison.png",
-            "target_confound_margin_histogram.png",
-            "calibration_reliability_phase1.png",
-        ]:
-            src = diag_src_root / name
-            if src.exists():
-                try:
-                    (dst_root / name).write_bytes(src.read_bytes())
                 except Exception:
                     continue
 
@@ -3510,9 +3302,7 @@ class ActiveLearningTab(QWidget):
         self._progress.setFormat("Initializing…")
         self._cancel_flag[0] = False
         self._append_log("Starting full active-learning pipeline.")
-        self._start_pipeline_timeline(
-            include_phase1=bool(self._phase1_enable.isChecked() and self._phase1_diagnostics.isChecked())
-        )
+        self._start_pipeline_timeline()
 
         worker = TaskWorker(self._run_pipeline_task, self._pipeline_progress_updated.emit, self._cancel_flag)
         worker.signals.finished.connect(self._on_pipeline_finished)
@@ -3624,15 +3414,13 @@ class ActiveLearningTab(QWidget):
         # Idempotent: an already-broad label (e.g. our composed status) maps to
         # itself so the recorder can classify status or log line interchangeably.
         for known in ("Preparing", "Training", "Scoring", "Evaluating",
-                      "Benchmarking", "Candidates", "Embedding", "Working"):
+                      "Candidates", "Embedding", "Working"):
             if t.startswith(known.lower()):
                 return known
         if t.startswith("[retrain]") or t.startswith("[training]"):
             return "Training"
         if t.startswith("[inference]"):
             return "Scoring"
-        if "phase 1" in t:
-            return "Benchmarking"
         if "evaluation" in t or "report" in t:
             return "Evaluating"
         if "candidate" in t:
@@ -6383,7 +6171,6 @@ class ActiveLearningTab(QWidget):
             reuse_cached_features = True
         use_video_features = bool(behavior_cfg.use_video_features)
         run_evaluation = not bool(self._skip_evaluation.isChecked())
-        run_phase1_after_eval = bool(self._phase1_enable.isChecked() and self._phase1_diagnostics.isChecked())
         strict_gpu = bool(self._strict_gpu.isChecked())
 
         def _fmt_duration(seconds: float) -> str:
@@ -6403,7 +6190,6 @@ class ActiveLearningTab(QWidget):
             ("Scoring segments with uncertainty model", "Inference & Uncertainty"),
             ("Selecting next review candidates", "Generate Candidates"),
             ("Evaluating predictions and writing reports", "Evaluation & Reports"),
-            ("Completed Phase 1 diagnostics", "Phase 1 Diagnostics"),
         )
 
         # ── Seed ETA from prior run ──────────────────────────────────────
@@ -6611,7 +6397,7 @@ class ActiveLearningTab(QWidget):
                     except Exception:
                         cached_ctx_sessions = set()
 
-        total_steps = summary.n_sessions + 7 + (1 if run_phase1_after_eval else 0)
+        total_steps = summary.n_sessions + 7
         current_step = 0
         _progress(
             current_step,
@@ -6652,10 +6438,14 @@ class ActiveLearningTab(QWidget):
             if v.fps is not None
         }
         fps_by_session_id: dict[str, float] = {}
+        roi_subject_by_session: dict[str, str] = {}
         session_jobs: list[tuple[int, str, str, Path, Path, float]] = []
         for i, linked in enumerate(linked_sessions, start=1):
             session_id = linked.session_id
-            subject_id = linked.subject_id or session_id
+            # The frozen key, not the display name: it becomes animal_id and the
+            # subject part of every segment id, which a rename must not change.
+            subject_id = linked.subject_key or linked.subject_id or session_id
+            roi_subject_by_session[str(session_id)] = linked.subject_id or session_id
             step_started = time.monotonic()
             video_path = self._imports.video_path_for_session(manifest, session_id)
             pose_path = self._imports.pose_path_for_session(manifest, session_id)
@@ -6865,6 +6655,7 @@ class ActiveLearningTab(QWidget):
                         pose_path=pose_path,
                         animal_id=subject_id,
                         session_id=session_id,
+                        roi_subject_id=roi_subject_by_session.get(str(session_id)),
                         config=ContextFeatureConfig(flow_temporal_stride=int(self._flow_temporal_stride.value())),
                         progress_cb=_chunk_progress,
                         intra_session_workers=intra_session_workers,
@@ -7323,36 +7114,6 @@ class ActiveLearningTab(QWidget):
             time.monotonic() - step_started,
         )
 
-        phase1_result: dict[str, Any] | None = None
-        if run_phase1_after_eval:
-            _check_cancel()
-            step_started = time.monotonic()
-
-            def _phase1_progress(msg: str) -> None:
-                _progress(
-                    current_step,
-                    total_steps,
-                    msg,
-                    "Running Phase 1 diagnostics…",
-                    None,
-                )
-
-            phase1_result = self._phase1.run_phase1(
-                project_root=self._project_root,
-                target_behavior=target_behavior,
-                progress_cb=_phase1_progress,
-                force=False,
-                session_ids=sorted(selected_session_ids),
-            )
-            current_step += 1
-            _progress(
-                current_step,
-                total_steps,
-                "Completed Phase 1 behavior-adaptive benchmarks.",
-                "Completed Phase 1 diagnostics.",
-                time.monotonic() - step_started,
-            )
-
         _check_cancel()
         step_started = time.monotonic()
         write_json(
@@ -7410,7 +7171,6 @@ class ActiveLearningTab(QWidget):
             "metrics": train_result.get("metrics", {}),
             "model_device_used": summary.model_device_used,
             "fallback_reason": summary.fallback_reason,
-            "phase1_result": phase1_result,
             "timing_chart_path": str(timing_chart_path) if timing_chart_path else "",
         }
 
@@ -8889,7 +8649,6 @@ class ActiveLearningTab(QWidget):
         self._retrain_all_btn.setEnabled(not busy)
         self._run_existing_btn.setEnabled(not busy)
         self._run_models_btn.setEnabled(not busy)
-        self._phase1_run_btn.setEnabled(not busy)
         self._confound_graph_btn.setEnabled(not busy)
         self._unified_umap_btn.setEnabled(not busy)
         self._unsupervised_umap_btn.setEnabled(not busy)
@@ -10086,12 +9845,6 @@ class ActiveLearningTab(QWidget):
         )
         self._append_log(self._quality_explanation(metrics))
 
-        phase1_result = payload.get("phase1_result") if isinstance(payload, dict) else None
-        if isinstance(phase1_result, dict) and bool(phase1_result.get("enabled", False)):
-            self._append_log("Phase 1 benchmarking complete.")
-            for card in list(phase1_result.get("summary_cards") or []):
-                self._append_log(f"- {card}")
-
         model_cpu_fallback = bool(metrics.get("used_cpu_fallback", False))
         if model_cpu_fallback:
             model_reason = str(metrics.get("fallback_reason", "")).strip()
@@ -10720,24 +10473,6 @@ class ActiveLearningTab(QWidget):
                 "- PR-AUC summarizes ranking quality, especially for imbalanced labels.\n"
                 "- Use this to choose a threshold for your tolerance of false positives vs misses."
             )
-        elif selected == "feature_family":
-            text = (
-                "Feature-family comparison:\n"
-                "- Compares AP/F1 across modality experts.\n"
-                "- Helps verify whether behavior-adaptive modality weighting is useful."
-            )
-        elif selected == "margin":
-            text = (
-                "Target-vs-confound margin:\n"
-                "- Distribution of target score minus top-confound score for TP/FP/FN groups.\n"
-                "- Larger positive margins indicate better target/confound separation."
-            )
-        elif selected == "calibration":
-            text = (
-                "Calibration reliability:\n"
-                "- Predicted probability versus observed correctness.\n"
-                "- Includes ECE to quantify confidence quality."
-            )
         elif selected == "queue":
             text = (
                 "Queue composition:\n"
@@ -10806,23 +10541,9 @@ class ActiveLearningTab(QWidget):
             eval_dir = model_eval_dir if model_eval_dir.exists() else base_eval_dir
         else:
             eval_dir = base_eval_dir
-        target_behavior = self._selected_target_behavior_id()
-        safe_behavior = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in target_behavior) or "target_behavior"
-        diag_root = self._project_root / "derived" / "analysis" / "diagnostics" / safe_behavior
-        latest_diag = read_json(diag_root / "latest.json", {}) if (diag_root / "latest.json").exists() else {}
-        latest_diag_dir = Path(str(latest_diag.get("diagnostic_dir", ""))) if latest_diag.get("diagnostic_dir") else None
         queue_diag_root = self._project_root / "derived" / "analysis" / "diagnostics" / "queue"
         latest_queue = read_json(queue_diag_root / "latest.json", {}) if (queue_diag_root / "latest.json").exists() else {}
         queue_run_path = Path(str(latest_queue.get("queue_composition", ""))) if latest_queue.get("queue_composition") else None
-
-        def _diag_file(name: str) -> Path:
-            if chosen_model and chosen_model != "__latest__":
-                model_path = base_eval_dir / "by_model" / chosen_model / name
-                if model_path.exists():
-                    return model_path
-            if latest_diag_dir is not None:
-                return latest_diag_dir / name
-            return diag_root / name
 
         def _queue_file(name: str) -> Path:
             if chosen_model and chosen_model != "__latest__":
@@ -10838,9 +10559,6 @@ class ActiveLearningTab(QWidget):
             "umap": [eval_dir / "unified_behavior_umap.png"],
             "confusion": [eval_dir / "confusion_matrix.png"],
             "pr": [eval_dir / "PR_curve.png"],
-            "feature_family": [_diag_file("feature_family_comparison.png")],
-            "margin": [_diag_file("target_confound_margin_histogram.png")],
-            "calibration": [_diag_file("calibration_reliability_phase1.png")],
             "queue": [_queue_file("queue_composition.png")],
             "timing": [eval_dir / "pipeline_timing.png"],
             "confound_cross": [eval_dir / "cross_behavior_confound_matrix.png"],
@@ -10851,9 +10569,6 @@ class ActiveLearningTab(QWidget):
                 eval_dir / "unified_behavior_umap.png",
                 eval_dir / "confusion_matrix.png",
                 eval_dir / "PR_curve.png",
-                _diag_file("feature_family_comparison.png"),
-                _diag_file("target_confound_margin_histogram.png"),
-                _diag_file("calibration_reliability_phase1.png"),
                 _queue_file("queue_composition.png"),
             ],
         }
@@ -10904,11 +10619,10 @@ class ActiveLearningTab(QWidget):
     @Slot(int, int, str, str)
     # ── Stage-aware pipeline timeline (rich progress + ETA) ─────────────
 
-    def _start_pipeline_timeline(self, *, include_phase1: bool) -> None:
+    def _start_pipeline_timeline(self) -> None:
         stages = [
             Stage(key, label, weight=weight)
             for key, label, weight, _frags in _AL_PIPELINE_STAGES
-            if key != "phase1" or include_phase1
         ]
         self._pipeline_timeline = RunTimeline(stages, history=self._load_pipeline_timeline_history())
         self._pipeline_panel.set_stages([(s.key, s.label) for s in stages])

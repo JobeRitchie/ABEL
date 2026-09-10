@@ -59,32 +59,6 @@ class ProjectService:
                         },
                     },
                 )
-            elif key == "behavior_adaptive_settings":
-                write_yaml(
-                    target,
-                    {
-                        "phase1": {
-                            "enabled": False,
-                            "enable_modality_benchmarking": True,
-                            "enable_confound_analysis": True,
-                            "diagnostics_enabled": True,
-                            "cache_features": True,
-                            "regenerate_diagnostics": False,
-                            "export_high_resolution": True,
-                            "save_artifacts": True,
-                            "primary_metric": "ap",
-                            "min_examples_per_class": 12,
-                            "min_examples_for_learned_weights": 75,
-                            "use_gpu_if_available": True,
-                            "quick_feature_test": False,
-                            "subset_max_sessions": 6,
-                            "subset_max_segments_per_scale": 25000,
-                            "cpu_parallel_workers": 0,
-                            "cpu_use_process_pool": True,
-                        },
-                        "behavior_overrides": {},
-                    },
-                )
             else:
                 write_yaml(target, {})
 

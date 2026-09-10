@@ -593,6 +593,7 @@ class ClipMiningDialog(QDialog):
 
         self._mining = True
         self._mine_btn.setEnabled(False)
+        self.refresh_exemplar_count()
         self._progress.setVisible(True)
         self._progress.setRange(0, len(clips))
         self._progress.setValue(0)
@@ -610,6 +611,7 @@ class ClipMiningDialog(QDialog):
         cols = [m for m in dict.fromkeys(want) if is_rich_metric(m)]
         self._mining = True
         self._mine_btn.setEnabled(False)
+        self.refresh_exemplar_count()
         self._progress.setVisible(True)
         self._progress.setRange(0, 0)  # a table read, not a per-clip scan
         self._progress.setFormat("Reading extracted features…")
@@ -643,6 +645,7 @@ class ClipMiningDialog(QDialog):
         self._scored = True
         self._mining = False
         self._mine_btn.setEnabled(True)
+        self.refresh_exemplar_count()
         self._progress.setRange(0, 1)
         self._progress.setValue(1)
         self._progress.setFormat(f"Scored {len(df)} segment(s)")
@@ -661,6 +664,7 @@ class ClipMiningDialog(QDialog):
     def _on_metrics_failed(self, tb: str) -> None:
         self._mining = False
         self._mine_btn.setEnabled(True)
+        self.refresh_exemplar_count()
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
         self._progress.setFormat("Failed to score segments")
@@ -681,7 +685,7 @@ class ClipMiningDialog(QDialog):
             f"⤢ Extract essence from {n} selected clip(s)" if n
             else "⤢ Extract essence from selected clips"
         )
-        self._essence_btn.setEnabled(n > 0 and not self._essence_busy)
+        self._essence_btn.setEnabled(n > 0 and not self._essence_busy and not self._mining)
 
     # -- feature search / persistence ----------------------------------------
 
@@ -973,7 +977,16 @@ class ClipMiningDialog(QDialog):
         in a background worker because reading the extracted-feature table and the
         greedy criteria search together take a second or two.
         """
-        if self._essence_busy or self._mining:
+        if self._essence_busy:
+            return
+        if self._mining:
+            # Essence shares the pool/background caches with the scoring worker.
+            # Say so: a click that silently does nothing leaves the previous
+            # essence on screen, which reads as "it didn't update".
+            self._count_label.setText(
+                "Find matches is still scoring the pool — Extract essence will be "
+                "available again when it finishes."
+            )
             return
         from PySide6.QtCore import QThreadPool
 
@@ -1069,7 +1082,8 @@ class ClipMiningDialog(QDialog):
             if missing:
                 self._warn_missing_pose(missing, "in your selection")
             self._count_label.setText(
-                ("Could not read features for the selected clips. " + note).strip()
+                ("Could not read features for the selected clips — the criteria "
+                 "below are unchanged from before. " + note).strip()
             )
             return
         crits = out["crits"]
@@ -1080,7 +1094,7 @@ class ClipMiningDialog(QDialog):
         if not crits and self._essence_scorer is None:
             self._count_label.setText(
                 "Couldn't find distinguishing features — pick two or more clips "
-                "that are alike. " + note
+                "that are alike (the criteria below are unchanged). " + note
             )
             return
         # Extracted features aren't in the project's metric registry, so register

@@ -323,9 +323,8 @@ def build_segment_df_fast(
 ) -> "pd.DataFrame":
     """Build a segment-summary DataFrame for one (animal, session) group.
 
-    This is a drop-in replacement for the per-window Python loop used in both
-    ``BehaviorRepresentationService`` and
-    ``BehaviorAdaptiveFeatureCacheService``.
+    This is a drop-in replacement for the per-window Python loop used in
+    ``BehaviorRepresentationService``.
 
     When *include_posture_deltas* is True, angle and proximity columns (see
     :func:`_is_posture_delta_col`) additionally receive clip-wise ``_delta`` and

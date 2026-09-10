@@ -289,7 +289,9 @@ class R3DFeatureService:
             return [self._crop_geometry(pose)], np.zeros(len(grp), dtype=int)
 
         subject_map = dict(getattr(session, "individual_subject_map", None) or {})
-        fallback_subject = getattr(session, "subject_id", None) or session_id
+        fallback_subject = (
+            getattr(session, "subject_key", None) or getattr(session, "subject_id", None) or session_id
+        )
         multi = self._pose.load_and_clean_multi(
             pose_path,
             settings=smoothing,

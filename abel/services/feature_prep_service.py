@@ -96,6 +96,10 @@ class SessionJob:
     """Maps each individual to a real subject identity used as its ``animal_id``."""
     identity_corrections: list[dict] = field(default_factory=list)
     """Identity-swap corrections applied on load (see LinkedSession)."""
+    subject_key: str | None = None
+    """Frozen id token (``LinkedSession.subject_key``) written as ``animal_id``
+    and into segment ids.  ``subject_id`` stays the current display name, used
+    for ROI lookup.  Falls back to ``subject_id`` when unset."""
 
 
 @dataclass
@@ -672,10 +676,11 @@ class FeaturePrepService:
 
         def _process_one(job: SessionJob) -> str:
             sid = str(job.session_id)
+            animal_key = job.subject_key or job.subject_id or sid
             # Per-individual animal_id mapping (used by BOTH pose and context so
             # their frame tables share join keys). Empty for single-animal jobs.
             animal_ids = {
-                ind: (job.individual_subject_map.get(ind) or f"{job.subject_id or sid}:{ind}")
+                ind: (job.individual_subject_map.get(ind) or f"{animal_key}:{ind}")
                 for ind in job.individuals
             } if job.individuals else {}
             if sid not in cached_pose:
@@ -699,7 +704,7 @@ class FeaturePrepService:
                         project_root=project_root,
                         pose_path=job.pose_path,
                         fps=job.fps,
-                        animal_id=job.subject_id,
+                        animal_id=animal_key,
                         session_id=job.session_id,
                         video_id=job.session_id,
                         keypoint_aliases=aliases,
@@ -733,8 +738,9 @@ class FeaturePrepService:
                         project_root=project_root,
                         video_path=job.video_path,
                         pose_path=job.pose_path,
-                        animal_id=job.subject_id,
+                        animal_id=animal_key,
                         session_id=job.session_id,
+                        roi_subject_id=job.subject_id,
                         config=ctx_cfg,
                         intra_session_workers=plan.intra_session_workers,
                         warning_cb=_collect_warning,

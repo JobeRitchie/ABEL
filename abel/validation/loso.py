@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
+from abel.services.subject_rename_service import SUBJECT_GROUP_COL, add_subject_groups
 from abel.temporal_refinement.refined_eval import (
     _frames_from_segment_ids,
     load_temporal_settings,
@@ -50,12 +51,17 @@ def _is_refine_only(label_source: pd.Series) -> pd.Series:
     return mask
 
 
-def _group_column(df: pd.DataFrame) -> str | None:
-    """The column that identifies a subject: ``animal_id``, else ``session_id``."""
-    for col in ("animal_id", "session_id"):
-        if col in df.columns:
-            return col
-    return None
+def _group_column(df: pd.DataFrame, project: ProjectRef) -> str | None:
+    """The column that identifies a subject, adding it to *df* when needed.
+
+    ``animal_id`` keeps each session's frozen subject key, so the current
+    subject name is resolved through the manifest into ``subject_group``;
+    frames without ``animal_id`` fall back to ``session_id``.
+    """
+    if "animal_id" in df.columns:
+        add_subject_groups(df, project.root)
+        return SUBJECT_GROUP_COL
+    return "session_id" if "session_id" in df.columns else None
 
 
 def _select_subjects(
@@ -114,7 +120,7 @@ def available_subjects(
         df = _read_subject_columns(project.training_set_path)
     if df is None or df.empty:
         return []
-    group_col = _group_column(df)
+    group_col = _group_column(df, project)
     if group_col is None or "label" not in df.columns:
         return []
 
@@ -280,7 +286,7 @@ def leave_one_subject_out(
         df = pd.read_parquet(project.training_set_path)
     df = df.reset_index(drop=True)
 
-    group_col = _group_column(df)
+    group_col = _group_column(df, project)
     if group_col is None or "label" not in df.columns:
         return {
             "behavior_id": behavior_id,

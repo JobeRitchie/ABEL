@@ -239,6 +239,8 @@ class ValidationService:
                 "pr_auc": metrics.get("pr_auc"),
                 "n_train": metrics.get("n_train"),
                 "n_val": metrics.get("n_val"),
+                "n_train_pos": metrics.get("n_train_pos"),
+                "n_val_pos": metrics.get("n_val_pos"),
                 "calibration": metrics.get("calibration"),
                 "last_trained": metrics.get("last_trained"),
                 "n_positive_labels": pos,
@@ -296,6 +298,10 @@ class ValidationService:
                 # report the count the counts actually came from.
                 if refined.get("n_val") is not None:
                     row["n_val"] = refined.get("n_val")
+                # Held-out positives follow from the counts, so models trained
+                # before n_val_pos was recorded still show them.
+                if row["raw_tp"] is not None and row["raw_fn"] is not None:
+                    row["n_val_pos"] = int(row["raw_tp"]) + int(row["raw_fn"])
             row["quality"] = self._quality_badge(
                 row.get("frame_f1"), basis=row["metrics_basis"]
             )
@@ -401,6 +407,8 @@ class ValidationService:
                 out["pr_auc"] = _f(metrics.get("pr_auc"))
                 out["n_train"] = metrics.get("n_train")
                 out["n_val"] = metrics.get("n_val")
+                out["n_train_pos"] = metrics.get("n_train_pos")
+                out["n_val_pos"] = metrics.get("n_val_pos")
             card = read_yaml(model_dir / "model_card.yaml", {})
             if card:
                 out["calibration"] = card.get("calibration_method")

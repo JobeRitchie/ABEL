@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from abel.ui.flow_layout import flow_row, labelled
+from abel.ui.tabs.feature_audit_tab import FeatureAuditTab
 from abel.models.schemas import ValidationAnswerRecord, ValidationRun, ValidationSettings
 from abel.services.behavior_service import BehaviorService
 from abel.services.validation_service import NO_BEHAVIOR_ID, ValidationService
@@ -385,31 +386,23 @@ class ValidationOverviewPanel(QWidget):
     # Held-out counts are window-level: the unit of evaluation is one ~15-frame
     # segment window, because that is the only unit a sparsely-labelled holdout
     # can support (see refined_eval — event/bout counts were removed for exactly
-    # this reason).  Raw and refined are shown side by side so the effect of the
-    # Temporal Review settings is visible rather than implied.
+    # this reason).  Scores are the model's own output, before temporal
+    # refinement: on a sparse holdout the refined pass had to be withheld for
+    # most behaviors, so its columns were almost always dashes.
     _COLUMNS = [
         "Behavior", "Model", "Quality",
         "F1 (raw)", "Prec (raw)", "Rec (raw)", "TP/FP/FN (raw)",
-        "F1 (refined)", "Prec (refined)", "Rec (refined)", "TP/FP/FN (refined)",
-        "PR-AUC", "Train / Val", "Pos labels", "Bouts", "Overlap",
+        "PR-AUC", "Pos train / val", "Pos labels", "Bouts", "Overlap",
     ]
 
-    # Displayed header text.  The metric columns are stacked onto two lines
-    # because a single line of "TP/FP/FN (refined)" needs ~228px and 16 stretched
-    # columns get ~116px at the app's minimum usable width — it elided to
-    # "TP/FP/FN (…" exactly where the reader needs to know which pass it is.
-    # Qt measures a header's width from its widest LINE, so stacking costs
-    # nothing horizontally.
+    # Displayed header text.  Two-line labels keep columns narrow: Qt measures a
+    # header's width from its widest LINE, so stacking costs nothing horizontally.
     _HEADER_LABELS = {
-        "F1 (raw)": "F1\nraw",
-        "Prec (raw)": "Prec\nraw",
-        "Rec (raw)": "Rec\nraw",
-        "TP/FP/FN (raw)": "TP/FP/FN\nraw",
-        "F1 (refined)": "F1\nrefined",
-        "Prec (refined)": "Prec\nrefined",
-        "Rec (refined)": "Rec\nrefined",
-        "TP/FP/FN (refined)": "TP/FP/FN\nrefined",
-        "Train / Val": "Train\n/ Val",
+        "F1 (raw)": "F1",
+        "Prec (raw)": "Prec",
+        "Rec (raw)": "Rec",
+        "TP/FP/FN (raw)": "TP/FP/FN",
+        "Pos train / val": "Pos\ntrain / val",
         "Pos labels": "Pos\nlabels",
     }
 
@@ -424,13 +417,6 @@ class ValidationOverviewPanel(QWidget):
     _RAW_NOTE = (
         "RAW = the model's own per-window output at P(behavior) >= 0.5, with no "
         "temporal post-processing. This is the model itself."
-    )
-
-    _REFINED_NOTE = (
-        "REFINED = the same held-out probabilities put through the pipeline that "
-        "actually ships: smooth -> onset threshold -> merge close bouts -> drop "
-        "short bouts, using this behavior's settings from the Temporal Review tab. "
-        "This is what your exported bouts are scored on."
     )
 
     _TARGET_NOTE = (
@@ -451,8 +437,7 @@ class ValidationOverviewPanel(QWidget):
         "Quality": (
             "Badge from the raw target-class F1: Good >= 0.75, Fair >= 0.55, Poor "
             "below.\n\n"
-            "It grades the MODEL, so it uses the raw score — the refined score "
-            "also depends on Temporal Review settings you can retune at any time.\n\n"
+            "It grades the MODEL alone, before any Temporal Review settings.\n\n"
             "The bar used to sit at 0.80 on a macro F1, which was a much weaker "
             "test: macro F1 has a floor near 0.50, so models with a target-class F1 "
             "around 0.65 were being badged Good."
@@ -481,30 +466,6 @@ class ValidationOverviewPanel(QWidget):
             "every row (most windows are not any given behavior) and say little on "
             "their own, so they no longer take a column."
         ),
-        "F1 (refined)": (
-            "Harmonic mean of refined precision and recall.\n\n"
-            + _TARGET_NOTE + "\n\n" + _REFINED_NOTE
-        ),
-        "Prec (refined)": (
-            "Precision after temporal refinement.\n\n"
-            + _TARGET_NOTE + "\n\n" + _REFINED_NOTE
-        ),
-        "Rec (refined)": (
-            "Recall after temporal refinement.\n\n"
-            + _TARGET_NOTE + "\n\n" + _REFINED_NOTE
-        ),
-        "TP/FP/FN (refined)": (
-            "The same held-out confusion counts after temporal refinement.\n\n"
-            + _REFINED_NOTE + "\n\n"
-            "Compare against the raw counts to the left: refinement almost always "
-            "trades recall for precision (it deletes short and isolated "
-            "detections), so FN rising while FP falls is expected.\n\n"
-            "Shows a dash when this behavior's min-bout is longer than the observed "
-            "held-out windows — in that regime no prediction can survive refinement "
-            "no matter how good the model is, so the counts would measure label "
-            "sparsity rather than the model. Hover the dash for the measured "
-            "fraction.\n\n" + _UNIT_NOTE
-        ),
         "PR-AUC": (
             "Average precision for this behavior across every threshold — a "
             "threshold-free summary, so unlike F1 it does not move when you retune "
@@ -512,9 +473,13 @@ class ValidationOverviewPanel(QWidget):
             "Already target-class in the stored metrics, and the most robust single "
             "number here for a rare behavior."
         ),
-        "Train / Val": (
-            "Rows used to fit the model, then rows held out from training and "
-            "scored here. Every row's TP + FP + FN + TN sums to the Val number.\n\n"
+        "Pos train / val": (
+            "Windows of THIS behavior used to fit the model / held out and scored "
+            "here. Held-out positives = TP + FN.\n\n"
+            "Every behavior's model is trained on the same pool of all labeled "
+            "windows (other behaviors' labels are its negatives) and split by "
+            "mouse the same way, so the total train / val row counts are identical "
+            "across behaviors — hover a cell for them. Only the positives differ.\n\n"
             "The shipped model is afterwards refit on ALL labelled rows so your "
             "per-mouse corrections reach inference; these metrics stay from the "
             "honest held-out split."
@@ -548,7 +513,7 @@ class ValidationOverviewPanel(QWidget):
         header = QLabel("Model Overview")
         header.setStyleSheet("font-size: 16px; font-weight: 700; color: #ECEFF1;")
         subtitle = QLabel(
-            "Held-out quality per behavior model, raw and refined. "
+            "Held-out quality per behavior model. "
             "Hover any column header for what it means."
         )
         # Unwrapped, this label's full single-line width became the panel's
@@ -582,12 +547,9 @@ class ValidationOverviewPanel(QWidget):
         top.addWidget(self._loso_btn)
         top.addWidget(self._refresh_btn)
 
-        # Answers "what do raw and refined mean?" without needing a hover.
         self._legend = QLabel(
-            "<b>raw</b> = the model alone, every window at P &ge; 0.5"
-            "&nbsp;&nbsp;·&nbsp;&nbsp;"
-            "<b>refined</b> = after the smooth &rarr; onset threshold &rarr; merge "
-            "&rarr; min-bout pipeline your exports actually use"
+            "Scores are the model alone, every held-out window at P &ge; 0.5, "
+            "before temporal refinement"
             "&nbsp;&nbsp;·&nbsp;&nbsp;"
             "scores are <b>target-class</b> (this behavior alone, never averaged "
             "with 'not this behavior') and follow from the TP/FP/FN in the same row"
@@ -623,13 +585,6 @@ class ValidationOverviewPanel(QWidget):
             + 2 * _fm.averageCharWidth()
         )
 
-        # Surfaces withheld/legacy rows without making the user hover to discover
-        # that a dash is a deliberate refusal rather than missing data.
-        self._notes = QLabel("")
-        self._notes.setWordWrap(True)
-        self._notes.setStyleSheet("color: #FFCC80; font-size: 11px;")
-        self._notes.hide()
-
         self._empty = QLabel("Open a project with trained models to see the overview.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setStyleSheet("color: #8FA6B4; font-size: 13px; padding: 20px;")
@@ -639,7 +594,6 @@ class ValidationOverviewPanel(QWidget):
         layout.addLayout(top)
         layout.addWidget(self._legend)
         layout.addWidget(self._table, 1)
-        layout.addWidget(self._notes)
         layout.addWidget(self._empty)
         self._empty.hide()
 
@@ -672,7 +626,6 @@ class ValidationOverviewPanel(QWidget):
             logger.exception("Validation overview refresh failed")
             rows = []
         self._table.setRowCount(0)
-        self._notes.hide()
         if not rows:
             self._table.hide()
             self._legend.hide()
@@ -683,8 +636,6 @@ class ValidationOverviewPanel(QWidget):
         self._table.show()
 
         col = {name: i for i, name in enumerate(self._COLUMNS)}
-        suppressed: list[str] = []
-        legacy: list[str] = []
 
         for data in rows:
             r = self._table.rowCount()
@@ -694,26 +645,7 @@ class ValidationOverviewPanel(QWidget):
             overlap = data.get("overlap_fraction")
             overlap_text = "—" if overlap is None else f"{overlap:.0%}"
             basis = str(data.get("metrics_basis") or "macro")
-            evaluable = bool(data.get("refined_evaluable", True))
             has_counts = data.get("raw_tp") is not None
-
-            if basis != "target":
-                legacy.append(name)
-            if has_counts and not evaluable:
-                suppressed.append(name)
-
-            # Refinement is withheld wholesale — scores AND counts.  Publishing the
-            # counts while blanking the F1 they imply showed the reader the exact
-            # quantity the suppression rule exists to withhold (measured on a real
-            # project: Freeze's refined counts read 6/4/40, a recall of 0.13, sitting
-            # next to a blank refined F1 and a raw recall of 0.87).
-            ref_f1 = _fmt(data.get("refined_f1")) if evaluable else "—"
-            ref_p = _fmt(data.get("refined_precision")) if evaluable else "—"
-            ref_r = _fmt(data.get("refined_recall")) if evaluable else "—"
-            ref_counts = (
-                _tpfpfn(data.get("refined_tp"), data.get("refined_fp"), data.get("refined_fn"))
-                if evaluable else "—"
-            )
 
             cells = [
                 name,
@@ -723,14 +655,10 @@ class ValidationOverviewPanel(QWidget):
                 _fmt(data.get("frame_precision")),
                 _fmt(data.get("frame_recall")),
                 _tpfpfn(data.get("raw_tp"), data.get("raw_fp"), data.get("raw_fn")),
-                ref_f1,
-                ref_p,
-                ref_r,
-                ref_counts,
                 _fmt(data.get("pr_auc")),
                 "{} / {}".format(
-                    data.get("n_train") if data.get("n_train") is not None else "—",
-                    data.get("n_val") if data.get("n_val") is not None else "—",
+                    data.get("n_train_pos") if data.get("n_train_pos") is not None else "—",
+                    data.get("n_val_pos") if data.get("n_val_pos") is not None else "—",
                 ),
                 str(data.get("n_positive_labels", 0)),
                 str(data.get("n_bouts", 0)),
@@ -806,61 +734,7 @@ class ValidationOverviewPanel(QWidget):
                     ),
                 )
             else:
-                for _c in (
-                    "TP/FP/FN (raw)", "TP/FP/FN (refined)",
-                    "F1 (refined)", "Prec (refined)", "Rec (refined)",
-                ):
-                    _tip(_c, "Retrain this model to populate held-out confusion counts.")
-
-            st = data.get("refined_settings") or {}
-            st_note = ""
-            if st:
-                st_note = (
-                    "\n\nSettings used: onset {onset}, min bout {mb} frames, "
-                    "merge gap {mg} frames."
-                ).format(
-                    onset=st.get("onset_threshold"),
-                    mb=st.get("min_bout_duration_frames"),
-                    mg=st.get("merge_gap_frames"),
-                )
-
-            if has_counts and evaluable:
-                _tip(
-                    "TP/FP/FN (refined)",
-                    self._counts_tooltip(
-                        "Refined (the pipeline that ships) —",
-                        data.get("refined_tp"), data.get("refined_fp"),
-                        data.get("refined_fn"), data.get("refined_tn"),
-                    ) + st_note,
-                )
-                for _c in ("F1 (refined)", "Prec (refined)", "Rec (refined)"):
-                    _tip(
-                        _c,
-                        "Target-class, computed from this row's refined TP/FP/FN."
-                        + st_note,
-                    )
-            elif has_counts:
-                frac = data.get("refined_unsupported_fraction")
-                pct = "—" if frac is None else f"{float(frac):.0%}"
-                msg = (
-                    "Not evaluable on this held-out set — deliberately blank, not "
-                    "missing data.\n\n"
-                    f"{pct} of this behavior's held-out positive windows sit in "
-                    "observed stretches shorter than its min-bout duration "
-                    f"({st.get('min_bout_duration_frames', '?')} frames), so "
-                    "refinement deletes them no matter how good the model is. Any "
-                    "refined score or count here would measure how sparsely the "
-                    "holdout was labelled, not the model.\n\n"
-                    "Read the raw columns for this behavior, or shorten its min-bout "
-                    "in the Temporal Review tab if the current value is not "
-                    "biologically motivated."
-                )
-                for _c in (
-                    "F1 (refined)", "Prec (refined)", "Rec (refined)",
-                    "TP/FP/FN (refined)",
-                ):
-                    _amber(_c)
-                    _tip(_c, msg)
+                _tip("TP/FP/FN (raw)", "Retrain this model to populate held-out confusion counts.")
 
             # --- context cells ------------------------------------------------
             pos = int(data.get("n_positive_labels", 0) or 0)
@@ -880,17 +754,17 @@ class ValidationOverviewPanel(QWidget):
                 + (f"\nLast trained: {data.get('last_trained')}" if data.get("last_trained") else "")
                 + (f"\nCalibration: {data.get('calibration')}" if data.get("calibration") else ""),
             )
-            if has_counts:
-                _total = (
-                    int(data.get("raw_tp") or 0) + int(data.get("raw_fp") or 0)
-                    + int(data.get("raw_fn") or 0) + int(data.get("raw_tn") or 0)
+            _split = (
+                "All labeled windows, shared by every behavior's model: "
+                f"{data.get('n_train') or '—'} trained on, "
+                f"{data.get('n_val') or '—'} held out."
+            )
+            if data.get("n_train_pos") is None:
+                _split += (
+                    "\n\nTraining positives were not recorded for this model — "
+                    "retrain to fill them in."
                 )
-                _tip(
-                    "Train / Val",
-                    f"{data.get('n_train')} rows trained on, "
-                    f"{data.get('n_val')} held out and scored here; "
-                    f"TP + FP + FN + TN = {_total}.",
-                )
+            _tip("Pos train / val", _split)
 
             # --- overlap ------------------------------------------------------
             if overlap is not None:
@@ -901,24 +775,6 @@ class ValidationOverviewPanel(QWidget):
                         o_item.setForeground(QColor("#EF9A9A"))
                     elif overlap >= 0.05:
                         o_item.setForeground(QColor("#FFCC80"))
-
-        notes: list[str] = []
-        if suppressed:
-            notes.append(
-                "⚠ Refinement is not evaluable for " + ", ".join(suppressed)
-                + " — their min-bout is longer than the observed held-out windows, so "
-                "every refined score and count for them is withheld rather than "
-                "reported as a model failure. Hover a dash for the measured fraction."
-            )
-        if legacy:
-            notes.append(
-                "⚠ " + ", ".join(legacy) + " predate saved held-out probabilities: "
-                "their scores are macro-averaged (optimistic, floor near 0.50) and "
-                "they have no confusion counts. Retrain to fix."
-            )
-        if notes:
-            self._notes.setText("\n".join(notes))
-            self._notes.show()
 
     # ------------------------------------------------------------------
     # Leave-one-mouse-out cross-validation
@@ -2435,7 +2291,7 @@ class BehaviorGridPanel(QWidget):
 # Container
 # ===========================================================================
 class ValidationTab(QWidget):
-    """Top-level Validation tab hosting Overview / Quiz / Results subtabs."""
+    """Top-level Validation tab hosting Overview / Quiz / Results / Grid / Feature Audit subtabs."""
 
     def __init__(
         self,
@@ -2452,6 +2308,7 @@ class ValidationTab(QWidget):
         self.quiz_panel = ValidationQuizPanel(service, behavior_service)
         self.results_panel = ValidationResultsPanel(service)
         self.behavior_grid_panel = BehaviorGridPanel(service)
+        self.feature_audit_panel = FeatureAuditTab()
 
         self._tabs = QTabWidget()
         self._tabs.setTabPosition(QTabWidget.TabPosition.North)
@@ -2459,6 +2316,7 @@ class ValidationTab(QWidget):
         self._tabs.addTab(self.quiz_panel, "Validation Quiz")
         self._tabs.addTab(self.results_panel, "Results & Suggestions")
         self._tabs.addTab(self.behavior_grid_panel, "Behavior Grid")
+        self._tabs.addTab(self.feature_audit_panel, "Feature Audit")
         self._tabs.currentChanged.connect(self._on_sub_changed)
 
         layout = QVBoxLayout(self)
@@ -2477,6 +2335,7 @@ class ValidationTab(QWidget):
         self.quiz_panel.set_project(self._project_root)
         self.results_panel.refresh()
         self.behavior_grid_panel.set_project(self._project_root)
+        self.feature_audit_panel.set_project(self._project_root)
 
     def _on_sub_changed(self, index: int) -> None:
         widget = self._tabs.widget(index)

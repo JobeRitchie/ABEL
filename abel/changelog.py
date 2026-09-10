@@ -7,10 +7,52 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 9, 2026"
+VERSION_DATE = "September 10, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.19.0", "September 10, 2026", [
+        "Renaming a subject no longer detaches its saved state. Each session now "
+        "keeps a frozen subject key, fixed when the session is created, which is "
+        "what extraction writes as animal_id and into segment and clip ids, so "
+        "labels, clips and cached features stay attached whatever the subject is "
+        "later called. Saving the import manifest re-keys the name-keyed state - "
+        "Analytics factor assignments, session order, per-subject prechop and "
+        "per-subject ROIs - from the old name to the new one and logs what moved. "
+        "The Analytics tab anchors its in-memory group state to session ids so it "
+        "follows a rename on load and refresh, and it no longer saves before the "
+        "file has been read, which could overwrite factor assignments with an "
+        "empty state. Subject-level train/validation splits, the validation "
+        "holdout and LOSO folds group by the current subject name, so two "
+        "sessions renamed to the same subject fall in the same fold.",
+        "Targeted Clip Mining's Extract essence now describes a behavior with up "
+        "to the requested number of features instead of one. The criteria search "
+        "stopped as soon as a single feature excluded 98% of the pool, which any "
+        "behavior at the extreme of one axis reaches immediately, so freezing and "
+        "escape jumping each came back as one nose-motion row and looked "
+        "identical. Remaining slots are now filled with features that separate "
+        "the selected clips from the whole pool on their own (AUC at least 0.80, "
+        "excluding at least half the pool), are not another statistic of a chosen "
+        "signal or correlated with one (|Spearman| below 0.7), and drop no more "
+        "selected clips than the recall target allows; the fill needs at least 4 "
+        "selected clips. Ranked matching is unchanged; All/Any matching and "
+        "'Flag failing clips' see the extra criteria. Clicking Extract essence "
+        "while Find matches is still scoring used to do nothing silently; the "
+        "button is now disabled until scoring finishes and says why.",
+        "The Validation tab reports the positives each model was trained and "
+        "scored on ('Pos train / val', with held-out positives = TP + FN, so "
+        "models trained before the count was recorded still show it) and "
+        "labels its metrics as the model's own output, before Temporal Review "
+        "settings.",
+        "The legacy-cache check for float32 segment features ignores the "
+        "model-output columns scoring writes back (prediction and uncertainty "
+        "scores), which are float64 by design and made a freshly rebuilt cache "
+        "look like an old one.",
+        "Removed the Phase 1 behavior-adaptive benchmarks (the benchmark and "
+        "feature-cache services and their Active Learning tab controls). They "
+        "never fed training. Run, Retrain and batch-retrain buttons now explain "
+        "in their tooltips when to use each.",
+    ]),
     ("0.18.0", "September 9, 2026", [
         "The Session Sections chart no longer freezes on many-section presets. "
         "The bar and line draw routines read each value with a pair of "

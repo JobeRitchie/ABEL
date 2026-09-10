@@ -288,6 +288,18 @@ def rich_column(metric_id: str) -> str:
     return mid[len(RICH_PREFIX):] if mid.startswith(RICH_PREFIX) else mid
 
 
+def essence_signal(metric_id: str) -> str:
+    """The underlying signal of a metric, ignoring its summary statistic.
+
+    ``feat:nose_speed_mean`` and ``feat:nose_speed_p90`` summarise one signal, so
+    they share ``feat:nose_speed``; clip metrics are their own signal.
+    """
+    if not is_rich_metric(metric_id):
+        return str(metric_id)
+    stem, _, tail = rich_column(metric_id).rpartition("_")
+    return rich_metric_id(stem) if stem and tail in _RICH_STAT_SUFFIXES else str(metric_id)
+
+
 def rich_metric_def(metric_id: str) -> MetricDef:
     """Build a display definition for a rich feature id on the fly.
 
@@ -1657,7 +1669,10 @@ class ClipMetricsService:
         still-surviving *background* clips while retaining at least
         ``recall_target`` of the exemplars.  It stops after ``k`` features, once the
         surviving background falls below ``max_leak`` of the pool, or once no
-        remaining metric removes a meaningful share of background.
+        remaining metric removes a meaningful share of background.  Any slots
+        still free are then filled with strongly separating, non-redundant
+        features that fit the same recall budget, so a behaviour one feature
+        already isolates is still described by up to ``k`` of them.
 
         This is what makes the result both *tight* (it is scored against the pool,
         so it can't settle on a range that half the project also satisfies) and
@@ -1690,70 +1705,125 @@ class ClipMetricsService:
 
         surv_ex = np.ones(n_ex, dtype=bool)
         surv_bg = np.ones(n_bg, dtype=bool)
+        all_bg = np.ones(n_bg, dtype=bool)
         chosen: list[tuple[str, float | None, float | None]] = []
         used: set[str] = set()
 
         low_qs = (0, 1, 2, 3, 5, 8, 12)
         high_qs = (88, 92, 95, 97, 98, 99, 100)
 
-        for _step in range(max(1, int(k))):
-            best = None  # (removed, recall, metric, low, high, new_ex, new_bg)
-            for m in feats:
-                if m in used:
-                    continue
-                e = ex_cols[m]
-                b = bg_cols[m]
-                fin_e = np.isfinite(e)
-                fin_b = np.isfinite(b)
-                surv_e_vals = e[surv_ex & fin_e]
-                if surv_e_vals.size < 2:
-                    continue
-                lows = [float(np.percentile(surv_e_vals, q)) - pads[m] for q in low_qs]
-                highs = [float(np.percentile(surv_e_vals, q)) + pads[m] for q in high_qs]
+        def _best_bound(m: str, base_bg: np.ndarray):
+            """Best recall-safe bound on *m*: ``(removed, recall, low, high, new_ex, new_bg)``.
 
-                def _eval(low, high):
-                    ok_e = np.ones(n_ex, dtype=bool)
-                    if low is not None:
-                        ok_e &= (e >= low) | ~fin_e
-                    if high is not None:
-                        ok_e &= (e <= high) | ~fin_e
-                    new_ex = surv_ex & ok_e
-                    if int(new_ex.sum()) < keep_min:
-                        return None
-                    ok_b = np.ones(n_bg, dtype=bool)
-                    if low is not None:
-                        ok_b &= (b >= low) | ~fin_b
-                    if high is not None:
-                        ok_b &= (b <= high) | ~fin_b
-                    new_bg = surv_bg & ok_b
-                    removed = int(surv_bg.sum() - new_bg.sum())
-                    return removed, int(new_ex.sum()), new_ex, new_bg
+            ``removed`` counts the ``base_bg`` windows the bound excludes — the
+            still-surviving background while the box is being built, the whole
+            pool when a feature has to justify itself on its own.
+            """
+            e = ex_cols[m]
+            b = bg_cols[m]
+            fin_e = np.isfinite(e)
+            fin_b = np.isfinite(b)
+            surv_e_vals = e[surv_ex & fin_e]
+            if surv_e_vals.size < 2:
+                return None
+            lows = [float(np.percentile(surv_e_vals, q)) - pads[m] for q in low_qs]
+            highs = [float(np.percentile(surv_e_vals, q)) + pads[m] for q in high_qs]
+            cands: list[tuple[float | None, float | None]] = []
+            cands += [(lo, None) for lo in lows]
+            cands += [(None, hi) for hi in highs]
+            cands += [(lo, hi) for lo in lows[::2] for hi in highs[::2] if hi > lo]
+            best_m = None
+            for low, high in cands:
+                ok_e = np.ones(n_ex, dtype=bool)
+                if low is not None:
+                    ok_e &= (e >= low) | ~fin_e
+                if high is not None:
+                    ok_e &= (e <= high) | ~fin_e
+                new_ex = surv_ex & ok_e
+                rec = int(new_ex.sum())
+                if rec < keep_min:
+                    continue
+                ok_b = np.ones(n_bg, dtype=bool)
+                if low is not None:
+                    ok_b &= (b >= low) | ~fin_b
+                if high is not None:
+                    ok_b &= (b <= high) | ~fin_b
+                removed = int(base_bg.sum() - (base_bg & ok_b).sum())
+                if best_m is None or removed > best_m[0] or (removed == best_m[0] and rec > best_m[1]):
+                    best_m = (removed, rec, low, high, new_ex, surv_bg & ok_b)
+            return best_m
 
-                cands: list[tuple[float | None, float | None]] = []
-                cands += [(lo, None) for lo in lows]
-                cands += [(None, hi) for hi in highs]
-                cands += [(lo, hi) for lo in lows[::2] for hi in highs[::2] if hi > lo]
-                for low, high in cands:
-                    r = _eval(low, high)
-                    if r is None:
-                        continue
-                    removed, rec, new_ex, new_bg = r
-                    if best is None or removed > best[0] or (removed == best[0] and rec > best[1]):
-                        best = (removed, rec, m, low, high, new_ex, new_bg)
-            if best is None:
-                break
-            removed, _rec, m, low, high, new_ex, new_bg = best
-            if removed < gain_min and chosen:
-                break
+        def _commit(m: str, low, high, new_ex, new_bg) -> None:
+            nonlocal surv_ex, surv_bg
             surv_ex, surv_bg = new_ex, new_bg
             used.add(m)
             chosen.append(
                 (m, None if low is None else round(low, 3), None if high is None else round(high, 3))
             )
+
+        for _step in range(max(1, int(k))):
+            best = None  # (removed, recall, metric, low, high, new_ex, new_bg)
+            for m in feats:
+                if m in used:
+                    continue
+                r = _best_bound(m, surv_bg)
+                if r is None:
+                    continue
+                removed, rec, low, high, new_ex, new_bg = r
+                if best is None or removed > best[0] or (removed == best[0] and rec > best[1]):
+                    best = (removed, rec, m, low, high, new_ex, new_bg)
+            if best is None:
+                break
+            removed, _rec, m, low, high, new_ex, new_bg = best
+            if removed < gain_min and chosen:
+                break
+            _commit(m, low, high, new_ex, new_bg)
             if surv_bg.sum() / max(1, n_bg) <= max_leak:
                 break
 
+        # A behaviour at the extreme of one axis (freezing, a jump) has a single
+        # feature that already excludes ~all of the pool, which ends the search
+        # above after one criterion — and every such behaviour then reads as that
+        # one axis.  Fill the remaining slots with features that separate the
+        # exemplars from the *whole* pool on their own, are not near-copies of a
+        # chosen one, and fit inside the exemplar recall budget already spent.
+        if chosen and len(chosen) < int(k) and n_ex >= cls._FILL_MIN_EXEMPLARS:
+            pooled = {
+                m: pd.Series(np.concatenate([ex_cols[m], bg_cols[m]])) for m in feats
+            }
+            fill_min = int(np.ceil(cls._FILL_MIN_POOL_REMOVED * n_bg))
+            for m in feats:  # best-separated first
+                if len(chosen) >= int(k):
+                    break
+                if m in used or essence_signal(m) in {essence_signal(c) for c in used}:
+                    continue
+                if cls._separation(ex_cols[m], bg_cols[m]) < cls._FILL_MIN_SEPARATION:
+                    continue
+                if any(
+                    abs(pooled[m].corr(pooled[c], method="spearman"))
+                    >= cls._FILL_MAX_REDUNDANCY
+                    for c, _lo, _hi in chosen
+                ):
+                    continue
+                r = _best_bound(m, all_bg)
+                if r is None or r[0] < fill_min:
+                    continue
+                _removed, _rec, low, high, new_ex, new_bg = r
+                _commit(m, low, high, new_ex, new_bg)
+
         return [Criterion(metric_id=m, low=lo, high=hi, enabled=True) for (m, lo, hi) in chosen]
+
+    # Fill-phase guards for :meth:`extract_contrastive_essence`.  Below
+    # ``_FILL_MIN_EXEMPLARS`` clips a second strongly-separating feature is as
+    # likely chance as signal.  A fill feature must reach |AUC − 0.5| ≥ 0.30
+    # (AUC ≥ 0.80) and exclude half the pool on its own, and it must be neither
+    # another summary statistic of a chosen feature's signal nor a different
+    # signal moving with one (|Spearman ρ| ≥ 0.7 counts as the same axis: nose
+    # "surface" vs "local" change rate sit at 0.74–0.93, distinct signals ≤ 0.46).
+    _FILL_MIN_EXEMPLARS = 4
+    _FILL_MIN_SEPARATION = 0.30
+    _FILL_MIN_POOL_REMOVED = 0.50
+    _FILL_MAX_REDUNDANCY = 0.70
 
     @classmethod
     def build_essence_scorer(

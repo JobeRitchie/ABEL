@@ -14,7 +14,9 @@ import numpy as np
 import pandas as pd
 
 from abel.models.schemas import ModelCard
+from abel.services.import_service import ImportService
 from abel.services.provenance_service import ProvenanceService
+from abel.services.subject_rename_service import SUBJECT_GROUP_COL, current_subjects
 from abel.storage.file_store import write_json, write_yaml
 from abel.utils import xgb_predict
 
@@ -141,7 +143,10 @@ class ActiveLearningTrainerService:
 
     @staticmethod
     def _numeric_feature_cols(df: pd.DataFrame) -> list[str]:
-        ignore = {"segment_id", "label", "label_source", "reviewer_confidence", "animal_id", "session_id"}
+        ignore = {
+            "segment_id", "label", "label_source", "reviewer_confidence", "animal_id", "session_id",
+            SUBJECT_GROUP_COL,
+        }
         forbidden = {
             "start_frame",
             "end_frame",
@@ -259,11 +264,20 @@ class ActiveLearningTrainerService:
         raise ValueError(f"Unsupported classifier_family: {family}")
 
     @staticmethod
-    def _split(df: pd.DataFrame, strategy: str, test_size: float, random_state: int) -> tuple[np.ndarray, np.ndarray]:
+    def _split(
+        df: pd.DataFrame,
+        strategy: str,
+        test_size: float,
+        random_state: int,
+        project_root: Path | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         from sklearn.model_selection import GroupShuffleSplit
 
         if strategy.endswith("subject"):
-            groups = df["animal_id"].to_numpy()
+            # animal_id is the frozen subject_key; group by the current subject
+            # name so sessions merged under one subject stay on one side.
+            manifest = ImportService().load_manifest(project_root) if project_root else None
+            groups = current_subjects(df, manifest).to_numpy()
         else:
             groups = df["session_id"].to_numpy()
 
@@ -1099,7 +1113,9 @@ class ActiveLearningTrainerService:
                 f"examples — training on all data. Metrics are in-sample, not held-out."
             )
         else:
-            train_idx, val_idx = self._split(df, cfg.split_strategy, cfg.test_size, cfg.random_state)
+            train_idx, val_idx = self._split(
+                df, cfg.split_strategy, cfg.test_size, cfg.random_state, project_root=project_root
+            )
         if "_eval_split_role" in df.columns:
             df = df.drop(columns=["_eval_split_role"])
         train_df = df.iloc[train_idx]
@@ -1478,6 +1494,17 @@ class ActiveLearningTrainerService:
             "calibration_curve": calibration,
             "n_train": int(len(train_df)),
             "n_val": int(len(val_df)),
+            # Every one-vs-rest model shares the same split of the whole label
+            # pool, so n_train/n_val are identical across behaviors; these are
+            # the rows that are THIS behavior.
+            # Counted from train_df, not y_train, which augmentation may extend.
+            "n_train_pos": (
+                int(sum(label_to_idx.get(str(lbl)) == int(target_idx) for lbl in train_df["label"]))
+                if target_idx is not None else None
+            ),
+            "n_val_pos": (
+                int((y_val == int(target_idx)).sum()) if target_idx is not None else None
+            ),
             "n_features": len(feature_cols),
             "holdout": (not _no_holdout),
             "evaluated_on": ("train_in_sample" if _no_holdout else "held_out"),

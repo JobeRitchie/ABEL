@@ -39,6 +39,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
+from abel.services.subject_rename_service import SUBJECT_GROUP_COL, add_subject_groups
 from abel.validation.datamodel import ProjectRef
 
 # Label sources the trainer keeps for training but refuses to validate on.
@@ -93,8 +94,12 @@ def clip_unit_label(frames: float, fps: float) -> str:
 
 
 def _group_column(strategy: str) -> str:
-    """Column to partition train vs. held-out by (mirrors trainer._split)."""
-    return "animal_id" if str(strategy).endswith("subject") else "session_id"
+    """Column to partition train vs. held-out by (mirrors trainer._split).
+
+    Subject strategies group by the current subject name (``subject_group``,
+    added by :func:`split`), not ``animal_id``, which keeps the frozen name.
+    """
+    return SUBJECT_GROUP_COL if str(strategy).endswith("subject") else "session_id"
 
 
 def is_refine_only(df: pd.DataFrame) -> pd.Series:
@@ -201,6 +206,8 @@ def split(
     df = df.reset_index(drop=True)
 
     group_col = _group_column(project.split_strategy)
+    if group_col == SUBJECT_GROUP_COL:
+        add_subject_groups(df, project.root)
     if group_col not in df.columns:
         raise ValueError(f"Training set has no '{group_col}' column for holdout split.")
 

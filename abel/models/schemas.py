@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SourceMode(str, Enum):
@@ -308,6 +308,14 @@ class LinkedSession(BaseModel):
     video_asset_id: str
     pose_asset_id: str
     subject_id: str | None = None
+    subject_key: str | None = None
+    """Frozen identity token for this session's derived data: the ``animal_id`` of
+    its frame/segment tables and the subject part of its segment and clip ids
+    (``seg_{subject_key}_{session_id}_…``).  Fixed when the session is created —
+    from its subject name then, or its session id when unnamed — and never
+    changed by a rename, so relabelling a subject cannot orphan the labels,
+    clips and features already keyed by those ids.  ``subject_id`` is the
+    display name everything else (analytics, ROIs, LOSO folds) groups by."""
     session_type: str | None = None
     """Explicit session-type label (e.g. ``TestingDay2``, ``Validation``).  When
     set, this overrides the regex-derived type and is protected from regex
@@ -323,11 +331,20 @@ class LinkedSession(BaseModel):
     individual_subject_map: dict[str, str] = Field(default_factory=dict)
     """Maps each detected individual to a real project subject identity (e.g.
     ``{"Mouse1": "green", "Mouse2": "black"}``).  Unmapped individuals fall back
-    to ``{subject_id}:{individual}`` as their ``animal_id``."""
+    to ``{subject_key}:{individual}`` as their ``animal_id``."""
     identity_corrections: list[dict[str, Any]] = Field(default_factory=list)
     """User-confirmed identity-swap corrections, each ``{"frame": t, "a": A,
     "b": B}`` meaning individuals A and B exchange tracks from frame ``t`` onward.
     Applied on pose load so features see identity-consistent tracks."""
+
+    @model_validator(mode="after")
+    def _freeze_subject_key(self) -> "LinkedSession":
+        # Manifests written before subject_key existed extracted with
+        # ``subject_id or session_id``; freezing that value on load keeps the
+        # ids of already-extracted sessions stable through a later rename.
+        if not self.subject_key:
+            self.subject_key = self.subject_id or self.session_id
+        return self
 
 
 class BehaviorDefinition(BaseModel):

@@ -429,6 +429,15 @@ class BehaviorRepresentationService:
     # precision.  Frame tables keep the size-gated policy above.
     SEGMENT_FEATURE_DTYPE = np.float32
 
+    # Per-window model outputs that the scoring step writes back onto the
+    # segment table.  They are not features, they are float64 by design, and
+    # their presence says nothing about which format the features were built in.
+    SCORING_COLUMNS = frozenset({
+        "prediction_prob", "prediction_prob_fused", "prediction_variance",
+        "uncertainty_score", "uncertainty_entropy", "uncertainty_margin",
+        "density_outlier_score",
+    })
+
     @classmethod
     def downcast_segment_features(cls, df: pd.DataFrame) -> pd.DataFrame:
         """Store a segment table's float feature columns at ``SEGMENT_FEATURE_DTYPE``.
@@ -467,7 +476,14 @@ class BehaviorRepresentationService:
             n_rows = int(meta.metadata.num_rows)
         except Exception:
             return None
-        f64 = [n for n, t in zip(schema.names, schema.types) if str(t) == "double"]
+        # Only feature columns decide the format: every scored run leaves
+        # SCORING_COLUMNS behind as float64, even on a freshly rebuilt cache.
+        f64 = [
+            n for n, t in zip(schema.names, schema.types)
+            if str(t) == "double"
+            and n not in cls.SCORING_COLUMNS
+            and not n.startswith("uncertainty_")
+        ]
         if not f64 or n_rows <= 0:
             return None
         n_f32 = sum(1 for t in schema.types if str(t) == "float")

@@ -889,10 +889,28 @@ class ImportService:
         clean = (value or "").strip()
         return clean or None
 
-    def save_manifest(self, project_root: Path, manifest: ImportManifest) -> None:
+    def save_manifest(self, project_root: Path, manifest: ImportManifest) -> list[str]:
+        """Write *manifest* and carry subject renames over to subject-keyed state.
+
+        Analytics groups and per-subject ROIs are keyed by subject name, so a save
+        that renames subjects re-keys them against the manifest still on disk
+        (see ``subject_rename_service``).  A failure there is logged and reported
+        but never blocks the save.  Returns notes about what the rename moved.
+        """
         path = project_root / "derived" / "review_tables" / "import_manifest.json"
+        notes: list[str] = []
+        previous = self.load_manifest(project_root) if path.exists() else None
+        if previous is not None:
+            from abel.services.subject_rename_service import propagate_subject_renames  # noqa: PLC0415
+
+            try:
+                notes = propagate_subject_renames(project_root, previous, manifest)
+            except Exception:
+                logger.exception("Could not carry subject renames over to Analytics/ROI settings")
+                notes = ["Could not update Analytics/ROI settings for the renamed subjects — see the log."]
         write_json(path, manifest.model_dump(mode="json"))
         self.update_registry(project_root, manifest)
+        return notes
 
     def load_manifest(self, project_root: Path) -> ImportManifest | None:
         path = project_root / "derived" / "review_tables" / "import_manifest.json"

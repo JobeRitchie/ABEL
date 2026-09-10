@@ -89,7 +89,7 @@ def test_train_uses_contiguous_label_ids(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         ActiveLearningTrainerService,
         "_split",
-        staticmethod(lambda _df, _strategy, _test_size, _random_state: (np.asarray([0, 1]), np.asarray([2]))),
+        staticmethod(lambda _df, _strategy, _test_size, _random_state, **_kw: (np.asarray([0, 1]), np.asarray([2]))),
     )
     monkeypatch.setattr(
         ActiveLearningTrainerService,

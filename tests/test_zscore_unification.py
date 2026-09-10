@@ -3,8 +3,6 @@
 - The vectorised ``_zscore_by_group`` must produce bit-for-bit the same result
   as the original per-group Python loop (data not damaged).
 - Per-(animal_id, session_id) mean/std stats must be persisted by build().
-- The adaptive feature cache must reuse the canonical representation cache
-  instead of re-reading raw pose/context.
 """
 
 from __future__ import annotations
@@ -17,9 +15,6 @@ import pandas as pd
 from abel.services.behavior_representation_service import (
     BehaviorRepresentationService,
     RepresentationConfig,
-)
-from abel.services.behavior_adaptive_feature_cache_service import (
-    BehaviorAdaptiveFeatureCacheService,
 )
 
 
@@ -120,33 +115,3 @@ def test_build_persists_zscore_stats(tmp_path: Path):
     stats = pd.read_parquet(stats_path)
     assert {"animal_id", "session_id"}.issubset(stats.columns)
     assert len(stats) == 2  # two sessions
-
-
-def test_adaptive_cache_reuses_representation(tmp_path: Path, monkeypatch):
-    project, pose_path, ctx_path = _make_project(tmp_path)
-    # Build the canonical representation cache first.
-    BehaviorRepresentationService().build(
-        project_root=project,
-        frame_pose_path=pose_path,
-        frame_context_path=ctx_path,
-        config=RepresentationConfig(window_size_frames=30, window_stride_frames=15),
-    )
-
-    svc = BehaviorAdaptiveFeatureCacheService()
-
-    # If the adaptive loader touches raw pose/context, fail loudly.
-    import abel.services.behavior_adaptive_feature_cache_service as mod
-
-    real_read = mod.pd.read_parquet
-    repr_frame = project / "derived" / "representations" / "frame_features.parquet"
-
-    def guarded_read(path, *a, **k):
-        p = str(path)
-        if "pose_features" in p or "context_features" in p:
-            raise AssertionError(f"adaptive loader read raw source instead of cache: {p}")
-        return real_read(path, *a, **k)
-
-    monkeypatch.setattr(mod.pd, "read_parquet", guarded_read)
-    frame_df = svc._load_merged_frame_features(project)
-    assert not frame_df.empty
-    assert repr_frame.exists()
