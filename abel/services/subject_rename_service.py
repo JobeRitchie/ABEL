@@ -99,6 +99,11 @@ def session_labels(manifest: Any) -> SessionLabels:
                     stype = remainder
         if not stype and "_" in subject:
             stype = subject.split("_", 1)[1]
+        # A subject typed over by hand ("m01" for m1_cond1.mp4) matches
+        # neither; without the filename-regex session every session of that
+        # subject would share one label and their factor assignments collide.
+        if not stype and video is not None:
+            stype = (video.session_id or "").strip()
         types[sid] = stype
     per_subject = Counter(subjects.values())
     labels = {

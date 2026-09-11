@@ -2726,6 +2726,24 @@ class BehaviorAnalyticsTab(QWidget):
                 row["latency_s"] = float("nan")
         return rows
 
+    def _relabel_to_current_sessions(self, rows: list[dict]) -> list[dict]:
+        """Give cached rows the subject, label and session type they have now.
+
+        A subject rename leaves pose-derived values unchanged, so it does not
+        miss the cache — but the rows still carry the old names, and each
+        renamed session would show up twice (old label and current label).
+        Sessions outside this manifest (merged projects) keep their labels.
+        """
+        for row in rows:
+            sid = str(row.get("session_id", ""))
+            subject = self._subject_by_session.get(sid)
+            if subject is None:
+                continue
+            row["subject"] = subject
+            row["session_label"] = self._session_label_by_session.get(sid, subject)
+            row["session_type"] = self._session_type_by_session.get(sid, "")
+        return rows
+
     def _save_pseudo_rows(self, fingerprint: str, rows: list[dict]) -> None:
         path = self._pseudo_rows_cache_path()
         if path is None:
@@ -2760,7 +2778,7 @@ class BehaviorAnalyticsTab(QWidget):
         cached = self._try_load_pseudo_rows(fingerprint)
         if cached is not None:
             logger.debug("Distance/ROI rows loaded from cache (fp %s).", fingerprint[:8])
-            self._apply_pseudo_rows(cached)
+            self._apply_pseudo_rows(self._relabel_to_current_sessions(cached))
             self._close_loading_popup()
             return
 
@@ -3595,10 +3613,15 @@ class BehaviorAnalyticsTab(QWidget):
 
     def _compute_session_distance_binned(
         self, session_id: str, bin_seconds: float,
+        origin_s: float = 0.0,
+        lo_s: float | None = None,
+        hi_s: float | None = None,
     ) -> list[tuple[float, float]]:
-        """Compute distance (pixels) per time-bin across the whole session.
+        """Compute distance (pixels) per time-bin across the session.
 
-        Returns a sorted list of ``(bin_start_s, distance_px)`` tuples.
+        Bins are aligned to ``origin_s``; movement outside ``[lo_s, hi_s)`` is
+        dropped so a partial first/last bin holds only in-range distance, as
+        the bout bins do.  Returns a sorted list of ``(bin_start_s, distance_px)``.
         """
         pose = self._get_pose_for_session(session_id)
         if pose is None:
@@ -3619,10 +3642,17 @@ class BehaviorAnalyticsTab(QWidget):
         dy = np.diff(cy_sub)
         segment_dist = np.sqrt(dx * dx + dy * dy)
         segment_times = times_s[:-1]
-        bin_starts = (segment_times // bin_seconds) * bin_seconds
+        keep = np.ones(len(segment_times), dtype=bool)
+        if lo_s is not None:
+            keep &= segment_times >= lo_s
+        if hi_s is not None:
+            keep &= segment_times < hi_s
+        segment_times = segment_times[keep]
+        segment_dist = segment_dist[keep]
+        bin_idx = np.floor((segment_times - origin_s) / bin_seconds).astype(np.int64)
         result: dict[float, float] = {}
-        for t, d in zip(bin_starts, segment_dist):
-            t_key = float(t)
+        for k, d in zip(bin_idx, segment_dist):
+            t_key = _time_bin_start(origin_s, int(k), bin_seconds)
             result[t_key] = result.get(t_key, 0.0) + float(d)
         return sorted(result.items())
 
@@ -5306,6 +5336,22 @@ def _significance_label(pval: float) -> str:
     return "Result: Not significant (p >= 0.05)"
 
 
+def _time_bin_start(origin_s: float, k: int, bin_seconds: float) -> int | float:
+    """Start (s) of the ``k``-th time bin counted from ``origin_s``.
+
+    Every producer and consumer of ``time_bin_s`` builds its keys here so a
+    fractional Data Range origin (e.g. 100.5 s) still matches exactly across
+    the binned rows, the zero-filled grid and the export columns.
+    """
+    v = round(float(origin_s) + int(k) * float(bin_seconds), 6)
+    return int(v) if v == int(v) else v
+
+
+def _time_bin_index(t_s: float, origin_s: float, bin_seconds: float) -> int:
+    """Index of the time bin (aligned to ``origin_s``) containing ``t_s``."""
+    return int(np.floor((float(t_s) - float(origin_s)) / float(bin_seconds)))
+
+
 # ======================================================================
 # Sub-tab 2: Graphs
 # ======================================================================
@@ -5503,6 +5549,23 @@ class _GraphsWidget(QWidget):
             "Affects bar graphs, statistics, and all aggregated metrics."
         )
 
+        self._bin_from_range_chk = QCheckBox("Start time bins at Data Range 'from'")
+        self._bin_from_range_chk.setToolTip(
+            "Time-course charts and binned exports, when Data Range 'from' is set.\n"
+            "Checked: bins start at the 'from' time "
+            "(from 100 s, 60 s bins → 100–160, 160–220, …).\n"
+            "Unchecked: bins stay aligned to the session start "
+            "(60–120, 120–180, …); the first bin then holds only "
+            "the in-range part (100–120)."
+        )
+        self._bin_from_range_chk.setEnabled(False)
+        self._bin_from_range_chk.toggled.connect(lambda _: self.update_graph())
+        self._data_min_s.valueChanged.connect(
+            lambda _: self._bin_from_range_chk.setEnabled(
+                self._get_data_range_seconds()[0] is not None
+            )
+        )
+
         # Row 4 — faceted grouping: one combine/split/level dropdown per factor.
         self._facet = _FacetControls("Group by:")
         self._facet.setToolTip(
@@ -5593,6 +5656,12 @@ class _GraphsWidget(QWidget):
         data_range_row.addWidget(QLabel("to"))
         data_range_row.addWidget(self._data_max_s)
         data_range_row.addStretch(1)
+
+        _bin_origin_row = QHBoxLayout()
+        _bin_origin_row.setSpacing(6)
+        _bin_origin_row.setContentsMargins(8, 0, 0, 0)
+        _bin_origin_row.addWidget(self._bin_from_range_chk)
+        _bin_origin_row.addStretch(1)
 
         # Row 7 — bout filter (First N / Bouts Until Behavior)
         self._bout_filter_mode = QComboBox()
@@ -5711,6 +5780,7 @@ class _GraphsWidget(QWidget):
         # X/Y axis range overrides live in the Settings… dialog to keep the
         # panel uncluttered; x_axis_row/y_axis_row hold the persistent spinboxes.
         ctrl_vbox.addLayout(_labeled_row("Data Range (s):", data_range_row))
+        ctrl_vbox.addLayout(_bin_origin_row)
         ctrl_vbox.addLayout(_labeled_row("Bout Filter:", bout_filter_row))
         ctrl_vbox.addLayout(_until_scale_row)
 
@@ -6433,6 +6503,30 @@ class _GraphsWidget(QWidget):
         lo, hi = self._get_data_range_seconds()
         return lo is not None or hi is not None
 
+    def _bin_origin_s(self) -> float:
+        """Session time (s) the time bins are aligned to.
+
+        The Data Range 'from' when "Start time bins at Data Range 'from'" is
+        checked, otherwise the session start.
+        """
+        lo, _hi = self._get_data_range_seconds()
+        if lo is not None and self._bin_from_range_chk.isChecked():
+            return float(lo)
+        return 0.0
+
+    def _bin_grid(self, max_bin: float) -> list[int | float]:
+        """Every bin start from the first in-range bin through ``max_bin``.
+
+        Starts at the bin containing the Data Range 'from' (or the session
+        start) so bins lying wholly before the range are not zero-filled.
+        """
+        bin_seconds = max(10, int(self._time_bin_spin.value()))
+        origin = self._bin_origin_s()
+        lo, _hi = self._get_data_range_seconds()
+        k0 = _time_bin_index(lo if lo is not None else 0.0, origin, bin_seconds)
+        k1 = int(round((float(max_bin) - origin) / bin_seconds))
+        return [_time_bin_start(origin, k, bin_seconds) for k in range(k0, k1 + 1)]
+
     def _get_first_n_bouts(self) -> int:
         """Return the first-N-bouts limit, or 0 when inactive."""
         if self._bout_filter_mode.currentData() == "first_n":
@@ -6935,7 +7029,7 @@ class _GraphsWidget(QWidget):
                 return
             # Grid over the full roster so subjects with no bouts (and empty
             # bins) count as zero rather than dropping out of the group mean.
-            all_bins = list(range(0, int(binned["time_bin_s"].max()) + bin_seconds, bin_seconds))
+            all_bins = self._bin_grid(binned["time_bin_s"].max())
             roster = [s for s in self._export_sessions() if groups.get(s, "")]
             sess_bin = self._binned_session_grid(
                 binned, col, all_bins, roster or sorted(binned["session_label"].unique()),
@@ -6975,7 +7069,7 @@ class _GraphsWidget(QWidget):
         else:
             # Collapse across all sessions → mean ± SEM.  Gridded over the
             # full roster so subjects with no bouts count as zero.
-            all_bins = list(range(0, int(binned["time_bin_s"].max()) + bin_seconds, bin_seconds))
+            all_bins = self._bin_grid(binned["time_bin_s"].max())
             sess_bin = self._binned_session_grid(
                 binned, col, all_bins,
                 self._export_sessions() or sorted(binned["session_label"].unique()),
@@ -7204,6 +7298,7 @@ class _GraphsWidget(QWidget):
         # the behavior filter selects the distance pseudo-behavior.
         need_distance = metric == "distance_cm" or DISTANCE_BEHAVIOR_ID in selected_bids
         data_range = self._get_data_range_seconds()
+        origin_s = self._bin_origin_s()
         first_n = self._get_first_n_bouts()
         until_bid = self._get_until_behavior_id()
 
@@ -7211,7 +7306,7 @@ class _GraphsWidget(QWidget):
         cache_key = (
             id(self._host._raw_bouts), len(self._host._raw_bouts),
             fps, bin_seconds, selected_bids, checked, need_distance, data_range,
-            first_n, until_bid,
+            origin_s, first_n, until_bid,
         )
         if self._bin_cache is not None and self._bin_cache_key == cache_key:
             return self._bin_cache
@@ -7233,13 +7328,9 @@ class _GraphsWidget(QWidget):
                     continue
                 _seen_sessions.add(sid)
                 ppm = self._host._pixels_per_mm_for_session(sid)
-                for t_bin, d_px in self._host._compute_session_distance_binned(sid, bin_seconds):
-                    # Apply data range filter to distance bins
-                    bin_end = t_bin + bin_seconds
-                    if data_range[0] is not None and bin_end <= data_range[0]:
-                        continue
-                    if data_range[1] is not None and t_bin >= data_range[1]:
-                        continue
+                for t_bin, d_px in self._host._compute_session_distance_binned(
+                    sid, bin_seconds, origin_s, data_range[0], data_range[1],
+                ):
                     d_cm = (d_px / ppm / 10.0) if ppm and ppm > 0 else d_px
                     rows.append({
                         "session_label": slbl,
@@ -7302,8 +7393,12 @@ class _GraphsWidget(QWidget):
                         cursor = b_start
                         is_first_slice = True
                         while cursor < b_end:
-                            cur_bin = int(cursor // bin_seconds) * bin_seconds
-                            bin_edge = cur_bin + bin_seconds
+                            k = _time_bin_index(cursor, origin_s, bin_seconds)
+                            bin_edge = origin_s + (k + 1) * bin_seconds
+                            if bin_edge <= cursor:  # round-off exactly at an edge
+                                k += 1
+                                bin_edge += bin_seconds
+                            cur_bin = _time_bin_start(origin_s, k, bin_seconds)
                             slice_end = min(b_end, float(bin_edge))
                             slice_dur = slice_end - cursor
 
@@ -7388,7 +7483,7 @@ class _GraphsWidget(QWidget):
         # Grid over the full roster: subjects with no bouts (and empty bins)
         # are absent from _bin_bouts and would otherwise be left out of the
         # group mean entirely, inflating it.
-        all_bins = list(range(0, int(binned["time_bin_s"].max()) + bin_seconds, bin_seconds))
+        all_bins = self._bin_grid(binned["time_bin_s"].max())
         roster = [s for s in self._export_sessions() if groups.get(s, "")]
         sess_bin = self._binned_session_grid(
             binned, col, all_bins, roster or sorted(binned["session_label"].unique()),
@@ -7925,7 +8020,7 @@ class _GraphsWidget(QWidget):
             long = pivot.reset_index().melt(
                 id_vars="session_label", var_name="time_bin_s", value_name=col,
             )
-            long["time_bin_s"] = long["time_bin_s"].astype(int)
+            long["time_bin_s"] = pd.to_numeric(long["time_bin_s"])
             long["behavior"] = beh
             parts.append(long)
         if not parts:
@@ -8045,11 +8140,9 @@ class _GraphsWidget(QWidget):
             binned = self._bin_bouts()
             if binned.empty:
                 return None
-            bin_seconds = max(10, int(self._time_bin_spin.value()))
             col = metric if metric != "time_spent_s" else "duration_s"
             # Build complete bin index so empty bins appear as zero
-            max_bin = int(binned["time_bin_s"].max())
-            all_bins = list(range(0, max_bin + bin_seconds, bin_seconds))
+            all_bins = self._bin_grid(binned["time_bin_s"].max())
 
             export_sessions = self._export_sessions()
             if mode == "group" and groups_map:
@@ -8230,7 +8323,6 @@ class _GraphsWidget(QWidget):
 
         metric = self._get_metric()
         col = metric if metric != "time_spent_s" else "duration_s"
-        bin_seconds = max(10, int(self._time_bin_spin.value()))
         groups_map = self._host._session_groups
         checked = self._host._summary_tab._checked_subjects()
         checked_groups = self._checked_groups()
@@ -8248,8 +8340,7 @@ class _GraphsWidget(QWidget):
         if agg.empty:
             return None
 
-        max_bin = int(agg["time_bin_s"].max())
-        all_bins = list(range(0, max_bin + bin_seconds, bin_seconds))
+        all_bins = self._bin_grid(agg["time_bin_s"].max())
         bin_col_names = [f"{b}s" for b in all_bins]
         behaviors = sorted(agg["behavior"].unique())
 

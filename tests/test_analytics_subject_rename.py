@@ -92,3 +92,21 @@ def test_refresh_remaps_in_memory_state(_app, tmp_path: Path) -> None:
     assert set(tab._session_factors) == {"m1 – cond1", "m1 – ext", "m2"}
     on_disk = json.loads((root / "derived" / "analytics_groups.json").read_text(encoding="utf-8"))
     assert set(on_disk["session_factors"]) == {"m1 – cond1", "m1 – ext", "m2"}
+
+
+def test_cached_distance_rows_take_current_labels(_app, tmp_path: Path) -> None:
+    # The distance/ROI cache is keyed by pose files, not names, so a rename
+    # hits it — its rows must not bring the old labels back as extra sessions.
+    root, svc, manifest = _project(tmp_path)
+    old_tab = _open(root)
+    cached = old_tab._build_distance_rows(sorted(old_tab._subject_by_session))
+    assert {r["session_label"] for r in cached} == set(STEMS)
+
+    svc.apply_subject_name_settings(manifest, ImportNameSettings())
+    svc.save_manifest(root, manifest)
+    tab = _open(root)
+    rows = tab._relabel_to_current_sessions(cached + [
+        {"session_id": "merged::s9", "subject": "x", "session_label": "other::m9", "session_type": ""},
+    ])
+    assert {r["session_label"] for r in rows} == {"m1 – cond1", "m1 – ext", "m2", "other::m9"}
+    assert {r["subject"] for r in rows} == {"m1", "m2", "x"}

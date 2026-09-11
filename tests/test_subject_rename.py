@@ -182,6 +182,35 @@ def test_conflicting_prechop_is_reported_not_guessed(tmp_path: Path) -> None:
     assert any("m1" in n and "different values" in n for n in notes)
 
 
+def test_hand_typed_subject_keeps_one_label_per_session(tmp_path: Path) -> None:
+    # "m01" is not a prefix of m1_cond1.mp4; the sessions used to collapse
+    # onto a single "m01" label, and renaming back fanned one Session Type
+    # out to all of them.
+    stems = ["m1_cond1", "m1_cond2", "m1_ext", "m1_recall"]
+    manifest = _fear_manifest(tmp_path, stems)
+    ImportService().apply_subject_name_settings(manifest, DEFAULT)
+    before = session_labels(manifest)
+    state = {"session_factors": {
+        before.label_by_session[_sid(manifest, s)]: {"Session Type": s.split("_")[1]} for s in stems
+    }}
+    anchor_group_state(state, before)
+
+    for session in manifest.linked_sessions:
+        session.subject_id = "m01"
+    renamed = session_labels(manifest)
+    assert sorted(renamed.label_by_session.values()) == [
+        "m01 – cond1", "m01 – cond2", "m01 – ext", "m01 – recall",
+    ]
+    assert remap_group_state(state, renamed) == []
+
+    for session in manifest.linked_sessions:
+        session.subject_id = "m1"
+    assert remap_group_state(state, session_labels(manifest)) == []
+    assert state["session_factors"] == {
+        f"m1 – {t}": {"Session Type": t} for t in ("cond1", "cond2", "ext", "recall")
+    }
+
+
 def test_unanchored_keys_are_left_alone() -> None:
     # Labels from merged projects never appear in this manifest's anchors.
     state = {"session_factors": {"other_project::m9": {"Sex": "F"}}, "subject_order": ["other_project::m9"]}

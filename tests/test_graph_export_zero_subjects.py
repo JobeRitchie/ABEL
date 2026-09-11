@@ -62,6 +62,7 @@ def _make_widget(metric: str, style: str, mode: str = "individual"):
         "_export_sessions", "_missing_value_for_metric", "_binned_session_grid",
         "_session_aggregate", "_build_wide_binned_df", "_collect_graph_data",
         "_graph_rows", "_per_session_metric_table", "_scaled_rate_table",
+        "_bin_grid", "_bin_origin_s",
     ):
         setattr(stub, name, getattr(_GraphsWidget, name).__get__(stub))
 
@@ -87,6 +88,7 @@ def _make_widget(metric: str, style: str, mode: str = "individual"):
                                     "mean_bout_s": "Mean Bout (s)"}[m]
     stub._time_bin_spin = SimpleNamespace(value=lambda: BIN_SECONDS)
     stub._get_data_range_seconds = lambda: (None, None)
+    stub._bin_from_range_chk = SimpleNamespace(isChecked=lambda: False)
     stub._is_data_range_active = lambda: False
     stub._is_bout_filter_active = lambda: False
     stub._apply_latency_fallbacks = lambda r: r

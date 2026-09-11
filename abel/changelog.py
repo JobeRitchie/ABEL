@@ -7,10 +7,30 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 10, 2026"
+VERSION_DATE = "September 11, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.20.0", "September 11, 2026", [
+        "Graphs tab: new 'Start time bins at Data Range from' option. With a "
+        "Data Range 'from' set, checking it starts the time bins at that time "
+        "(from 100 s with 60 s bins gives 100-160, 160-220, ...); unchecked, "
+        "bins stay aligned to the session start and the first bin holds only "
+        "the in-range part. Time-course charts, the zero-filled bin grid and "
+        "binned exports all share one bin-key builder so fractional origins "
+        "match exactly, and bins lying wholly before the range are no longer "
+        "zero-filled.",
+        "Binned distance now drops movement outside the Data Range before "
+        "binning, so a partial first or last bin holds only in-range distance "
+        "(as the bout bins already did) instead of the whole bin's distance.",
+        "Cached distance/ROI rows in Analytics are relabeled to the current "
+        "subject, session label and session type when loaded, so a renamed "
+        "subject no longer appears twice (under its old and new name).",
+        "Session labels fall back to the video's session id when a subject was "
+        "typed in by hand and matches neither the filename pattern nor a "
+        "subject_type suffix, so that subject's sessions no longer share one "
+        "label and collide in factor assignments.",
+    ]),
     ("0.19.0", "September 10, 2026", [
         "Renaming a subject no longer detaches its saved state. Each session now "
         "keeps a frozen subject key, fixed when the session is created, which is "
