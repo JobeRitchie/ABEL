@@ -67,11 +67,11 @@ class InvariantFeatureConfig(BaseModel):
     and any detected limb triplets).  Provides rotation-invariant posture
     descriptors that capture flexion/extension and rearing posture."""
 
-    enable_spine_curvature: bool = False
-    """Compute spine curvature from midline keypoints (requires spine1/spine2 etc.).
-    Useful for rearing, grooming, and escape behaviors.  Disabled by default because
-    it requires at least three midline keypoints; the feature is all-zero when those
-    keypoints are absent."""
+    enable_spine_curvature: bool = True
+    """Compute spine curvature from midline keypoints (nose, spine/back points,
+    body centre, tail base).  Useful for rearing, grooming, and escape behaviors.
+    Needs at least three midline keypoints; with fewer, no column is emitted, so
+    it is safe to leave enabled.  Enabled by default."""
 
     enable_social_features: bool = True
     """Compute inter-animal (social/interaction) features in multi-animal projects.

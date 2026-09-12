@@ -775,8 +775,12 @@ def _r_roi(f: dict[str, Any]) -> str:
     ]
     if roi.get("motion_radius_px"):
         parts.append(
-            f"Local pixel-motion features were computed within a "
-            f"{int(roi['motion_radius_px'])} px radius of the tracked body points."
+            f"Local pixel-motion features were computed within "
+            f"{2 * int(roi['motion_radius_px'])} × {2 * int(roi['motion_radius_px'])} px "
+            f"windows centred on the body centroid and nose, with MOG2 background "
+            f"subtraction applied to that moving window rather than the full frame "
+            f"(windows kept a constant size at the frame edge by replicating border "
+            f"pixels, and held at the last tracked position through keypoint dropouts)."
         )
     if roi.get("excluded_days"):
         parts.append(

@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 
 from abel.services.import_service import ImportService
 from abel.services.roi_service import ROI_COLORS, MAX_ROIS, ROIService
+from abel.ui.tabs.pose_features_tab import LOCAL_RADIUS_TOOLTIP
 from abel.utils import roi_geometry
 
 logger = logging.getLogger("abel")
@@ -835,11 +836,7 @@ class ROIDefinitionTab(QWidget):
         self._local_radius = QSpinBox()
         self._local_radius.setRange(8, 2048)
         self._local_radius.setSingleStep(4)
-        self._local_radius.setToolTip(
-            "Pixel radius around each tracked body part used for local optical-flow "
-            "and substrate-motion calculations.  Larger values capture a wider "
-            "neighbourhood around the animal."
-        )
+        self._local_radius.setToolTip(LOCAL_RADIUS_TOOLTIP)
 
         motion_box = QGroupBox("Local Motion Settings")
         motion_form = QFormLayout(motion_box)

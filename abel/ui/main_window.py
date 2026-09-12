@@ -46,7 +46,6 @@ from abel.ui.tabs.dependencies_tab import DependenciesTab
 from abel.ui.tabs.export_tab import ExportTab
 from abel.ui.tabs.help_tab import HelpTab
 from abel.ui.tabs.info_tab import InfoTab
-from abel.ui.tabs.methods_tab import MethodsTab
 from abel.ui.tabs.home_tab import HomeTab
 from abel.ui.tabs.logs_tab import LogsTab
 from abel.ui.tabs.pose_features_tab import PoseFeaturesTab
@@ -275,6 +274,7 @@ class MainWindow(QMainWindow):
             self._validation_service,
             self._behavior_service,
         )
+        self.validation_tab.session_quality_requested.connect(self._open_session_quality)
         self.export_tab = ExportTab(
             self._export_service,
             self._candidate_service,
@@ -284,8 +284,9 @@ class MainWindow(QMainWindow):
         self.logs_tab = LogsTab()
         self.settings_tab = SettingsTab(self._settings_service)
         self.help_tab = HelpTab()
-        self.methods_tab = MethodsTab()
         self.info_tab = InfoTab()
+        # Methods lives inside Info; set_project reaches it through InfoTab.
+        self.methods_tab = self.info_tab.methods_tab
 
         self.direct_use_tab = DirectUseTab()
         self.direct_use_tab.pipeline_complete.connect(self._on_direct_use_complete)
@@ -317,7 +318,6 @@ class MainWindow(QMainWindow):
         tabs.addTab(self._temporal_group, "Temporal")
         tabs.addTab(self.behavior_analytics_tab, "Analytics")
         tabs.addTab(self.validation_tab, "Validation")
-        tabs.addTab(self.methods_tab, "Methods")
         tabs.addTab(self.export_tab, "Export")
         tabs.addTab(self._direct_use_group, "Direct Use")
         tabs.addTab(self.model_refinement_tab, "Model Refinement")
@@ -791,6 +791,14 @@ class MainWindow(QMainWindow):
             self.direct_use_tab.set_source_from_current(self._project.project_root)
         self.tabs.setCurrentWidget(self._direct_use_group)
         self._direct_use_group.setCurrentWidget(self.direct_use_tab)
+
+    def _open_session_quality(self) -> None:
+        """Validation → Session Quality: runs on Temporal Review's loaded outputs."""
+        if self._project is None:
+            self._error("No project loaded.")
+            return
+        self._lazy_init_tab(self.temporal_review_tab)
+        self.temporal_review_tab.open_session_quality()
 
     def _show_active_learning_tab(self) -> None:
         """Switch to the Active Learning group (Learning sub-tab) to retrain."""

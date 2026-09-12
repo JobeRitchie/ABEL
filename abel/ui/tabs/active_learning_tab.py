@@ -6440,6 +6440,8 @@ class ActiveLearningTab(QWidget):
         fps_by_session_id: dict[str, float] = {}
         roi_subject_by_session: dict[str, str] = {}
         session_jobs: list[tuple[int, str, str, Path, Path, float]] = []
+        # Cached sessions whose pose parquet is reused as-is: (sid, subject, pose, fps).
+        reused_pose_jobs: list[tuple[str, str, Path, float]] = []
         for i, linked in enumerate(linked_sessions, start=1):
             session_id = linked.session_id
             # The frozen key, not the display name: it becomes animal_id and the
@@ -6466,6 +6468,10 @@ class ActiveLearningTab(QWidget):
                 and (not use_video_features or session_id in cached_ctx_sessions)
             )
             if cache_hit:
+                reused_pose_jobs.append((
+                    str(session_id), subject_id, pose_path,
+                    float(fps_by_video_asset_id.get(linked.video_asset_id, 30.0)),
+                ))
                 current_step += 1
                 _progress(
                     current_step,
@@ -6605,6 +6611,56 @@ class ActiveLearningTab(QWidget):
 
             kp_aliases = self._keypoint_aliases()
 
+            # New sessions are about to be extracted with the current pose
+            # schema.  If the reused cache predates it (e.g. spine curvature
+            # became a default column), the two would disagree on columns and
+            # the gap would turn into a per-session NaN pattern that encodes
+            # provenance.  Pose-only refresh of the reused sessions is cheap and
+            # leaves their (expensive) context cache alone.
+            from abel.services.feature_prep_service import FeaturePrepService, PrepConfig  # noqa: PLC0415
+            pose_schema_current = not reused_pose_jobs
+            # Context is far too slow to refresh silently here, so point the user
+            # at the Features tab, which rebuilds only what is stale.
+            if use_video_features and reused_pose_jobs and FeaturePrepService._context_changed(
+                self._project_root, FeaturePrepService.keypoint_aliases(self._project_root),
+                PrepConfig(flow_temporal_stride=int(self._flow_temporal_stride.value())),
+            ):
+                _progress(
+                    current_step,
+                    total_steps,
+                    (
+                        "⚠ Cached video-context features were built with older settings or "
+                        "formulas than the sessions being added now. Run Features → Extract "
+                        "to rebuild them so every session is computed the same way."
+                    ),
+                    "Cached context features are out of date",
+                    0.0,
+                )
+            if reused_pose_jobs and FeaturePrepService.pose_cache_stale(self._project_root):
+                _progress(
+                    current_step,
+                    total_steps,
+                    (
+                        f"Pose feature format changed — refreshing pose features for "
+                        f"{len(reused_pose_jobs)} cached session(s) so every session "
+                        "shares one column set (video context cache is kept)."
+                    ),
+                    "Refreshing cached pose features…",
+                    0.0,
+                )
+                for _sid, _subject, _pose_path, _fps in reused_pose_jobs:
+                    _check_cancel()
+                    PoseProcessingService().extract_and_save_frame_pose_features(
+                        project_root=self._project_root,
+                        pose_path=_pose_path,
+                        fps=_fps,
+                        animal_id=_subject,
+                        session_id=_sid,
+                        video_id=_sid,
+                        keypoint_aliases=kp_aliases,
+                    )
+                pose_schema_current = True
+
             def _process_one_session(job: tuple[int, str, str, Path, Path, float]) -> tuple[int, str, float]:
                 job_index, session_id, subject_id, video_path, pose_path, fps = job
                 step_started = time.monotonic()
@@ -6685,6 +6741,12 @@ class ActiveLearningTab(QWidget):
                         f"Processed session {done_count}/{len(session_jobs)}: {session_id}",
                         duration,
                     )
+            if pose_schema_current:
+                # Every session's pose parquet now matches the current schema.
+                try:
+                    FeaturePrepService.record_pose_signature(self._project_root)
+                except Exception as _sig_exc:
+                    logger.warning("Could not record pose cache signature: %s", _sig_exc)
             _preproc_wall = time.monotonic() - _preproc_wall_start
             if _preproc_wall > 0.5:
                 step_timings.append(("Session Preprocessing", _preproc_wall))

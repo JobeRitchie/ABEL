@@ -536,6 +536,15 @@ class ValidationOverviewPanel(QWidget):
         )
         self._loso_btn.clicked.connect(self._run_loso)
 
+        self.session_quality_btn = QPushButton("Session Quality…")
+        self.session_quality_btn.setToolTip(
+            "Flag sessions whose model output looks abnormal — unusually low confidence "
+            "or odd bout counts — by comparing each session with others of the same "
+            "type (e.g. acclimation vs acclimation, test vs test).\n\n"
+            "Uses the inference traces and bout thresholds from Temporal → Review. "
+            "Flagged sessions' top-confidence windows can be sent to Clip Review."
+        )
+
         top = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
@@ -544,6 +553,7 @@ class ValidationOverviewPanel(QWidget):
         # Stretch factor rather than a spacer: the subtitle wraps, so it must be
         # given the spare width instead of being squeezed to its minimum beside it.
         top.addLayout(title_box, 1)
+        top.addWidget(self.session_quality_btn)
         top.addWidget(self._loso_btn)
         top.addWidget(self._refresh_btn)
 
@@ -2293,6 +2303,10 @@ class BehaviorGridPanel(QWidget):
 class ValidationTab(QWidget):
     """Top-level Validation tab hosting Overview / Quiz / Results / Grid / Feature Audit subtabs."""
 
+    # The inspector runs on Temporal Review's loaded traces, so the main window
+    # routes this to that tab rather than duplicating its loading here.
+    session_quality_requested = Signal()
+
     def __init__(
         self,
         service: ValidationService,
@@ -2327,6 +2341,9 @@ class ValidationTab(QWidget):
         self.quiz_panel.answers_changed.connect(self.results_panel.refresh)
         # If a test is deleted from Results, the quiz may have it open — reload it.
         self.results_panel.run_deleted.connect(self.quiz_panel.reload)
+        self.overview_panel.session_quality_btn.clicked.connect(
+            lambda _checked=False: self.session_quality_requested.emit()
+        )
 
     def set_project(self, project_root: Path) -> None:
         self._project_root = Path(project_root)

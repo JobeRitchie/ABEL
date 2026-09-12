@@ -1,6 +1,6 @@
-"""Regenerate readme.txt as a plain-text mirror of README.md.
+"""Regenerate docs/readme.txt as a plain-text mirror of README.md.
 
-readme.txt carries the same content as README.md so there is one source of
+docs/readme.txt carries the same content as README.md so there is one source of
 truth: edit README.md, then run this script.
 
     python scripts/generate_readme_txt.py
@@ -13,7 +13,7 @@ WRAP = dict(break_on_hyphens=False, break_long_words=False)
 
 _ROOT = Path(__file__).resolve().parent.parent
 SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else _ROOT / "README.md"
-DST = Path(sys.argv[2]) if len(sys.argv) > 2 else _ROOT / "readme.txt"
+DST = Path(sys.argv[2]) if len(sys.argv) > 2 else _ROOT / "docs" / "readme.txt"
 W = 78
 
 # Plain-text mirror stays ASCII so it renders in any editor/console.

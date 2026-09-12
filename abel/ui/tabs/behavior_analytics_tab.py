@@ -18179,18 +18179,19 @@ class _SessionSectionsWidget(QWidget):
         checked_bids = set(self._checked_behavior_ids())
         checked_sessions = self._host._summary_tab._checked_subjects()
         rows: list[dict] = []
+        bid_names: dict[str, str] = {}
 
         for bid, df in raw_bouts.items():
             if bid not in checked_bids:
                 continue
+            bname = bid
+            if "behavior" in df.columns and len(df) > 0:
+                bname = str(df["behavior"].iloc[0])
+            bid_names[bid] = bname
             if df.empty or not {"session_id", "start_frame", "end_frame"}.issubset(
                 df.columns
             ):
                 continue
-
-            bname = bid
-            if "behavior" in df.columns and len(df) > 0:
-                bname = str(df["behavior"].iloc[0])
 
             for sid, grp in df.groupby("session_id"):
                 sid_str = str(sid)
@@ -18224,6 +18225,36 @@ class _SessionSectionsWidget(QWidget):
                             "pct_time": pct_time,
                         }
                     )
+
+        # A scored (session, behavior) pair with no bouts is a real zero in
+        # every section.  Without these rows the subject vanished from the
+        # chart and group means averaged only the subjects that did the
+        # behavior.  Pairs absent from the summary were never scored and stay
+        # out (blank), so they are still not mistaken for zeros.
+        seen = {(r["session_id"], r["behavior_id"]) for r in rows}
+        for srow in self._host._summary_rows:
+            bid = str(srow.get("behavior_id", ""))
+            sid_str = str(srow.get("session_id", ""))
+            if bid not in bid_names or (sid_str, bid) in seen:
+                continue
+            sess_label = self._host._session_label_by_session.get(sid_str, sid_str)
+            if checked_sessions and sess_label not in checked_sessions:
+                continue
+            seen.add((sid_str, bid))
+            for _s0, _s1, sec_name, sec_idx in boundaries:
+                rows.append(
+                    {
+                        "session_id": sid_str,
+                        "session_label": sess_label,
+                        "behavior_id": bid,
+                        "behavior": bid_names[bid],
+                        "section_idx": sec_idx,
+                        "section_name": sec_name,
+                        "n_bouts": 0,
+                        "duration_s": 0.0,
+                        "pct_time": 0.0,
+                    }
+                )
 
         return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -19505,12 +19536,53 @@ class _SessionSectionsWidget(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "Export Failed", str(exc))
 
+    # Exported metrics in chart-button order: (data column, label).
+    _EXPORT_METRICS = (
+        ("n_bouts", "Bout Count"),
+        ("duration_s", "Duration (s)"),
+        ("pct_time", "% Time"),
+    )
+
     def _export_data(self) -> None:
+        """Export the section data as an Excel workbook (or a long CSV).
+
+        The workbook opens on one Prism-ready sheet per metric — rows are
+        sections in timeline order, columns are subjects, one block per
+        behavior — followed by the long table and a README describing the
+        layout and the view settings that produced it.
+        """
+        prepared = self._prepare_export_frame()
+        if prepared is None:
+            return
+        df, sections = prepared
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Section Data", "",
+            "Excel Workbook (*.xlsx);;CSV - long format (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            long_df = self._long_export_table(df)
+            if path.lower().endswith(".csv"):
+                long_df.to_csv(path, index=False, encoding="utf-8-sig")
+            else:
+                if not path.lower().endswith(".xlsx"):
+                    path += ".xlsx"
+                self._write_export_workbook(path, df, sections, long_df)
+            self._host._status.setText(f"Exported section data to {path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", str(exc))
+
+    def _prepare_export_frame(
+        self,
+    ) -> "tuple[pd.DataFrame, list[tuple[str, float]]] | None":
+        """Section rows filtered exactly as the chart shows them, or None."""
         sections = self._get_sections()
         df = self._compute_section_data()
         if df.empty or not sections:
             QMessageBox.information(self, "No Data", "No section data to export.")
-            return
+            return None
 
         # Keep export aligned with the current chart view.
         if self._get_aggregate() == "type":
@@ -19539,60 +19611,246 @@ class _SessionSectionsWidget(QWidget):
                 "No Data",
                 "No rows remain after applying current section/group filters.",
             )
-            return
+            return None
+        return df, sections
 
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Section Data", "", "CSV (*.csv)"
+    def _long_export_table(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        """One row per (session, behavior, section) with spreadsheet headers."""
+        out = df.copy()
+
+        # Human-friendly fields for copy/paste workflows.
+        out["section_type"] = out["section_name"].apply(self._section_base_type)
+        out["section_order"] = out.get("section_idx", 0).astype(int) + 1
+
+        keep_cols = [
+            "session_label",
+            "group",
+            "behavior",
+            "section_name",
+            "section_type",
+            "section_order",
+            "n_bouts",
+            "duration_s",
+            "pct_time",
+        ]
+        keep_cols = [c for c in keep_cols if c in out.columns]
+        out = out[keep_cols]
+
+        # Stable sort for spreadsheet readability.
+        sort_cols = [c for c in ["group", "session_label", "behavior", "section_order"] if c in out.columns]
+        if sort_cols:
+            out = out.sort_values(sort_cols, kind="stable")
+
+        # Rename to spreadsheet-friendly headers.
+        out = out.rename(columns={
+            "session_label": "Session",
+            "group": "Group",
+            "behavior": "Behavior",
+            "section_name": "Section",
+            "section_type": "Section Type",
+            "section_order": "Section Order",
+            "n_bouts": "Avg Bout Count",
+            "duration_s": "Avg Duration (s)",
+            "pct_time": "Avg % Time In Section",
+        })
+
+        # Light rounding keeps precision while avoiding noisy floats.
+        for col in ["Avg Bout Count", "Avg Duration (s)", "Avg % Time In Section"]:
+            if col in out.columns:
+                out[col] = out[col].astype(float).round(4)
+
+        # Stamp the ROI scope so an in-zone export is never mistaken for
+        # whole-arena data once it leaves the app.
+        if self._host._roi_scope_zone > 0:
+            out.insert(0, "ROI Scope", self._host.roi_scope_label())
+        return out
+
+    def _export_subject_slots(
+        self, df: "pd.DataFrame"
+    ) -> list[tuple[str, str | None]]:
+        """One ``(group, subject)`` per Prism column; ``None`` marks padding.
+
+        Subjects follow the roster order.  In group mode they are blocked by
+        group (level order) and every group is padded to the largest group's
+        size: Prism assigns replicate subcolumns positionally on paste, so a
+        short group would shift every group after it one column left.
+        """
+        present = set(df["session_label"].astype(str))
+        roster = [s for s in self._host.ordered_session_labels() if s in present]
+        roster += sorted(present - set(roster))
+        if "group" not in df.columns:
+            return [("", s) for s in roster]
+
+        group_of = (
+            df.drop_duplicates("session_label")
+            .set_index("session_label")["group"]
+            .astype(str)
+            .to_dict()
         )
-        if not path:
-            return
-        try:
-            out = df.copy()
+        groups = self._host._ordered_group_list(
+            set(group_of.values()),
+            self._host._split_factors_for_controls(self._ss_facet_controls),
+        )
+        members = {g: [s for s in roster if group_of.get(s) == g] for g in groups}
+        width = max((len(m) for m in members.values()), default=0)
+        slots: list[tuple[str, str | None]] = []
+        for g in groups:
+            slots += [(g, s) for s in members[g]]
+            slots += [(g, None)] * (width - len(members[g]))
+        return slots
 
-            # Human-friendly fields for copy/paste workflows.
-            out["section_type"] = out["section_name"].apply(self._section_base_type)
-            out["section_order"] = out.get("section_idx", 0).astype(int) + 1
+    @classmethod
+    def _prism_section_table(
+        cls,
+        beh_df: "pd.DataFrame",
+        metric: str,
+        section_names: list[str],
+        slots: list[tuple[str, str | None]],
+    ) -> "pd.DataFrame":
+        """Rows = sections in timeline order, one column per subject slot.
 
-            keep_cols = [
-                "session_label",
-                "group",
-                "behavior",
-                "section_name",
-                "section_type",
-                "section_order",
-                "n_bouts",
-                "duration_s",
-                "pct_time",
+        Values come from the same pivot the chart draws from.  A subject with
+        no rows for this behavior (never scored) and padding slots stay NaN,
+        which the workbook writes as a blank cell rather than a zero.
+        """
+        rows = list(dict.fromkeys(section_names))
+        piv = cls._section_pivot(beh_df, metric, section_names)
+        cols: dict[int, "np.ndarray"] = {}
+        for j, (_grp, subj) in enumerate(slots):
+            if subj is not None and subj in piv.index:
+                cols[j] = piv.loc[subj].reindex(rows).to_numpy(dtype=float)
+            else:
+                cols[j] = np.full(len(rows), np.nan)
+        return pd.DataFrame(cols, index=rows, columns=range(len(slots))).round(4)
+
+    def _write_export_workbook(
+        self,
+        path: str,
+        df: "pd.DataFrame",
+        sections: list[tuple[str, float]],
+        long_df: "pd.DataFrame",
+    ) -> None:
+        from openpyxl.styles import Font
+
+        bold = Font(bold=True)
+        section_names = [n for n, _ in sections]
+        slots = self._export_subject_slots(df)
+        grouped = any(g for g, _ in slots)
+        scope = (
+            self._host.roi_scope_label() if self._host._roi_scope_zone > 0 else ""
+        )
+        # Behaviors in the selector's order, the order the chart lists them.
+        present_bids = set(df["behavior_id"].astype(str))
+        bid_order = [b for b in self._checked_behavior_ids() if b in present_bids]
+        bid_order += sorted(present_bids - set(bid_order))
+        bid_name = (
+            df.drop_duplicates("behavior_id")
+            .set_index("behavior_id")["behavior"]
+            .astype(str)
+            .to_dict()
+        )
+        # The chart's metric opens first.
+        chart_metric = self._get_metric()
+        metrics = sorted(self._EXPORT_METRICS, key=lambda m: m[0] != chart_metric)
+        name_w = max([len("Section")] + [len(str(n)) for n in section_names])
+
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            for key, label in metrics:
+                ws = writer.book.create_sheet(f"Prism - {label}")
+                ws.column_dimensions["A"].width = min(name_w + 2, 60)
+                r = 1
+                for bid in bid_order:
+                    table = self._prism_section_table(
+                        df[df["behavior_id"].astype(str) == bid],
+                        key, section_names, slots,
+                    )
+                    title = f"{bid_name.get(bid, bid)} - {label}"
+                    if scope:
+                        title += f" [{scope}]"
+                    ws.cell(row=r, column=1, value=title).font = bold
+                    r += 1
+                    if grouped:
+                        ws.cell(row=r, column=1, value="Group").font = bold
+                        prev = None
+                        for j, (g, _s) in enumerate(slots, start=2):
+                            if g != prev:
+                                ws.cell(row=r, column=j, value=g).font = bold
+                                prev = g
+                        r += 1
+                    ws.cell(row=r, column=1, value="Section").font = bold
+                    for j, (_g, s) in enumerate(slots, start=2):
+                        if s is not None:
+                            ws.cell(row=r, column=j, value=s).font = bold
+                    r += 1
+                    for sec, vals in zip(table.index, table.to_numpy(dtype=float)):
+                        ws.cell(row=r, column=1, value=str(sec))
+                        for j, v in enumerate(vals, start=2):
+                            if np.isfinite(v):
+                                ws.cell(row=r, column=j, value=float(v))
+                        r += 1
+                    r += 1  # blank row between behavior blocks
+
+            long_df.to_excel(writer, sheet_name="Long Format", index=False)
+
+            readme = writer.book.create_sheet("README")
+            readme.column_dimensions["A"].width = 110
+            for i, line in enumerate(
+                self._export_readme_lines(slots, grouped, scope), start=1
+            ):
+                readme.cell(row=i, column=1, value=line)
+
+    def _export_readme_lines(
+        self, slots: list[tuple[str, str | None]], grouped: bool, scope: str
+    ) -> list[str]:
+        n_subjects = sum(1 for _g, s in slots if s is not None)
+        lines = [
+            "Session Sections export",
+            "",
+            "Prism sheets (one per metric): one block per behavior. "
+            "Rows = sections in timeline order, columns = subjects.",
+        ]
+        if grouped:
+            n_groups = len(dict.fromkeys(g for g, _s in slots))
+            width = len(slots) // max(n_groups, 1)
+            lines += [
+                f"Columns are blocked by group ({n_groups} groups). Every group "
+                f"is padded to {width} columns with blanks so pasted groups "
+                "line up.",
+                f"In Prism: New Grouped table, 'Enter {width} replicate values "
+                "in side-by-side subcolumns'. Copy a block from its first "
+                "section row (Section column through the last column) and "
+                "paste into the first row-title cell.",
             ]
-            keep_cols = [c for c in keep_cols if c in out.columns]
-            out = out[keep_cols]
-
-            # Stable sort for spreadsheet readability.
-            sort_cols = [c for c in ["group", "session_label", "behavior", "section_order"] if c in out.columns]
-            if sort_cols:
-                out = out.sort_values(sort_cols, kind="stable")
-
-            # Rename to spreadsheet-friendly headers.
-            out = out.rename(columns={
-                "session_label": "Session",
-                "group": "Group",
-                "behavior": "Behavior",
-                "section_name": "Section",
-                "section_type": "Section Type",
-                "section_order": "Section Order",
-                "n_bouts": "Avg Bout Count",
-                "duration_s": "Avg Duration (s)",
-                "pct_time": "Avg % Time In Section",
-            })
-
-            # Light rounding keeps precision while avoiding noisy floats.
-            for col in ["Avg Bout Count", "Avg Duration (s)", "Avg % Time In Section"]:
-                if col in out.columns:
-                    out[col] = out[col].astype(float).round(4)
-
-            out.to_csv(path, index=False)
-        except Exception as exc:
-            QMessageBox.warning(self, "Export Failed", str(exc))
+        else:
+            lines += [
+                f"{n_subjects} subjects, one per column.",
+                f"In Prism: New Grouped table, 'Enter {n_subjects} replicate "
+                "values in side-by-side subcolumns' (one data set; Prism plots "
+                "the mean and error), or one data set per subject. Copy a "
+                "block from its first section row and paste into the first "
+                "row-title cell.",
+            ]
+        lines += [
+            "",
+            "0 = the subject was scored for that behavior but had no bouts in "
+            "the section. Blank = not scored for that behavior, or padding.",
+            "Long Format sheet: the same values, one row per subject x "
+            "behavior x section.",
+            "",
+            "View settings",
+            "Aggregate: "
+            + ("By Trial Type (each value is the subject's mean across that "
+               "type's sections)" if self._get_aggregate() == "type"
+               else "By Section"),
+        ]
+        if self._get_aggregate() == "section" and self._bin_sections_chk.isChecked():
+            lines.append(
+                f"Section binning: {int(self._bin_size_spin.value())} sections "
+                "per bin (each value is the subject's mean across the bin)"
+            )
+        lines.append("Mode: " + ("By Group" if grouped else "Individual Sessions"))
+        lines.append("ROI scope: " + (scope or "Whole arena"))
+        return lines
 
 
 # ======================================================================

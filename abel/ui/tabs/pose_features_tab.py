@@ -73,6 +73,24 @@ from abel.utils.error_text import format_task_error
 # Features tab has always done, before the heavier Active-Learning prep stages.
 STAGE_KINEMATICS = "kinematics"
 
+# Shared with the ROI tab, which edits the same project setting.
+LOCAL_RADIUS_TOOLTIP = (
+    "Half-width of the square window that follows the animal — one centred on the "
+    "body centroid, one on the nose — for the local surface-motion features "
+    "(background-subtraction foreground fraction, frame-to-frame pixel change, "
+    "pixel variance).\n\n"
+    "Background subtraction runs only inside that window, never on the whole "
+    "frame. The MOG2 model is fed the moving crop, so its 'background' is the "
+    "recent (~200-frame) appearance of the area around the animal, and "
+    "'foreground' means that local patch changed — body movement or disturbed "
+    "bedding — not simply that the animal is present. Near the frame edge the "
+    "window keeps its size (border pixels are repeated), and through tracking "
+    "dropouts it stays at the last tracked position.\n\n"
+    "Larger values take in more of the surrounding floor. Paw/nose optical-flow "
+    "patches use their own small fixed windows and are not affected. Changing "
+    "this rebuilds context features."
+)
+
 
 class _SignalPrepObserver:
     """Bridges :class:`FeaturePrepService` progress (worker thread) to the tab's
@@ -85,8 +103,8 @@ class _SignalPrepObserver:
     def stage_start(self, key: str, label: str, total_units: int) -> None:
         self._tab._prep_stage_start.emit(key, label, int(total_units))
 
-    def stage_advance(self, key: str, done_units: int, message: str) -> None:
-        self._tab._prep_stage_advance.emit(key, int(done_units), message)
+    def stage_advance(self, key: str, done_units: float, message: str) -> None:
+        self._tab._prep_stage_advance.emit(key, float(done_units), message)
 
     def stage_done(self, key: str) -> None:
         self._tab._prep_stage_done.emit(key)
@@ -110,7 +128,7 @@ class PoseFeaturesTab(QWidget):
     # Structured prep-progress signals — emitted from the worker thread and
     # delivered (queued) to GUI-thread slots that drive the timeline + panel.
     _prep_stage_start = Signal(str, str, int)   # (key, label, total_units)
-    _prep_stage_advance = Signal(str, int, str)  # (key, done_units, message)
+    _prep_stage_advance = Signal(str, float, str)  # (key, done_units, message)
     _prep_stage_done = Signal(str)               # (key)
     _prep_stage_skip = Signal(str, str)          # (key, message)
     _prep_log = Signal(str)                      # (message)
@@ -147,7 +165,7 @@ class PoseFeaturesTab(QWidget):
         self._prep_stage_advance.connect(self._on_prep_stage_advance)
         self._prep_stage_done.connect(self._on_prep_stage_done)
         self._prep_stage_skip.connect(self._on_prep_stage_skip)
-        self._prep_log.connect(self._append_log)
+        self._prep_log.connect(self._on_prep_log)
 
         # ── No-project placeholder ──────────────────────────────────────
         self._no_project = QLabel(
@@ -361,11 +379,7 @@ class PoseFeaturesTab(QWidget):
         self._local_radius.setRange(8, 2048)
         self._local_radius.setSingleStep(4)
         self._local_radius.setValue(36)
-        self._local_radius.setToolTip(
-            "Pixel radius around each tracked body part used for local optical-flow "
-            "and substrate-motion calculations.  Larger values capture a wider "
-            "neighbourhood around the animal."
-        )
+        self._local_radius.setToolTip(LOCAL_RADIUS_TOOLTIP)
         self._local_radius.valueChanged.connect(self._update_motion_area_preview)
         motion_form.addRow("Local radius (px):", self._local_radius)
 
@@ -471,12 +485,12 @@ class PoseFeaturesTab(QWidget):
         )
 
         self._feat_spine_curvature = QCheckBox("Spine curvature (requires 3+ midline keypoints)")
-        self._feat_spine_curvature.setChecked(False)
+        self._feat_spine_curvature.setChecked(True)
         self._feat_spine_curvature.setToolTip(
             "Estimates spine curvature from the mean angular change along ordered midline\n"
             "keypoints (nose → spine1 → spine2 → … → tail_base).\n"
-            "Returns zeros / empty when fewer than 3 midline keypoints are present.\n"
-            "Useful for models that track spine1/spine2 explicitly."
+            "No column is added when fewer than 3 midline keypoints are present,\n"
+            "so it is safe to leave on. Changing this rebuilds pose features."
         )
 
         for cb in (self._feat_egocentric, self._feat_body_length_norm, self._feat_relative_geometry,
@@ -845,7 +859,11 @@ class PoseFeaturesTab(QWidget):
         """Update the label showing the local motion area relative to video resolution."""
         radius = self._local_radius.value()
         diameter = radius * 2
-        lines: list[str] = [f"Sampling area: {diameter} \u00d7 {diameter} px ({diameter**2:,} px\u00b2)"]
+        lines: list[str] = [
+            f"Sampling area: {diameter} \u00d7 {diameter} px ({diameter**2:,} px\u00b2) square "
+            "around body centre and nose. Background subtraction runs inside "
+            "this window only, not the whole frame."
+        ]
 
         if self._manifest:
             for v in self._manifest.videos:
@@ -1332,6 +1350,7 @@ class PoseFeaturesTab(QWidget):
         ]
         self._timeline = RunTimeline(stages, history=self._load_timeline_history())
         self._prep_panel.set_stages([(s.key, s.label) for s in stages])
+        self._prep_panel.set_activity("")
         self._prep_panel.set_snapshot_provider(
             lambda: self._timeline.snapshot() if self._timeline else None
         )
@@ -1444,6 +1463,7 @@ class PoseFeaturesTab(QWidget):
     def _finish_prep_ui(self, status: str) -> None:
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
+        self._prep_panel.set_activity("")
         self._refresh_prep_panel()
         self._prep_panel.stop()
         self._progress.setFormat(status)
@@ -1500,17 +1520,28 @@ class PoseFeaturesTab(QWidget):
             self._timeline.start_stage(key, total_units=total_units)
             self._refresh_prep_panel()
 
-    @Slot(str, int, str)
-    def _on_prep_stage_advance(self, key: str, done_units: int, message: str) -> None:
+    @Slot(str, float, str)
+    def _on_prep_stage_advance(self, key: str, done_units: float, message: str) -> None:
         if self._timeline is not None:
             self._timeline.advance(key, done_units)
             self._refresh_prep_panel()
+        if message:
+            # Every completed session and video chunk is logged; without this
+            # a long session showed nothing between "Preprocessing N session(s)"
+            # and the end of the stage, which looked like a hang.
+            self._append_log(message)
+            self._prep_panel.set_activity(message.strip())
 
     @Slot(str)
     def _on_prep_stage_done(self, key: str) -> None:
         if self._timeline is not None:
             self._timeline.complete_stage(key)
             self._refresh_prep_panel()
+
+    @Slot(str)
+    def _on_prep_log(self, message: str) -> None:
+        self._append_log(message)
+        self._prep_panel.set_activity(message.strip())
 
     @Slot(str, str)
     def _on_prep_stage_skip(self, key: str, message: str) -> None:

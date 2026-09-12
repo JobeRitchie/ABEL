@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -194,22 +193,6 @@ def _overlay_pose(
             cv2.circle(canvas, (bx, by), radius + 1, (0, 0, 0), 1)  # outline
 
 
-def _crop_box_static(
-    gray: np.ndarray, x: float, y: float, radius: int = 12,
-) -> np.ndarray:
-    """Extract a square crop from *gray* centred at (*x*, *y*)."""
-    if not (np.isfinite(x) and np.isfinite(y)):
-        return np.zeros((1, 1), dtype=gray.dtype)
-    h, w = gray.shape[:2]
-    x0 = max(0, int(x) - radius)
-    x1 = min(w, int(x) + radius)
-    y0 = max(0, int(y) - radius)
-    y1 = min(h, int(y) + radius)
-    if x1 <= x0 or y1 <= y0:
-        return np.zeros((1, 1), dtype=gray.dtype)
-    return gray[y0:y1, x0:x1]
-
-
 def _render_graph_strip(
     traces: dict[str, np.ndarray],
     visible_keys: set[str],
@@ -285,7 +268,6 @@ def render_preview_frames(
     cancel_flag: list[bool],
     local_radius_px: int = 0,
     fps: float = 30.0,
-    mog2_var_threshold: int = 16,
     extra_raw: list[PoseData] | None = None,
     extra_smooth: list[PoseData] | None = None,
 ) -> PreviewResult:
@@ -447,27 +429,51 @@ def render_preview_frames(
     fl_l_spd = _part_speed(fl_l_idx) if fl_l_idx is not None else np.zeros(end_frame - start_frame)
     fl_r_spd = _part_speed(fl_r_idx) if fl_r_idx is not None else np.zeros(end_frame - start_frame)
 
-    # ── MOG2 background subtractor (full-frame) ──────────────────────
-    _DS = 2
-    fg_sub = cv2.createBackgroundSubtractorMOG2(
-        history=300, varThreshold=mog2_var_threshold, detectShadows=False,
+    # ── Nose-window video context, computed as extraction computes it ──
+    # Same moving fixed-size window, spatial downsample and MOG2 settings as
+    # ContextFeatureService, so these traces are the extracted
+    # nose_surface_energy / _change / _var for the current smoothing.
+    from abel.services.context_feature_service import (  # noqa: PLC0415
+        MOG2_HISTORY,
+        MOG2_VAR_THRESHOLD,
+        MOG2_WARMUP_FRAMES,
+        ContextFeatureConfig,
+        ContextFeatureService,
     )
 
-    _MOG2_WARMUP = 80
-    warmup_start = max(0, start_frame - _MOG2_WARMUP)
+    try:
+        _ds, _, _ = ContextFeatureService._resolve_downsample_factor(
+            Path(video_path), ContextFeatureConfig()
+        )
+    except Exception:
+        _ds = 1
+    _ds = max(1, int(_ds))
+    ds_radius = max(4, radius // _ds) if _ds > 1 else radius
+    nose_lx, nose_ly = ContextFeatureService._hold_last_position(
+        sm_x[:, nose_idx].astype(np.float64) / _ds,
+        sm_y[:, nose_idx].astype(np.float64) / _ds,
+    )
+
+    def _ds_gray(g: np.ndarray) -> np.ndarray:
+        if _ds <= 1:
+            return g
+        return cv2.resize(g, (g.shape[1] // _ds, g.shape[0] // _ds), interpolation=cv2.INTER_AREA)
+
+    def _nose_window(g_ds: np.ndarray, fi: int) -> np.ndarray:
+        return ContextFeatureService._local_crop(g_ds, nose_lx[fi], nose_ly[fi], ds_radius)
+
+    fg_sub = cv2.createBackgroundSubtractorMOG2(
+        history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False,
+    )
+    warmup_start = max(0, start_frame - MOG2_WARMUP_FRAMES)
     cap.set(cv2.CAP_PROP_POS_FRAMES, warmup_start)
-    prev_gray: np.ndarray | None = None
+    prev_window: np.ndarray | None = None
     for wf in range(warmup_start, start_frame):
         ok, wframe = cap.read()
         if not ok or wf >= smooth_pose.n_frames:
             break
-        wgray = cv2.cvtColor(wframe, cv2.COLOR_BGR2GRAY)
-        wgray_ds = cv2.resize(
-            wgray, (wgray.shape[1] // _DS, wgray.shape[0] // _DS),
-            interpolation=cv2.INTER_AREA,
-        )
-        fg_sub.apply(wgray_ds, learningRate=0.01)
-        prev_gray = wgray
+        prev_window = _nose_window(_ds_gray(cv2.cvtColor(wframe, cv2.COLOR_BGR2GRAY)), wf)
+        fg_sub.apply(prev_window)
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, float(start_frame))
 
@@ -499,49 +505,20 @@ def render_preview_frames(
         scaled_radius = max(1, int(radius * scale)) if radius > 0 else 0
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_ds = cv2.resize(
-            gray, (gray.shape[1] // _DS, gray.shape[0] // _DS),
-            interpolation=cv2.INTER_AREA,
-        )
 
-        # ── Full-frame MOG2 then crop around nose ────────────────────
-        fgmask_full = fg_sub.apply(gray_ds, learningRate=0.005)
-        ncx, ncy = float(sm_x[fi, nose_idx]), float(sm_y[fi, nose_idx])
-        if not (np.isfinite(ncx) and np.isfinite(ncy)):
-            # Primary nose undetected this frame (animal absent). Fall back to the
-            # primary centroid, then any present animal's centroid, then the frame
-            # centre — so the nose-energy trace/inset stay defined without crashing.
-            cand = [(sm_cx[fi], sm_cy[fi])]
-            cand += [(ex["sm_cx"][fi], ex["sm_cy"][fi]) for ex in extras if fi < ex["n"]]
-            ncx, ncy = next(
-                ((cx, cy) for cx, cy in cand if np.isfinite(cx) and np.isfinite(cy)),
-                (w_src / 2.0, h_src / 2.0),
-            )
-        ds_ncx, ds_ncy = ncx / _DS, ncy / _DS
-        ds_radius = max(4, radius // _DS)
-        nose_fgmask = _crop_box_static(fgmask_full, ds_ncx, ds_ncy, ds_radius)
-
+        # ── Nose window: MOG2 energy, pixel change, pixel variance ────
+        window = _nose_window(_ds_gray(gray), fi)
+        nose_fgmask = fg_sub.apply(window)
+        window_f = window.astype(np.float32)
         nose_energy_arr.append(float(np.mean(nose_fgmask.astype(np.float32)) / 255.0))
-
-        # Pixel change and variance near the nose
-        nose_crop_gray = _crop_box_static(gray, ncx, ncy, radius)
-        nose_var_arr.append(float(np.var(nose_crop_gray.astype(np.float32))))
-
-        if prev_gray is not None:
-            prev_nose_crop = _crop_box_static(prev_gray, ncx, ncy, radius)
-            hn = min(prev_nose_crop.shape[0], nose_crop_gray.shape[0])
-            wn = min(prev_nose_crop.shape[1], nose_crop_gray.shape[1])
-            if hn > 0 and wn > 0:
-                nose_diff = cv2.absdiff(
-                    nose_crop_gray[:hn, :wn].astype(np.float32),
-                    prev_nose_crop[:hn, :wn].astype(np.float32),
-                )
-                nose_change_arr.append(float(np.mean(nose_diff) / 255.0))
-            else:
-                nose_change_arr.append(0.0)
-        else:
+        nose_var_arr.append(float(np.var(window_f)))
+        if prev_window is None:
             nose_change_arr.append(0.0)
-        prev_gray = gray
+        else:
+            nose_change_arr.append(
+                float(np.mean(cv2.absdiff(window_f, prev_window.astype(np.float32))) / 255.0)
+            )
+        prev_window = window
 
         # ── Build display panes ──────────────────────────────────────
         left = cv2.resize(frame, (new_w, target_height), interpolation=cv2.INTER_LINEAR)
@@ -580,27 +557,29 @@ def render_preview_frames(
             )
 
         if scaled_radius > 0:
-            h_r, w_r = right.shape[:2]
+            # The two local-motion windows extraction samples: fixed squares
+            # (side 2 x Local radius) on the body centre and on the nose.
             overlay = right.copy()
-            for pi in range(sm_x.shape[1]):
-                conf = float(raw_lk[fi, pi]) if pi < raw_lk.shape[1] else 0.0
-                if conf < smoothing.likelihood_threshold:
+            body_hx, body_hy = ContextFeatureService._hold_last_position(
+                sm_cx[fi:fi + 1], sm_cy[fi:fi + 1]
+            )
+            for wx, wy in ((body_hx[0], body_hy[0]), (nose_lx[fi] * _ds, nose_ly[fi] * _ds)):
+                if not (np.isfinite(wx) and np.isfinite(wy)):
                     continue
-                sx, sy = sm_x[fi, pi], sm_y[fi, pi]
-                if not (np.isfinite(sx) and np.isfinite(sy)):
-                    continue
-                bx = int(sx * scale)
-                by = int(sy * scale)
-                if 0 <= bx < w_r and 0 <= by < h_r:
-                    cv2.circle(overlay, (bx, by), scaled_radius, (120, 200, 255), 1, cv2.LINE_AA)
+                bx, by = int(wx * scale), int(wy * scale)
+                cv2.rectangle(
+                    overlay,
+                    (bx - scaled_radius, by - scaled_radius),
+                    (bx + scaled_radius, by + scaled_radius),
+                    (120, 200, 255), 1, cv2.LINE_AA,
+                )
             cv2.addWeighted(overlay, 0.5, right, 0.5, 0, right)
 
         # ── Background-subtraction inset ─────────────────────────────
-        nx0 = max(0, int(ncy) - radius)
-        nx1 = min(h_src, int(ncy) + radius)
-        ny0 = max(0, int(ncx) - radius)
-        ny1 = min(w_src, int(ncx) + radius)
-        nose_crop_color = frame[nx0:nx1, ny0:ny1]
+        # The same window MOG2 saw, at full resolution, so the mask lines up.
+        nose_crop_color = ContextFeatureService._local_crop(
+            frame, nose_lx[fi] * _ds, nose_ly[fi] * _ds, ds_radius * _ds
+        )
         if nose_crop_color.size > 0 and nose_fgmask.size > 0:
             fg_upscaled = cv2.resize(
                 nose_fgmask,
@@ -740,27 +719,25 @@ class SmoothingPreviewDialog(QDialog):
         self._settings_label.setStyleSheet("padding: 4px; background: #1e2a1e; border-radius: 3px;")
 
         # --- Optional tuning controls ---
-        self._mog2_thresh = QSpinBox()
-        self._mog2_thresh.setRange(4, 100)
-        self._mog2_thresh.setValue(16)
-        self._mog2_thresh.setToolTip(
-            "MOG2 variance threshold \u2014 lower = more sensitive to subtle motion"
-        )
-        self._mog2_thresh.setSuffix("  var")
-        self._mog2_thresh.valueChanged.connect(self._save_mog2_threshold)
-        self._load_mog2_threshold()
         self._visible_traces: set[str] = set(_DEFAULT_TRACE_KEYS)
 
         trace_btn = QPushButton("Select Traces\u2026")
         trace_btn.setToolTip("Choose which dynamics traces appear in the graph strip")
         trace_btn.clicked.connect(self._open_trace_selector)
 
+        # The nose traces reproduce extraction exactly (same window, downsample
+        # and MOG2 settings), so there is deliberately no preview-only knob.
+        bg_note = QLabel(
+            "Nose traces = the extracted nose-window features: background "
+            "subtraction inside the square Local-radius window only."
+        )
+        bg_note.setWordWrap(True)
+        bg_note.setStyleSheet("color: #90A4AE; font-size: 11px;")
+
         tune_row = QHBoxLayout()
-        tune_row.addWidget(QLabel("BG subtract sensitivity:"))
-        tune_row.addWidget(self._mog2_thresh)
-        tune_row.addSpacing(16)
         tune_row.addWidget(trace_btn)
-        tune_row.addStretch()
+        tune_row.addSpacing(16)
+        tune_row.addWidget(bg_note, 1)
 
         self._refresh_settings_label()
 
@@ -832,14 +809,12 @@ class SmoothingPreviewDialog(QDialog):
         s = self._get_smoothing()
         interp = f"yes (max gap {s.interpolate_max_gap} fr)" if s.interpolate_dropouts else "no"
         radius = self._get_local_radius()
-        mog2 = self._mog2_thresh.value()
         self._settings_label.setText(
             f"<b>Current video settings</b> \u2014 "
             f"Smoothing: <b>{s.smoothing_window} frames</b>   |   "
             f"Likelihood: <b>{s.likelihood_threshold:.2f}</b>   |   "
             f"Interpolate: <b>{interp}</b>   |   "
-            f"Local radius: <b>{radius} px</b>   |   "
-            f"BG sensitivity: <b>{mog2}</b>"
+            f"Local radius: <b>{radius} px</b> ({2 * radius}\u00d7{2 * radius} px windows)"
         )
 
     def _pick_random_session(self) -> None:
@@ -854,35 +829,6 @@ class SmoothingPreviewDialog(QDialog):
     def _set_status(self, msg: str) -> None:
         self._status.setText(msg)
 
-    def _save_mog2_threshold(self, _value: int = 0) -> None:
-        """Persist MOG2 variance threshold to project.yaml."""
-        if not self._project_root:
-            return
-        try:
-            from abel.storage.file_store import read_yaml, write_yaml
-            path = self._project_root / "project.yaml"
-            raw = read_yaml(path, {})
-            cfg = raw.setdefault("feature_extraction", {})
-            cfg["mog2_var_threshold"] = self._mog2_thresh.value()
-            write_yaml(path, raw)
-        except Exception:
-            pass
-
-    def _load_mog2_threshold(self) -> None:
-        """Restore MOG2 variance threshold from project.yaml."""
-        if not self._project_root:
-            return
-        try:
-            from abel.storage.file_store import read_yaml
-            raw = read_yaml(self._project_root / "project.yaml", {})
-            cfg = raw.get("feature_extraction") or {}
-            val = cfg.get("mog2_var_threshold")
-            if val is not None:
-                self._mog2_thresh.blockSignals(True)
-                self._mog2_thresh.setValue(int(val))
-                self._mog2_thresh.blockSignals(False)
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------
     # Rendering
@@ -919,7 +865,6 @@ class SmoothingPreviewDialog(QDialog):
 
         smoothing = self._get_smoothing()
         local_radius = self._get_local_radius()
-        mog2_thresh = self._mog2_thresh.value()
 
         # Capture variables for the closure
         _pose_svc = self._pose
@@ -999,7 +944,6 @@ class SmoothingPreviewDialog(QDialog):
                 cancel_flag=_cancel,
                 local_radius_px=local_radius,
                 fps=fps_source,
-                mog2_var_threshold=mog2_thresh,
                 extra_raw=extra_raw,
                 extra_smooth=extra_smooth,
             )

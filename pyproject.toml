@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "abel"
-version = "0.20.0"
+version = "0.21.0"
 description = "ABEL (Active-learning Behavior Estimation and Labeling): local-first desktop app for behavioral modeling, review, and export from DLC-tracked rodent videos."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -55,7 +55,8 @@ all = [
   "hdbscan>=0.8"
 ]
 dev = [
-  "pytest>=8.3"
+  "pytest>=8.3",
+  "pytest-xdist>=3.6"
 ]
 
 [project.scripts]
@@ -74,4 +75,5 @@ include = ["abel*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# Parallel by default; pass ``-n 0`` to run serially (needed for --pdb / -s).
+addopts = "-q -n 8 --dist worksteal"

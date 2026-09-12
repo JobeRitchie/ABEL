@@ -44,7 +44,8 @@ class Stage:
     # ── runtime state ────────────────────────────────────────────────
     started_at: float | None = None
     ended_at: float | None = None
-    done_units: int = 0
+    # Fractional so a unit (e.g. one long session) can report partial progress.
+    done_units: float = 0.0
     skipped: bool = False
 
     @property
@@ -70,7 +71,7 @@ class StageView:
     key: str
     label: str
     state: str  # "pending" | "running" | "done" | "skipped"
-    done_units: int
+    done_units: float
     total_units: int
     elapsed_seconds: float | None
     estimate_seconds: float
@@ -124,21 +125,21 @@ class RunTimeline:
         st = self._stage(key)
         if total_units is not None:
             st.total_units = max(1, int(total_units))
-        st.done_units = 0
+        st.done_units = 0.0
         st.skipped = False
         st.ended_at = None
         st.started_at = self._now_fn()
 
-    def advance(self, key: str, done_units: int | None = None, *, delta: int = 1) -> None:
-        """Update sub-progress within a running stage."""
+    def advance(self, key: str, done_units: float | None = None, *, delta: float = 1) -> None:
+        """Update sub-progress within a running stage (fractional units allowed)."""
         st = self._stage(key)
         if st.started_at is None:
             self.start_stage(key)
         if done_units is not None:
-            st.done_units = int(done_units)
+            st.done_units = float(done_units)
         else:
-            st.done_units += int(delta)
-        st.done_units = max(0, min(st.done_units, st.total_units))
+            st.done_units += float(delta)
+        st.done_units = max(0.0, min(st.done_units, float(st.total_units)))
 
     def complete_stage(self, key: str) -> None:
         st = self._stage(key)

@@ -109,10 +109,8 @@ def test_invalidate_forces_rebuild_for_any_map(tmp_path: Path) -> None:
     assert FeaturePrepService._pose_changed(tmp_path, {"bodypart1": "nose"}) is False
 
 
-def test_legacy_signature_uses_mtime_for_context(tmp_path: Path) -> None:
+def test_context_cache_without_context_signature_rebuilds_once(tmp_path: Path) -> None:
     import json as _json
-    import os as _os
-    import time as _time
     # Simulate an old-format (pose-only) signature file + a context cache.
     sig_dir = tmp_path / "derived" / "pose_features"
     sig_dir.mkdir(parents=True)
@@ -128,11 +126,12 @@ def test_legacy_signature_uses_mtime_for_context(tmp_path: Path) -> None:
     roi = tmp_path / "config" / "environment_rois.yaml"
     roi.write_text("project_rois: {}\n", encoding="utf-8")
 
-    # ROI older than the context cache -> not stale.
-    old = _time.time() - 100
-    _os.utime(roi, (old, old))
-    assert FeaturePrepService._context_changed(tmp_path, {}, _cfg()) is False
-    # ROI newer than the context cache -> stale (the NSF_Jess case).
-    new = _time.time() + 100
-    _os.utime(roi, (new, new))
+    # A cache with no context signature predates the current context formulas
+    # (e.g. fixed-size local windows, context v2), whatever the ROI mtimes.
     assert FeaturePrepService._context_changed(tmp_path, {}, _cfg()) is True
+    # So does a cache with no signature file at all.
+    (sig_dir / ".keypoint_alias_signature.json").unlink()
+    assert FeaturePrepService._context_changed(tmp_path, {}, _cfg()) is True
+    # Recording the signatures makes it current.
+    FeaturePrepService._write_signatures(tmp_path, {}, _cfg())
+    assert FeaturePrepService._context_changed(tmp_path, {}, _cfg()) is False

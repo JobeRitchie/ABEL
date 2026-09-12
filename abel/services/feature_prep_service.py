@@ -68,7 +68,7 @@ class PrepObserver(Protocol):
     """Sink for structured progress.  All methods are optional no-ops."""
 
     def stage_start(self, key: str, label: str, total_units: int) -> None: ...
-    def stage_advance(self, key: str, done_units: int, message: str) -> None: ...
+    def stage_advance(self, key: str, done_units: float, message: str) -> None: ...
     def stage_done(self, key: str) -> None: ...
     def stage_skip(self, key: str, message: str) -> None: ...
     def log(self, message: str) -> None: ...
@@ -76,7 +76,7 @@ class PrepObserver(Protocol):
 
 class _NullObserver:
     def stage_start(self, key: str, label: str, total_units: int) -> None: ...
-    def stage_advance(self, key: str, done_units: int, message: str) -> None: ...
+    def stage_advance(self, key: str, done_units: float, message: str) -> None: ...
     def stage_done(self, key: str) -> None: ...
     def stage_skip(self, key: str, message: str) -> None: ...
     def log(self, message: str) -> None: ...
@@ -224,7 +224,13 @@ class FeaturePrepService:
     #   v3: optional multi-animal interaction (social_*) columns.
     #   v4: social heading-alignment, directed radial-velocity-toward, and
     #       contact-state (in_contact + duration) columns.
-    _POSE_SCHEMA_VERSION = "4"
+    #   v5: spine_curvature on by default (single-animal extraction always uses
+    #       the schema defaults, so every such project gains the column).
+    _POSE_SCHEMA_VERSION = "5"
+    # Same, for context-feature *formulas* (values change, columns may not).
+    #   v2: local surface-motion windows are a fixed size (edge-replicated), so
+    #       MOG2 no longer resets to 100% foreground near the frame edge.
+    _CONTEXT_SCHEMA_VERSION = "2"
 
     @staticmethod
     def _hash(obj: object) -> str:
@@ -241,15 +247,22 @@ class FeaturePrepService:
         # features rebuilds the pose cache (the column set changes), while solo
         # single-animal projects keep the same signature regardless of the flag.
         social = False
+        spine = False
         try:
             from abel.models.schemas import InvariantFeatureConfig  # noqa: PLC0415
-            social = bool(InvariantFeatureConfig.load_from_project(project_root).enable_social_features)
+            inv = InvariantFeatureConfig.load_from_project(project_root)
+            social = bool(inv.enable_social_features)
+            spine = bool(inv.enable_spine_curvature)
         except Exception:
             social = False
+            spine = False
+        # Spine curvature adds a column too, so toggling it must rebuild the
+        # cache or old and new sessions would disagree on the schema.
         return cls._hash({
             "v": cls._POSE_SCHEMA_VERSION,
             "aliases": aliases or {},
             "social": social,
+            "spine": spine,
         })
 
     @classmethod
@@ -262,6 +275,7 @@ class FeaturePrepService:
         except Exception:
             roi_blob = ""
         return cls._hash({
+            "v": cls._CONTEXT_SCHEMA_VERSION,
             "aliases": aliases or {},
             "roi": roi_blob,
             "flow_temporal_stride": int(getattr(config, "flow_temporal_stride", 0) or 0),
@@ -333,30 +347,18 @@ class FeaturePrepService:
     def _context_changed(
         cls, project_root: Path, aliases: dict[str, str], config: "PrepConfig",
     ) -> bool:
-        """True when cached context features were built from different ROIs/renames."""
+        """True when cached context features were built from different ROIs,
+        renames or context-formula version."""
         path = cls._alias_sig_path(project_root)
-        if not path.exists():
-            return False
-        prev = read_json(path, {}) or {}
+        prev = (read_json(path, {}) or {}) if path.exists() else {}
         if "context" not in prev:
-            # Legacy signature predates context tracking.  Fall back to mtimes:
-            # the context cache is stale if the ROI config is newer than it.
-            return cls._roi_newer_than_context_cache(project_root)
+            # No record of how the cache was built (no signature file, or a
+            # legacy pose-only one).  Every such cache predates the current
+            # context formulas, so rebuild it once if there is one.
+            return bool(cls.cached_context_sessions(project_root))
         return str(prev.get("context", "")) != cls._context_signature(
             project_root, aliases, config
         )
-
-    @staticmethod
-    def _roi_newer_than_context_cache(project_root: Path) -> bool:
-        roi_path = project_root / "config" / "environment_rois.yaml"
-        ctx_dir = project_root / "derived" / "context_features" / "sessions"
-        if not roi_path.exists() or not ctx_dir.exists():
-            return False
-        ctx_files = list(ctx_dir.glob("*.parquet"))
-        if not ctx_files:
-            return False
-        newest_ctx = max(f.stat().st_mtime for f in ctx_files)
-        return roi_path.stat().st_mtime > newest_ctx
 
     @classmethod
     def _write_signatures(
@@ -368,6 +370,25 @@ class FeaturePrepService:
             "pose": cls._pose_signature(project_root, aliases),
             "context": cls._context_signature(project_root, aliases, config),
         })
+
+    @classmethod
+    def pose_cache_stale(cls, project_root: Path) -> bool:
+        """True when cached pose features predate the current pose schema/settings."""
+        return cls._pose_changed(project_root, cls.keypoint_aliases(project_root))
+
+    @classmethod
+    def record_pose_signature(cls, project_root: Path) -> None:
+        """Mark the pose cache current, leaving the context signature untouched.
+
+        For callers outside :meth:`prepare` (the Active Learning pipeline) that
+        rebuild every session's pose features but not necessarily context.
+        """
+        path = cls._alias_sig_path(project_root)
+        prev = (read_json(path, {}) or {}) if path.exists() else {}
+        prev.pop("signature", None)
+        prev["pose"] = cls._pose_signature(project_root, cls.keypoint_aliases(project_root))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_json(path, prev)
 
     @classmethod
     def invalidate_caches(cls, project_root: Path) -> None:
@@ -674,6 +695,27 @@ class FeaturePrepService:
             with warn_lock:
                 result.gpu_warnings.append(msg)
 
+        # Per-session fraction of video chunks finished, so a long session
+        # advances the stage (and its ETA) chunk by chunk instead of sitting at
+        # 0/N until the whole video is decoded.
+        progress_lock = threading.Lock()
+        chunk_fracs: dict[str, float] = {}
+        sessions_done = [0]
+
+        def _chunk_progress_for(sid: str):
+            def _cb(chunks_done: int, chunks_total: int, msg: str) -> None:
+                if chunks_done <= 0:
+                    # A chunk *starting* is noise next to its completion, but
+                    # one-off setup notes (drive / downsample) are worth showing.
+                    if chunks_total == 1:
+                        obs.log(f"  {sid}: {msg}")
+                    return
+                with progress_lock:
+                    chunk_fracs[sid] = chunks_done / max(1, chunks_total)
+                    done_units = sessions_done[0] + sum(chunk_fracs.values())
+                obs.stage_advance(STAGE_PREPROCESS, done_units, f"  {sid}: context {msg}")
+            return _cb
+
         def _process_one(job: SessionJob) -> str:
             sid = str(job.session_id)
             animal_key = job.subject_key or job.subject_id or sid
@@ -728,6 +770,7 @@ class FeaturePrepService:
                         session_id=job.session_id,
                         roi_subject_id=job.subject_id,
                         config=ctx_cfg,
+                        progress_cb=_chunk_progress_for(sid),
                         intra_session_workers=plan.intra_session_workers,
                         warning_cb=_collect_warning,
                         keypoint_aliases=aliases,
@@ -742,6 +785,7 @@ class FeaturePrepService:
                         session_id=job.session_id,
                         roi_subject_id=job.subject_id,
                         config=ctx_cfg,
+                        progress_cb=_chunk_progress_for(sid),
                         intra_session_workers=plan.intra_session_workers,
                         warning_cb=_collect_warning,
                         keypoint_aliases=aliases,
@@ -757,8 +801,12 @@ class FeaturePrepService:
                     sid = future.result()
                     done += 1
                     result.n_sessions_processed += 1
+                    with progress_lock:
+                        chunk_fracs.pop(sid, None)
+                        sessions_done[0] = done
+                        done_units = done + sum(chunk_fracs.values())
                     obs.stage_advance(
-                        STAGE_PREPROCESS, done,
+                        STAGE_PREPROCESS, done_units,
                         f"Processed session {done}/{len(jobs)}: {sid}.",
                     )
             except PrepCancelledError:

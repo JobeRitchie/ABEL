@@ -83,7 +83,8 @@ class _StageRow(QWidget):
 
         label = view.label
         if view.total_units > 1 and view.state in ("running", "done"):
-            label = f"{view.label}  ({view.done_units}/{view.total_units})"
+            # Whole units only; the activity line carries sub-unit detail.
+            label = f"{view.label}  ({int(view.done_units)}/{view.total_units})"
         weight = "700" if view.state == "running" else "400"
         self._label.setText(label)
         self._label.setStyleSheet(f"font-size: 12px; color: {color}; font-weight: {weight};")
@@ -158,6 +159,17 @@ class ProgressPanel(QWidget):
         self._stage_box.setSpacing(1)
         layout.addLayout(self._stage_box)
 
+        # Latest sub-stage event (e.g. "chunk 5/16 done"), so a long unit of
+        # work visibly moves between stage-counter updates.  Word-wrapped so a
+        # long session name never sets the panel's minimum width.
+        self._activity = QLabel("")
+        self._activity.setWordWrap(True)
+        self._activity.setStyleSheet(
+            "font-family: Consolas, monospace; font-size: 11px; color: #78909C;"
+        )
+        self._activity.setVisible(False)
+        layout.addWidget(self._activity)
+
         # Repaint the spinner / live clocks even between progress events.
         self._tick = QTimer(self)
         self._tick.setInterval(120)
@@ -187,6 +199,12 @@ class ProgressPanel(QWidget):
             self._rows[key] = row
             self._stage_box.addWidget(row)
 
+    def set_activity(self, text: str) -> None:
+        """Show the most recent fine-grained progress event under the stages."""
+        text = (text or "").strip()
+        self._activity.setText(text)
+        self._activity.setVisible(bool(text))
+
     def update_snapshot(self, snapshot: TimelineSnapshot) -> None:
         """Refresh the whole panel from a timeline snapshot."""
         self._last_snapshot = snapshot
@@ -196,6 +214,7 @@ class ProgressPanel(QWidget):
 
     def reset(self) -> None:
         self._last_snapshot = None
+        self.set_activity("")
         self._bar.setValue(0)
         self._elapsed.setText("—")
         self._remaining.setText("—")

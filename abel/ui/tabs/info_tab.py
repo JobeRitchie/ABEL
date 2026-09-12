@@ -1,7 +1,7 @@
-"""Info tab — app version, in-app updater, and version history.
+"""Info tab — app version, in-app updater, methods documentation, version history.
 
-A sub-notebook keeps the "About & Updates" controls and the "Version History"
-changelog together. Updates are **manual only**: nothing is checked on launch;
+A sub-notebook keeps the "About & Updates" controls, the "Methods" references /
+formulas / write-up helper, and the "Version History" changelog together. Updates are **manual only**: nothing is checked on launch;
 the user clicks *Check for Updates*, and *Install Update* pulls the latest
 version and relaunches the app.
 """
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from abel import __version__
 from abel.changelog import VERSION_DATE, format_changelog
 from abel.services.update_service import UpdateService, UpdateStatus
+from abel.ui.tabs.methods_tab import MethodsTab
 
 logger = logging.getLogger("abel")
 
@@ -79,9 +80,13 @@ class InfoTab(QWidget):
         self._check_worker: _CheckWorker | None = None
         self._pull_worker: _PullWorker | None = None
 
+        # References, formulas and the project-scoped methods write-up helper.
+        self.methods_tab = MethodsTab()
+
         inner = QTabWidget()
         inner.setTabPosition(QTabWidget.TabPosition.North)
         inner.addTab(self._build_about_tab(), "About & Updates")
+        inner.addTab(self.methods_tab, "Methods")
         inner.addTab(self._build_history_tab(), "Version History")
 
         root = QVBoxLayout(self)
@@ -188,11 +193,11 @@ class InfoTab(QWidget):
         layout.addWidget(view, 1)
         return w
 
-    # ── No-op project hook (for main-window lazy-init uniformity) ───────
+    # ── Project hook (main-window lazy init) ─────────────────────────────
 
-    def set_project(self, project_root: Path) -> None:  # noqa: D401
-        """Info is app-global; nothing project-specific to load."""
-        return
+    def set_project(self, project_root: Path) -> None:
+        """Only the Methods write-up is project-scoped; the rest is app-global."""
+        self.methods_tab.set_project(project_root)
 
     # ── Check ──────────────────────────────────────────────────────────
 

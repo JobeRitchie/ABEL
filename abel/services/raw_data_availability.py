@@ -17,12 +17,18 @@ So availability is checked once, centrally, and reported *up front* — see
 (:mod:`abel.ui.raw_data_warning`); headless callers can read the same report.
 
 Checks are existence-only (``Path.exists``), never a read, so a 47-session project
-resolves in milliseconds and an unmounted drive fails fast instead of blocking on
-a network timeout.
+resolves in milliseconds.  A drive letter that is not mapped at all fails fast on
+its own, but a *mapped* network share that is unreachable (VPN down, ``J:`` →
+``\\\\ad.unc.edu\\...``) blocks every ``stat`` for the full SMB timeout — measured
+~158 s per path, uncached.  So each volume is probed once per check with a short
+timeout (:func:`_hung_volumes`), and files on a hung volume are reported missing
+without being stat'ed.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -164,6 +170,14 @@ def check_manifest_raw_data(
         sessions = [s for s in sessions if str(s.session_id) in wanted]
     report.n_sessions = len(sessions)
 
+    hung = _hung_volumes(
+        Path(c).anchor
+        for sess in sessions
+        for table, asset_id in ((videos, sess.video_asset_id), (poses, sess.pose_asset_id))
+        if asset_id and asset_id in table
+        for c in (table[asset_id].local_path, table[asset_id].source_path) if c
+    )
+
     for sess in sessions:
         for kind, table, asset_id in (
             (KIND_VIDEO, videos, sess.video_asset_id),
@@ -178,7 +192,7 @@ def check_manifest_raw_data(
                 continue
             report.n_checked += 1
             candidates = [c for c in (asset.local_path, asset.source_path) if c]
-            if any(_exists(Path(c)) for c in candidates):
+            if any(Path(c).anchor not in hung and _exists(Path(c)) for c in candidates):
                 continue
             report.missing.append(MissingAsset(
                 session_id=str(sess.session_id), kind=kind,
@@ -206,6 +220,48 @@ def check_project_raw_data(
     if manifest is None:
         return RawDataReport(project_root=root)
     return check_manifest_raw_data(manifest, root, kinds=kinds, session_ids=session_ids)
+
+
+# How long a volume root may take to answer before it is treated as unreachable.
+# A reachable share answers in milliseconds; an unreachable mapped one takes minutes.
+VOLUME_PROBE_TIMEOUT_S = 2.0
+
+# Probes still stuck in a network timeout, by anchor.  A later check reuses the
+# verdict instead of stacking another blocked thread on the same volume.
+_stuck_probes: dict[str, threading.Thread] = {}
+_stuck_lock = threading.Lock()
+
+
+def _hung_volumes(anchors, timeout: float | None = None) -> set[str]:
+    """Anchors (drive roots / UNC shares) whose root does not answer in ``timeout``.
+
+    Only a *hang* counts.  A root that answers — present or not — is left to the
+    per-file check, so a share whose root is merely unlistable (permissions) is
+    never mis-reported as missing.
+    """
+    timeout = VOLUME_PROBE_TIMEOUT_S if timeout is None else timeout
+    probes: dict[str, threading.Thread] = {}
+    hung: set[str] = set()
+    for anchor in {a for a in anchors if a}:
+        with _stuck_lock:
+            stuck = _stuck_probes.get(anchor)
+            if stuck is not None and stuck.is_alive():
+                hung.add(anchor)
+                continue
+            _stuck_probes.pop(anchor, None)
+        th = threading.Thread(target=_exists, args=(Path(anchor),), daemon=True,
+                              name=f"abel-volume-probe {anchor}")
+        th.start()
+        probes[anchor] = th
+    # One shared deadline: probing three dead shares costs one timeout, not three.
+    deadline = time.monotonic() + timeout
+    for anchor, th in probes.items():
+        th.join(max(0.0, deadline - time.monotonic()))
+        if th.is_alive():
+            hung.add(anchor)
+            with _stuck_lock:
+                _stuck_probes[anchor] = th
+    return hung
 
 
 def _exists(path: Path) -> bool:

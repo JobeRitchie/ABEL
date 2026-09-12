@@ -59,9 +59,11 @@ from abel.models.schemas import (
     ReviewDecision,
     ReviewDecisionType,
     ReviewerLabelRecord,
+    SeedExample,
 )
 from abel.services.behavior_service import BehaviorService, behavior_label
 from abel.services.candidate_service import CandidateGenerationService
+from abel.services.seed_service import SeedService
 from abel.services.import_service import ImportService
 from abel.services.preprocessing_service import ClipExtractionService, regenerate_clips_for_windows
 from abel.services.review_service import ReviewService
@@ -110,6 +112,16 @@ class _ReviewListRow:
     end_frame: int
     total_score: float = 0.0
     clip_path: str | None = None
+    source: str = ""
+
+
+# Seed examples are shown as read-only reviewed rows under this id prefix.
+SEED_ROW_PREFIX = "seed_"
+SEED_READ_ONLY_MSG = (
+    "Seed examples are labelled in Active Learning → Seeds and train the model "
+    "directly from there.\n\nThey are listed here so you can watch them alongside "
+    "your reviewed clips; edit or delete them in the Seeds tab."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -518,6 +530,7 @@ class ReviewTab(QWidget):
         "temporal_bout_review": "Temporal Bouts",
         "quality_check": "Quality Check",
         "clip_mining": "Clip Mining",
+        "seed": "Seed",
     }
 
     # Cross-thread progress relay for background clip regeneration.
@@ -542,6 +555,8 @@ class ReviewTab(QWidget):
         self._all_candidates = []
         self._visible_candidates = []
         self._decision_by_clip_id: dict[str, ReviewDecision] = {}
+        # Seed examples keyed by their review-row id (SEED_ROW_PREFIX + seed_id).
+        self._seed_by_row_id: dict[str, SeedExample] = {}
         self._current_candidate_idx = -1
         self._session_order_index: dict[str, int] = {}
         self._display_subject_map: dict[str, str] = {}
@@ -624,7 +639,10 @@ class ReviewTab(QWidget):
 
         self._show_reviewed_chk = QCheckBox("Show reviewed candidates")
         self._show_reviewed_chk.setChecked(False)
-        self._show_reviewed_chk.setToolTip("Include already-reviewed candidates in the list.")
+        self._show_reviewed_chk.setToolTip(
+            "Include already-reviewed candidates in the list, plus your seed "
+            "examples (Source: Seed, read-only here)."
+        )
         self._show_reviewed_chk.toggled.connect(self._apply_filter)
         panel_layout.addWidget(self._show_reviewed_chk)
 
@@ -1348,6 +1366,9 @@ class ReviewTab(QWidget):
             QMessageBox.warning(self, "No Candidate", "No candidate selected to commit labels for.")
             return
         cand = self._visible_candidates[self._current_candidate_idx]
+        if self._is_seed_row(cand):
+            QMessageBox.information(self, "Seed Examples", SEED_READ_ONLY_MSG)
+            return
         reviewer = (self._reviewer_input.text() or "reviewer").strip()
         start = int(cand.start_frame)
         end = int(cand.end_frame)
@@ -1622,9 +1643,32 @@ class ReviewTab(QWidget):
         self._all_candidates = self._candidate_service.load_candidates()
         decisions = self._review_service.load_decisions()
         self._decision_by_clip_id = {d.clip_id: d for d in decisions}
+        self._seed_by_row_id = self._load_seed_rows()
         self._rebuild_display_maps()
         self._refresh_behavior_filter_options()
         self._apply_filter()
+
+    def _load_seed_rows(self) -> dict[str, SeedExample]:
+        """Seed examples from config/seeds.json, keyed by their review-row id."""
+        if not self._project_root:
+            return {}
+        seeds = SeedService()
+        try:
+            seeds.set_project(self._project_root)
+        except Exception:
+            logger.exception("Could not read seed examples for the Review tab")
+            return {}
+        return {f"{SEED_ROW_PREFIX}{s.seed_id}": s for s in seeds.seeds if s.seed_id}
+
+    def _is_seed_row(self, candidate) -> bool:
+        return getattr(candidate, "source", "") == "seed"
+
+    def _without_seed_rows(self, candidates: list) -> list:
+        """Drop read-only seed rows from a batch; say so if nothing is left."""
+        kept = [c for c in candidates if not self._is_seed_row(c)]
+        if candidates and not kept:
+            QMessageBox.information(self, "Seed Examples", SEED_READ_ONLY_MSG)
+        return kept
 
     def _refresh_session_order_index(self) -> None:
         self._session_order_index = {}
@@ -2246,6 +2290,19 @@ class ReviewTab(QWidget):
                 if not clip_id or clip_id in existing_ids:
                     continue
                 rows.append(self._candidate_from_decision(decision))
+            # Seeds are human-labelled examples too, so they belong alongside
+            # the reviewed clips (read-only: they are edited in the Seeds tab).
+            for row_id, seed in self._seed_by_row_id.items():
+                rows.append(
+                    _ReviewListRow(
+                        window_id=row_id,
+                        session_id=str(seed.session_id),
+                        behavior_id=str(seed.behavior_id or "") or None,
+                        start_frame=int(seed.start_frame),
+                        end_frame=int(seed.end_frame),
+                        source="seed",
+                    )
+                )
 
         # Inject any AL FP/FN segments that are not already in the list.
         # These are reviewed segments (they have labels) that may not be in
@@ -2306,7 +2363,8 @@ class ReviewTab(QWidget):
             rows = [
                 c
                 for c in rows
-                if c.window_id in self._decision_by_clip_id and self._candidate_clip_path(c)
+                if (c.window_id in self._decision_by_clip_id or self._is_seed_row(c))
+                and self._candidate_clip_path(c)
             ]
         elif not show_reviewed:
             # AL FP/FN clips stay visible until the user re-labels them; after saving
@@ -2332,6 +2390,7 @@ class ReviewTab(QWidget):
                     c
                     for c in rows
                     if c.window_id in self._decision_by_clip_id
+                    or self._is_seed_row(c)
                     or self._candidate_clip_path(c)
                     or (show_fp_fn and c.window_id in bout_review_ids)
                     or (show_al_fp_fn and c.window_id in al_all_ids)
@@ -2430,7 +2489,10 @@ class ReviewTab(QWidget):
             # after the model ran show their actual saved decision.
             post_reviewed = cand.window_id in getattr(self, "_al_post_pred_reviewed_ids", set())
             is_stale_fp_fn = al_fp_fn_active and (is_fp or is_fn) and not post_reviewed
-            if is_stale_fp_fn:
+            seed = self._seed_by_row_id.get(cand.window_id) if self._is_seed_row(cand) else None
+            if seed is not None:
+                dec_text = "seed" if seed.label_type == "positive" else f"seed ({seed.label_type})"
+            elif is_stale_fp_fn:
                 dec_text = "—"
             elif dec:
                 dec_text = dec.decision.value
@@ -2476,6 +2538,8 @@ class ReviewTab(QWidget):
             color = QColor("#00838F")
         elif src == "quality_check":
             color = QColor("#00838F")
+        elif src == "seed":
+            color = QColor("#F9A825")
         elif not src and reason in ("hard_negative", "confound_boundary"):
             color = QColor("#E65100")
         elif not src and reason == "uncertainty":
@@ -2521,7 +2585,7 @@ class ReviewTab(QWidget):
 
     def _accept_all(self) -> None:
         """Accept every currently visible candidate, with a confirmation prompt."""
-        visible = self._visible_candidates
+        visible = self._without_seed_rows(list(self._visible_candidates))
         if not visible:
             return
         answer = QMessageBox.question(
@@ -2895,7 +2959,12 @@ class ReviewTab(QWidget):
         selected_rows = sorted({idx.row() for idx in self._candidate_table.selectionModel().selectedRows()})
         selected = [self._visible_candidates[r] for r in selected_rows if 0 <= r < len(self._visible_candidates)]
         scope_all = not selected
-        pool = self._all_candidates if scope_all else selected
+        # Visible seed rows are included so their clips can be watched here too.
+        pool = (
+            list(self._all_candidates)
+            + [c for c in self._visible_candidates if self._is_seed_row(c)]
+            if scope_all else selected
+        )
         missing = [c for c in pool if not self._candidate_clip_path(c)]
 
         if not missing:
@@ -2995,6 +3064,9 @@ class ReviewTab(QWidget):
         if not candidates:
             QMessageBox.warning(self, "No Selection", "Select one or more candidate rows first.")
             return
+        candidates = self._without_seed_rows(candidates)
+        if not candidates:
+            return
         reviewer = (self._reviewer_input.text() or "reviewer").strip()
         notes = self._notes_edit.toPlainText().strip()
         confidence = float(self._confidence_spin.value())
@@ -3032,6 +3104,9 @@ class ReviewTab(QWidget):
         candidates = self._selected_visible_candidates()
         if not candidates:
             QMessageBox.warning(self, "No Selection", "Select one or more candidate rows first.")
+            return
+        candidates = self._without_seed_rows(candidates)
+        if not candidates:
             return
 
         clip_ids = [c.window_id for c in candidates]
@@ -3090,6 +3165,9 @@ class ReviewTab(QWidget):
         if not candidates:
             QMessageBox.warning(self, "No Selection", "Select one or more candidate rows first.")
             return
+        candidates = self._without_seed_rows(candidates)
+        if not candidates:
+            return
         reviewer = (self._reviewer_input.text() or "reviewer").strip()
         notes = self._notes_edit.toPlainText().strip()
         confidence = float(self._confidence_spin.value())
@@ -3138,6 +3216,9 @@ class ReviewTab(QWidget):
             scope = list(self._visible_candidates)
         if not scope:
             QMessageBox.information(self, "Bulk Assign", "No clips in the queue to assign.")
+            return
+        scope = self._without_seed_rows(scope)
+        if not scope:
             return
 
         behaviors = [
@@ -3252,7 +3333,15 @@ class ReviewTab(QWidget):
         self._score_label.setText(f"Score: {candidate.total_score:.3f}  |  Subject: {subject}")
 
         clip = self._candidate_clip_path(candidate)
-        self._clip_label.setText(f"Clip: {clip or 'missing (extract clips first)'}")
+        if clip:
+            self._clip_label.setText(f"Clip: {clip}")
+        elif self._is_seed_row(candidate):
+            self._clip_label.setText(
+                "Clip: seed example (read-only) — select it and click "
+                "Regenerate Missing Clips to watch it"
+            )
+        else:
+            self._clip_label.setText("Clip: missing (extract clips first)")
         if clip:
             self._player.load_clip(clip)
             if self._autoplay_chk.isChecked() and not self._player._playing:
@@ -3371,6 +3460,8 @@ class ReviewTab(QWidget):
             return
         if not self._review_dirty:
             return
+        if self._is_seed_row(self._visible_candidates[self._current_candidate_idx]):
+            return
         # Temporarily disable auto-advance so _save_decision does not also
         # move the index — the caller handles navigation.
         prev = self._autoplay_chk.isChecked()
@@ -3421,6 +3512,9 @@ class ReviewTab(QWidget):
             return
 
         candidate = self._visible_candidates[self._current_candidate_idx]
+        if self._is_seed_row(candidate):
+            QMessageBox.information(self, "Seed Examples", SEED_READ_ONLY_MSG)
+            return
         decision_type: ReviewDecisionType = self._decision_combo.currentData()
         reviewer = (self._reviewer_input.text() or "reviewer").strip()
         notes = self._notes_edit.toPlainText().strip()

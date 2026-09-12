@@ -7,10 +7,61 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 11, 2026"
+VERSION_DATE = "September 12, 2026"
 
 # (version, date, [bullet lines]) — newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.21.0", "September 12, 2026", [
+        "Session Sections export now writes an Excel workbook that opens on one "
+        "Prism-ready sheet per metric (bout count, duration, % time): one block "
+        "per behavior, rows are sections in timeline order, columns are "
+        "subjects. In group mode columns are blocked by group and each group is "
+        "padded to the largest group's size so pasted replicate subcolumns line "
+        "up. A Long Format sheet and a README (layout, Prism paste steps, view "
+        "settings, ROI scope) follow; the long CSV is still available. A "
+        "subject scored for a behavior but with no bouts is now a real zero in "
+        "every section instead of vanishing from the chart and the group means; "
+        "never-scored pairs stay blank.",
+        "Local surface-motion features use a fixed-size window (2 x Local "
+        "radius) that is edge-replicated at the frame border and held at the "
+        "last tracked position through keypoint dropouts. Clipped or collapsed "
+        "windows made MOG2 re-initialise and read the next frame as 100% "
+        "foreground, injecting spikes for wall-hugging animals. The context "
+        "schema version is bumped, so cached context features rebuild once. "
+        "The Smoothing Preview's nose traces are now computed exactly as "
+        "extraction computes them (same window, downsample and MOG2 settings), "
+        "and its preview-only BG sensitivity control is removed, as is the "
+        "matching Feature Demo control. The Local radius tooltip and Methods "
+        "write-up describe the window.",
+        "Spine curvature is on by default. With fewer than three midline "
+        "keypoints no column is emitted, so it is safe to leave on. The pose "
+        "schema version is bumped and the flag is part of the pose cache "
+        "signature, so pose features rebuild once. When Active Learning adds "
+        "new sessions to a project whose cached pose features predate the "
+        "current schema, it refreshes the cached sessions' pose features too "
+        "(the video-context cache is kept) so every session shares one column "
+        "set, and it warns when cached context features are out of date.",
+        "Feature extraction progress advances chunk by chunk within a session, "
+        "so a long video no longer sits at 0/N until it finishes decoding. "
+        "The progress panel shows the latest chunk or session event under the "
+        "stages and every event is logged.",
+        "The raw-data availability check probes each drive or network share "
+        "once with a 2 s timeout. A mapped but unreachable share (VPN down) "
+        "used to block every file check for the full SMB timeout, about 158 s "
+        "per path; its files are now reported missing without being checked.",
+        "The Review tab lists seed examples (Source: Seed) alongside reviewed "
+        "clips when 'Show reviewed candidates' is on. They are read-only there "
+        "(edit them in Active Learning -> Seeds); Regenerate Missing Clips can "
+        "extract their clips so they can be watched.",
+        "Session Quality moved to the Validation tab. It still runs on Temporal "
+        "Review's traces and thresholds and loads them first if that tab has "
+        "not been opened. The Methods tab moved into Info.",
+        "Matplotlib toolbar icons are visible again under the native Windows "
+        "palette. Matplotlib had already tinted them, so the tint that looked "
+        "for black pixels blanked every icon; it now recolours by alpha.",
+        "The README's plain-text mirror moved to docs/readme.txt. Tests run in "
+        "parallel by default (pytest-xdist, -n 8) with per-worker thread caps.",
+    ]),
     ("0.20.0", "September 11, 2026", [
         "Graphs tab: new 'Start time bins at Data Range from' option. With a "
         "Data Range 'from' set, checking it starts the time bins at that time "

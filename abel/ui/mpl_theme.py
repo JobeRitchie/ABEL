@@ -9,8 +9,7 @@ ratio, which is effectively invisible.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QIcon, QPalette
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import QToolButton, QWidget
 
 #: Icon/foreground tint. 8.4:1 against ``#0D1B2A``.
@@ -29,7 +28,7 @@ def style_navigation_toolbar(
 
     Safe to call with ``None`` and safe to call twice.  Works on the rendered
     pixmaps rather than matplotlib's ``_icon`` internals, so it does not depend
-    on the backend's private API.
+    on the backend's private API or on whether matplotlib tinted them first.
     """
     if toolbar is None:
         return
@@ -55,18 +54,29 @@ def style_navigation_toolbar(
         icon = button.icon()
         if icon.isNull():
             continue
-        sizes = icon.availableSizes()
-        size = sizes[0] if sizes else button.iconSize()
-        if size.isEmpty():
-            continue
-        pixmap = icon.pixmap(size)
-        if pixmap.isNull():
-            continue
-        # Mask out everything that is *not* black, then flood the remaining
-        # (glyph) pixels with the tint -- the same trick matplotlib uses, just
-        # applied after construction where the palette is finally correct.
-        mask = pixmap.createMaskFromColor(QColor("black"),
-                                          Qt.MaskMode.MaskOutColor)
-        pixmap.fill(colour)
-        pixmap.setMask(mask)
-        button.setIcon(QIcon(pixmap))
+        tinted = QIcon()
+        for size in icon.availableSizes() or [button.iconSize()]:
+            if size.isEmpty():
+                continue
+            pixmap = icon.pixmap(size)
+            if not pixmap.isNull():
+                tinted.addPixmap(_tint_pixmap(pixmap, colour))
+        if not tinted.isNull():
+            button.setIcon(tinted)
+
+
+def _tint_pixmap(pixmap: QPixmap, colour: QColor) -> QPixmap:
+    """Repaint every glyph pixel in *colour*, keeping its alpha.
+
+    Keyed on alpha rather than on the glyph's current colour: under the native
+    Windows palette matplotlib has already tinted its icons by the time we run,
+    so matching "black" pixels found none and blanked every icon.
+    """
+    image = pixmap.toImage().convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    painter = QPainter(image)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
+    painter.fillRect(image.rect(), colour)
+    painter.end()
+    out = QPixmap.fromImage(image)
+    out.setDevicePixelRatio(pixmap.devicePixelRatio())
+    return out

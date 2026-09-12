@@ -3407,8 +3407,6 @@ class ValidationWindow(QMainWindow):
         self._demo_radius = QSpinBox(); self._demo_radius.setRange(8, 2048)
         self._demo_radius.setSingleStep(4); self._demo_radius.setValue(36); self._demo_radius.setSuffix(" px")
         sform.addRow("Local motion radius:", self._demo_radius)
-        self._demo_mog2 = QSpinBox(); self._demo_mog2.setRange(4, 100); self._demo_mog2.setValue(16)
-        sform.addRow("BG-subtract sensitivity (var):", self._demo_mog2)
         self._demo_dur = QSpinBox(); self._demo_dur.setRange(2, 60); self._demo_dur.setValue(10); self._demo_dur.setSuffix(" s")
         sform.addRow("Clip duration:", self._demo_dur)
         lay.addWidget(sett)
@@ -3534,9 +3532,6 @@ class ValidationWindow(QMainWindow):
         )
         # Reflect the demo tab's export choices in the preview (without writing to project.yaml).
         dlg._visible_traces = set(self._selected_demo_traces())
-        dlg._mog2_thresh.blockSignals(True)
-        dlg._mog2_thresh.setValue(self._demo_mog2.value())
-        dlg._mog2_thresh.blockSignals(False)
         sid = self._demo_sess_combo.currentData()
         if sid is not None:
             i = dlg._session_combo.findData(sid)
@@ -3573,7 +3568,6 @@ class ValidationWindow(QMainWindow):
             smoothing=self._demo_smoothing(),
             out_path=Path(dest),
             local_radius_px=self._demo_radius.value(),
-            mog2_var_threshold=self._demo_mog2.value(),
             duration_sec=float(self._demo_dur.value()),
             visible_traces=self._selected_demo_traces(),
             cancel_flag=self._demo_cancel,

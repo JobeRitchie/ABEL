@@ -28,7 +28,6 @@ def export_feature_demo(
     out_path: Path,
     *,
     local_radius_px: int = 36,
-    mog2_var_threshold: int = 16,
     duration_sec: float = 10.0,
     visible_traces: set[str] | None = None,
     start_frame: int | None = None,
@@ -99,7 +98,6 @@ def export_feature_demo(
         cancel_flag=cancel_flag,
         local_radius_px=int(local_radius_px),
         fps=float(fps_source),
-        mog2_var_threshold=int(mog2_var_threshold),
     )
     if not result.frames:
         raise RuntimeError(

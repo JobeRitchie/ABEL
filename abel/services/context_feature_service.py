@@ -25,6 +25,12 @@ from abel.utils import roi_geometry
 # writes has been removed in favour of per-session parquet files.
 logger = logging.getLogger("abel")
 
+# Background-subtraction settings for the local surface-motion features.  The
+# Smoothing Preview imports these so its trace is computed the same way.
+MOG2_HISTORY = 200
+MOG2_VAR_THRESHOLD = 16
+MOG2_WARMUP_FRAMES = 50
+
 # Semantic role → ordered list of token-sets.  A body-part name is split on
 # word boundaries (_, -, space) and lower-cased; a part matches the first
 # token-set where *every* required token appears among the part's tokens.
@@ -205,6 +211,54 @@ class ContextFeatureService:
         if x1 <= x0 or y1 <= y0:
             return np.zeros((1, 1), dtype=frame.dtype)
         return frame[y0:y1, x0:x1]
+
+    @staticmethod
+    def _local_crop(frame: np.ndarray, x: float, y: float, radius: int) -> np.ndarray:
+        """Fixed 2r × 2r window centred on (x, y), edge-replicated past the border.
+
+        The size never changes: OpenCV's MOG2 re-initialises whenever its input
+        size changes and the next frame then reads as 100% foreground, so a
+        window clipped at the frame edge (or collapsed on a missing keypoint)
+        used to inject spurious full-energy frames for wall-hugging animals.
+        Pass positions through :meth:`_hold_last_position` first.
+        """
+        import cv2
+
+        h, w = frame.shape[:2]
+        side = 2 * int(radius)
+        if not np.isfinite(x) or not np.isfinite(y):
+            x, y = w / 2.0, h / 2.0
+        # Clamp so the window always overlaps the frame by at least one pixel.
+        cx = min(max(int(x), 0), w - 1)
+        cy = min(max(int(y), 0), h - 1)
+        x0, y0 = cx - radius, cy - radius
+        x1, y1 = x0 + side, y0 + side
+        sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
+        crop = frame[sy0:sy1, sx0:sx1]
+        if crop.shape[0] == side and crop.shape[1] == side:
+            return crop
+        return cv2.copyMakeBorder(
+            crop, sy0 - y0, y1 - sy1, sx0 - x0, x1 - sx1, cv2.BORDER_REPLICATE,
+        )
+
+    @staticmethod
+    def _hold_last_position(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Carry the last tracked position through keypoint dropouts.
+
+        Leading gaps take the first tracked position; an untracked series falls
+        back to (0, 0), which :meth:`_local_crop` turns into a constant window.
+        """
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        ok = np.isfinite(x) & np.isfinite(y)
+        if ok.all():
+            return x, y
+        if not ok.any():
+            return np.zeros_like(x), np.zeros_like(y)
+        idx = np.where(ok, np.arange(len(x)), 0)
+        np.maximum.accumulate(idx, out=idx)
+        idx[: int(np.argmax(ok))] = int(np.argmax(ok))
+        return x[idx], y[idx]
 
     @staticmethod
     def _roi_crop(frame: np.ndarray, roi: dict[str, Any]) -> np.ndarray:
@@ -415,7 +469,7 @@ class ContextFeatureService:
         local_radius: int,
         config: ContextFeatureConfig,
         extra_rois: "list[dict] | None" = None,
-        mog2_warmup_frames: int = 50,
+        mog2_warmup_frames: int = MOG2_WARMUP_FRAMES,
         _cv2_cuda_algo: "Any | None" = None,
     ) -> dict[str, list]:
         """Process a contiguous range of video frames, returning per-column value lists.
@@ -447,6 +501,10 @@ class ContextFeatureService:
                 ds, body_x, body_y, paw_l_x, paw_l_y,
                 paw_r_x, paw_r_y, nose_x, nose_y, target_roi, local_radius,
             )
+            # The local windows hold the last tracked position through keypoint
+            # dropouts instead of collapsing to a degenerate crop (see _local_crop).
+            lbody_x, lbody_y = ContextFeatureService._hold_last_position(body_x, body_y)
+            lnose_x, lnose_y = ContextFeatureService._hold_last_position(nose_x, nose_y)
 
             def _ds_gray(g: np.ndarray) -> np.ndarray:
                 if ds <= 1:
@@ -457,10 +515,10 @@ class ContextFeatureService:
                 )
 
             fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=200, varThreshold=16, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
             )
             nose_fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=200, varThreshold=16, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
             )
             _inv_ds = 1.0 / ds if ds > 1 else 1.0
             _scaled_extra_rois: list[dict] = [
@@ -482,12 +540,12 @@ class ContextFeatureService:
                 if not ok:
                     break
                 gray = _ds_gray(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-                surface_crop = ContextFeatureService._crop_box(
-                    gray, body_x[wf], body_y[wf], radius=local_radius
+                surface_crop = ContextFeatureService._local_crop(
+                    gray, lbody_x[wf], lbody_y[wf], local_radius
                 )
                 fg_subtractor.apply(surface_crop)
-                nose_surface_crop = ContextFeatureService._crop_box(
-                    gray, nose_x[wf], nose_y[wf], radius=local_radius
+                nose_surface_crop = ContextFeatureService._local_crop(
+                    gray, lnose_x[wf], lnose_y[wf], local_radius
                 )
                 nose_fg_subtractor.apply(nose_surface_crop)
                 prev_nose_surface_crop = nose_surface_crop
@@ -532,8 +590,8 @@ class ContextFeatureService:
                     break
                 gray = _ds_gray(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
 
-                surface_crop = ContextFeatureService._crop_box(
-                    gray, body_x[frame_idx], body_y[frame_idx], radius=local_radius
+                surface_crop = ContextFeatureService._local_crop(
+                    gray, lbody_x[frame_idx], lbody_y[frame_idx], local_radius
                 )
                 fgmask = fg_subtractor.apply(surface_crop)
                 fgmask_arr = np.asarray(fgmask, dtype=np.float32)
@@ -542,8 +600,8 @@ class ContextFeatureService:
                 local_surface_var.append(float(np.var(surface_arr)))
 
                 # ── Nose-area surface crop (wide radius, MOG2) ────────────────
-                nose_surface_crop = ContextFeatureService._crop_box(
-                    gray, nose_x[frame_idx], nose_y[frame_idx], radius=local_radius
+                nose_surface_crop = ContextFeatureService._local_crop(
+                    gray, lnose_x[frame_idx], lnose_y[frame_idx], local_radius
                 )
                 nose_fgmask = nose_fg_subtractor.apply(nose_surface_crop)
                 nose_fgmask_arr = np.asarray(nose_fgmask, dtype=np.float32)
@@ -591,10 +649,10 @@ class ContextFeatureService:
                     diff = np.zeros_like(surface_crop, dtype=np.float32)
                     flow = np.zeros((gray.shape[0], gray.shape[1], 2), dtype=np.float32)
                 else:
-                    prev_cx = body_x[frame_idx - 1] if frame_idx > 0 else body_x[frame_idx]
-                    prev_cy = body_y[frame_idx - 1] if frame_idx > 0 else body_y[frame_idx]
-                    prev_sub = ContextFeatureService._crop_box(
-                        prev_gray, prev_cx, prev_cy, radius=local_radius
+                    prev_cx = lbody_x[frame_idx - 1] if frame_idx > 0 else lbody_x[frame_idx]
+                    prev_cy = lbody_y[frame_idx - 1] if frame_idx > 0 else lbody_y[frame_idx]
+                    prev_sub = ContextFeatureService._local_crop(
+                        prev_gray, prev_cx, prev_cy, local_radius
                     )
                     h = min(prev_sub.shape[0], surface_crop.shape[0])
                     w = min(prev_sub.shape[1], surface_crop.shape[1])
@@ -746,7 +804,7 @@ class ContextFeatureService:
         local_radius: int,
         config: ContextFeatureConfig,
         extra_rois: "list[dict] | None" = None,
-        mog2_warmup_frames: int = 50,
+        mog2_warmup_frames: int = MOG2_WARMUP_FRAMES,
         gpu_flow_lock: "threading.Lock | None" = None,
         gpu_batch_size: int = 0,
         gpu_lock_timeout: float = 120.0,
@@ -783,6 +841,10 @@ class ContextFeatureService:
                 ds, body_x, body_y, paw_l_x, paw_l_y,
                 paw_r_x, paw_r_y, nose_x, nose_y, target_roi, local_radius,
             )
+            # The local windows hold the last tracked position through keypoint
+            # dropouts instead of collapsing to a degenerate crop (see _local_crop).
+            lbody_x, lbody_y = ContextFeatureService._hold_last_position(body_x, body_y)
+            lnose_x, lnose_y = ContextFeatureService._hold_last_position(nose_x, nose_y)
 
             def _ds_gray(g: np.ndarray) -> np.ndarray:
                 if ds <= 1:
@@ -793,10 +855,10 @@ class ContextFeatureService:
                 )
 
             fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=200, varThreshold=16, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
             )
             nose_fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=200, varThreshold=16, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
             )
             _inv_ds = 1.0 / ds if ds > 1 else 1.0
             _scaled_extra_rois: list[dict] = [
@@ -816,12 +878,12 @@ class ContextFeatureService:
                 if not ok:
                     break
                 gray = _ds_gray(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
-                surface_crop = ContextFeatureService._crop_box(
-                    gray, body_x[wf], body_y[wf], radius=local_radius
+                surface_crop = ContextFeatureService._local_crop(
+                    gray, lbody_x[wf], lbody_y[wf], local_radius
                 )
                 fg_subtractor.apply(surface_crop)
-                nose_surface_crop = ContextFeatureService._crop_box(
-                    gray, nose_x[wf], nose_y[wf], radius=local_radius
+                nose_surface_crop = ContextFeatureService._local_crop(
+                    gray, lnose_x[wf], lnose_y[wf], local_radius
                 )
                 nose_fg_subtractor.apply(nose_surface_crop)
                 prev_nose_surface_crop = nose_surface_crop
@@ -872,8 +934,8 @@ class ContextFeatureService:
                     gray = gray_frames[i]
 
                     # BG subtraction on body crop
-                    surface_crop = ContextFeatureService._crop_box(
-                        gray, body_x[fi], body_y[fi], radius=local_radius
+                    surface_crop = ContextFeatureService._local_crop(
+                        gray, lbody_x[fi], lbody_y[fi], local_radius
                     )
                     fgmask = fg_subtractor.apply(surface_crop)
                     local_surface_energy.append(
@@ -884,8 +946,8 @@ class ContextFeatureService:
                     )
 
                     # Nose surface crop (wide radius, MOG2)
-                    nose_surface_crop = ContextFeatureService._crop_box(
-                        gray, nose_x[fi], nose_y[fi], radius=local_radius
+                    nose_surface_crop = ContextFeatureService._local_crop(
+                        gray, lnose_x[fi], lnose_y[fi], local_radius
                     )
                     nose_fgmask = nose_fg_subtractor.apply(nose_surface_crop)
                     nose_fgmask_arr = np.asarray(nose_fgmask, dtype=np.float32)
@@ -942,8 +1004,8 @@ class ContextFeatureService:
                         diff = np.zeros_like(surface_crop, dtype=np.float32)
                     else:
                         fi_prev = fi - 1 if fi > 0 else fi
-                        prev_sub = ContextFeatureService._crop_box(
-                            pg, body_x[fi_prev], body_y[fi_prev], radius=local_radius
+                        prev_sub = ContextFeatureService._local_crop(
+                            pg, lbody_x[fi_prev], lbody_y[fi_prev], local_radius
                         )
                         h = min(prev_sub.shape[0], surface_crop.shape[0])
                         w = min(prev_sub.shape[1], surface_crop.shape[1])

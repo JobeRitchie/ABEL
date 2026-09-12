@@ -65,6 +65,9 @@ class TemporalReviewTab(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._project_root: Path | None = None
+        # Project whose outputs have been loaded (the load is deferred after
+        # set_project, but Session Quality may need it synchronously).
+        self._loaded_root: Path | None = None
         self._manager: ProjectManager | None = None
         self._behaviors = BehaviorService()
         self._imports = ImportService()
@@ -118,20 +121,14 @@ class TemporalReviewTab(QWidget):
         # Edited via Per-Behavior Thresholds dialog only.
         self._trace_settings_label = QLabel("")
 
-        self._session_quality_btn = QPushButton("Session Quality…")
-        self._session_quality_btn.setToolTip(
-            "Detect sessions with abnormally low model confidence or unusual bout patterns "
-            "by comparing each session against others of the same type "
-            "(e.g. acclimation vs acclimation, testing vs testing)."
-        )
-        self._session_quality_btn.clicked.connect(self._open_session_quality_dialog)
-
+        # Session Quality is launched from the Validation tab (see
+        # open_session_quality); it still lives here because it reads this
+        # tab's loaded traces, bouts and per-behavior thresholds.
         top_row = QHBoxLayout()
         top_row.addWidget(QLabel("Behavior:"))
         top_row.addWidget(self._behavior, 1)
         top_row.addWidget(self._per_behavior_thresholds_btn)
         top_row.addWidget(self._refresh_btn)
-        top_row.addWidget(self._session_quality_btn)
 
         self._metrics_table = QTableWidget(0, 9)
         self._metrics_table.setHorizontalHeaderLabels(
@@ -333,14 +330,16 @@ class TemporalReviewTab(QWidget):
 
     def set_project(self, project_root: Path) -> None:
         self._project_root = project_root
+        self._loaded_root = None
         self._manager = ProjectManager(project_root)
         # Defer I/O to avoid blocking the tab switch.
         from PySide6.QtCore import QTimer  # noqa: PLC0415
         QTimer.singleShot(0, lambda: self._deferred_project_init(project_root))
 
     def _deferred_project_init(self, project_root: Path) -> None:
-        if self._project_root != project_root:
+        if self._project_root != project_root or self._loaded_root == project_root:
             return
+        self._loaded_root = project_root
         self._behaviors.set_project(project_root)
         self._review_service.set_project(project_root)
         self._subject_by_session = self._build_subject_map()
@@ -2048,6 +2047,16 @@ class TemporalReviewTab(QWidget):
                 ))
 
         return candidates
+
+    def open_session_quality(self) -> None:
+        """Entry point for the Validation tab's Session Quality button.
+
+        This tab may never have been visited, so finish its (normally deferred)
+        project load first — the inspector needs the loaded traces and bouts.
+        """
+        if self._project_root is not None:
+            self._deferred_project_init(self._project_root)
+        self._open_session_quality_dialog()
 
     def _open_session_quality_dialog(self) -> None:
         """Open the Session Quality Inspector dialog."""

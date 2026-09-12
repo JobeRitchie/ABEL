@@ -9,15 +9,33 @@ NaN output, which reads as a real (negative) result. See
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
+import pytest
+
 from abel.models.schemas import ImportManifest, LinkedSession, PoseAsset, VideoAsset
+from abel.services import raw_data_availability as rda
 from abel.services.raw_data_availability import (
     KIND_POSE,
     KIND_VIDEO,
     check_manifest_raw_data,
     check_project_raw_data,
 )
+
+# Drive letters these tests treat as "not mounted".  They are answered here rather
+# than by the OS: on the dev machine J: is a mapped UNC share, and stat'ing it while
+# it is unreachable blocked this file for 338 s.
+_FAKE_UNMOUNTED = {"H:\\", "J:\\"}
+
+
+@pytest.fixture(autouse=True)
+def _fake_drives(monkeypatch):
+    real = rda._exists
+    monkeypatch.setattr(
+        rda, "_exists",
+        lambda p: False if Path(p).anchor in _FAKE_UNMOUNTED else real(p))
 
 
 def _manifest(entries) -> ImportManifest:
@@ -113,6 +131,44 @@ def test_signature_is_stable_per_problem_and_changes_with_it(tmp_path):
     sig_b = check_manifest_raw_data(b, tmp_path).signature()
     assert sig_a1 == sig_a2          # same problem → warn once
     assert sig_a1 != sig_b           # different drive → warn again
+
+
+def test_hung_network_volume_is_probed_once_not_stat_per_file(tmp_path, monkeypatch):
+    """A mapped-but-unreachable share blocks each stat for minutes; the check must
+    give up on the volume after one short probe and never stat its files."""
+    release = threading.Event()
+    file_stats: list[Path] = []
+
+    def fake_exists(p):
+        p = Path(p)
+        if p.anchor == "K:\\":
+            if p == Path(p.anchor):
+                release.wait(30)      # the volume root hangs like an SMB timeout
+                return False
+            file_stats.append(p)
+        return p.exists()
+
+    monkeypatch.setattr(rda, "_exists", fake_exists)
+    monkeypatch.setattr(rda, "VOLUME_PROBE_TIMEOUT_S", 0.2)
+    v, p = tmp_path / "a.mp4", tmp_path / "a.csv"
+    v.write_bytes(b""), p.write_text("x")
+    entries = [("s0", v, p)] + [(f"s{i}", Path(rf"K:\{i}.mp4"), Path(rf"K:\{i}.csv"))
+                                for i in range(1, 4)]
+    try:
+        t0 = time.monotonic()
+        rep = check_manifest_raw_data(_manifest(entries), tmp_path)
+        elapsed = time.monotonic() - t0
+        # A second check while the first probe is still stuck reuses its verdict.
+        t1 = time.monotonic()
+        rep2 = check_manifest_raw_data(_manifest(entries), tmp_path)
+        elapsed2 = time.monotonic() - t1
+    finally:
+        release.set()
+    assert elapsed < 2.0 and elapsed2 < 0.1
+    assert not file_stats
+    assert len(rep.missing) == 6 and rep.drives() == ["K:"]
+    assert rep.signature() == rep2.signature()
+    rda._stuck_probes.clear()
 
 
 def test_project_with_no_manifest_is_ok_not_a_warning(tmp_path):
