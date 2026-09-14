@@ -585,15 +585,34 @@ class ExportService:
 
         # Sheet label per session.  A subject with one session keeps its bare
         # name; one with several gets the session appended so its sessions land
-        # on separate sheets rather than silently merging into one.
+        # on separate sheets rather than silently merging into one.  Where no
+        # session type is known the video stem stands in — the bare session id
+        # would not, since every id starts with the same "session_" prefix.
+        session_token_by_sid = self._session_token_by_session()
         label_by_session: dict[str, str] = {}
+        # Labels only have to be unique within a workbook, so track them per
+        # session-type group when the export splits by type.
+        used_labels: dict[str, set[str]] = {}
         for sid in intervals_by_session:
             subj = subject_by_session.get(sid, sid)
             if not split_by_type and len(subject_session_ids.get(subj, [])) > 1:
                 stype = (session_type_by_sid.get(sid) or "").strip()
-                label_by_session[sid] = f"{subj} {stype}" if stype else f"{subj} {sid[:8]}"
+                if not stype:
+                    stype = (session_token_by_sid.get(sid) or "").strip()
+                    if stype == str(subj).strip():
+                        stype = ""
+                label = f"{subj} {stype}" if stype else f"{subj} {self._unique_session_token(sid)}"
             else:
-                label_by_session[sid] = subj
+                label = subj
+            # Two sessions that resolve to the same label (a duplicated session
+            # type, or the same video linked twice) must still get their own
+            # sheet rather than merging their bouts together.
+            group_key = (session_type_by_sid.get(sid, "") or "") if split_by_type else ""
+            group_used = used_labels.setdefault(group_key, set())
+            if label in group_used:
+                label = f"{label} {self._unique_session_token(sid)}"
+            group_used.add(label)
+            label_by_session[sid] = label
 
         total_rows = 0
         output_paths: list[Path] = []
@@ -838,14 +857,19 @@ class ExportService:
             subject = str(subject_by_session.get(session_id, session_id) or session_id).strip()
             if len(sessions_by_subject.get(subject, [])) > 1:
                 stype = (session_type_by_sid.get(session_id) or "").strip()
-                tracy_subject = f"{subject}_{stype}" if stype else f"{subject}_{session_id[:8]}"
+                tracy_subject = (
+                    f"{subject}_{stype}"
+                    if stype
+                    else f"{subject}_{self._unique_session_token(session_id)}"
+                )
             else:
                 tracy_subject = subject
 
             safe_subject = self._safe_name(tracy_subject)
             name = f"{safe_subject}{self.ABEL_POSITION_MARKER}.csv"
             if name.lower() in used_names:
-                name = f"{safe_subject}_{session_id[:8]}{self.ABEL_POSITION_MARKER}.csv"
+                token = self._unique_session_token(session_id)
+                name = f"{safe_subject}_{token}{self.ABEL_POSITION_MARKER}.csv"
             used_names.add(name.lower())
 
             output = out_dir / name
@@ -1273,26 +1297,9 @@ class ExportService:
         manifest = self._imports.load_manifest(self._project_root)
         if manifest is None:
             return []
-        video_by_id = {v.asset_id: v for v in manifest.videos}
-        subject_by_sid: dict[str, str] = {}
-        session_type_by_sid: dict[str, str] = {}
-        for session in manifest.linked_sessions:
-            sid = session.session_id
-            subject = (session.subject_id or "").strip()
-            video = video_by_id.get(session.video_asset_id)
-            if not subject:
-                subject = (video.subject_id or "").strip() if video else ""
-            if not subject and video:
-                subject = Path(video.source_path).stem.strip()
-            subject = subject or sid
-            subject_by_sid[sid] = subject
-            # Derive session type from video filename
-            stype = ""
-            if video:
-                stem = Path(video.source_path).stem
-                if subject and stem.startswith(subject):
-                    stype = stem[len(subject):].lstrip("_- ")
-            session_type_by_sid[sid] = stype
+        subject_by_sid = self._subject_by_session()
+        session_type_by_sid = self._session_type_by_session()
+        session_token_by_sid = self._session_token_by_session()
         # Determine which subjects have multiple sessions
         subject_count: dict[str, int] = {}
         for subj in subject_by_sid.values():
@@ -1303,10 +1310,12 @@ class ExportService:
             sid = session.session_id
             subj = subject_by_sid.get(sid, sid)
             stype = session_type_by_sid.get(sid, "")
-            if subject_count.get(subj, 1) > 1 and stype:
-                label = f"{subj} \u2013 {stype}"
-            elif subject_count.get(subj, 1) > 1:
-                label = f"{subj} \u2013 {sid[:8]}"
+            if subject_count.get(subj, 1) > 1:
+                if not stype:
+                    stype = (session_token_by_sid.get(sid) or "").strip()
+                    if stype == str(subj).strip():
+                        stype = ""
+                label = f"{subj} \u2013 {stype or self._unique_session_token(sid)}"
             else:
                 label = subj
             result.append((label, sid))
@@ -1332,11 +1341,13 @@ class ExportService:
         return mapping
 
     def _session_type_by_session(self, project_root: Path | None = None) -> dict[str, str]:
-        """Derive a session-type label for every session from its video filename.
+        """Return the session-type label for every session.
 
-        The label is produced by stripping the subject prefix (and any leading
-        ``_-`` separators) from the video stem.  Returns an empty string for
-        sessions where no such suffix can be derived.
+        Delegates to :meth:`ImportService.effective_session_type` so exports see
+        the same label the Import tab shows: an explicit per-session override
+        first, then the regex-derived type stored on the video asset, and only
+        then the filename stem with the subject prefix stripped.  Returns an
+        empty string for sessions where nothing can be derived.
         """
         root = project_root or self._project_root
         if not root:
@@ -1344,20 +1355,47 @@ class ExportService:
         manifest = self._imports.load_manifest(root)
         if manifest is None:
             return {}
-        subject_by_sid = self._subject_by_session(root)
+        return {
+            session.session_id: (
+                self._imports.effective_session_type(manifest, session) or ""
+            ).strip()
+            for session in manifest.linked_sessions
+        }
+
+    def _session_token_by_session(self, project_root: Path | None = None) -> dict[str, str]:
+        """Return a last-resort per-session label token for sheet names.
+
+        Used only where no session type can be derived.  Prefers the video
+        filename stem (meaningful to the user) and falls back to the unique part
+        of the generated session id — never the bare ``session_`` prefix, which
+        every id shares and which therefore collapses a subject's sessions onto
+        one sheet.
+        """
+        root = project_root or self._project_root
+        if not root:
+            return {}
+        manifest = self._imports.load_manifest(root)
+        if manifest is None:
+            return {}
         video_by_id = {v.asset_id: v for v in manifest.videos}
         result: dict[str, str] = {}
         for session in manifest.linked_sessions:
             sid = session.session_id
-            subject = subject_by_sid.get(sid, "")
             video = video_by_id.get(session.video_asset_id)
-            stype = ""
-            if video:
-                stem = Path(video.source_path).stem
-                if subject and stem.startswith(subject):
-                    stype = stem[len(subject):].lstrip("_- ")
-            result[sid] = stype
+            stem = Path(video.source_path).stem.strip() if video else ""
+            result[sid] = stem or self._unique_session_token(sid)
         return result
+
+    @staticmethod
+    def _unique_session_token(session_id: str) -> str:
+        """Return the distinguishing tail of a session id.
+
+        Session ids are generated as ``session_<hex>``, so the first eight
+        characters are the shared ``session_`` prefix and identify nothing.
+        """
+        sid = str(session_id or "").strip()
+        token = sid[len("session_"):] if sid.startswith("session_") else sid
+        return (token or sid)[:12]
 
     def merged_project_intervals(
         self,

@@ -187,3 +187,72 @@ def test_session_types_still_split_when_every_subject_has_them(tmp_path: Path) -
     for path in out.output_paths:
         sheets = [n for n in load_workbook(path).sheetnames if n != "_bout_counts"]
         assert sorted(sheets) == ["m1", "m2"]
+
+
+def test_sheet_labels_use_explicit_session_types(tmp_path: Path) -> None:
+    """Session types set in the Import tab must reach the sheet names.
+
+    The export used to derive the type itself by stripping the subject prefix
+    off the video stem, so an explicit override (or a regex-derived type) was
+    ignored and every sheet fell back to the shared "session_" id prefix.
+    """
+    project_root = tmp_path / "project"
+    (project_root / "derived" / "review_tables").mkdir(parents=True)
+
+    sessions = [
+        ("session_aaaaaaa1", "DR27", "vid_001"),
+        ("session_aaaaaaa2", "DR29", "vid_002"),
+        ("session_aaaaaaa3", "DR28", "vid_003"),
+        ("session_aaaaaaa4", "DR28", "vid_004"),
+    ]
+    manifest = _manifest_for(sessions)
+    imports = ImportService()
+    imports.update_session_type(manifest, "session_aaaaaaa3", "conditioning")
+    imports.update_session_type(manifest, "session_aaaaaaa4", "recall")
+    imports.save_manifest(project_root, manifest)
+    candidates, decisions = _accepted(sessions)
+
+    service = ExportService()
+    service.set_project(project_root)
+    out = service.export_boutframes_xlsx(candidates, decisions, include_merged_projects=False)
+
+    assert out.success
+    sheets = [n for n in load_workbook(out.output_path).sheetnames if n != "_bout_counts"]
+    assert "DR28 conditioning" in sheets
+    assert "DR28 recall" in sheets
+
+
+def test_sessions_without_a_type_get_distinct_sheets(tmp_path: Path) -> None:
+    """With no derivable type, sheets must still name and separate the sessions.
+
+    Every generated session id starts with "session_", so the old ``sid[:8]``
+    fallback produced the same label for each of a subject's sessions and
+    merged their bouts onto one sheet.
+    """
+    project_root = tmp_path / "project"
+    (project_root / "derived" / "review_tables").mkdir(parents=True)
+
+    sessions = [
+        ("session_bbbbbbb1", "DR27", "DR27"),
+        ("session_bbbbbbb2", "DR29", "DR29"),
+        ("session_bbbbbbb3", "DR28", "DR28"),
+        ("session_bbbbbbb4", "DR28", "DR28"),
+    ]
+    ImportService().save_manifest(project_root, _manifest_for(sessions))
+    candidates, decisions = _accepted(sessions)
+
+    service = ExportService()
+    service.set_project(project_root)
+    out = service.export_boutframes_xlsx(candidates, decisions, include_merged_projects=False)
+
+    assert out.success
+    wb = load_workbook(out.output_path)
+    sheets = [n for n in wb.sheetnames if n != "_bout_counts"]
+    assert len(sheets) == 4
+    dr28 = sorted(n for n in sheets if n.startswith("DR28"))
+    assert len(dr28) == 2
+    assert not any(n.endswith("session_") for n in sheets)
+    # Each session keeps its own bout rather than both landing on one sheet.
+    for name in dr28:
+        rows = list(wb[name].iter_rows(min_row=2, values_only=True))
+        assert len(rows) == 1
