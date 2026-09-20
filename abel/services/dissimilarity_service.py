@@ -2,7 +2,7 @@
 
 Loads segment-level features from the representations parquet, matches them to
 reviewed clips for a given behavior, and computes per-clip outlier scores based
-on Euclidean distance to the behaviour centroid in standardised feature space.
+on Euclidean distance to the behavior centroid in standardized feature space.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def run_dissimilarity_analysis(
         List of dicts with keys: ``window_id``, ``session_id``,
         ``start_frame``, ``end_frame``.
     behavior_id:
-        The behavior these clips are labelled as.
+        The behavior these clips are labeled as.
     outlier_percentile:
         Clips above this percentile in distance are flagged as outliers.
 
@@ -93,6 +93,9 @@ def run_dissimilarity_analysis(
         "segment_id", "start_frame", "end_frame", "animal_id", "session_id",
         "video_id", "prediction_variance", "density_outlier_score",
         "uncertainty_score", "prediction_prob", "prediction_prob_fused",
+        # Presence bookkeeping is float32 like every feature, so it passes the
+        # dtype filter below unless it is named here.
+        "pose_present_frac", "partner_present_frac",
     }
     feature_cols = [c for c in seg_df.columns if c not in meta_cols and seg_df[c].dtype.kind == "f"]
     if not feature_cols:
@@ -108,7 +111,7 @@ def run_dissimilarity_analysis(
     # Segment features use a canonical window grid; reviewed clips may use
     # different frame ranges (random sampling, bout windows) so we match by
     # exact (session, start, end) first, then fall back to the nearest segment
-    # centre.
+    # center.
     seg_df = seg_df.reset_index(drop=True)
     seg_lookup: dict[tuple[str, int, int], int] = {}
     for idx, row in seg_df[["session_id", "start_frame", "end_frame"]].iterrows():
@@ -130,8 +133,8 @@ def run_dissimilarity_analysis(
             matched_clips.append(clip)
             continue
 
-        # Nearest-segment match: find the segment whose centre frame is
-        # closest to the clip's centre.  This handles clips that fall between
+        # Nearest-segment match: find the segment whose center frame is
+        # closest to the clip's center.  This handles clips that fall between
         # grid positions (e.g. randomly sampled or bout windows).
         best_idx = _nearest_segment_match(seg_df, sid, sf, ef)
         if best_idx is not None:
@@ -146,7 +149,7 @@ def run_dissimilarity_analysis(
             n_matched=n_matched,
             n_outliers=0,
             error=(
-                f"Only {n_matched} clip(s) matched to segment features — need at "
+                f"Only {n_matched} clip(s) matched to segment features, need at "
                 f"least 3 for a meaningful analysis."
             ),
         )
@@ -167,7 +170,7 @@ def run_dissimilarity_analysis(
     feat_matrix = (feat_matrix - means) / stds
 
     # Compute Euclidean distance from each clip to the group centroid in the
-    # standardised space.  After standardisation the centroid sits at the origin
+    # standardized space.  After standardization the centroid sits at the origin
     # so the distance is simply the L2 norm of each row.
     distances = np.linalg.norm(feat_matrix, axis=1)
 
@@ -214,7 +217,7 @@ def run_dissimilarity_analysis(
 def _nearest_segment_match(
     seg_df: pd.DataFrame, session_id: str, start: int, end: int
 ) -> int | None:
-    """Find the segment row whose centre is closest to the clip centre."""
+    """Find the segment row whose center is closest to the clip center."""
     mask = seg_df["session_id"] == session_id
     subset = seg_df.loc[mask]
     if subset.empty:

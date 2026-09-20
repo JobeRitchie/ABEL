@@ -1,4 +1,4 @@
-"""In-app updater — check the git remote and pull the latest ABEL version.
+"""In-app updater: check the git remote and pull the latest ABEL version.
 
 Mirrors the manual updater pattern: the user explicitly clicks *Check for
 Updates* (we never auto-check on launch). When an update exists, *Install
@@ -44,7 +44,7 @@ def find_git() -> str | None:
     GUI apps launched from a shortcut or ``.bat`` inherit whatever PATH existed
     when the launcher was created, so a Git install made *after* that point is
     invisible to ``shutil.which`` even though git is on disk. Fall back to the
-    standard Git-for-Windows install locations before giving up — this is the
+    standard Git-for-Windows install locations before giving up, this is the
     usual reason "Check for Updates" reports git as missing.
     """
     found = shutil.which("git")
@@ -178,7 +178,7 @@ class UpdateService:
         """Fetch remote metadata and report how many commits HEAD is behind."""
         if not self.is_git_repo():
             return UpdateStatus(
-                error="Not a git checkout — in-app updates are unavailable for "
+                error="Not a git checkout: in-app updates are unavailable for "
                 "this install."
             )
         if self.git_executable() is None:
@@ -198,14 +198,14 @@ class UpdateService:
         except FileNotFoundError:
             return UpdateStatus(error=GIT_MISSING_MSG)
         except subprocess.TimeoutExpired:
-            return UpdateStatus(error="Timed out — check your network connection.")
+            return UpdateStatus(error="Timed out: check your network connection.")
         except Exception as exc:  # pragma: no cover - defensive
             return UpdateStatus(error=str(exc))
 
     def pull(self, line_cb: Callable[[str], None]) -> bool:
         """Run ``git pull`` streaming output through ``line_cb``; return success."""
         if not self.is_git_repo():
-            line_cb("Not a git checkout — cannot update.")
+            line_cb("Not a git checkout: cannot update.")
             return False
         if self.git_executable() is None:
             line_cb(GIT_MISSING_MSG)

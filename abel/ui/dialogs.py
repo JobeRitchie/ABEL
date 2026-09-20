@@ -57,7 +57,7 @@ class ProjectWizardDialog(QDialog):
         self.pose_mode = QComboBox()
         self.pose_mode.addItems([SourceMode.REFERENCE.value, SourceMode.COPY.value])
 
-        browse_btn = QPushButton("Browse...")
+        browse_btn = QPushButton("Browse…")
         browse_btn.clicked.connect(self._choose_root)
 
         buttons = QHBoxLayout()

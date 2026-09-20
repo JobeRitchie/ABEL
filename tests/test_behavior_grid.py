@@ -88,7 +88,7 @@ def test_select_grid_bouts_prefers_confident_then_backfills(tmp_path: Path) -> N
     svc = _service(_make_project(tmp_path))
     # 3 detected bouts: session_a (0.95, 0.70), session_b (0.85). top_fraction=0.4
     # keeps only 0.95 as "confident", but the grid backfills with the next-
-    # strongest bouts until full rather than leaving cells blank — so all three
+    # strongest bouts until full rather than leaving cells blank, so all three
     # are used and the weakest (0.70) appears only after the strong ones.
     specs = svc.select_grid_bouts("groom", n_cells=25, top_fraction=0.4)
     assert len(specs) == 3
@@ -188,7 +188,7 @@ def test_select_grid_bouts_prefers_unique_subjects(tmp_path: Path) -> None:
     )
     svc = _service(root)
     # Two cells across two subjects: the lone m2 session must always be chosen,
-    # plus exactly one of the m1 sessions — never two m1 clips.
+    # plus exactly one of the m1 sessions: never two m1 clips.
     for _ in range(15):
         specs = svc.select_grid_bouts("groom", n_cells=2, top_fraction=1.0)
         assert len(specs) == 2

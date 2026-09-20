@@ -154,9 +154,9 @@ class ReviewService:
 
     def replace_segment_labels(self, records: list[ReviewerLabelRecord]) -> None:
         """Append reviewer labels, replacing any existing rows for the same
-        ``segment_id`` — one parquet read/write for the whole batch.
+        ``segment_id``, one parquet read/write for the whole batch.
 
-        This keeps re-labelling idempotent (no duplicate/stale rows accumulate)
+        This keeps re-labeling idempotent (no duplicate/stale rows accumulate)
         and is far faster than calling :meth:`append_segment_label` per record.
         """
         if not self._project_root or not records:
@@ -239,7 +239,7 @@ class ReviewService:
         """Delete reviewer-label rows for the given segment IDs (labels only).
 
         Unlike :meth:`delete_decisions`, this leaves the review decisions
-        untouched — used when re-committing a clip's soundboard labels so the
+        untouched, used when re-committing a clip's soundboard labels so the
         fresh set replaces the prior rows instead of duplicating them.
         Returns the number of label rows removed.
         """
@@ -308,7 +308,7 @@ class ReviewService:
                 existing = pd.read_parquet(path)
                 merged = pd.concat([existing, row], ignore_index=True)
             except Exception:
-                # File is corrupted or empty — start fresh
+                # File is corrupted or empty: start fresh
                 merged = row
         else:
             merged = row

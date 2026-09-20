@@ -1,6 +1,6 @@
 """Focused analysis: how much do the *video motion features* buy us?
 
-The headline case is **Groom vs Freeze** — two behaviors that pose-only kinematics
+The headline case is **Groom vs Freeze**, two behaviors that pose-only kinematics
 struggle to separate (freezing is defined by the *absence* of motion, grooming by
 small *rhythmic* motion; both are low-locomotion, so body-part geometry alone
 confuses them).  ABEL's video-derived motion features (optical flow magnitude/
@@ -8,9 +8,9 @@ entropy, local surface motion, R3D appearance) are exactly the signal that shoul
 disambiguate them.
 
 For each requested ``(project, behavior)`` this trains ABEL's real classifier twice
-on the *same* held-out split and the *same* per-seed training subsample — once
+on the *same* held-out split and the *same* per-seed training subsample, once
 **without** the video features (pose + kinematics + context ± social) and once
-**with** them — so the F1 difference is a clean paired estimate of what the video
+**with** them, so the F1 difference is a clean paired estimate of what the video
 motion features add.  Nothing is re-implemented: both arms call the shared
 ``engine.run_one_config`` primitive with a ``feature_cols_override``.
 
@@ -66,7 +66,7 @@ class VideoValueResult:
     precision_with_video: float = float("nan")
     recall_no_video: float = float("nan")
     recall_with_video: float = float("nan")
-    # Held-out error counts (mean across seeds) — the reduction is the story.
+    # Held-out error counts (mean across seeds): the reduction is the story.
     fp_no_video: float = float("nan")
     fp_with_video: float = float("nan")
     fn_no_video: float = float("nan")
@@ -79,7 +79,7 @@ class VideoValueResult:
     error: str = ""
 
     def to_row(self) -> dict:
-        """Flat CSV row — including the per-seed F1 on each arm.
+        """Flat CSV row: including the per-seed F1 on each arm.
 
         The seeds used to be dropped here, which left the export with a mean, a CI
         half-width and a significance *boolean* but no way to re-run the paired test
@@ -259,7 +259,7 @@ def results_to_frame(results: list[VideoValueResult]) -> pd.DataFrame:
     *family* of them ("video features improved N of M behaviors"), so a raw p at
     0.05 across ~45 behaviors buys a couple of expected false positives.  ``q_value``
     is the BH-adjusted p over the testable behaviors, and ``significant_bh`` is the
-    flag a figure should colour by.  ``significant`` is left alone so older runs and
+    flag a figure should color by.  ``significant`` is left alone so older runs and
     the per-behavior panel keep their meaning.
     """
     df = pd.DataFrame([r.to_row() for r in results])
@@ -272,7 +272,7 @@ def results_to_frame(results: list[VideoValueResult]) -> pd.DataFrame:
     q = pd.to_numeric(df["q_value"], errors="coerce")
     gain = pd.to_numeric(df.get("gain"), errors="coerce")
     df["significant_bh"] = (q < 0.05) & gain.notna()
-    # Signed verdict, so a panel can colour "helped" apart from "hurt" without
+    # Signed verdict, so a panel can color "helped" apart from "hurt" without
     # re-deriving it from a sign and a flag.
     df["verdict"] = np.where(
         ~df["significant_bh"], "ns",
@@ -281,10 +281,10 @@ def results_to_frame(results: list[VideoValueResult]) -> pd.DataFrame:
 
 
 def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
-    """Paired dumbbells — F1 without → with video features, per (project, behavior).
+    """Paired dumbbells: F1 without → with video features, per (project, behavior).
 
     Two panels.  Left: for each behavior, a line from the pose-only F1 to the
-    +video F1, so the *pairing* — the whole point of the design — is the visual
+    +video F1, so the *pairing*, the whole point of the design, is the visual
     primitive rather than something the reader has to infer by comparing the
     heights of two adjacent bars.  Right: the paired gain with its 95% CI across
     seeds, which is the quantity the significance claim is actually about.
@@ -336,7 +336,7 @@ def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
                 zorder=3, label="+ Video motion features")
     ax1.set_yticks(y)
     ax1.set_yticklabels(labels, fontsize=7.5)
-    # Frame the region F1 actually occupies — starting at 0 spends most of the
+    # Frame the region F1 actually occupies: starting at 0 spends most of the
     # panel on empty space and flattens every difference the figure is about.
     lo = float(np.nanmin([no_v.min(), with_v.min()]))
     ax1.set_xlim(max(0.0, lo - 0.06), 1.0)
@@ -347,13 +347,13 @@ def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
     for side in ("top", "right"):
         ax1.spines[side].set_visible(False)
 
-    # ── Right: the paired gain and its CI — the quantity the asterisks are about.
+    # ── Right: the paired gain and its CI, the quantity the asterisks are about.
     ax2.barh(y, gains, 0.62, xerr=gain_ci,
              color=[(C_ON if s else "#CFD8DC") for s in sig],
              edgecolor="white", linewidth=0.4,
              error_kw={"elinewidth": 0.8, "ecolor": "#455A64", "capsize": 2})
     ax2.axvline(0, color="#546E7A", linewidth=1.0)
-    # Mirror the label to the far side for negative gains — always writing it to the
+    # Mirror the label to the far side for negative gains, always writing it to the
     # right of the bar puts it *on top of* a leftward bar and its error whisker.
     span = float(np.nanmax(np.abs(gains) + gain_ci)) if len(gains) else 1.0
     pad = max(span * 0.03, 1e-3)
@@ -368,7 +368,7 @@ def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
     ax2.grid(axis="x", alpha=0.22)
     for side in ("top", "right"):
         ax2.spines[side].set_visible(False)
-    # Room for the value labels themselves, which sit *beyond* the error whiskers —
+    # Room for the value labels themselves, which sit *beyond* the error whiskers,
     # a plain margin sized to the bars alone clips the widest label.
     ends = np.concatenate([gains - gain_ci, gains + gain_ci])
     ends = ends[np.isfinite(ends)]

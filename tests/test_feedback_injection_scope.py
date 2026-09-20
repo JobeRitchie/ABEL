@@ -1,11 +1,11 @@
-"""Regression: temporal-review feedback must honour the training session scope.
+"""Regression: temporal-review feedback must honor the training session scope.
 
 Bug (found on TMT_NewCam): a user unticks held-out sessions in the training
 selector, but any of those sessions that were reviewed in the Temporal Review tab
 have false-positive/false-negative intervals saved to
 ``feedback_intervals.json``.  ``_load_training_frame`` scopes the labeled rows
 correctly, then injects hard-negative / hard-positive rows from
-``segment_features.parquet`` for *every* session named in the feedback file —
+``segment_features.parquet`` for *every* session named in the feedback file,
 with no session-scope check.  That silently reintroduced 4 held-out mice into the
 Dig model, leaking exactly the sessions being validated (the model was tuned by
 the reviewer's own FP corrections on those mice).
@@ -37,7 +37,7 @@ def _build_project(tmp_path: Path) -> Path:
 
     # Labeled corpus: one ticked (training) session, one unticked (held-out) one.
     # Both carry reviewer labels; the held-out session's labels are what the scope
-    # filter should drop — the injection path is what this test really exercises.
+    # filter should drop: the injection path is what this test really exercises.
     rows = []
     for sess in ("s_train", "s_hold"):
         for i in range(6):
@@ -54,7 +54,7 @@ def _build_project(tmp_path: Path) -> Path:
     )
 
     # segment_features holds candidate segments for BOTH sessions in the FP window
-    # (frames 900-909) — the injection would pull the held-out one if unguarded.
+    # (frames 900-909): the injection would pull the held-out one if unguarded.
     feats = []
     for sess in ("s_train", "s_hold"):
         feats.append({

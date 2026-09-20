@@ -1,21 +1,21 @@
-"""Meta-level summary tables — the spine of the one-figure manuscript story.
+"""Meta-level summary tables: the spine of the one-figure manuscript story.
 
 A full validation run emits ~189 figures and ~117 tidy CSVs: one learning curve,
 one reliability diagram, one Bland-Altman per behavior per assay.  That granularity
 is right for the archive and wrong for a paper, which needs a single multi-panel
 figure backed by a handful of tables.  This module distils the exhaustive per-behavior
-exports into five small tables — one row per assay, or per behavior, or per feature
-family — that a person can plot directly:
+exports into five small tables, one row per assay, or per behavior, or per feature
+family, that a person can plot directly:
 
-    summary_per_assay.csv            8 rows  — headline accuracy + counts + κ/ECE/CCC
-    summary_per_behavior.csv        43 rows  — the master supplementary table
-    summary_feature_value.csv       14 rows  — ΔF1 per enhancement × clip budget
-    summary_discrimination.csv       3 rows  — error removed by feature family
-    summary_active_learning_curve.csv        — pooled positives-found curve
+    summary_per_assay.csv            8 rows , headline accuracy + counts + κ/ECE/CCC
+    summary_per_behavior.csv        43 rows , the master supplementary table
+    summary_feature_value.csv       14 rows , ΔF1 per enhancement × clip budget
+    summary_discrimination.csv       3 rows , error removed by feature family
+    summary_active_learning_curve.csv       , pooled positives-found curve
 
 Each builder is defensive: a summary is emitted only from the source tables that are
 present, and any absent join column is left NaN rather than sinking the whole export.
-The tables are assay-scoped throughout — same-named behaviors from different assays
+The tables are assay-scoped throughout, same-named behaviors from different assays
 stay separate rows (see :func:`abel.validation.plots.pool_generalization_by_behavior`).
 """
 
@@ -62,7 +62,7 @@ def _read(path: Path) -> pd.DataFrame | None:
         # UTF-8 (older runs) unchanged -- otherwise the first column of every
         # source table would come back named "﻿project".
         return pd.read_csv(path, encoding="utf-8-sig") if path.is_file() else None
-    except Exception:  # noqa: BLE001 — a corrupt source must not sink the summary
+    except Exception:  # noqa: BLE001, a corrupt source must not sink the summary
         return None
 
 
@@ -133,7 +133,7 @@ def summary_per_assay(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
     # false alarms." Summing across *behaviors* is the meaningful direction (each
     # behavior contributes its own positives); summing across seeds is not, and
     # confusion_by_behavior has already collapsed that axis by averaging.
-    # TN is excluded on purpose — an assay-level accuracy off it would be ~0.99
+    # TN is excluded on purpose: an assay-level accuracy off it would be ~0.99
     # by imbalance alone.
     conf = src.get("confusion_by_behavior")
     if conf is not None and {"project_id", "tp", "fn", "fp"} <= set(conf.columns):
@@ -242,7 +242,7 @@ def summary_feature_value(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
             # The manuscript-level test. Each row here is already one seed-averaged
             # gain per behavior, but behaviors cluster within projects (ICC ~0.3-0.4),
             # so a flat t-test across them overstates significance by ~2 orders of
-            # magnitude — the same defect corrected in
+            # magnitude: the same defect corrected in
             # ablation.pooled_gain_by_behavior, and corrected the same way here so
             # the summary table cannot disagree with the pooled one.
             clusters = (keep["assay"].astype(str).tolist()
@@ -257,7 +257,7 @@ def summary_feature_value(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
                 "ci95": float(mm.ci95),
                 "p_across_behaviors": float(mm.p_value),
                 # `n_significant` counts the per-behavior across-SEED test, which
-                # answers a narrower question — see ablation.pooled_gain_by_behavior.
+                # answers a narrower question: see ablation.pooled_gain_by_behavior.
                 "n_significant": int(n_sig),
                 "n_total": int(len(grp)),
                 "n_projects": int(mm.n_clusters),
@@ -305,7 +305,7 @@ def summary_discrimination(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 def summary_active_learning_curve(src: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Positives discovered vs clips reviewed, pooled across all behaviors, one row
-    per (clips reviewed, strategy) — the meta AL-vs-random curve."""
+    per (clips reviewed, strategy), the meta AL-vs-random curve."""
     pts = src.get("al_points")
     if pts is None or pts.empty:
         return pd.DataFrame()
@@ -393,7 +393,7 @@ def build_summaries(src: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
     for fname, fn in _BUILDERS.items():
         try:
             df = fn(src)
-        except Exception:  # noqa: BLE001 — one bad summary must not sink the rest
+        except Exception:  # noqa: BLE001, one bad summary must not sink the rest
             df = pd.DataFrame()
         if df is not None and not df.empty:
             out[fname] = df

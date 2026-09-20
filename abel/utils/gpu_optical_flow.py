@@ -7,7 +7,7 @@ tried first when OpenCV was built with CUDA support.
 
 Thread safety
 -------------
-A module-level lock serialises GPU batch calls so multiple chunk threads
+A module-level lock serializes GPU batch calls so multiple chunk threads
 can share the GPU without contention.
 """
 
@@ -131,7 +131,7 @@ def probe_gpu_batch_size(
 
 
 def gpu_summary() -> dict[str, Any]:
-    """Return a dict summarising GPU state for display in the UI."""
+    """Return a dict summarizing GPU state for display in the UI."""
     total = gpu_vram_total_mb()
     free = gpu_vram_free_mb()
     backend = "cpu"
@@ -166,9 +166,9 @@ def detect_flow_backend() -> str:
     """Return the best available optical flow backend identifier.
 
     Priority order:
-    1. ``"cv2_cuda"`` — OpenCV compiled with CUDA (exact Farneback on GPU).
-    2. ``"torch"``    — Pyramidal Lucas-Kanade via PyTorch CUDA.
-    3. ``"cpu"``      — Standard CPU Farneback (baseline).
+    1. ``"cv2_cuda"``: OpenCV compiled with CUDA (exact Farneback on GPU).
+    2. ``"torch"``   : Pyramidal Lucas-Kanade via PyTorch CUDA.
+    3. ``"cpu"``     : Standard CPU Farneback (baseline).
     """
     # 1. OpenCV CUDA Farneback
     try:
@@ -197,7 +197,7 @@ def detect_flow_backend() -> str:
 
 
 def get_flow_lock() -> threading.Lock:
-    """Return the GPU compute lock for serialising flow batches."""
+    """Return the GPU compute lock for serializing flow batches."""
     return _flow_lock
 
 
@@ -241,7 +241,7 @@ def _pyramidal_lk_flow(
 
     Returns
     -------
-    (B, 2, H, W) float32 tensor — per-pixel (dx, dy) in pixels.
+    (B, 2, H, W) float32 tensor, per-pixel (dx, dy) in pixels.
     """
     import torch
     import torch.nn.functional as F
@@ -271,7 +271,7 @@ def _pyramidal_lk_flow(
         pyr_prev.append(F.avg_pool2d(pyr_prev[-1], 2))
         pyr_curr.append(F.avg_pool2d(pyr_curr[-1], 2))
 
-    # Coarsest-level flow initialised to zero.
+    # Coarsest-level flow initialized to zero.
     ch, cw = pyr_prev[-1].shape[2], pyr_prev[-1].shape[3]
     flow = torch.zeros(B, 2, ch, cw, device=device)
 
@@ -286,7 +286,7 @@ def _pyramidal_lk_flow(
                 flow, (lh, lw), mode="bilinear", align_corners=False,
             ) * 2
 
-        # Base sampling grid in normalised [-1, 1] coordinates.
+        # Base sampling grid in normalized [-1, 1] coordinates.
         grid_y = torch.linspace(-1, 1, lh, device=device)
         grid_x = torch.linspace(-1, 1, lw, device=device)
         base_gy, base_gx = torch.meshgrid(grid_y, grid_x, indexing="ij")
@@ -328,7 +328,7 @@ def _pyramidal_lk_flow(
             du = -(Iyy * Ixt - Ixy * Iyt) / det
             dv = -(Ixx * Iyt - Ixy * Ixt) / det
 
-            # Clamp large increments to stabilise textureless regions.
+            # Clamp large increments to stabilize textureless regions.
             max_incr = 5.0
             du = du.clamp(-max_incr, max_incr)
             dv = dv.clamp(-max_incr, max_incr)
@@ -470,7 +470,7 @@ def compute_flow_batch_gpu(
                         t_prev, t_curr, levels=levels,
                         winsize=winsize, iterations=iterations,
                     )
-                    # Synchronise the CUDA stream before reading results back.
+                    # Synchronize the CUDA stream before reading results back.
                     # This converts any asynchronous CUDA kernel errors (e.g.
                     # illegal memory access from diverged LK flow) into a
                     # synchronous RuntimeError that the except clause below can
@@ -485,7 +485,7 @@ def compute_flow_batch_gpu(
                         batch_flows_np[pos] = raw_np[vi]
 
                 except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
-                    # CUDA OOM or allocation failure — fall back to CPU for
+                    # CUDA OOM or allocation failure: fall back to CPU for
                     # this sub-batch and record the event.
                     warnings_out.oom_fallback_count += 1
                     msg = (
@@ -531,7 +531,7 @@ def compute_flow_batch_gpu(
                     zero_flow if i in null_indices else batch_flows_np[i]
                 )
 
-    # Release cache once per call (i.e. per chunk), not per sub-batch — this
+    # Release cache once per call (i.e. per chunk), not per sub-batch, this
     # bounds cross-session fragmentation without the per-batch malloc churn.
     try:
         torch.cuda.empty_cache()

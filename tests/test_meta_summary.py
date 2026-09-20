@@ -16,7 +16,7 @@ from abel.validation import meta_summary as ms
 
 
 def _sources() -> dict[str, pd.DataFrame]:
-    # Two assays that SHARE a behavior name ("Rear") — the collision the assay
+    # Two assays that SHARE a behavior name ("Rear"), the collision the assay
     # scoping must survive.
     return {
         "publication_metrics": pd.DataFrame({

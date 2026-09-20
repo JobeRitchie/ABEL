@@ -1,20 +1,20 @@
 """Feature-role clustering: do ABEL's extracted features play distinct roles?
 
 The behaviorscape importance profile says, per behavior, *which* feature modality the
-model leans on — pose geometry, kinematics, environment/ROI context, or video motion.
+model leans on, pose geometry, kinematics, environment/ROI context, or video motion.
 If features were interchangeable every behavior would lean the same way. They do not:
 Groom is pose-driven, Explore is kinematics-driven, Climb/Sniff are context-driven,
 Approach is video-driven. This module makes that quantitative:
 
 1. Cluster behaviors by their modality-reliance profile (hierarchical, Ward linkage,
-   k=4 by default — one group per dominant modality) → a dendrogram.
+   k=4 by default, one group per dominant modality) → a dendrogram.
 2. For each cluster, name its dominant modality and measure how much that reliance
    *buys*: the F1 improvement over a pose-only baseline the corresponding features
    provide (ablation ΔF1). Context and video are added features and can lift F1;
    pose and kinematics are already IN the baseline, so their lift is 0 by construction
-   — which is the point (those behaviors need no extra features).
+  , which is the point (those behaviors need no extra features).
 3. A one-sample t-test asks whether each cluster's lift is real; a Kruskal-Wallis
-   across clusters shows the lift is not uniform — the feature roles are distinct.
+   across clusters shows the lift is not uniform, the feature roles are distinct.
 
 The bar table (:func:`dominant_modality_improvement_bars`) is Prism-ready: one row per
 cluster, y = mean improvement over pose-only, with a 95% CI and p.
@@ -27,7 +27,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Which ablation enhancement realises each modality's over-pose lift. Pose geometry and
+# Which ablation enhancement realizes each modality's over-pose lift. Pose geometry and
 # kinematics are part of the pose-only baseline, so they have no over-pose enhancement.
 MODALITY_TO_ENHANCEMENT: dict[str, str] = {
     "Context (ROI / target)": "+ Environment / ROI context",
@@ -117,8 +117,8 @@ def _ci95(vals: np.ndarray) -> float:
 
 def _behavior_improvement(matrix: pd.DataFrame, gain_df: pd.DataFrame,
                           dominant: dict[str, str]) -> pd.Series:
-    """Per behavior: the over-pose ΔF1 of the enhancement realising its cluster's
-    dominant modality (0 when that modality is pose/kinematics — already in baseline)."""
+    """Per behavior: the over-pose ΔF1 of the enhancement realizing its cluster's
+    dominant modality (0 when that modality is pose/kinematics, already in baseline)."""
     imp = {}
     for beh in matrix.index:
         enh = MODALITY_TO_ENHANCEMENT.get(dominant.get(beh, ""))
@@ -135,7 +135,7 @@ def dominant_modality_improvement_bars(matrix: pd.DataFrame, labels: np.ndarray,
                                        gain_df: pd.DataFrame) -> pd.DataFrame:
     """One row per cluster: dominant modality + mean improvement over pose-only.
 
-    Improvement is the ablation ΔF1 of the enhancement that realises the cluster's
+    Improvement is the ablation ΔF1 of the enhancement that realizes the cluster's
     dominant modality (0 for pose/kinematics-dominant clusters). Carries a 95% CI
     across the cluster's behaviors and a one-sample t-test p vs 0. Ordered by
     descending improvement so the most feature-dependent cluster reads first.
@@ -214,7 +214,7 @@ def kruskal_across_clusters(matrix: pd.DataFrame, labels: np.ndarray,
     try:
         H, p = stats.kruskal(*groups)
         return {"H": float(H), "p_value": float(p), "n_groups": len(groups)}
-    except Exception:  # noqa: BLE001 — degenerate (all-equal) groups
+    except Exception:  # noqa: BLE001, degenerate (all-equal) groups
         return {}
 
 

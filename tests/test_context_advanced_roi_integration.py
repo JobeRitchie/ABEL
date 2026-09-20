@@ -67,7 +67,7 @@ def project(tmp_path):
     (root / "config").mkdir(parents=True)
     (root / "raw").mkdir(parents=True)
 
-    xs = np.full(N_FRAMES, 30.0)                     # centre of ROI 1 (x 20-40)
+    xs = np.full(N_FRAMES, 30.0)                     # center of ROI 1 (x 20-40)
     ys = np.linspace(15.0, 105.0, N_FRAMES)          # travels down the strip
     _write_pose(root / "raw" / "pose.csv", xs, ys)
     _write_video(root / "raw" / "video.avi")
@@ -133,11 +133,11 @@ def test_values_reflect_real_geometry(project):
     # Inside ROI 1 -> signed distance positive; outside ROI 2 -> negative.
     assert (df["body_centroid_to_roi_1_signed_dist"] > 0).all()
     assert (df["body_centroid_to_roi_2_signed_dist"] < 0).all()
-    # Travelling down the arm: axial position sweeps from negative to positive,
-    # which is exactly the information distance-to-centre cannot express.
+    # Traveling down the arm: axial position sweeps from negative to positive,
+    # which is exactly the information distance-to-center cannot express.
     axial = df["body_centroid_roi_1_axial"].to_numpy()
     assert axial[0] < -0.5 and axial[-1] > 0.5
-    # Lateral stays ~0: the animal is on the arm's centreline throughout.
+    # Lateral stays ~0: the animal is on the arm's centerline throughout.
     assert np.abs(df["body_centroid_roi_1_lateral"]).max() < 0.2
 
 
@@ -146,7 +146,7 @@ def test_centre_distance_alone_cannot_separate_the_two_arm_ends(project):
     df = _run(project, advanced=True)
     d = df["body_centroid_to_roi_1_dist"].to_numpy()
     axial = df["body_centroid_roi_1_axial"].to_numpy()
-    # First and last frame are near-equidistant from the ROI centre...
+    # First and last frame are near-equidistant from the ROI center...
     assert abs(d[0] - d[-1]) < 0.15 * max(d[0], d[-1])
     # ...yet they are at opposite ends of the arm, and axial says so.
     assert np.sign(axial[0]) != np.sign(axial[-1])
@@ -156,6 +156,6 @@ def test_toggle_off_removes_the_columns_but_keeps_the_legacy_ones(project):
     df = _run(project, advanced=False)
     assert not [c for c in df.columns if c.startswith("in_roi_")]
     assert not [c for c in df.columns if "_signed_dist" in c or "_axial" in c]
-    # The pre-existing centre-based ROI features are untouched.
+    # The pre-existing center-based ROI features are untouched.
     assert "nose_to_roi_1_dist" in df.columns
     assert "roi_1_present" in df.columns

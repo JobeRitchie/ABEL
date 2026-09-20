@@ -1,7 +1,7 @@
 """Turn a worker traceback into something a user can act on.
 
 Worker threads hand the UI a full traceback string.  Truncating it from the
-front (``tb[:600]``) keeps the call frames and cuts off the exception message —
+front (``tb[:600]``) keeps the call frames and cuts off the exception message,
 the one line that says what actually went wrong.  These helpers surface the
 message first and keep the frames as supporting detail.
 """

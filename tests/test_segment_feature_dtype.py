@@ -1,7 +1,7 @@
 """Segment summary statistics are stored as float32 (representation_v5).
 
-The statistics were always *computed* in float32 — ``build_segment_df_fast``
-reads its group block at that width — but the final assembly widened every
+The statistics were always *computed* in float32, ``build_segment_df_fast``
+reads its group block at that width, but the final assembly widened every
 column back to float64.  That doubled the segment table (7.9 GiB for a
 628k-window project) and, because a full-table copy consolidates every numeric
 column into one contiguous block, made a routine append ask the allocator for a
@@ -96,9 +96,14 @@ def test_downcast_segment_features_leaves_non_float_columns_alone() -> None:
     assert out["speed_mean"].tolist() == [1.5, 2.5]
 
 
-def test_feature_version_is_v5_so_old_caches_invalidate() -> None:
-    """The v4 -> v5 bump is what rebuilds a float64 cache on the next run."""
-    assert RepresentationConfig().feature_version == "representation_v5"
+def test_feature_version_is_v6_so_old_caches_invalidate() -> None:
+    """Each bump is what rebuilds a stale cache on the next run.
+
+    v4 -> v5 moved segment statistics to float32; v5 -> v6 stopped back-filling
+    absent animals with a frozen pose and started dropping windows they were
+    not present for.
+    """
+    assert RepresentationConfig().feature_version == "representation_v6"
 
 
 def test_legacy_cache_detector_flags_float64_and_ignores_float32(tmp_path) -> None:
@@ -167,7 +172,7 @@ def test_merge_enriched_does_not_widen_the_segment_table() -> None:
 
     ``reindex(..., fill_value=0.0)`` typed its pads from a Python float, so the
     padded frame arrived as float64 and the concat upcast every matching float32
-    column with it — turning a routine append into a single contiguous float64
+    column with it, turning a routine append into a single contiguous float64
     block covering every numeric column.
     """
     from abel.ui.tabs.active_learning_tab import ActiveLearningTab

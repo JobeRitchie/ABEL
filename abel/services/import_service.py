@@ -31,7 +31,7 @@ class ImportService:
     # token (``bout_<uuid>_session_0952e047_44761_44775``), so re-pointing a recording
     # at a new session id is a token substitution wherever those ids are persisted.
     _SESSION_TOKEN_RE = re.compile(r"session_[0-9a-fA-F]+")
-    # SLEAP predictions aren't read directly — they're converted to a DLC ``.h5``
+    # SLEAP predictions aren't read directly: they're converted to a DLC ``.h5``
     # (see :meth:`convert_sleap_poses`) that then flows through the normal path.
     SLEAP_EXTENSIONS = set(SLEAP_POSE_EXTENSIONS)
 
@@ -94,13 +94,42 @@ class ImportService:
         )
 
     def auto_match(self, videos: list[VideoAsset], poses: list[PoseAsset]) -> list[LinkedSession]:
+        """Pair videos with pose files, most certain evidence first.
+
+        1. identical filename stems once tracker suffixes are stripped;
+        2. one stem extends the other past a separator
+           (``COA301`` ↔ ``COA301_side_predictions``), only when unambiguous;
+        3. the same subject *and* session parsed by the filename regexes, only
+           when that pair names exactly one video and one pose file.
+        """
+        pairs: list[tuple[VideoAsset, PoseAsset, float, str]] = []
+
         pose_by_key = {self._match_key(Path(p.source_path)): p for p in poses}
-        linked: list[LinkedSession] = []
         for video in videos:
-            key = self._match_key(Path(video.source_path))
-            pose = pose_by_key.get(key)
-            if pose is None:
-                continue
+            pose = pose_by_key.get(self._match_key(Path(video.source_path)))
+            if pose is not None:
+                pairs.append((video, pose, 1.0, "Auto-matched by filename stem"))
+
+        def _unpaired() -> tuple[list[VideoAsset], list[PoseAsset]]:
+            used_v = {id(v) for v, *_ in pairs}
+            used_p = {id(p) for _, p, *_ in pairs}
+            return (
+                [v for v in videos if id(v) not in used_v],
+                [p for p in poses if id(p) not in used_p],
+            )
+
+        rest_v, rest_p = _unpaired()
+        for video, pose in self._prefix_pairs(rest_v, rest_p):
+            pairs.append((video, pose, 0.9, "Auto-matched by filename prefix"))
+
+        rest_v, rest_p = _unpaired()
+        for video, pose in self._subject_session_pairs(rest_v, rest_p):
+            pairs.append((video, pose, 0.8, "Auto-matched by subject + session"))
+
+        order = {id(v): i for i, v in enumerate(videos)}
+        pairs.sort(key=lambda item: order[id(item[0])])
+        linked: list[LinkedSession] = []
+        for video, pose, score, note in pairs:
             individuals = list(pose.individuals or [])
             linked.append(
                 LinkedSession(
@@ -109,8 +138,8 @@ class ImportService:
                     pose_asset_id=pose.asset_id,
                     subject_id=video.subject_id,
                     pixels_per_mm=video.pixels_per_mm,
-                    pairing_score=1.0,
-                    pairing_notes="Auto-matched by filename stem",
+                    pairing_score=score,
+                    pairing_notes=note,
                     individuals=individuals,
                     # Default each detected individual to itself; the import UI
                     # lets the user remap to real subject identities (green/black).
@@ -118,6 +147,73 @@ class ImportService:
                 )
             )
         return linked
+
+    @classmethod
+    def _prefix_pairs(
+        cls, videos: list[VideoAsset], poses: list[PoseAsset]
+    ) -> list[tuple[VideoAsset, PoseAsset]]:
+        """Pairs where one match key is the other's prefix up to a separator.
+
+        The longest shared key wins; a tie on either side is left unpaired so
+        ``M1`` never grabs one of ``M1_day1`` / ``M1_day2`` at random.
+        """
+
+        def _extends(longer: str, shorter: str) -> bool:
+            return (
+                len(longer) > len(shorter)
+                and longer.startswith(shorter)
+                and not longer[len(shorter)].isalnum()
+            )
+
+        v_keys = [cls._match_key(Path(v.source_path)) for v in videos]
+        p_keys = [cls._match_key(Path(p.source_path)) for p in poses]
+        scores: dict[tuple[int, int], int] = {}
+        for vi, vk in enumerate(v_keys):
+            for pi, pk in enumerate(p_keys):
+                if _extends(pk, vk) or _extends(vk, pk):
+                    scores[(vi, pi)] = min(len(vk), len(pk))
+
+        def _unique_best(candidates: list[tuple[int, int]]) -> tuple[int, int] | None:
+            if not candidates:
+                return None
+            best = max(scores[c] for c in candidates)
+            top = [c for c in candidates if scores[c] == best]
+            return top[0] if len(top) == 1 else None
+
+        out: list[tuple[VideoAsset, PoseAsset]] = []
+        for vi in range(len(videos)):
+            choice = _unique_best([c for c in scores if c[0] == vi])
+            if choice is None:
+                continue
+            if _unique_best([c for c in scores if c[1] == choice[1]]) == choice:
+                out.append((videos[vi], poses[choice[1]]))
+        return out
+
+    @staticmethod
+    def _subject_session_pairs(
+        videos: list[VideoAsset], poses: list[PoseAsset]
+    ) -> list[tuple[VideoAsset, PoseAsset]]:
+        """Pairs whose regex-parsed (subject, session) is shared by exactly one of each."""
+
+        def _key(asset) -> tuple[str, str] | None:
+            subject = str(asset.subject_id or "").strip().casefold()
+            session = str(asset.session_id or "").strip().casefold()
+            return (subject, session) if subject and session else None
+
+        def _index(assets) -> dict[tuple[str, str], list]:
+            out: dict[tuple[str, str], list] = {}
+            for asset in assets:
+                key = _key(asset)
+                if key is not None:
+                    out.setdefault(key, []).append(asset)
+            return out
+
+        poses_by_key = _index(poses)
+        return [
+            (vids[0], poses_by_key[key][0])
+            for key, vids in _index(videos).items()
+            if len(vids) == 1 and len(poses_by_key.get(key, [])) == 1
+        ]
 
     def update_session_individual_map(
         self,
@@ -155,7 +251,9 @@ class ImportService:
                 a, b = str(c.get("a")), str(c.get("b"))
             except Exception:
                 continue
-            if a in valid_inds and b in valid_inds and a != b and frame > 0:
+            # frame 0 is legitimate: the tracks were mislabeled from the very
+            # first frame, so the exchange covers the whole session.
+            if a in valid_inds and b in valid_inds and a != b and frame >= 0:
                 cleaned.append({"frame": frame, "a": a, "b": b})
         session.identity_corrections = cleaned
         return manifest
@@ -321,11 +419,11 @@ class ImportService:
 
         Existing sessions (including hand-edited subject names) are never modified.
 
-        A file is recognised by *filename*, not by its absolute path: re-adding a
+        A file is recognized by *filename*, not by its absolute path: re-adding a
         recording that already exists under a different folder (after the project
         or the media folder moved) re-points the existing asset instead of adding
-        a second copy of it, so the session — and every label and derived artifact
-        hanging off its ``session_id`` — stays attached.
+        a second copy of it, so the session, and every label and derived artifact
+        hanging off its ``session_id``, stays attached.
         """
         settings = settings or manifest.subject_name_settings or ImportNameSettings()
         manifest.subject_name_settings = settings
@@ -342,13 +440,17 @@ class ImportService:
         manifest.videos.extend(fresh_videos)
         manifest.poses.extend(fresh_poses)
 
-        if fresh_videos or fresh_poses:
-            # All assets not yet part of an existing session — includes fresh ones and
-            # any old unlinked assets, with no duplicates.
-            linked_video_ids = {s.video_asset_id for s in manifest.linked_sessions}
-            linked_pose_ids = {s.pose_asset_id for s in manifest.linked_sessions}
-            matchable_videos = [v for v in manifest.videos if v.asset_id not in linked_video_ids]
-            matchable_poses = [p for p in manifest.poses if p.asset_id not in linked_pose_ids]
+        # All assets not yet part of an existing session, fresh ones and any
+        # left unpaired by an earlier Auto Match, which is retried here so new
+        # parsing settings or matching rules can still link them.
+        linked_video_ids = {s.video_asset_id for s in manifest.linked_sessions}
+        linked_pose_ids = {s.pose_asset_id for s in manifest.linked_sessions}
+        matchable_videos = [v for v in manifest.videos if v.asset_id not in linked_video_ids]
+        matchable_poses = [p for p in manifest.poses if p.asset_id not in linked_pose_ids]
+        if matchable_videos and matchable_poses:
+            for asset in [*matchable_videos, *matchable_poses]:
+                asset.subject_id = self.extract_subject_name(Path(asset.source_path), settings)
+                asset.session_id = self.extract_session_type(Path(asset.source_path), settings)
             new_sessions = self.auto_match(matchable_videos, matchable_poses)
             # auto_match may suggest pairs already linked; keep only genuinely new ones.
             existing_pairs = {
@@ -408,9 +510,9 @@ class ImportService:
     def _asset_key(path: Path | str) -> str:
         """Identity of an imported file: its filename, case-folded.
 
-        Filenames are already the project-wide key for a recording — poses are
+        Filenames are already the project-wide key for a recording, poses are
         paired to videos by filename stem and the session registry is keyed by
-        ``video_filename`` — so two assets sharing a filename are the same
+        ``video_filename``, so two assets sharing a filename are the same
         recording, whatever folder they were picked from.
         """
         return Path(path).name.casefold()
@@ -420,7 +522,7 @@ class ImportService:
 
         Returns ``{canonical_session_id: [duplicate_session_ids...]}`` for every
         recording linked more than once, keyed by video filename. The first-linked
-        session wins as canonical — it is the one the project's labels and derived
+        session wins as canonical, it is the one the project's labels and derived
         data were built against.
 
         Projects imported before duplicate detection existed can carry these when a
@@ -475,8 +577,8 @@ class ImportService:
 
         A recording keeps its filename across re-imports but is minted a fresh
         ``session_id`` each time, so labels recorded before a re-import or a
-        de-duplication address a session that no longer exists. The registry — a log
-        of every session ever imported, keyed by video filename — is what lets those
+        de-duplication address a session that no longer exists. The registry, a log
+        of every session ever imported, keyed by video filename, is what lets those
         labels be traced back to the session that now owns the same recording.
         """
         current_ids = {s.session_id for s in manifest.linked_sessions}
@@ -505,7 +607,7 @@ class ImportService:
 
         Labels, review decisions and seeds are the user's own work, and they are keyed
         by ids that embed the owning session (``segment_id``, ``clip_id``). When a
-        recording's session id changes, those keys must follow it — otherwise the
+        recording's session id changes, those keys must follow it, otherwise the
         labels match no feature row and are silently dropped from training. Derived
         caches are deliberately not touched here: they are rebuilt from the manifest.
 
@@ -603,12 +705,12 @@ class ImportService:
         user's own work, keyed by ids that embed the owning session
         (``clip_id``/``segment_id``/window id). Unlike the derived caches they are
         *not* rebuilt from the manifest, so a removed session's reviews linger in
-        the queue forever — showing a raw ``session_<hex>`` code with no subject
+        the queue forever, showing a raw ``session_<hex>`` code with no subject
         and no clip. Duplicate removals are re-pointed onto the surviving session
         before this runs (see :meth:`remap_session_references`), so anything still
         naming a removed id here belongs to a recording that has genuinely left
         the project. The generic ``session_id``-column parquet pruner can't touch
-        reviewer_labels — its session lives inside ``segment_id`` — so it is
+        reviewer_labels, its session lives inside ``segment_id``, so it is
         handled explicitly here. Returns rows removed across all three stores.
         """
         if not removed_ids:
@@ -678,7 +780,7 @@ class ImportService:
         if removed_sessions <= 0:
             return {"sessions": 0, "files": 0, "rows": 0, "remapped": 0}
 
-        # Must run before the manifest is rewritten below — it needs the sessions and
+        # Must run before the manifest is rewritten below, it needs the sessions and
         # videos that are about to be dropped. Removing a duplicate of a recording that
         # stays in the project re-points its review work at the surviving session; the
         # pruning further down would otherwise orphan every label recorded against it.
@@ -710,7 +812,7 @@ class ImportService:
             files_removed += self._delete_tree(clips_dir)
 
         # Per-session caches are scattered across derived/ under names that embed
-        # the session id — pose_features/sessions/<sid>.parquet, context_features/
+        # the session id: pose_features/sessions/<sid>.parquet, context_features/
         # sessions/<sid>.parquet, temporal_refinement/**/<sid>_bouts.parquet,
         # analytics_cache/<sid>_*.json. None are rebuilt on removal, so a session
         # deleted here otherwise keeps feeding inference, analytics and the UMAP.
@@ -798,7 +900,7 @@ class ImportService:
     def _delete_session_named_artifacts(root: Path, session_ids: set[str]) -> int:
         """Delete every file/dir under *root* whose name embeds a removed session id.
 
-        Returns the number of files deleted. Failures are logged, never raised — a
+        Returns the number of files deleted. Failures are logged, never raised, a
         session removal must not abort because one cache file was locked.
         """
         if not root.exists() or not session_ids:
@@ -827,7 +929,7 @@ class ImportService:
         Rewrites *path* in place keeping only rows whose ``session_id`` is in
         *kept_session_ids*. Returns the number of rows removed (0 when the file
         is absent, has no ``session_id`` column, or nothing matched). Failures
-        are swallowed and logged — a session removal must not abort because one
+        are swallowed and logged, a session removal must not abort because one
         derived cache could not be rewritten.
         """
         if not path.exists():
@@ -907,7 +1009,7 @@ class ImportService:
                 notes = propagate_subject_renames(project_root, previous, manifest)
             except Exception:
                 logger.exception("Could not carry subject renames over to Analytics/ROI settings")
-                notes = ["Could not update Analytics/ROI settings for the renamed subjects — see the log."]
+                notes = ["Could not update Analytics/ROI settings for the renamed subjects, see the log."]
         write_json(path, manifest.model_dump(mode="json"))
         self.update_registry(project_root, manifest)
         return notes
@@ -922,7 +1024,7 @@ class ImportService:
             return None
 
     # ------------------------------------------------------------------
-    # Session registry — persistent log of every session ever imported
+    # Session registry: persistent log of every session ever imported
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -1044,7 +1146,7 @@ class ImportService:
         """Probe width, height, fps, and frame_count for any video asset that has
         null metadata and write the updated manifest back to disk.
 
-        This is a fast one-time operation (~1 ms per video — no frame decoding).
+        This is a fast one-time operation (~1 ms per video, no frame decoding).
         Callers can invoke it before any processing step to ensure metadata is
         available for resolution-dependent decisions (e.g. downsample factor) and
         to avoid repeated probing across multiple runs.
@@ -1137,11 +1239,18 @@ class ImportService:
         dlc_idx = stem.find("dlc_")
         if dlc_idx > 0:
             return stem[:dlc_idx].rstrip("_- .")
-        # Other common suffixes used by various trackers
-        for suffix in ["_dlc", "_pose", "_tracking", "_tracked", "_labeled"]:
-            if stem.endswith(suffix):
-                return stem[: -len(suffix)].rstrip("_- .")
-        return stem
+        # Suffixes trackers and ABEL's own SLEAP conversion append, possibly
+        # stacked: "coa301.tracked.sleap" (from coa301.tracked.slp) -> "coa301".
+        while True:
+            m = ImportService._TRACKER_SUFFIX_RE.search(stem)
+            if not m or m.start() == 0:
+                return stem
+            stem = stem[: m.start()].rstrip("_- .")
+
+    _TRACKER_SUFFIX_RE = re.compile(
+        r"[_\-. ](?:dlc|sleap|slp|h5|csv|pose|poses|tracking|tracked|tracks|labeled|"
+        r"predictions|predicted|preds|analysis|filtered|proofread|inference)$"
+    )
 
     @staticmethod
     def _video_asset(path: Path, settings: ImportNameSettings) -> VideoAsset:
@@ -1222,7 +1331,7 @@ class ImportService:
 
         Groups files by source directory and runs one ``robocopy`` call per
         group on Windows (falls back to ``shutil.copy2`` elsewhere).  This
-        avoids per-file subprocess overhead and lets the OS optimise the
+        avoids per-file subprocess overhead and lets the OS optimize the
         transfer for the underlying device.
 
         Returns a dict with keys ``videos_copied`` and ``poses_copied``.
@@ -1245,7 +1354,7 @@ class ImportService:
                     continue
                 src = Path(video.source_path)
                 if not src.exists():
-                    logger.warning("Copy skipped — source missing: %s", src)
+                    logger.warning("Copy skipped: source missing: %s", src)
                     continue
                 dst = videos_dir / src.name
                 if dst.exists() and dst.stat().st_size == src.stat().st_size:
@@ -1259,7 +1368,7 @@ class ImportService:
                     continue
                 src = Path(pose.source_path)
                 if not src.exists():
-                    logger.warning("Copy skipped — source missing: %s", src)
+                    logger.warning("Copy skipped: source missing: %s", src)
                     continue
                 dst = poses_dir / src.name
                 if dst.exists() and dst.stat().st_size == src.stat().st_size:
@@ -1270,7 +1379,7 @@ class ImportService:
         total = len(work)
         if total == 0:
             if progress_cb:
-                progress_cb(0, 0, "Nothing to copy — all files already local.")
+                progress_cb(0, 0, "Nothing to copy: all files already local.")
             self.save_manifest(project_root, manifest)
             return {"videos_copied": 0, "poses_copied": 0}
 
@@ -1322,7 +1431,7 @@ class ImportService:
                     except Exception as exc:
                         logger.error("Failed to copy %s: %s", src, exc)
                         if progress_cb:
-                            progress_cb(done, total, f"FAILED: {src.name} — {exc}")
+                            progress_cb(done, total, f"FAILED: {src.name}, {exc}")
                         continue
 
                 asset.local_path = str(dst)

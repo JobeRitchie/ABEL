@@ -1,12 +1,12 @@
 """Many-section presets must not freeze the Session Sections chart.
 
-The LPT presets define 101 sections (a 3-minute baseline plus 50 tone/ITI
-trials).  The bar and line draw routines used to read each value with a pair of
+The LPT presets define ~100 sections (a 3-minute baseline plus 50 tone/ITI
+trials, with a shock section after each shocked tone).  The bar and line draw routines used to read each value with a pair of
 full-column comparisons per (session, section) and to add one Rectangle patch
 per bar, so a 101-section preset across 80 sessions spent ~25 s on the UI thread
-per redraw — long enough for Windows to mark the window unresponsive.
+per redraw, long enough for Windows to mark the window unresponsive.
 
-The value lookup is now one pivot per behaviour and the individual-mode bars are
+The value lookup is now one pivot per behavior and the individual-mode bars are
 one PolyCollection per session.  These tests pin both: the pivot must return
 exactly what the per-section scan returned, and the collection must produce the
 same geometry, limits and legend entry as ``ax.bar``.
@@ -201,14 +201,16 @@ class TestLptPresets:
         )
         secs = preset["sections"]
         assert secs[0] == {"name": "Baseline", "duration": 180}
-        assert len(secs) == 1 + 50 * 2
-        # 3-min baseline + 50 trials of 15 s tone + 60 s ITI.
-        assert sum(s["duration"] for s in secs) == 180 + 50 * 75
+        # 3-min baseline + 50 trials of 15 s tone + 60 s ITI; a shocked trial
+        # adds a 2 s shock section between its tone and ITI.
+        assert len(secs) == 1 + 50 * 2 + len(shock_trials)
+        assert sum(s["duration"] for s in secs) == (
+            180 + 50 * 75 + 2 * len(shock_trials)
+        )
+        it = iter(secs[1:])
         for trial in range(1, 51):
-            tone, iti = secs[trial * 2 - 1], secs[trial * 2]
-            assert tone["duration"] == 15
-            assert iti == {"name": f"ITI {trial}", "duration": 60}
-            expected = f"Tone {trial}" + (
-                " (Shock)" if trial in shock_trials else ""
-            )
-            assert tone["name"] == expected
+            assert next(it) == {"name": f"Tone {trial}", "duration": 15}
+            if trial in shock_trials:
+                assert next(it) == {"name": f"Shock {trial}", "duration": 2}
+            assert next(it) == {"name": f"ITI {trial}", "duration": 60}
+        assert next(it, None) is None

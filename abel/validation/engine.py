@@ -4,17 +4,17 @@ Concatenates the (sub)sampled training pool with the held-out evaluation set,
 hands the trainer a *precomputed split* (pool rows = train, held-out rows =
 validation), and calls ABEL's real ``train_and_evaluate``.  Because held-out
 rows are physically appended and flagged as validation, **no held-out row can
-ever enter training** — the same mechanism guarantees zero leakage for
+ever enter training**, the same mechanism guarantees zero leakage for
 learning-curve, ablation, and generalization runs alike.
 
 That guarantee covers the *model* but originally not the *calibrator*.  ABEL's
 trainer fits its probability calibrator on the validation split (right for the
-product — the calibrator must see unseen data, and the shipped model is refit
+product, the calibrator must see unseen data, and the shipped model is refit
 and CV-calibrated separately), and this engine hands it the held-out set as
 that split.  Every calibrated cell was therefore scored on rows its calibrator
 had been fit to.  Measured across 7 projects / 23 behaviors at a 50-clip
 budget, that inflated the ablation's calibration gain from +0.064 to +0.073
-(the enhancement is overwhelmingly real — the leak is ~12% of the bar, not the
+(the enhancement is overwhelmingly real, the leak is ~12% of the bar, not the
 bar itself) and understated held-out ECE by ~13%.  So we now carve a dedicated
 **calibration slice** off the training
 pool, split by group, and pass it as ``cal_idx``: the calibrator sees only pool
@@ -53,15 +53,15 @@ def _carve_calibration_slice(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split ``pool`` into (fit_rows, calibration_rows) along group boundaries.
 
-    Splitting by group — not by row — keeps the calibrator off every session the
-    base model trained on, so it measures the model's behaviour on genuinely
+    Splitting by group, not by row, keeps the calibrator off every session the
+    base model trained on, so it measures the model's behavior on genuinely
     unseen subjects the way the held-out set does.
 
     The slice is drawn from groups that actually contain the **target** behavior.
     ABEL's trainer is one-vs-rest: it collapses every other behavior into
     ``no_behavior``, so a slice full of varied non-target labels still arrives at
     the calibrator as a single class, and the calibrator then silently falls back
-    to the validation split — reintroducing exactly the leak this exists to
+    to the validation split, reintroducing exactly the leak this exists to
     prevent.  Label *diversity* in the pool is therefore not the test; target
     positives are.
 
@@ -141,7 +141,7 @@ def build_config(
     suite validates a model the project does not train.  ``max_train_samples_per_``
     ``class``, ``no_behavior_sample_weight`` and ``excluded_feature_cols`` were
     set by the UI, saved to ``project.yaml``, and then dropped on the floor by this
-    function — harmless while every manuscript project sat at their defaults, and a
+    function, harmless while every manuscript project sat at their defaults, and a
     silent misreport for the first project that did not.
     """
     overrides = overrides or {}
@@ -157,7 +157,7 @@ def build_config(
         max_train_samples_per_class=int(project.max_train_samples_per_class or 0),
         no_behavior_sample_weight=float(project.no_behavior_sample_weight or 0.0),
         # TrainingConfig declares this a tuple. Note this is the Active Learning
-        # tab's per-run exclusion list, which composes with — does not replace —
+        # tab's per-run exclusion list, which composes with, does not replace,
         # the project's config/feature_exclusions.json; the trainer reads that one
         # off disk itself via project_root, so it was already reaching the engine.
         excluded_feature_cols=tuple(project.excluded_feature_cols or ()),
@@ -216,7 +216,7 @@ def run_one_config(
     )
     calibration_requested = str(cfg.calibration_method) in {"sigmoid", "isotonic"}
     if cal_df.empty and calibration_requested:
-        # No honest slice available — drop calibration for this cell rather than
+        # No honest slice available: drop calibration for this cell rather than
         # let the trainer fall back to fitting it on the rows we then score.  This
         # is recorded on the result (``calibration_applied``): at the low end of a
         # learning-curve schedule it fires on every seed, and a curve whose left
@@ -227,7 +227,7 @@ def run_one_config(
 
     n_fit, n_cal = int(len(fit_df)), int(len(cal_df))
     # The slice came out of the caller's budget, so the reported training counts
-    # must describe the rows the base model actually saw — otherwise a learning
+    # must describe the rows the base model actually saw, otherwise a learning
     # curve plots more labels than were used.
     if n_cal:
         is_pos = fit_df["label"].astype(str).str.strip() == str(behavior_id).strip()
@@ -247,7 +247,7 @@ def run_one_config(
             precomputed_split=split,
             feature_cols_override=feature_cols_override,
         )
-    except Exception as exc:  # noqa: BLE001 — surface as a degenerate cell
+    except Exception as exc:  # noqa: BLE001, surface as a degenerate cell
         return ConfigEvalResult(
             project_id=project.project_id,
             behavior_id=str(behavior_id),
@@ -333,12 +333,12 @@ def run_one_config(
 # separability" score), otherwise the answer tilts toward whichever behavior
 # happened to be named the target.
 #
-# NOTE: ABEL's trainer is strictly one-vs-rest — when ``target_label`` is set it
+# NOTE: ABEL's trainer is strictly one-vs-rest, when ``target_label`` is set it
 # remaps every other behavior to ``no_behavior`` (see the "Collapse alternate-
 # behavior labels into negatives" block in the trainer). There is therefore no
 # multiclass model to read a confusion matrix off. Pairwise discrimination works
 # *with* that design rather than against it: hand the trainer a frame containing
-# only behaviors A and B, with A as the target, and B becomes the negative class —
+# only behaviors A and B, with A as the target, and B becomes the negative class,
 # yielding a genuine binary A-vs-B model built by the shipped training code.
 SYMMETRIC_FIT_OVERRIDES: dict[str, Any] = {
     "enable_feature_augmentation": False,

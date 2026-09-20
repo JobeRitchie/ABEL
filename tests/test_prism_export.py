@@ -74,7 +74,7 @@ def _ablation_frame(with_seeds: bool) -> pd.DataFrame:
 
 
 def test_prism_ablation_splits_by_budget_and_pivots_configs():
-    """4 crossed factors can't be one Prism table — it must split into one per budget."""
+    """4 crossed factors can't be one Prism table: it must split into one per budget."""
     tables = prism.prism_ablation(_ablation_frame(with_seeds=False))
     assert set(tables) == {"n50", "all"}
     t = tables["n50"]
@@ -194,7 +194,7 @@ def test_prism_discrimination_drops_zero_baseline_from_error_reduction():
     err = out["prism_discrimination_error_reduction.csv"]
     assert list(roc.columns) == ["Pair", "Pose only", "+ Video"]
     assert list(roc["Pair"]) == ["P · A vs B"]
-    # Pose-only error reduction is 0 by definition — never emit that column.
+    # Pose-only error reduction is 0 by definition: never emit that column.
     assert "Pose only" not in err.columns
     assert list(err.columns) == ["Pair", "+ Video"]
 
@@ -278,7 +278,7 @@ def test_prism_seeds_pad_every_family_to_the_same_subcolumn_count():
 
 def test_tiny_p_values_survive_the_dust_collapse(tmp_path):
     """_sig zeroes anything under 1e-9 as float dust. That is right for a CI
-    half-width of 1e-17 and wrong for a p of 9e-10, which would export as "0" —
+    half-width of 1e-17 and wrong for a p of 9e-10, which would export as "0",
     a value a p-value can never take."""
     df = _landscape_frame()
     df.loc[df["best_family"], "p_value"] = 9.063e-10
@@ -337,7 +337,7 @@ def test_absent_modality_is_not_reported():
     """`social` features only exist in multi-animal projects.
 
     A single-animal run has zero of them, and must not emit a Social legend entry or
-    an all-zero Social share row — that implies ABEL measured an interaction modality
+    an all-zero Social share row, that implies ABEL measured an interaction modality
     it never measured.
     """
     from abel.validation.analyses.behaviorscape import BehaviorscapeData
@@ -373,14 +373,14 @@ def test_written_files_are_ascii_with_a_bom(tmp_path):
 
     Prism and Excel on Windows decode a CSV with the ANSI code page unless it opens
     with a BOM, so a UTF-8 "≥" arrives as "â‰¥" and a header like "F1≥0.70:1" lands
-    in the data table as gibberish. Two defences are asserted here: the symbols this
+    in the data table as gibberish. Two defenses are asserted here: the symbols this
     package chooses are transliterated to ASCII, and the file carries a BOM so any
     non-ASCII the *user* typed still survives.
     """
     df = pd.DataFrame({
         "Behavior": ["P · Rear"],          # middle dot, from _row_title
         "F1≥0.80:1": [0.5],                # >=, from the effort-to-quality targets
-        "ΔF1 — video": [0.25],             # delta + em dash
+        "ΔF1 — video": [0.25],             # delta + em dash (a user-typed name)
     })
     path = prism._write(df, tmp_path / "t.csv")
 

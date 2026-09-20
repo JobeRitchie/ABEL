@@ -1,4 +1,4 @@
-"""Model Refinement tab — refine this project's models with labeled examples
+"""Model Refinement tab: refine this project's models with labeled examples
 imported from other ABEL projects.
 
 This tab merges *labeled training examples* (segment features + their reviewer
@@ -164,11 +164,11 @@ class ModelRefinementTab(QWidget):
         header.setStyleSheet("font-size: 16px; font-weight: 800; color: #90CAF9;")
         desc = QLabel(
             "Refine this project's models by importing labeled examples from "
-            "other ABEL projects. The imported segments' features and behaviour "
+            "other ABEL projects. The imported segments' features and behavior "
             "labels are added to this project's training set; retrain in the "
             "Active Learning tab to produce improved models.\n\n"
             "Only projects that use the same pose keypoints and ROI layout are "
-            "compatible — others are detected and blocked automatically."
+            "compatible: others are detected and blocked automatically."
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("font-size: 11px; color: #607D8B; padding-bottom: 4px;")
@@ -182,7 +182,7 @@ class ModelRefinementTab(QWidget):
         self._baseline_btn.setStyleSheet(_BTN)
         self._baseline_btn.setToolTip(
             "Seed this project from another project's clips, labeled features, and "
-            "trained models — so you can run those models here or fold the examples "
+            "trained models: so you can run those models here or fold the examples "
             "into your training pool. Works on projects with extracted features that "
             "haven't trained yet."
         )
@@ -201,10 +201,10 @@ class ModelRefinementTab(QWidget):
         )
         self._remove_import_btn.setEnabled(False)
         self._remove_import_btn.clicked.connect(self._remove_import)
-        self._remap_btn = QPushButton("Map Behaviour Names…")
+        self._remap_btn = QPushButton("Map Behavior Names…")
         self._remap_btn.setStyleSheet(_BTN)
         self._remap_btn.setToolTip(
-            "Match behaviours that have different names across projects but are "
+            "Match behaviors that have different names across projects but are "
             "really the same (e.g. Head Dip → Dip) so their examples import."
         )
         self._remap_btn.setEnabled(False)
@@ -241,7 +241,7 @@ class ModelRefinementTab(QWidget):
 
         # ── Detail / mapping panel ────────────────────────────────────
         self._detail = QLabel("Add a source project to see its compatibility and "
-                              "behaviour mapping.")
+                              "behavior mapping.")
         self._detail.setWordWrap(True)
         self._detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._detail.setStyleSheet(
@@ -378,7 +378,7 @@ class ModelRefinementTab(QWidget):
         if not pv.rows:
             QMessageBox.information(
                 self, "Import Baseline",
-                f"'{pv.tag}' has no labeled behaviours or trained models to import.",
+                f"'{pv.tag}' has no labeled behaviors or trained models to import.",
             )
             return
 
@@ -445,7 +445,7 @@ class ModelRefinementTab(QWidget):
         self._previews.clear()
         self._rebuild_table()
         self._detail.setText("Add a source project to see its compatibility and "
-                             "behaviour mapping.")
+                             "behavior mapping.")
         self._status.setText("")
 
     def _remove_import(self) -> None:
@@ -527,7 +527,7 @@ class ModelRefinementTab(QWidget):
             name_item = QTableWidgetItem(rec.tag)
             name_item.setData(Qt.ItemDataRole.UserRole, key)
             name_item.setToolTip(rec.source_root or rec.tag)
-            match_item = QTableWidgetItem("—")
+            match_item = QTableWidgetItem("-")
             count_item = QTableWidgetItem(str(rec.imported_rows))
             status_item = QTableWidgetItem("✓ Imported")
             status_item.setForeground(QColor("#42A5F5"))
@@ -573,7 +573,7 @@ class ModelRefinementTab(QWidget):
                 lines.append(f"Imported: {rec.imported_at}")
             if rec.behaviors:
                 lines.append(
-                    "Behaviours: "
+                    "Behaviors: "
                     + ", ".join(f"{n} ({c})" for n, c in rec.behaviors.items())
                 )
             lines.append(
@@ -590,7 +590,7 @@ class ModelRefinementTab(QWidget):
             self._remap_btn.setEnabled(False)
             return
         # Remapping only helps when the feature schema is compatible; otherwise
-        # the import is blocked regardless of behaviour names.
+        # the import is blocked regardless of behavior names.
         schema_ok = pv.coverage >= COMPAT_THRESHOLD and pv.host_feature_count > 0
         self._remap_btn.setEnabled(schema_ok and self._worker is None)
 
@@ -623,12 +623,12 @@ class ModelRefinementTab(QWidget):
                 f"{m.source_name} ({m.example_count})" for m in unmatched
             )
             lines.append(
-                f"\nSkipped (no matching behaviour in this project): {names}"
+                f"\nSkipped (no matching behavior in this project): {names}"
             )
             if schema_ok:
                 lines.append(
-                    "Use “Map Behaviour Names…” to match any of these to a "
-                    "host behaviour."
+                    "Use “Map Behavior Names…” to match any of these to a "
+                    "host behavior."
                 )
         self._detail.setText("\n".join(lines))
 
@@ -636,14 +636,14 @@ class ModelRefinementTab(QWidget):
     def _diagnostics_lines(diag) -> list[str]:
         """Render the value-level project-similarity diagnostics, if present.
 
-        These never block an import — they help judge whether merging is
+        These never block an import, they help judge whether merging is
         *scientifically* sound, beyond the schema matching mechanically.
         """
         if diag is None:
             return []
         lines = ["\nProject comparison (informational):"]
 
-        # Net feature-value shift — the headline "are values comparable" signal.
+        # Net feature-value shift: the headline "are values comparable" signal.
         if diag.feature_shift_median is not None:
             band = (
                 "low" if diag.feature_shift_median < 0.25
@@ -659,12 +659,12 @@ class ModelRefinementTab(QWidget):
                 f"({band}){frac_txt}{base_txt}."
             )
 
-        # Spatial calibration — expected to differ with camera/resolution setup;
-        # body-length-normalised features are scale-invariant, so this is context.
+        # Spatial calibration: expected to differ with camera/resolution setup;
+        # body-length-normalized features are scale-invariant, so this is context.
         if diag.host_px_per_mm is not None and diag.source_px_per_mm is not None:
             pct = diag.px_per_mm_pct_diff or 0.0
             note = (
-                "  (likely a camera/resolution difference; normalised features "
+                "  (likely a camera/resolution difference; normalized features "
                 "are scale-invariant)" if pct >= 5 else ""
             )
             lines.append(
@@ -672,7 +672,7 @@ class ModelRefinementTab(QWidget):
                 f"{diag.source_px_per_mm:.3f} px/mm ({pct:.0f}% diff){note}"
             )
 
-        # Pose model — same DLC network == most directly comparable keypoints.
+        # Pose model: same DLC network == most directly comparable keypoints.
         if diag.host_pose_models or diag.source_pose_models:
             if diag.pose_models_match:
                 lines.append(
@@ -681,7 +681,7 @@ class ModelRefinementTab(QWidget):
                 )
             else:
                 lines.append(
-                    f"   • Pose model: differs — host {diag.host_pose_models or ['?']} "
+                    f"   • Pose model: differs, host {diag.host_pose_models or ['?']} "
                     f"vs source {diag.source_pose_models or ['?']}. Same keypoints, "
                     "but a different DLC network can shift point placement slightly."
                 )
@@ -697,7 +697,7 @@ class ModelRefinementTab(QWidget):
             lines.append("   • Extraction settings: aligned.")
         return lines
 
-    # ── Behaviour name remapping ────────────────────────────────────────
+    # ── Behavior name remapping ────────────────────────────────────────
 
     def _open_remap_dialog(self) -> None:
         if self._host_root is None:
@@ -716,12 +716,12 @@ class ModelRefinementTab(QWidget):
         host_names = [name for _, name in host_behaviors]
         if not host_names:
             QMessageBox.information(
-                self, "Map Behaviour Names",
-                "This project has no behaviours defined to map onto.",
+                self, "Map Behavior Names",
+                "This project has no behaviors defined to map onto.",
             )
             return
 
-        # Rows = source behaviours not already matched by exact name
+        # Rows = source behaviors not already matched by exact name
         # (unmatched, or previously remapped so the user can adjust them).
         rows: list[tuple[str, int, str]] = []
         for m in pv.behavior_mappings:
@@ -735,9 +735,9 @@ class ModelRefinementTab(QWidget):
 
         if not rows:
             QMessageBox.information(
-                self, "Map Behaviour Names",
-                f"Every behaviour in '{pv.tag}' already matches a behaviour in "
-                "this project — nothing to remap.",
+                self, "Map Behavior Names",
+                f"Every behavior in '{pv.tag}' already matches a behavior in "
+                "this project: nothing to remap.",
             )
             return
 
@@ -748,7 +748,7 @@ class ModelRefinementTab(QWidget):
             return
 
         chosen = dlg.aliases()
-        # Replace mappings for the source behaviours shown in this dialog
+        # Replace mappings for the source behaviors shown in this dialog
         # (so de-selecting one clears it), keep aliases for other projects.
         shown = {name.lower() for name, _, _ in rows}
         self._aliases = {
@@ -760,7 +760,7 @@ class ModelRefinementTab(QWidget):
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Failed to save behavior aliases")
             QMessageBox.warning(
-                self, "Map Behaviour Names",
+                self, "Map Behavior Names",
                 f"Mappings applied for this session but could not be saved:\n{exc}",
             )
         self._repreview_all()
@@ -769,8 +769,8 @@ class ModelRefinementTab(QWidget):
             "font-size: 11px; color: #66BB6A; padding-top: 2px;"
         )
         self._status.setText(
-            f"Applied {n} behaviour remapping(s)." if n else
-            "Behaviour remappings cleared."
+            f"Applied {n} behavior remapping(s)." if n else
+            "Behavior remappings cleared."
         )
 
     def _repreview_all(self) -> None:

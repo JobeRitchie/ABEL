@@ -32,18 +32,24 @@ def canonical_distance_name(col: str) -> str:
 
     Pairwise inter-keypoint distances are symmetric, so ``dist_a_to_b`` and
     ``dist_b_to_a`` (and their ``_norm`` variants) denote the same quantity; the
-    canonical name sorts the two endpoints.  Non-distance columns — and ROI/target
+    canonical name sorts the two endpoints.  Non-distance columns, and ROI/target
     distances such as ``*_to_target_dist`` / ``*_to_roi_*`` that don't parse as a
-    keypoint pair — are returned unchanged.  Centralised here so feature extraction,
+    keypoint pair, are returned unchanged.  Centralised here so feature extraction,
     representation building, and model-vs-data alignment at inference all agree on
     one spelling.
 
     Handles both frame-level names (``dist_a_to_b``, ``dist_a_to_b_norm``) and
     segment-level ones, which append a statistic (``dist_a_to_b_norm_mean``).
     The statistic must be split off before sorting the endpoints, or it is
-    swept into the second endpoint and sorted with it — turning
+    swept into the second endpoint and sorted with it, turning
     ``dist_nose_to_left_ear_mean`` into ``dist_left_ear_mean_to_nose``, a name
     no table has, which then silently reindexes to a fill value.
+   
+    The early returns rebuild the name from ``col``, which still carries its
+    ``_norm``; re-appending the suffix there would rename every non-``dist_``
+    normalized column (e.g. ``social_dist_centroid_to_centroid_nearest_norm``)
+    to ``..._norm_norm`` on each pass, and this runs on every representation
+    build, so the doubling compounds and the real values are orphaned.
     """
     stat = ""
     for suffix in _STAT_SUFFIXES:
@@ -53,12 +59,20 @@ def canonical_distance_name(col: str) -> str:
     norm = col.endswith("_norm")
     core = col[: -len("_norm")] if norm else col
     if not core.startswith("dist_"):
-        return col + ("_norm" if norm else "") + stat
+        return col + stat
     parts = core[len("dist_") :].split("_to_")
     if len(parts) != 2:
-        return col + ("_norm" if norm else "") + stat
+        return col + stat
     a, b = parts
     return "dist_" + "_to_".join(sorted((a, b))) + ("_norm" if norm else "") + stat
+
+
+_REPEATED_NORM_RE = re.compile(r"(?:_norm){2,}")
+
+
+def _collapse_repeated_norm(col: str) -> str:
+    """Collapse a run of two or more ``_norm`` suffixes down to one."""
+    return _REPEATED_NORM_RE.sub("_norm", col)
 
 
 def align_model_feature_columns(
@@ -76,7 +90,7 @@ def align_model_feature_columns(
     * **Present.** The data has the column under the model's own name.
     * **Spelled the other way round.** The data has this symmetric distance
       under the opposite endpoint ordering.  If the model expects *only* the one
-      spelling, it reads the data's column — the same measurement, renamed.  If
+      spelling, it reads the data's column, the same measurement, renamed.  If
       the model expects *both* spellings, the pair is double-named: in training
       exactly one of the two held the value and the other was NaN (the training
       set was assembled across two extractor eras with opposite conventions), so
@@ -99,7 +113,7 @@ def align_model_feature_columns(
         canon = canonical_distance_name(col)
         if canon != col and canon in data:
             if canon in model_set:
-                # Double-named pair — the model already reads the value under
+                # Double-named pair: the model already reads the value under
                 # the canonical name, so this slot was the NaN one in training.
                 source.append(col)
                 nan_fill.append(True)
@@ -112,8 +126,8 @@ def align_model_feature_columns(
     return source, nan_fill
 
 
-# Label tokens that denote the negative / "not this behaviour" class.  A model's
-# label_map pairs the target behaviour's id with one of these.
+# Label tokens that denote the negative / "not this behavior" class.  A model's
+# label_map pairs the target behavior's id with one of these.
 _NO_BEHAVIOR_TOKENS = frozenset({
     "no_behavior", "no_behaviour", "nobehavior", "nobehaviour",
 })
@@ -125,7 +139,7 @@ def normalize_label_token(label: Any) -> str:
 
 
 def is_no_behavior_label(label: Any) -> bool:
-    """True if *label* denotes the negative / no-behaviour class."""
+    """True if *label* denotes the negative / no-behavior class."""
     return normalize_label_token(label) in _NO_BEHAVIOR_TOKENS
 
 
@@ -134,16 +148,16 @@ def resolve_target_class_index(
 ) -> int | None:
     """Column index into ``predict_proba`` for *target_behavior*'s positive class.
 
-    ``label_map`` maps a class index to its stored label (a behaviour id/name, or
+    ``label_map`` maps a class index to its stored label (a behavior id/name, or
     a ``no_behavior`` sentinel).  Resolution order:
 
-    1. **Exact match** — the target behaviour's id (or name) is stored under some
+    1. **Exact match**: the target behavior's id (or name) is stored under some
        class index.  Tolerant of punctuation/case via :func:`normalize_label_token`.
-    2. **Binary positive-class fallback** — the map has exactly one class that is
-       not a ``no_behavior`` label.  That class *is* the behaviour's positive
+    2. **Binary positive-class fallback**: the map has exactly one class that is
+       not a ``no_behavior`` label.  That class *is* the behavior's positive
        class even when its stored id differs from ``target_behavior``.  This is
        precisely the imported-model case: a model copied from another project
-       keeps the *source* project's behaviour UUID in its ``label_map``, so an id
+       keeps the *source* project's behavior UUID in its ``label_map``, so an id
        match fails, yet the single non-``no_behavior`` class is unambiguously the
        target.  Selecting it here is what keeps active-learning inference and
        dense temporal refinement scoring the *same*, correct class.
@@ -153,7 +167,7 @@ def resolve_target_class_index(
 
     This is the single source of truth for target-class selection; every scorer
     (active-learning run-models, dense temporal refinement) must go through it so
-    they can never again disagree on which class column is "the behaviour".
+    they can never again disagree on which class column is "the behavior".
     """
     if not isinstance(label_map, dict) or not label_map:
         return None
@@ -189,7 +203,7 @@ class RepresentationConfig:
     model_version: str = "behavior_repr_v1"
     # v2: clip-wise _delta is now an edge-band average (mean of last k − mean of
     # first k frames) instead of last-frame − first-frame.
-    # v3: pairwise-distance columns are canonicalised (``dist_a_to_b`` /
+    # v3: pairwise-distance columns are canonicalized (``dist_a_to_b`` /
     # ``dist_b_to_a`` merged onto the sorted name) so mixed-order pose exports no
     # longer produce duplicate, half-populated "dead" distance columns.
     # v4: per-segment R3D-18 appearance embeddings (``r3d_000``…``r3d_511``) are
@@ -200,15 +214,39 @@ class RepresentationConfig:
     # made every downstream full-table copy allocate a 9.2 GiB contiguous block.
     # Bumping the version invalidates the content/config-hash representation cache
     # so segment features are rebuilt with the current feature definitions.
-    feature_version: str = "representation_v5"
+    # v6: absent animals no longer back-fill as a frozen phantom pose, so
+    # windows where the animal was not in the arena are dropped (see
+    # ``min_focal_presence``) and the social columns they used to fabricate are
+    # NaN instead.  Every project's segment cache must be rebuilt for this.
+    feature_version: str = "representation_v6"
     # R3D appearance embeddings.  Gated additionally on context/video features
-    # being present at all — no pixels means no appearance features.
+    # being present at all: no pixels means no appearance features.
     use_r3d_features: bool = True
     # DEPRECATED / no-op: feature exclusions are applied at training time, not
     # baked into the representation, so the cache stays valid across exclusion
     # changes.  Retained only for call-site compatibility.  See
     # ActiveLearningTrainerService for where exclusions are actually applied.
     excluded_feature_cols: frozenset[str] = field(default_factory=frozenset)
+    # Fraction of a window the focal animal must actually be present for before
+    # the window counts as data.  Below this the segment is dropped rather than
+    # shipped to training, review or inference.
+    #
+    # 1.0, not a half, because the window summary is not NaN-aware: an absent
+    # frame is NaN in every pose column and ``windows.mean(axis=2)`` propagates
+    # it, so a window that is 83% present still summarizes to NaN for every
+    # feature.  Any threshold below 1.0 therefore keeps rows whose features are
+    # entirely missing -- which XGBoost then routes down its missing-value
+    # branches and the density scorer fills with column means, i.e. a window
+    # scored from nothing.  Presence is all-or-nothing here, so the threshold
+    # says so.  0.0 keeps every window (the pre-0.22 behavior); anything in
+    # between is available but lets all-NaN rows through.
+    min_focal_presence: float = 1.0
+
+
+#: Per-frame 0/1 bookkeeping columns written by the pose feature extractor.
+#: They travel with the frame table but are never features, see
+#: ``build_segment_df_fast(presence_cols=...)``.
+_PRESENCE_COLS = ("pose_present", "partner_present")
 
 
 class BehaviorRepresentationService:
@@ -225,7 +263,7 @@ class BehaviorRepresentationService:
         per-column statistics (min / max / null-count / value-count aggregated
         across row groups).  All of this comes from the parquet footer, so it is
         still cheap (no data pages are read) and independent of file mtime or
-        byte-level compression — re-saving identical data yields an identical
+        byte-level compression, re-saving identical data yields an identical
         signature.  The statistics digest closes a correctness gap: re-extracting
         features with the *same* schema and row count but *different values*
         (e.g. a smoothing/units change, or a pose re-export) now invalidates the
@@ -251,8 +289,8 @@ class BehaviorRepresentationService:
 
         Aggregates each column's statistics across all row groups (min-of-mins,
         max-of-maxes, summed null/value counts) so the digest is invariant to
-        how the writer chunked the data into row groups — an identical re-save
-        produces the same digest — while a genuine change in values shifts a
+        how the writer chunked the data into row groups, an identical re-save
+        produces the same digest, while a genuine change in values shifts a
         min/max/null-count and therefore the digest.
         """
         import hashlib  # noqa: PLC0415
@@ -327,7 +365,7 @@ class BehaviorRepresentationService:
         # user chooses to exclude downstream.
         # ``use_r3d_features`` IS part of the signature: unlike an exclusion it
         # changes which columns the cached segment table contains, so without it
-        # the toggle is inert on any project that already has a cache — turning
+        # the toggle is inert on any project that already has a cache, turning
         # it off would keep serving the r3d_* columns, and turning it on would
         # never add them.
         return {
@@ -356,7 +394,29 @@ class BehaviorRepresentationService:
         and drops the redundant duplicate(s).  Non-distance columns and
         ROI/target distances (``*_to_target_dist`` / ``*_to_roi_*``) are left
         untouched.
+
+        Also repairs caches written while :func:`canonical_distance_name`
+        re-appended ``_norm`` to non-``dist_`` normalized columns: those built up
+        one extra ``_norm`` per rebuild (``social_..._norm_norm``, ``_norm_norm_norm_norm``,
+        ...), orphaning the real body-length-normalized social features under
+        names nothing reads.  Repeated suffixes collapse back to a single ``_norm``.
         """
+        repair = {
+            col: _collapse_repeated_norm(col)
+            for col in df.columns
+            if _collapse_repeated_norm(col) != col
+        }
+        if repair:
+            # A doubled name and its repaired spelling can both exist (the
+            # repaired one written before the doubling began); keep whichever
+            # holds values, preferring the existing canonical column.
+            for src, dst in repair.items():
+                if dst in df.columns:
+                    df[dst] = df[dst].combine_first(df[src])
+                else:
+                    df[dst] = df[src]
+            df = df.drop(columns=list(repair))
+
         def _canonical(col: str) -> str | None:
             canon = canonical_distance_name(col)
             return canon if canon != col or col.startswith("dist_") else None
@@ -384,7 +444,7 @@ class BehaviorRepresentationService:
         return df
 
     # Frame tables larger than this (as float64) are converted to float32.
-    # Below it, behaviour is unchanged — typical projects keep float64.
+    # Below it, behavior is unchanged, typical projects keep float64.
     DOWNCAST_THRESHOLD_BYTES = 2 * 1024**3
 
     @classmethod
@@ -399,7 +459,7 @@ class BehaviorRepresentationService:
         Frame-level pose/context tables scale with (frames x features), so a
         long multi-session project runs into hard allocation failures during
         z-scoring and segment building purely from float64 overhead.  float32
-        halves that at ~7 significant digits of precision — well beyond what
+        halves that at ~7 significant digits of precision, well beyond what
         pose estimates and pixel statistics actually resolve.  Columns are
         converted one at a time so the conversion itself does not need a second
         full copy of the table.
@@ -417,7 +477,7 @@ class BehaviorRepresentationService:
         gc.collect()
         if progress is not None:
             progress(
-                f"Representation: {label} frame table is {nbytes / 1024**3:.1f} GiB as float64 — "
+                f"Representation: {label} frame table is {nbytes / 1024**3:.1f} GiB as float64, "
                 f"storing {len(f64)} feature column(s) as float32 to fit in memory."
             )
         return df
@@ -509,18 +569,18 @@ class BehaviorRepresentationService:
     def _zscore_by_group_with_stats(
         cls, df: pd.DataFrame, feature_cols: list[str], copy: bool = True
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Per-(animal_id, session_id) standardisation, returning the stats too.
+        """Per-(animal_id, session_id) standardization, returning the stats too.
 
         Computed one column at a time from group codes (``np.bincount``) rather
         than ``groupby(...).transform``, which materialises a full
-        ``n_rows x n_features`` float64 frame *per statistic* — 11.4 GiB on a
+        ``n_rows x n_features`` float64 frame *per statistic*, 11.4 GiB on a
         9.4M-frame project, with the copy, the mean, the std and the arithmetic
         result all alive at once.  Here the only extra allocations are a few
         single-column temporaries.  Results match the per-group loop; the
         per-group mean/std are deterministic and small, so they are returned for
         persistence and reuse (e.g. Direct-Use inference on new data).
 
-        ``copy=False`` scales the caller's frame in place — used by ``build()``,
+        ``copy=False`` scales the caller's frame in place, used by ``build()``,
         where the frame table is already the largest object in the process.
         """
         out = df.copy() if copy else df
@@ -566,7 +626,7 @@ class BehaviorRepresentationService:
             if not all_keyed:
                 scaled[~keyed] = np.nan
             # Preserve a float32 source column's dtype so downcast frames stay
-            # downcast; anything else standardises to float64 as before.
+            # downcast; anything else standardizes to float64 as before.
             out[col] = scaled.astype(src_dtype, copy=False) if src_dtype == np.float32 else scaled
             mu_by_col[f"{col}__mean"] = mu
             sigma_by_col[f"{col}__std"] = sigma
@@ -579,6 +639,35 @@ class BehaviorRepresentationService:
     def _zscore_by_group(cls, df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
         out, _ = cls._zscore_by_group_with_stats(df, feature_cols)
         return out
+
+    @staticmethod
+    def _drop_absent_segments(
+        segment_df: "pd.DataFrame",
+        min_focal_presence: float,
+        progress: "Callable[[str], None] | None" = None,
+    ) -> "pd.DataFrame":
+        """Drop windows whose focal animal was present for less than the threshold.
+
+        A no-op when the threshold is 0, when the table is empty, or when the
+        frame table predates presence tracking (no ``pose_present_frac``), so
+        older projects keep working until they are re-extracted.
+        """
+        if segment_df.empty or min_focal_presence <= 0.0:
+            return segment_df
+        if "pose_present_frac" not in segment_df.columns:
+            return segment_df
+        frac = pd.to_numeric(segment_df["pose_present_frac"], errors="coerce")
+        # A NaN fraction means "unknown", which is not the same as "absent",
+        # keep those rows rather than silently deleting data.
+        keep = ~(frac < float(min_focal_presence))
+        n_dropped = int((~keep).sum())
+        if n_dropped and progress is not None:
+            progress(
+                f"Representation: dropped {n_dropped} segment(s) where the focal "
+                f"animal was present for <{min_focal_presence:.0%} of the window "
+                "(not yet in the arena, removed, or tracking lost)."
+            )
+        return segment_df[keep].reset_index(drop=True)
 
     @staticmethod
     def _segment_summary(window_df: pd.DataFrame, feature_cols: list[str], segment_id: str) -> dict[str, float | str | int]:
@@ -618,7 +707,7 @@ class BehaviorRepresentationService:
         ensure_only: bool = False,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         # ``ensure_only`` skips loading the (potentially multi-GB) cached frame
-        # and segment parquet on a full cache hit — the caller only wants the
+        # and segment parquet on a full cache hit: the caller only wants the
         # cache to *exist* (e.g. pre-building during feature extraction), not
         # the dataframes.  Returns empty frames in that case.
         config = config or RepresentationConfig()
@@ -630,7 +719,7 @@ class BehaviorRepresentationService:
         # Fast path: return cached outputs when the full representation cache
         # already exists.  For full (non-filtered) runs the cache is returned
         # as-is.  For subset runs (session_ids provided) the cache is loaded
-        # and filtered in memory — much faster than re-deriving features from
+        # and filtered in memory: much faster than re-deriving features from
         # raw pose/context data, and avoids overwriting the full cache with a
         # partial result.
         #
@@ -665,7 +754,7 @@ class BehaviorRepresentationService:
             if _meta.get("cache_signature") != cache_signature:
                 _progress(
                     "Representation: cache is stale (source content or config "
-                    "changed) — clearing and rebuilding..."
+                    "changed): clearing and rebuilding..."
                 )
                 _frame_cached.unlink(missing_ok=True)
                 _seg_cached.unlink(missing_ok=True)
@@ -674,7 +763,7 @@ class BehaviorRepresentationService:
             # Frame cache present but no signature manifest (older cache format):
             # rebuild once so future runs get a fast content-signature hit.
             _progress(
-                "Representation: cache present without signature manifest — "
+                "Representation: cache present without signature manifest, "
                 "rebuilding once to record content signature..."
             )
             _frame_cached.unlink(missing_ok=True)
@@ -683,17 +772,17 @@ class BehaviorRepresentationService:
         if _frame_cached.exists() and _seg_cached.exists() and _manifest_cached.exists():
             if not session_ids:
                 if ensure_only:
-                    _progress("Representation: cache hit — already prepared (skipping load).")
+                    _progress("Representation: cache hit, already prepared (skipping load).")
                     return pd.DataFrame(), pd.DataFrame()
-                _progress("Representation: cache hit — loading existing frame and segment features...")
+                _progress("Representation: cache hit, loading existing frame and segment features...")
                 return pd.read_parquet(_frame_cached), pd.read_parquet(_seg_cached)
             else:
                 # Subset fast-path: load full cache then filter to requested sessions.
                 # z-scoring was done per (animal_id, session_id) so independent
-                # sessions remain correctly normalised after filtering.
+                # sessions remain correctly normalized after filtering.
                 keep = {str(s) for s in session_ids}
                 _progress(
-                    f"Representation: cache hit (subset) — filtering {len(keep)} session(s) "
+                    f"Representation: cache hit (subset), filtering {len(keep)} session(s) "
                     "from existing cached features..."
                 )
                 frame_sub = pd.read_parquet(_frame_cached)
@@ -701,7 +790,7 @@ class BehaviorRepresentationService:
                 frame_sub = frame_sub[frame_sub["session_id"].astype(str).isin(keep)].copy()
                 seg_sub = seg_sub[seg_sub["session_id"].astype(str).isin(keep)].copy()
                 _progress(
-                    f"Representation: subset filter applied — "
+                    f"Representation: subset filter applied, "
                     f"frame_rows={len(frame_sub)}, segment_rows={len(seg_sub)}."
                 )
                 # Detect stale cache: find sessions that are present in the
@@ -731,7 +820,7 @@ class BehaviorRepresentationService:
                     # after the last build).  Remove the stale files and rebuild
                     # the full cache so future runs are fast.
                     _progress(
-                        f"Representation: segment cache is stale — "
+                        f"Representation: segment cache is stale, "
                         f"{len(_missing_eligible)} session(s) have frames but no segments "
                         f"({', '.join(sorted(_missing_eligible)[:5])}"
                         f"{'…' if len(_missing_eligible) > 5 else ''}). "
@@ -751,7 +840,7 @@ class BehaviorRepresentationService:
                     frame_sub = full_frame[full_frame["session_id"].astype(str).isin(keep)].copy()
                     seg_sub = full_seg[full_seg["session_id"].astype(str).isin(keep)].copy()
                     _progress(
-                        f"Representation: rebuilt and filtered — "
+                        f"Representation: rebuilt and filtered, "
                         f"frame_rows={len(frame_sub)}, segment_rows={len(seg_sub)}."
                     )
                 return frame_sub, seg_sub
@@ -843,8 +932,8 @@ class BehaviorRepresentationService:
         join_cols = ["frame", "animal_id", "session_id"]
         # Very large frame tables are stored as float32 from here on.  float64
         # frame features cost 8 bytes x n_frames x n_features (11.4 GiB for a
-        # 9.4M-frame, 163-feature project) and every downstream step — merge,
-        # z-scoring, the segment builder — needs headroom on top of that.
+        # 9.4M-frame, 163-feature project) and every downstream step, merge,
+        # z-scoring, the segment builder, needs headroom on top of that.
         # float32 keeps ~7 significant digits, far more than pose/context
         # features carry, and small projects are left untouched so their
         # numbers are bit-for-bit what they were.
@@ -867,11 +956,11 @@ class BehaviorRepresentationService:
         frame_df = self._canonicalize_distance_columns(frame_df)
         if frame_df.shape[1] != _n_cols_before:
             _progress(
-                f"Representation: canonicalised distance columns "
+                f"Representation: canonicalized distance columns "
                 f"({_n_cols_before - frame_df.shape[1]} duplicate spelling(s) merged)."
             )
 
-        # Feature exclusions are NOT applied here — neither the project-level
+        # Feature exclusions are NOT applied here: neither the project-level
         # config/feature_exclusions.json NOR the per-run ``excluded_feature_cols``.
         # The representation builder must compute statistics for ALL available
         # features so the cache is independent of feature-selection choices and
@@ -880,7 +969,11 @@ class BehaviorRepresentationService:
         # dependency: dead features were excluded → never got windowed stats →
         # stayed "dead" even after the underlying data was fixed.  The trainer
         # applies all exclusions at the segment level instead.
-        excluded = {"frame", "animal_id", "session_id", "video_id"}
+        # Presence bookkeeping is metadata, not signal: it must not be
+        # z-scored, windowed into seven statistics, or handed to a classifier
+        # as a feature.  It is summarized separately as ``*_frac`` below.
+        presence_cols = [c for c in _PRESENCE_COLS if c in frame_df.columns]
+        excluded = {"frame", "animal_id", "session_id", "video_id", *_PRESENCE_COLS}
 
         feature_cols = [
             c
@@ -927,6 +1020,7 @@ class BehaviorRepresentationService:
                 config.window_stride_frames,
                 include_periodicity=True,
                 include_posture_deltas=posture_deltas,
+                presence_cols=presence_cols,
             )
             if not seg_df.empty:
                 dfs.append(seg_df)
@@ -939,10 +1033,19 @@ class BehaviorRepresentationService:
 
         segment_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
+        # ── Drop windows the focal animal was not present for ─────────────
+        # An animal added to the cage part-way through a session (or lost by
+        # the tracker for a long stretch) has no pose to summarize there.  Left
+        # in, these windows reach training as plausible-looking negatives and
+        # reach review as clips of an empty arena.
+        segment_df = self._drop_absent_segments(
+            segment_df, config.min_focal_presence, _progress
+        )
+
         # ── R3D-18 appearance embeddings (video feature family) ───────────
         # Merged here, before the cache is written, so every consumer of
-        # segment_features.parquet — training, the ablation harness, the
-        # validation suite — sees them as ordinary numeric feature columns.
+        # segment_features.parquet, training, the ablation harness, the
+        # validation suite: sees them as ordinary numeric feature columns.
         # ``frame_context_path is None`` means pixel features are off for this
         # run, so appearance features are off with them.
         if config.use_r3d_features and frame_context_path is not None and not segment_df.empty:

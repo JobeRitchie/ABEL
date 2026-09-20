@@ -6,7 +6,7 @@ group-by-group (whole sessions/animals first) to mimic the realistic "you
 labeled N clips across whatever sessions" scenario and avoid single-session
 artefacts at small N.  Negatives follow a configurable policy.
 
-Subsampling only ever draws from the *training pool* — the held-out evaluation
+Subsampling only ever draws from the *training pool*, the held-out evaluation
 set is fixed across all sizes.
 """
 

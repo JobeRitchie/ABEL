@@ -57,7 +57,7 @@ FULL_SUITE = [
 
 # The analyses behind the manuscript's Figure 3.  Ticked by default on the Run All
 # tab so the headline figure is one button, with the remaining suite analyses
-# available but off — they answer other questions and cost real time.
+# available but off: they answer other questions and cost real time.
 #
 # Derived from the panels the figure actually contains, not from habit:
 #   learning curve   -> F1/PR-AUC vs clip budget
@@ -120,11 +120,11 @@ class ValidationRunConfig:
     al_seed_pos: int = 5
     al_acquisition: str = "probability"
     # rare-behavior discovery (clip hunting: essence / AL / UMAP vs random / whole-video)
-    # With several projects selected, hunting every checked behaviour in every one
+    # With several projects selected, hunting every checked behavior in every one
     # of them costs hours and buries the result.  Auto-target runs the *cheap*
     # rarity pass first (dense bout detections, no fitting), then spends the whole
-    # discovery/quality budget on that project's rarest behaviour — the one the
-    # analysis is actually about — before moving to the next project.
+    # discovery/quality budget on that project's rarest behavior, the one the
+    # analysis is actually about: before moving to the next project.
     #
     # OFF by default: the manuscript comparison covers every checked behavior.
     # Auto-target collapses it to one behavior per project (43 -> 8), which is a
@@ -135,7 +135,7 @@ class ValidationRunConfig:
     # tools after an initial random-hunting phase, not from a cold 8-clip start.
     # Measured on the full pool this cuts essence's effort-to-50 from 486 to 336
     # clips; on the (enriched) reviewed pool it is worth ~nothing, which is why the
-    # effect was invisible before.  Do not raise much further — at 40 exemplars the
+    # effect was invisible before.  Do not raise much further, at 40 exemplars the
     # essence AND-box widens and purity regresses.
     rare_n_seed_pos: int = 20
     rare_al_budget: int = 400
@@ -150,10 +150,10 @@ class ValidationRunConfig:
     rare_measure: str = "time_fraction"    # behavior-rarity readout
     # Effort-to-quality: labeling effort → held-out target-class F1 / PR-AUC per
     # acquisition strategy ("how much review until the model is actually good?").
-    # This is the PRIMARY rare-behaviour result — positives-found is the mechanism,
+    # This is the PRIMARY rare-behavior result: positives-found is the mechanism,
     # but the two can rank the arms differently, so the outcome metric leads.  Each
     # arm trains a model at every checkpoint; measured at ~0.5 s per fit, a full
-    # behaviour is minutes, not hours.
+    # behavior is minutes, not hours.
     rare_include_quality: bool = True
     rare_quality_k0: int = 20
     rare_quality_seed_pos: int = 5
@@ -162,7 +162,7 @@ class ValidationRunConfig:
     rare_quality_f1_targets: list[float] = field(default_factory=lambda: [0.70, 0.80])
     rare_quality_pr_auc_targets: list[float] = field(default_factory=lambda: [0.80, 0.90])
     rare_quality_frac_targets: list[float] = field(default_factory=lambda: [0.90, 0.95])
-    # Behaviours to EXCLUDE from the rarity comparison (names or ids) — e.g. one
+    # Behaviors to EXCLUDE from the rarity comparison (names or ids), e.g. one
     # that is not validly scored in this dataset and would pollute "the rest".
     rare_exclude_behaviors: list[str] = field(default_factory=list)
     # behaviorscape
@@ -177,7 +177,7 @@ class ValidationRunConfig:
     throughput_stages: list[str] = field(
         default_factory=lambda: [benchmark.STAGE_EXTRACT, benchmark.STAGE_TRAIN])
     # human review effort (the labeling-time ledger).  Read straight off each
-    # project's review_decisions.json — no training, no side effects, ~1 s per
+    # project's review_decisions.json, no training, no side effects, ~1 s per
     # project.  The two thresholds decide which inter-decision gaps count as one
     # clip's review; see abel.validation.analyses.review_effort for why.
     review_break_sec: float = review_effort.BREAK_SEC
@@ -239,7 +239,7 @@ class ValidationRunConfig:
 # button and not a form.  The seed counts are the load-bearing choice: the 95%
 # interval on a mean of n seeds uses the *t* quantile, which is 4.30 at 3 seeds
 # and 2.78 at 5.  Three seeds therefore buys an interval so wide that real gains
-# fail to reach significance — every analysis whose headline is a *difference*
+# fail to reach significance: every analysis whose headline is a *difference*
 # (ablation, discrimination, active learning, video value) gets 5.
 PUBLICATION_SEEDS = 5
 
@@ -271,7 +271,7 @@ def publication_config(
         analyses=list(analyses if analyses is not None else FULL_SUITE),
         # The learning-curve schedule the manuscript figure was built on: dense at
         # the low end, where all the curvature is, and extended to 400 so the
-        # plateau is visible. It deliberately omits ALL_CLIPS — an "all" point sits
+        # plateau is visible. It deliberately omits ALL_CLIPS, an "all" point sits
         # at a different x per behavior, so it cannot be averaged across behaviors
         # into the pooled curve.
         sizes=MANUSCRIPT_LC_SIZES,
@@ -282,7 +282,7 @@ def publication_config(
         neg_policy="ratio",
         neg_per_pos=MANUSCRIPT_NEG_PER_POS,
         n_seeds_ablation=PUBLICATION_SEEDS,
-        # Full data only — the shipped-pipeline comparison. A 50-clip budget answers
+        # Full data only: the shipped-pipeline comparison. A 50-clip budget answers
         # a different question (do regularizers pay off when labels are scarce); run
         # it deliberately by adding 50 back, not as part of the headline figure.
         ablation_budgets=[subsample.ALL_CLIPS],
@@ -322,7 +322,7 @@ def preset_description(cfg: ValidationRunConfig) -> str:
     budgets = ", ".join("all" if b == subsample.ALL_CLIPS else str(b)
                         for b in cfg.ablation_budgets)
     return (
-        f"{PUBLICATION_SEEDS} seeds per point (95% CI uses the t quantile — at 3 seeds "
+        f"{PUBLICATION_SEEDS} seeds per point (95% CI uses the t quantile, at 3 seeds "
         f"that is 4.30 and real effects miss significance; at 5 it is 2.78)\n"
         f"Learning-curve clip schedule: {sizes}\n"
         f"Negatives: {cfg.neg_policy}"
@@ -337,7 +337,7 @@ def preset_description(cfg: ValidationRunConfig) -> str:
         f"Held-out: {cfg.holdout_test_size:.0%} of subjects/sessions, reviewer "
         f"confidence ≥ {cfg.min_confidence:g}\n"
         f"Throughput stages: {', '.join(cfg.throughput_stages) or 'none'} "
-        f"(dense inference excluded — it rewrites project traces)"
+        f"(dense inference excluded, it rewrites project traces)"
     )
 
 
@@ -359,7 +359,7 @@ def _default_root() -> Path:
     """Where a run lands when no output root was given.
 
     Runs belong to the validation workspace, not to any one project's parent
-    folder — a run spans projects, and scattering results next to whichever
+    folder, a run spans projects, and scattering results next to whichever
     project happened to be first made them impossible to find later.  A run
     launched from a saved session gets that session's ``runs/`` folder instead
     (the GUI passes it as ``output_root``); this is the unfiled fallback.
@@ -375,11 +375,11 @@ def run_rarity_preflight(
     config: ValidationRunConfig | None = None,
     progress_cb: ProgressCB | None = None,
 ) -> list:
-    """Phase 1 of the rare-behaviour workflow: the cheap rarity + evidence check.
+    """Phase 1 of the rare-behavior workflow: the cheap rarity + evidence check.
 
-    Ranks each project's checked behaviours by measured rarity and reports how
-    many confirmed examples the rarest ones actually have — seconds of parquet
-    reads, no model fitting — so the user can go label more *before* committing
+    Ranks each project's checked behaviors by measured rarity and reports how
+    many confirmed examples the rarest ones actually have, seconds of parquet
+    reads, no model fitting, so the user can go label more *before* committing
     hours to a hunt that would die on three positives.  Returns a list of
     :class:`rare_discovery.ProjectPreflight`, one per project.
     """
@@ -454,13 +454,13 @@ def run_validation(
             u += 1                                           # one JSON read/project
         if ANALYSIS_RARE_DISCOVERY in config.analyses:
             # One coarse unit per completed sub-analysis (discovery, +rarity,
-            # +full pool) per behavior, plus one behaviour-rarity readout/project.
+            # +full pool) per behavior, plus one behavior-rarity readout/project.
             per_beh = 1 + (1 if config.rare_include_rarity_scaling else 0) \
                 + (1 if config.rare_include_fullpool else 0)
             u += rare_count * per_beh + 1
             if config.rare_include_quality:
                 # Effort-to-quality trains a model per checkpoint per arm, so it is
-                # the one rare sub-analysis worth costing at fit granularity — a
+                # the one rare sub-analysis worth costing at fit granularity, a
                 # coarse +1 would make the ETA stall badly here.
                 steps = max(1, (config.rare_quality_budget - config.rare_quality_k0)
                             // max(1, config.rare_quality_batch) + 1)
@@ -468,7 +468,7 @@ def run_validation(
         return max(1, u)
 
     def _rare_count(beh_count: int) -> int:
-        """Behaviours the rare analyses will actually hunt in one project."""
+        """Behaviors the rare analyses will actually hunt in one project."""
         return 1 if (config.rare_auto_target and beh_count > 1) else beh_count
 
     total_units = sum(
@@ -481,7 +481,7 @@ def run_validation(
         """A wall-clock ETA appended to every progress message.
 
         Held behind a short warm-up gate ("calculating…") because the first few
-        units are unrepresentative — the estimate uses whole-run throughput
+        units are unrepresentative, the estimate uses whole-run throughput
         (elapsed ÷ fraction), which is the honest extrapolation when units take
         wildly different times (an AL fit ≫ a learning-curve point).
         """
@@ -512,7 +512,7 @@ def run_validation(
     rare_rarity: list = []
     rare_behavior: list = []
     rare_quality: list = []
-    rare_target_rows: list[dict] = []      # which behaviour each project hunted, and why
+    rare_target_rows: list[dict] = []      # which behavior each project hunted, and why
     proj_names: dict[str, str] = {p.project_id: p.name for p in projects}
     vv_results: list = []
     bench_results: list = []
@@ -541,7 +541,7 @@ def run_validation(
         project_meta.append({
             "project_id": proj.project_id, "name": proj.name,
             # Renames are display-only, so the manifest carries both names: a figure
-            # labelled "Groom" must stay traceable to the project/behavior on disk.
+            # labeled "Groom" must stay traceable to the project/behavior on disk.
             "source_name": proj.original_name,
             "renamed": proj.is_renamed,
             "root": str(proj.root),
@@ -557,11 +557,11 @@ def run_validation(
             ],
         })
 
-        # ── which behaviour does this project's rare-discovery budget go to? ──
-        # The cheap pass first: rank every selected behaviour by how rare it
-        # actually is (dense bout detections — no fitting, seconds not hours), then
+        # ── which behavior does this project's rare-discovery budget go to? ──
+        # The cheap pass first: rank every selected behavior by how rare it
+        # actually is (dense bout detections: no fitting, seconds not hours), then
         # hunt the rarest one.  The rest of the ranking is kept as a fallback chain:
-        # the rarest behaviour is also the likeliest to have too few confirmed
+        # the rarest behavior is also the likeliest to have too few confirmed
         # positives to cross-validate, and dropping the project entirely over that
         # is worse than moving one rank down and saying so.
         rare_excl_ids: list[str] = []
@@ -574,23 +574,23 @@ def run_validation(
             rare_auto = bool(config.rare_auto_target) and len(beh_ids) > 1
             rare_targets = list(beh_ids)
             if rare_auto:
-                _emit_msg(f"[{proj.name}] ranking behaviours by rarity (cheap pass)…")
+                _emit_msg(f"[{proj.name}] ranking behaviors by rarity (cheap pass)…")
                 try:
                     ranking = rare_discovery.rank_behaviors_by_rarity(
                         proj, beh_ids, exclude_behavior_ids=rare_excl_ids,
                         measure=config.rare_measure, progress_cb=_emit_msg)
-                except Exception as exc:  # noqa: BLE001 — fall back to the selection order
+                except Exception as exc:  # noqa: BLE001, fall back to the selection order
                     _emit_msg(f"[{proj.name}] rarity ranking unavailable ({exc}); "
-                              f"using the checked behaviours in order")
+                              f"using the checked behaviors in order")
                     ranking = []
                 if ranking:
                     rare_targets = [bid for bid, _n, _v in ranking]
                     _emit_msg(f"[{proj.name}] rarest → " + ", ".join(
                         f"{n} ({v:.4g})" for _b, n, v in ranking[:3]))
 
-        # Behaviour-independent clip metrics + UMAP embedding, computed ONCE per
-        # project and shared across every behaviour's discovery run (bit-identical
-        # to recomputing — they depend only on the pool, not the target).
+        # Behavior-independent clip metrics + UMAP embedding, computed ONCE per
+        # project and shared across every behavior's discovery run (bit-identical
+        # to recomputing: they depend only on the pool, not the target).
         rare_cache = None
         if rare_targets:
             _emit_msg(f"[{proj.name}] preparing shared clip metrics + embedding…")
@@ -669,14 +669,14 @@ def run_validation(
 
         # ── rare-behavior discovery (its own loop over this project's targets) ──
         # In auto-target mode ``rare_targets`` is the rarity ranking and we stop at
-        # the first behaviour that is actually huntable; otherwise it is every
-        # checked behaviour and all of them run.
+        # the first behavior that is actually huntable; otherwise it is every
+        # checked behavior and all of them run.
         hunted: list[str] = []
         for beh in rare_targets:
             name = proj.behavior_label(beh)
-            # Clip-hunting efficiency for this behaviour (essence / AL / UMAP vs
+            # Clip-hunting efficiency for this behavior (essence / AL / UMAP vs
             # random / whole-video), cross-validated on the shared holdout pool.
-            # Guarded: a behaviour with too few confirmed positives to
+            # Guarded: a behavior with too few confirmed positives to
             # cross-validate is skipped rather than sinking the run.
             # Fine-grained logs route through _emit_msg (message + ETA, no unit
             # count); the unit counter advances once per completed sub-analysis
@@ -708,16 +708,16 @@ def run_validation(
                         proj, beh, sp, n_seeds=config.n_seeds_rare,
                         cache=rare_cache, progress_cb=_emit_msg))
                     _emit(f"[{name}] rarity scaling done")
-            except Exception as exc:  # noqa: BLE001 — skip un-huntable behaviours
+            except Exception as exc:  # noqa: BLE001, skip un-huntable behaviors
                 _emit(f"[{name}] rare-discovery skipped: {type(exc).__name__}: {exc}")
                 if rare_auto:
-                    # The rarest behaviour could not be cross-validated — drop one
+                    # The rarest behavior could not be cross-validated, drop one
                     # rank and try again rather than losing the whole project.
-                    _emit_msg(f"[{proj.name}] trying the next-rarest behaviour…")
+                    _emit_msg(f"[{proj.name}] trying the next-rarest behavior…")
                     continue
 
             # Effort-to-quality: same acquisition arms, but the y-axis is model
-            # quality on the fixed holdout rather than positives found — "how
+            # quality on the fixed holdout rather than positives found, "how
             # much labeling until the model is good?".  Guarded separately from
             # the discovery block so a failure in one still leaves the other.
             # Each checkpoint fit emits a unit (see _units_for), so the ETA
@@ -744,16 +744,16 @@ def run_validation(
                     _emit_msg(f"[{name}] effort-to-quality skipped: "
                               f"{type(exc).__name__}: {exc}")
             if rare_auto:
-                break  # one behaviour per project — the rarest huntable one
+                break  # one behavior per project: the rarest huntable one
 
-        # ── behavior rarity (once per project, contextualising the hunted target) ──
-        # Describes how rare each behaviour actually is (from dense bout detections),
-        # the context that makes the rare-behaviour discovery story land.  The
-        # highlighted behaviour is the one we actually hunted.
+        # ── behavior rarity (once per project, contextualizing the hunted target) ──
+        # Describes how rare each behavior actually is (from dense bout detections),
+        # the context that makes the rare-behavior discovery story land.  The
+        # highlighted behavior is the one we actually hunted.
         if rare_targets:
-            _emit_msg(f"[{proj.name}] behaviour rarity…")
+            _emit_msg(f"[{proj.name}] behavior rarity…")
             # Recorded even if the rarity readout below fails: the reader must be
-            # able to see which behaviour the hunt was spent on regardless.
+            # able to see which behavior the hunt was spent on regardless.
             for beh in hunted:
                 rare_target_rows.append({
                     "project": proj.name, "project_id": proj.project_id,
@@ -765,8 +765,8 @@ def run_validation(
                 })
             for beh in (hunted or rare_targets):
                 try:
-                    # Compare against EVERY project behaviour (not just the selected
-                    # ones), else a single-behaviour selection has nothing to rank
+                    # Compare against EVERY project behavior (not just the selected
+                    # ones), else a single-behavior selection has nothing to rank
                     # against and the stats are degenerate.
                     br = rare_discovery.run_behavior_rarity(
                         proj, beh, behavior_ids=None,
@@ -788,11 +788,11 @@ def run_validation(
                             })
                     if br.source_caveat():
                         _emit_msg(f"[{proj.name}] {br.source_caveat()}")
-                    break  # one readout per project (all behaviours plotted together)
+                    break  # one readout per project (all behaviors plotted together)
                 except Exception as exc:  # noqa: BLE001
-                    _emit_msg(f"[{proj.name}] behaviour rarity skipped: {exc}")
+                    _emit_msg(f"[{proj.name}] behavior rarity skipped: {exc}")
                     break
-            _emit("behaviour rarity done")
+            _emit("behavior rarity done")
 
         # ── pairwise discrimination (once per project, over all behavior pairs) ──
         # Complements the ablation: that one measures *detection* of each behavior
@@ -834,7 +834,7 @@ def run_validation(
             bscape_data = data
             try:
                 bscape_stats = behaviorscape.behavior_distinctiveness_stats(data)
-            except Exception:  # noqa: BLE001 — the PERMANOVA is optional colour
+            except Exception:  # noqa: BLE001, the PERMANOVA is optional color
                 bscape_stats = None
 
     # ── pipeline throughput (once per project) ──
@@ -914,7 +914,7 @@ def run_validation(
                 # fold it into the frame handed to prism.write_all (the archival
                 # learning_curve_points.csv above stays per-behavior). Without this
                 # the Prism learning-curve tables carry every behavior *except* the
-                # across-behavior average — the one users actually plot.
+                # across-behavior average: the one users actually plot.
                 lc_points_df = pd.concat(
                     [lc_points_df, pd.DataFrame(avg_rows)], ignore_index=True)
                 # Fixed-composition companion: the same average restricted to the
@@ -979,7 +979,7 @@ def run_validation(
                         r.untestable.get(cfgname, False)),
                 }
                 # The per-seed F1 behind every mean/CI, so the paired test can be
-                # re-run downstream (Prism, R, a reviewer) from the CSV alone —
+                # re-run downstream (Prism, R, a reviewer) from the CSV alone,
                 # a boolean `significant` column cannot be re-derived or re-plotted.
                 for i, v in enumerate(r.f1_seeds.get(cfgname, []), start=1):
                     row[f"f1_seed{i}"] = v
@@ -1023,7 +1023,7 @@ def run_validation(
             if not pair_results:
                 continue
             tag = _tag(pid)
-            # One matrix per add-on family — NOT just video. Defaulting the Δ panel to
+            # One matrix per add-on family: NOT just video. Defaulting the Δ panel to
             # video hid the actual result on object-based assays, where the ROI/context
             # family is what disambiguates the pairs and video does almost nothing.
             addons = [s for s in (pair_results[0].order if pair_results else [])
@@ -1045,7 +1045,7 @@ def run_validation(
                             f"{tag}__separability_matrix.csv", subdir="discrimination")
         disc_df = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()
         # The whole run's discrimination result in one figure, pooled over every
-        # project — the matrices above are one panel per project PER feature family,
+        # project: the matrices above are one panel per project PER feature family,
         # which is the archive, not something a reader can draw a conclusion from.
         # Written FIRST in the figure list so it leads the report and the GUI tab.
         land_img = disc_dir / "discrimination_landscape.png"
@@ -1054,7 +1054,7 @@ def run_validation(
         plots.close_all()
         if not disc_df.empty:
             store.write_csv(disc_df, "discrimination_results.csv", subdir="discrimination")
-        # Pairs, not seeds, as the unit of analysis — and only pairs the pose
+        # Pairs, not seeds, as the unit of analysis, and only pairs the pose
         # baseline has not already solved (see discrimination.pooled_gain_by_pair).
         disc_pooled_df = discrimination.pooled_gain_by_pair(disc_df)
         if not disc_pooled_df.empty:
@@ -1090,7 +1090,7 @@ def run_validation(
     if gen_results:
         plots.human_ceiling_plot(gen_results, store.sub("generalization") / "model_vs_human_kappa.png")
         plots.close_all()
-        # Per project × behavior — the detail, kept so a pooled bar can be broken back down.
+        # Per project × behavior: the detail, kept so a pooled bar can be broken back down.
         gen_df = pd.DataFrame([
             {"project": r.project_id, "behavior": r.behavior_name,
              "f1": r.f1_mean, "cohen_kappa": r.kappa_mean,
@@ -1098,7 +1098,7 @@ def run_validation(
             for r in gen_results
         ])
         store.write_csv(gen_df, "agreement.csv", subdir="generalization")
-        # Per (assay, behavior) with seed CI — the exact numbers behind the figure.
+        # Per (assay, behavior) with seed CI, the exact numbers behind the figure.
         pooled_df = plots.pool_generalization_by_behavior(gen_results)
         if not pooled_df.empty:
             store.write_csv(pooled_df, "agreement_pooled.csv", subdir="generalization")
@@ -1185,7 +1185,7 @@ def run_validation(
             })
         plots.close_all()
         store.write_csv(pd.DataFrame(al_rows), "al_vs_random_summary.csv", subdir="active_learning")
-        # Per-step curves — the exact series drawn in the figure (F1 + positives
+        # Per-step curves: the exact series drawn in the figure (F1 + positives
         # discovered vs. clips reviewed, for each arm), for paste into graphing tools.
         point_rows = [row for r in al_results for row in _al_points_rows(r)]
         store.write_csv(pd.DataFrame(point_rows), "al_vs_random_points.csv",
@@ -1196,14 +1196,14 @@ def run_validation(
     if rare_reviewed or rare_behavior or rare_quality:
         rd_dir = store.sub("rare_discovery")
         rd_imgs: list[Path] = []
-        # Behaviour rarity first — it frames why the rest matters.
+        # Behavior rarity first: it frames why the rest matters.
         for br in rare_behavior:
             img = rd_dir / f"0_behavior_rarity__{_tag(br.project_id)}.png"
             rare_discovery.plot_behavior_rarity(br, img)
             rd_imgs.append(img)
             br.per_session.to_csv(
                 rd_dir / f"behavior_rarity__{_tag(br.project_id)}.csv", index=False)
-        # Deployment prevalence rolled up per behavior — the X axis of the
+        # Deployment prevalence rolled up per behavior: the X axis of the
         # rarity-vs-performance panel. Written as its own table so the panel and
         # the caption's "spans X% to Y% of session time" come from one number.
         rarity_df = rare_discovery.prevalence_by_behavior(rare_behavior)
@@ -1257,7 +1257,7 @@ def run_validation(
             rar_rows.extend(rare_discovery.rarity_rows(r))
         # ── combined (cross-project) panels ──
         # Only meaningful with ≥2 projects, where each contributes its own rarest
-        # behaviour as one paired observation of the same four arms.  Prefixed 1_
+        # behavior as one paired observation of the same four arms.  Prefixed 1_
         # so they sit right after the rarity context and ahead of the per-project
         # detail in the report and the GUI gallery.
         comb_rows: list[dict] = []
@@ -1320,7 +1320,7 @@ def run_validation(
                     prism._write(pooled,
                                  store.run_dir / "prism" / "prism_discovery_pooled.csv")
             if q_rows:
-                # Human review rate, NOT clip duration — see the note in
+                # Human review rate, NOT clip duration, see the note in
                 # prism_effort_to_quality_time. Quote this rate in the legend.
                 tmin = rare_discovery.prism_effort_to_quality_time(
                     pd.DataFrame(q_rows), clip_sec_map,
@@ -1333,7 +1333,7 @@ def run_validation(
             spc = rare_discovery.REVIEW_SEC_PER_CLIP
             # One table per configured target, not just the auto-picked one. The
             # auto-pick is "the largest target every arm reached in every project",
-            # which moves with the behaviors in the run — so the panel silently
+            # which moves with the behaviors in the run: so the panel silently
             # changed its N between runs and two figures could not be compared.
             # Every target is now on disk; the FIGURES copy is the auto-picked one,
             # named in INDEX.txt, and swapping panels is a file rename.
@@ -1363,20 +1363,20 @@ def run_validation(
                 if not sw.empty:
                     prism._write(sw, store.run_dir / "prism" /
                                  "prism_time_to_strong_model_minutes_pooled.csv")
-        except Exception as exc:  # noqa: BLE001 — pooled extras must not sink the run
+        except Exception as exc:  # noqa: BLE001, pooled extras must not sink the run
             _emit_msg(f"Pooled rare-discovery Prism tables skipped: "
                       f"{type(exc).__name__}: {exc}")
-        # Prism-ready copies (one behaviour-rarity table, plus discovery/effort/
+        # Prism-ready copies (one behavior-rarity table, plus discovery/effort/
         # rarity/quality).  Quality results are matched to their discovery run by
-        # behaviour so both land in the same Prism bundle.
+        # behavior so both land in the same Prism bundle.
         # With more than one project in the run every table is filed under a
         # per-project stem; a single-project run keeps the plain filenames.
         multi = len({r.project_id for r in
                      (rare_reviewed + rare_quality + rare_behavior)}) > 1
-        # A project can hunt more than one behaviour (non-auto target mode), and
+        # A project can hunt more than one behavior (non-auto target mode), and
         # every one of its tables would otherwise land on the same filename with
-        # only the last surviving. Add the behaviour to the stem for exactly the
-        # projects that need it, so the common single-behaviour case keeps its
+        # only the last surviving. Add the behavior to the stem for exactly the
+        # projects that need it, so the common single-behavior case keeps its
         # short, stable filenames.
         _beh_per_proj: dict[str, set[str]] = {}
         for r in (rare_reviewed + rare_quality):
@@ -1399,8 +1399,8 @@ def run_validation(
                 matched_quality.add(id(q))
             rare_discovery.write_prism(
                 store.run_dir, reviewed=r,
-                # Matched on project AND behaviour: imported models reuse their
-                # source project's behaviour ids, so id alone can collide.
+                # Matched on project AND behavior: imported models reuse their
+                # source project's behavior ids, so id alone can collide.
                 full=next((f for f in rare_full
                            if f.behavior_id == r.behavior_id
                            and f.project_id == r.project_id), None),
@@ -1417,7 +1417,7 @@ def run_validation(
             rare_discovery.write_prism(store.run_dir, behavior_rarity=br,
                                        stem=_prism_stem(br))
         rarity_note = ""
-        # Say up front which behaviour each project's hunt was spent on — in
+        # Say up front which behavior each project's hunt was spent on, in
         # auto-target mode the reader never chose it, so the figures are
         # uninterpretable without it.
         if rare_target_rows:
@@ -1425,11 +1425,11 @@ def run_validation(
                 ["project", "hunted_behavior", "auto_selected", "rarity_measure",
                  "rarity_value", "rarity_rank", "n_behaviors_compared",
                  "rarer_behaviors_not_hunted"]]
-            rarity_note += ("<p><b>Behaviour hunted per project</b> "
+            rarity_note += ("<p><b>Behavior hunted per project</b> "
                             "(auto-selected = rarest by the cheap bout-detection "
                             "pass, before any model fitting):</p>"
                             + report.table_section(tdf))
-        # Loudly flag any arm that could not run — an absent line on the figure
+        # Loudly flag any arm that could not run: an absent line on the figure
         # otherwise reads as "we tested it and it lost".
         for r in rare_reviewed:
             for strat, why in (r.disabled_strategies or {}).items():
@@ -1461,7 +1461,7 @@ def run_validation(
                 clips = q.clips_to(strat, target)
                 if saved and clips:
                     rarity_note += (
-                        f"<p><b>{q.behavior_name}</b> — {cur.label()} reached "
+                        f"<p><b>{q.behavior_name}</b>, {cur.label()} reached "
                         f"{target} in {clips:.0f} clips, {saved:.1f}× less labeling "
                         f"than random selection.</p>")
         sections.append(("Rare-behavior discovery (clip hunting)",
@@ -1521,7 +1521,7 @@ def run_validation(
             "the gap to the previous decision by the same reviewer; gaps under "
             f"{config.review_batch_sec:g}s are one bulk UI action and gaps over "
             f"{config.review_break_sec:g}s mean the reviewer stepped away, so neither "
-            "is charged to a clip. Active hours are therefore a floor — the first "
+            "is charged to a clip. Active hours are therefore a floor, the first "
             "clip after every break contributes nothing "
             "(<code>active_review_hours_adjusted</code> adds those back at the "
             "project's own median rate).</p>"
@@ -1547,7 +1547,7 @@ def run_validation(
     if not speed_df.empty:
         store.write_csv(speed_df, "training_speed.csv", subdir="cross_project")
     # Every publication summary metric per project (F1, MCC, balanced accuracy,
-    # ROC-AUC, κ) — not just F1 — so reviewers see the imbalance-robust picture.
+    # ROC-AUC, κ), not just F1, so reviewers see the imbalance-robust picture.
     pub_df = cross_project.publication_metrics_by_project(cells_df)
     if not pub_df.empty:
         store.write_csv(pub_df, "publication_metrics.csv", subdir="cross_project")
@@ -1582,7 +1582,7 @@ def run_validation(
     conf_df = cross_project.confusion_by_behavior(cells_df)
     if not conf_df.empty:
         # How long a clip is decides whether these counts mean anything to a
-        # reader, and it is per-project — measured from the labeled rows, never
+        # reader, and it is per-project, measured from the labeled rows, never
         # taken from segment_window_frames (whose default is 4x what most
         # projects actually use). See holdout.median_clip_frames.
         clip_frames = {p.project_id: holdout.median_clip_frames(p) for p in projects}
@@ -1604,7 +1604,7 @@ def run_validation(
                      + report.table_section(pub_df))
     if not conf_df.empty:
         cp_inner += ("<h3>Held-out confusion counts by behavior</h3>"
-                     "<p>Counts are per fit, averaged over seeds (never summed — "
+                     "<p>Counts are per fit, averaged over seeds (never summed, "
                      "every seed scores the same held-out pool). The unit is one "
                      "reviewer-scored clip (clip_frames / clip_sec below), not a "
                      "bout.</p>"
@@ -1654,18 +1654,18 @@ def run_validation(
             progress_cb(
                 f"Prism tables → {store.run_dir / 'prism'} "
                 f"({len(panel_paths)} figure panels in prism/FIGURES)", 0.99)
-    except Exception as exc:  # noqa: BLE001 — a bad pivot must not sink the run
+    except Exception as exc:  # noqa: BLE001, a bad pivot must not sink the run
         if progress_cb:
             progress_cb(f"Prism export skipped: {type(exc).__name__}: {exc}", 0.99)
 
     # ── Meta summary tables (the one-figure manuscript spine) ──
-    # Distil the per-behavior CSVs written above into 5 assay/behavior-level tables.
+    # Distill the per-behavior CSVs written above into 5 assay/behavior-level tables.
     try:
         summary_paths = meta_summary.write_all(
             store.run_dir, meta_summary.load_run_dir(store.run_dir))
         if summary_paths and progress_cb:
             progress_cb(f"Summary tables → {store.run_dir / 'summary'}", 0.995)
-    except Exception as exc:  # noqa: BLE001 — a bad summary must not sink the run
+    except Exception as exc:  # noqa: BLE001, a bad summary must not sink the run
         if progress_cb:
             progress_cb(f"Summary export skipped: {type(exc).__name__}: {exc}", 0.995)
 
@@ -1680,7 +1680,7 @@ def run_validation(
                 prism_dir=store.run_dir / "prism")
             if fr_paths and progress_cb:
                 progress_cb(f"Feature roles → {store.run_dir / 'feature_roles'}", 0.997)
-        except Exception as exc:  # noqa: BLE001 — must not sink the run
+        except Exception as exc:  # noqa: BLE001, must not sink the run
             if progress_cb:
                 progress_cb(f"Feature-role export skipped: {type(exc).__name__}: {exc}",
                             0.997)
@@ -1721,12 +1721,12 @@ def run_validation(
             findings_mod.findings_markdown(store.run_id, run_findings), encoding="utf-8")
         summary_html = pdf_report.build_summary_html(
             store.run_id, store.run_dir, run_findings, overview, project_meta)
-    except Exception as exc:  # noqa: BLE001 — a bad summary must not lose the results
+    except Exception as exc:  # noqa: BLE001, a bad summary must not lose the results
         if progress_cb:
             progress_cb(f"Summary skipped: {type(exc).__name__}: {exc}", 0.99)
 
     if progress_cb:
-        progress_cb(f"Done — results in {store.run_dir}", 1.0)
+        progress_cb(f"Done, results in {store.run_dir}", 1.0)
 
     return RunOutputs(
         run_dir=store.run_dir,
@@ -1788,7 +1788,7 @@ def _lc_points_rows(lc) -> list[dict]:
             "tp_pct": p.tp_pct, "fp_pct": p.fp_pct, "fn_pct": p.fn_pct,
             "tp_pct_ci": p.tp_pct_ci, "fp_pct_ci": p.fp_pct_ci, "fn_pct_ci": p.fn_pct_ci,
             "kappa_mean": p.kappa_mean,
-            # Imbalance-robust companions to F1 — target-class F1 alone cannot tell a
+            # Imbalance-robust companions to F1: target-class F1 alone cannot tell a
             # good detector from an always-predict-target one.
             "mcc_mean": p.mcc_mean, "specificity_mean": p.specificity_mean,
             # Composition and health of this point: how many behaviors are behind it
@@ -1819,7 +1819,7 @@ def _row_float(row, col: str) -> float:
 
 def _lc_result_from_rows(rows: pd.DataFrame) -> "learning_curve.LearningCurveResult":
     """Reconstruct a LearningCurveResult from saved tidy rows (inverse of
-    :func:`_lc_points_rows`) — enough to redraw the figures without retraining.
+    :func:`_lc_points_rows`), enough to redraw the figures without retraining.
 
     ``behavior_id`` is not persisted (the plots don't use it) and the knee is
     recomputed from ``f1_mean`` with the same detector used at run time, so a
@@ -1865,7 +1865,7 @@ def _lc_result_from_rows(rows: pd.DataFrame) -> "learning_curve.LearningCurveRes
     )
     res.f1_max = learning_curve._curve_ceiling(pts)
     res.knee_clips = learning_curve.detect_knee(pts)
-    # The bootstrap cannot be redone here — the per-seed fits are not in this CSV —
+    # The bootstrap cannot be redone here: the per-seed fits are not in this CSV,
     # so the stored interval is carried through as-is. Runs predating it leave the
     # band off rather than drawing a falsely tight one.
     res.knee_lo = _row_float(first, "knee_lo")
@@ -1876,7 +1876,7 @@ def _lc_result_from_rows(rows: pd.DataFrame) -> "learning_curve.LearningCurveRes
 
 
 def rerender_learning_curves(lc_dir: "str | Path") -> int:
-    """Redraw every learning-curve figure from a run's saved point CSVs — no
+    """Redraw every learning-curve figure from a run's saved point CSVs, no
     retraining.
 
     Reads ``learning_curve_points.csv`` (one block per behavior) and, when
@@ -1890,7 +1890,7 @@ def rerender_learning_curves(lc_dir: "str | Path") -> int:
     points_csv = lc_dir / "learning_curve_points.csv"
     if not points_csv.is_file():
         raise FileNotFoundError(
-            f"No learning_curve_points.csv in {lc_dir} — nothing to re-render.")
+            f"No learning_curve_points.csv in {lc_dir}, nothing to re-render.")
     df = pd.read_csv(points_csv)
     written = 0
     # Per-behavior figures, grouped exactly as they were written at run time.

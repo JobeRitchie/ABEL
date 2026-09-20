@@ -329,7 +329,7 @@ class MainWindow(QMainWindow):
             if page is not None:
                 page.setMinimumSize(0, 0)
 
-        # Wire lazy-init signals — tabs initialize only on first visit
+        # Wire lazy-init signals: tabs initialize only on first visit
         self._initialized_tabs: set[QWidget] = set()
         tabs.currentChanged.connect(self._on_top_tab_changed)
         self._learning_group.currentChanged.connect(self._on_sub_tab_changed)
@@ -349,7 +349,7 @@ class MainWindow(QMainWindow):
     def _update_clip_extraction_uncertainty_candidates(self, candidates: list, source_label: str) -> None:
         """Pre-populate clip extraction with uncertainty-ranked candidates after each pipeline run.
 
-        Unlike edge-case candidates this does NOT switch the active tab — the user stays on the
+        Unlike edge-case candidates this does NOT switch the active tab, the user stays on the
         Active Learning tab to review metrics and can navigate to Clip Extraction when ready.
         The candidates replace any previous AL-uncertainty set so re-runs are clean.
         """
@@ -445,7 +445,7 @@ class MainWindow(QMainWindow):
 
     def open_recent_project(self, path: str) -> None:
         project_root = Path(path)
-        # Opening a large project reads the manifest, the behaviour definitions
+        # Opening a large project reads the manifest, the behavior definitions
         # and several derived tables before anything repaints, which looks like
         # a hang. The popup is closed by _update_home_stats, the last deferred
         # stage of the open, or by the error path here.
@@ -480,7 +480,7 @@ class MainWindow(QMainWindow):
         self._refresh_recent_projects()
         self._pose_features_service.set_project(context.project_root)
 
-        # ── Phase 1: fast tabs — window becomes visible now ──────────
+        # ── Phase 1: fast tabs, window becomes visible now ──────────
         self.home_tab.update_project(context.config.project_name, context.project_root)
         self.logs_tab.set_project(context.project_root)
         self.settings_tab.set_project(context.project_root)
@@ -577,7 +577,7 @@ class MainWindow(QMainWindow):
             self._lazy_init_tab(widget)
             self._check_raw_data_for_tab(widget)
 
-    # Tabs that never touch raw video or pose — warning here would be pure noise.
+    # Tabs that never touch raw video or pose: warning here would be pure noise.
     _RAW_DATA_EXEMPT_ATTRS = (
         "settings_tab", "dependencies_tab", "logs_tab", "help_tab",
         "info_tab", "home_tab", "methods_tab", "data_import_tab",
@@ -589,7 +589,7 @@ class MainWindow(QMainWindow):
         Hooked into the two central tab-change handlers rather than added to each
         tab, so every current and future tab is covered by construction and the
         warning cannot drift out of sync between them.  Data Import is exempt
-        because relinking missing files is exactly what that tab is *for* — the
+        because relinking missing files is exactly what that tab is *for*, the
         dialog would fire on the way to the fix.
         """
         if self._project is None or widget is None:
@@ -654,8 +654,8 @@ class MainWindow(QMainWindow):
                     "stride_frames": str_fr,
                     "stride_sec": round(str_fr / fps, 3) if fps > 0 and str_fr else None,
                     "fps": fps,
-                    "model_version": snap.get("model_version") or "—",
-                    "query_mode": rs.get("mode") or "—",
+                    "model_version": snap.get("model_version") or "-",
+                    "query_mode": rs.get("mode") or "-",
                     "classifier": None,
                 }
             except Exception:
@@ -665,7 +665,7 @@ class MainWindow(QMainWindow):
             try:
                 raw_p = yaml.safe_load(proj_yaml.read_text(encoding="utf-8")) or {}
                 bm = raw_p.get("behavior_model") or {}
-                pipeline["classifier"] = bm.get("classifier_type") or "—"
+                pipeline["classifier"] = bm.get("classifier_type") or "-"
                 # Fill window/stride from project config if snapshot didn't supply them
                 if not pipeline.get("window_frames"):
                     fps = pipeline.get("fps") or float(raw_p.get("default_fps") or 30.0)
@@ -688,17 +688,17 @@ class MainWindow(QMainWindow):
         if metrics_path.exists():
             try:
                 text = metrics_path.read_text(encoding="utf-8")
-                # JSON does not allow bare NaN — replace before parsing
+                # JSON does not allow bare NaN: replace before parsing
                 text = re.sub(r'\bNaN\b', 'null', text)
                 raw_m = json.loads(text)
 
                 def _fmt(v: object) -> str:
                     if v is None:
-                        return "—"
+                        return "-"
                     try:
                         return f"{float(v):.3f}"
                     except (TypeError, ValueError):
-                        return "—"
+                        return "-"
 
                 fl = raw_m.get("frame_level") or {}
                 sl = raw_m.get("segment_level") or {}
@@ -758,7 +758,7 @@ class MainWindow(QMainWindow):
             snapshot = svc.build_from_project(self._project.project_root)
             svc.save(self._project.project_root, snapshot)
 
-            # Build a summary of captured behaviours
+            # Build a summary of captured behaviors
             sbm = snapshot.selected_behavior_models or {}
             excluded = set(snapshot.excluded_behavior_ids or [])
             beh_lookup: dict[str, str] = {}
@@ -807,7 +807,7 @@ class MainWindow(QMainWindow):
         self._learning_group.setCurrentWidget(self.active_learning_tab)
 
     def _on_direct_use_complete(self, target_root: Path) -> None:
-        """Handle pipeline completion — offer to switch to analytics."""
+        """Handle pipeline completion: offer to switch to analytics."""
         reply = QMessageBox.question(
             self,
             "Pipeline Complete",
@@ -870,6 +870,6 @@ def _shutdown_mkl_threads() -> None:
         pass
     try:
         import numpy as _np
-        _np.__config__  # noqa: B018 – force attribute access to ensure module is loaded
+        _np.__config__  # noqa: B018, force attribute access to ensure module is loaded
     except Exception:
         pass

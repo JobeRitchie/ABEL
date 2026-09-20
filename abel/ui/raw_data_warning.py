@@ -4,14 +4,14 @@
 are reachable; this module decides *how the user hears about it*.  It exists as
 one shared widget rather than a per-tab message box so the wording, the
 once-per-problem cadence, and the "which drive?" diagnosis are identical
-everywhere — a user who sees it on the Features tab should see the same thing on
+everywhere, a user who sees it on the Features tab should see the same thing on
 Validation.
 
 Cadence is the whole design problem.  Warning on every tab switch trains people to
 dismiss it; warning once per session hides a genuinely new problem when a
 different drive drops.  :class:`RawDataWarningPresenter` therefore keys on the
-report's :meth:`~abel.services.raw_data_availability.RawDataReport.signature` —
-the missing set itself — so the dialog appears once per *distinct* problem and
+report's :meth:`~abel.services.raw_data_availability.RawDataReport.signature`,
+the missing set itself, so the dialog appears once per *distinct* problem and
 again the moment that problem changes.
 
 DPI note: the dialog sizes from the font metrics, not fixed pixels, so it does not
@@ -46,7 +46,7 @@ from abel.services.raw_data_availability import (
 logger = logging.getLogger("abel")
 
 # How many individual paths to list before collapsing into "+N more".  Enough to
-# recognise the pattern, few enough that the dialog stays readable.
+# recognize the pattern, few enough that the dialog stays readable.
 _MAX_LISTED = 8
 
 
@@ -101,13 +101,13 @@ def format_report_html(report: RawDataReport) -> str:
     if report.unlinked_sessions:
         parts.append(
             f"<p><b>{len(report.unlinked_sessions)} session(s)</b> have no linked "
-            f"video/pose asset at all. These were never fully imported — re-run "
+            f"video/pose asset at all. These were never fully imported, re-run "
             f"the pairing step on the Data Import tab.</p>")
 
     parts.append(
         "<p style='color:#666;'>You can keep working: steps that read only "
         "already-extracted features still run. Steps that recompute from raw "
-        "video or pose will be skipped or produce empty results — which is easy "
+        "video or pose will be skipped or produce empty results, which is easy "
         "to mistake for a real finding, so check this before interpreting "
         "output.</p>")
     return "".join(parts)
@@ -155,7 +155,7 @@ class RawDataWarningPresenter:
     """Owns *when* the warning shows, so callers only say "check this project".
 
     One instance per main window.  Tabs and the project loader call
-    :meth:`check` freely — on every tab switch if they like — and the presenter
+    :meth:`check` freely, on every tab switch if they like, and the presenter
     suppresses repeats of a problem the user has already seen, and everything for
     a project the user has muted.
     """
@@ -166,7 +166,7 @@ class RawDataWarningPresenter:
         self._muted_projects: set[str] = set()
 
     def reset(self, project_root: Path | None = None) -> None:
-        """Forget history — call when a project is opened or its assets change.
+        """Forget history: call when a project is opened or its assets change.
 
         Reopening a project is the user's way of saying "I fixed it"; the warning
         must be able to fire again (or stay silent) based on fresh evidence.
@@ -180,7 +180,7 @@ class RawDataWarningPresenter:
         """Check ``project_root`` and warn if anything is unreachable.
 
         Returns the report (``None`` when there is no project). ``force`` shows
-        the dialog even for an already-seen problem — for the explicit
+        the dialog even for an already-seen problem, for the explicit
         "Check raw data" action, where silence would read as a broken button.
         Extra kwargs pass through to
         :func:`~abel.services.raw_data_availability.check_project_raw_data`
@@ -254,7 +254,7 @@ def confirm_run_with_missing_raw_data(
     # outcome is recorded in the run's own outputs.
     if _is_non_interactive():
         logger.warning(
-            "Raw data unavailable for %s, but running non-interactively — "
+            "Raw data unavailable for %s, but running non-interactively, "
             "proceeding without confirmation. Affected: %s",
             what, "; ".join(f"{Path(r.project_root).name}: {r.summary()}" for r in reports),
         )
@@ -263,7 +263,7 @@ def confirm_run_with_missing_raw_data(
     from PySide6.QtWidgets import QMessageBox  # local: keeps import cost off startup
 
     lines = "".join(
-        f"<li><b>{_esc(Path(r.project_root).name)}</b> — {_esc(r.summary())}</li>"
+        f"<li><b>{_esc(Path(r.project_root).name)}</b>, {_esc(r.summary())}</li>"
         for r in reports)
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Icon.Warning)
@@ -272,7 +272,7 @@ def confirm_run_with_missing_raw_data(
     box.setInformativeText(
         f"<ul>{lines}</ul>"
         "<p>Analyses that recompute from raw video or pose will be <b>skipped or "
-        "disabled</b>. The run will still finish and still produce figures — those "
+        "disabled</b>. The run will still finish and still produce figures, those "
         "figures will just be missing whole arms, with no marking on the figure "
         "itself.</p>"
         "<p>Connect the drive and re-open the projects to fix this, or continue "
@@ -294,7 +294,7 @@ def warn_if_raw_data_missing(
     """One-shot check + warn, for callers with no presenter to hand.
 
     Always shows the dialog when something is missing (no de-duplication), so use
-    it for deliberate, user-initiated actions — pressing Run on a long pipeline —
+    it for deliberate, user-initiated actions, pressing Run on a long pipeline,
     rather than anything that fires repeatedly.
     """
     if project_root is None:

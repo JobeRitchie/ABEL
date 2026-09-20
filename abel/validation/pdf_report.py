@@ -1,7 +1,7 @@
 """The consolidated summary report: a paginated, print-ready HTML → PDF.
 
-This is deliberately NOT ``report.html``.  That one is the exhaustive dump —
-every table, every figure — and it is what you open when you want to dig.  This
+This is deliberately NOT ``report.html``.  That one is the exhaustive dump,
+every table, every figure, and it is what you open when you want to dig.  This
 one is the thing you hand to a co-author or drop into a supplement: the findings
 in words, the key table per analysis, and only the *headline* figure(s).  Every
 other figure and the full data tables go to the export bundle instead.
@@ -71,22 +71,22 @@ SECTIONS: tuple[SectionSpec, ...] = (
               "reviewers of automated-behavior work expect alongside F1.",
     ),
     SectionSpec(
-        "Learning curves", "Data efficiency — how many clips do you need?",
+        "Learning curves", "Data efficiency: how many clips do you need?",
         figures=FigureSpec("learning_curves", ("0_AVERAGE__f1_prauc.png",), 1),
         table=TableSpec("learning_curves", "optimal_clips_summary.csv"),
-        blurb="Held-out F1 as a function of labeled clips. The knee — 95% of peak "
-              "F1 — is the recommended labeling budget.",
+        blurb="Held-out F1 as a function of labeled clips. The knee, 95% of peak "
+              "F1: is the recommended labeling budget.",
     ),
     SectionSpec(
-        "Ablation (detection)", "Feature ablation — what does each family add?",
+        "Ablation (detection)", "Feature ablation: what does each family add?",
         figures=FigureSpec("ablation", ("feature_impact__*.png",), 3),
         blurb="Baseline is pose-only with every enhancement off. Each bar adds ONE "
               "enhancement on its own; gains are paired per seed. Faded bars have a "
-              "95% CI that overlaps zero — a small ± there is noise, not harm.",
+              "95% CI that overlaps zero: a small ± there is noise, not harm.",
     ),
     SectionSpec(
         "Discrimination (pairwise)",
-        "Discrimination — can the features tell similar behaviors apart?",
+        "Discrimination: can the features tell similar behaviors apart?",
         figures=FigureSpec("discrimination",
                            ("discrimination_landscape.png",
                             "*__separability_matrix__*.png",
@@ -94,7 +94,7 @@ SECTIONS: tuple[SectionSpec, ...] = (
         table=TableSpec("discrimination", "confusable_pairs.csv", max_rows=10),
         blurb="Ablation asks a DETECTION question (behavior vs. everything else), "
               "where 'everything else' is mostly easy negatives. This asks the "
-              "DISCRIMINATION question — for every behavior pair, a binary A-vs-B "
+              "DISCRIMINATION question: for every behavior pair, a binary A-vs-B "
               "model per feature family on the same clips. The landscape figure "
               "leads: every pair of every assay placed by how much error pose "
               "leaves against the share the best feature family removes, then a "
@@ -102,14 +102,14 @@ SECTIONS: tuple[SectionSpec, ...] = (
               "behind it are the per-assay detail; hatched cells were never trained.",
     ),
     SectionSpec(
-        "Generalization", "Generalization — does it agree with the human scorer?",
+        "Generalization", "Generalization: does it agree with the human scorer?",
         figures=FigureSpec("generalization", ("model_vs_human_kappa.png",), 1),
         table=TableSpec("generalization", "agreement.csv"),
         blurb="Trained on training-pool subjects, scored on held-out subjects the "
               "model never saw, against the reviewer's labels.",
     ),
     SectionSpec(
-        "Biological readout", "Biological readout — prevalence & bout agreement",
+        "Biological readout", "Biological readout: prevalence & bout agreement",
         figures=FigureSpec("time_budget", ("0_AGREEMENT_FOREST__*.png",), 2),
         table=TableSpec("time_budget", "time_budget_agreement.csv"),
         blurb="Does the model recover the measure a scorer would report? Per-session "
@@ -117,7 +117,7 @@ SECTIONS: tuple[SectionSpec, ...] = (
               "of agreement.",
     ),
     SectionSpec(
-        "Calibration", "Calibration — do the probabilities mean anything?",
+        "Calibration", "Calibration: do the probabilities mean anything?",
         figures=FigureSpec("calibration", ("*.png",), 2),
         table=TableSpec("calibration", "calibration.csv"),
         blurb="Whether a predicted probability of 0.8 really means right 80% of the "
@@ -131,7 +131,7 @@ SECTIONS: tuple[SectionSpec, ...] = (
               "held-out data; they differ only in which clips get reviewed next.",
     ),
     SectionSpec(
-        "Behaviorscape", "Behaviorscape — which feature types drive which behaviors?",
+        "Behaviorscape", "Behaviorscape: which feature types drive which behaviors?",
         figures=FigureSpec("behaviorscape",
                            ("behaviorscape_modality_bars.png",
                             "behaviorscape_distinctiveness.png"), 2),
@@ -145,7 +145,7 @@ SECTIONS: tuple[SectionSpec, ...] = (
         figures=FigureSpec("video_value", ("video_value.png",), 1),
         table=TableSpec("video_value", "video_value.csv"),
         blurb="The same held-out split and the same training subsample, differing ONLY "
-              "in the video-feature columns — a clean paired estimate of what the video "
+              "in the video-feature columns: a clean paired estimate of what the video "
               "motion features add.",
     ),
     SectionSpec(
@@ -260,7 +260,7 @@ def _table_html(run_dir: Path, spec: TableSpec) -> str:
         # utf-8-sig, matching store.write_csv: a leftover BOM would rename the
         # first column and silently drop it from spec.columns below.
         df = pd.read_csv(path, encoding="utf-8-sig")
-    except Exception:  # noqa: BLE001 — a malformed CSV must not sink the report
+    except Exception:  # noqa: BLE001, a malformed CSV must not sink the report
         return ""
     if df.empty:
         return ""
@@ -272,9 +272,9 @@ def _table_html(run_dir: Path, spec: TableSpec) -> str:
     if total > spec.max_rows:
         df = df.head(spec.max_rows)
     out = df.to_html(index=False, border=0, justify="left",
-                     float_format=lambda v: f"{v:.3f}", na_rep="—")
+                     float_format=lambda v: f"{v:.3f}", na_rep="-")
     if total > spec.max_rows:
-        out += (f'<p class="trunc">Showing {spec.max_rows} of {total} rows — the full '
+        out += (f'<p class="trunc">Showing {spec.max_rows} of {total} rows, the full '
                 f'table is in <code>{spec.subdir}/{spec.filename}</code>.</p>')
     return out
 
@@ -315,7 +315,7 @@ def build_summary_html(
 
     projects_txt = ", ".join(
         f"{p.get('name', '?')} ({len(p.get('behaviors', []))} behaviors)"
-        for p in project_meta) or "—"
+        for p in project_meta) or "-"
     meta = (
         f'<div class="meta">'
         f'<b>Run</b>: {html.escape(run_id)}<br/>'
@@ -357,7 +357,7 @@ def build_summary_html(
                     f'{_findings_html(items)}</section>')
 
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>ABEL Validation Report — {html.escape(run_id)}</title>
+<title>ABEL Validation Report: {html.escape(run_id)}</title>
 <style>{_CSS}</style></head><body>
 <h1>ABEL Validation &amp; Meta-Analysis</h1>
 <p class="sub">Consolidated summary report · {html.escape(run_id)}</p>
@@ -377,7 +377,7 @@ def render_pdf(html_path: Path, pdf_path: Path, timeout_ms: int = 60_000) -> Pat
     nested :class:`QEventLoop` is used so this can be called synchronously from a
     button handler while the app's own loop is running.
 
-    Raises ``RuntimeError`` if WebEngine is unavailable or the render fails — the
+    Raises ``RuntimeError`` if WebEngine is unavailable or the render fails, the
     caller should fall back to pointing the user at the HTML.
     """
     html_path, pdf_path = Path(html_path), Path(pdf_path)
@@ -389,7 +389,7 @@ def render_pdf(html_path: Path, pdf_path: Path, timeout_ms: int = 60_000) -> Pat
     except ImportError as exc:  # noqa: BLE001
         raise RuntimeError(
             "QtWebEngine is not available, so the PDF could not be rendered. "
-            f"The summary HTML is at {html_path} — open it and print to PDF."
+            f"The summary HTML is at {html_path}, open it and print to PDF."
         ) from exc
 
     if QApplication.instance() is None:
@@ -438,7 +438,7 @@ def render_pdf(html_path: Path, pdf_path: Path, timeout_ms: int = 60_000) -> Pat
     # never runs one exits with QApplication being destroyed while WebEngine is
     # still up, and the process segfaults on the way out.
     #
-    # Flush ONLY the deferred deletes — not processEvents(), which would also
+    # Flush ONLY the deferred deletes: not processEvents(), which would also
     # deliver queued input events and could re-enter a run from a click that landed
     # while this was rendering.
     view.loadFinished.disconnect()
@@ -447,6 +447,6 @@ def render_pdf(html_path: Path, pdf_path: Path, timeout_ms: int = 60_000) -> Pat
     QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     if state["error"]:
-        raise RuntimeError(f"{state['error']} The summary HTML is at {html_path} — "
+        raise RuntimeError(f"{state['error']} The summary HTML is at {html_path}, "
                            f"open it and print to PDF.")
     return pdf_path

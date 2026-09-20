@@ -43,7 +43,7 @@ def test_blank_or_unchanged_behavior_rename_clears_the_alias() -> None:
     assert p.behavior_label("b1") == "Grooming"
     assert not p.behavior_aliases
 
-    p.set_behavior_alias("b1", "Grooming")  # same as disk — not worth storing
+    p.set_behavior_alias("b1", "Grooming")  # same as disk: not worth storing
     assert not p.behavior_aliases
 
 
@@ -68,7 +68,7 @@ def test_project_rename_relabels_but_leaves_root_alone() -> None:
     assert p.name == "Novel Object"
     assert p.original_name == "CAB_NOP_2023"
     assert p.is_renamed
-    # root is the only disk locator the project has — a rename must not move it.
+    # root is the only disk locator the project has: a rename must not move it.
     assert p.root == Path("/projects/cab_nop")
 
 
@@ -86,7 +86,7 @@ def test_same_behavior_in_two_assays_stays_two_generalization_bars() -> None:
     """A "Groom" model in one assay says nothing about "Groom" in another.
 
     Even when a rename makes two projects spell a behavior identically, the
-    generalization panel must keep them as two bars keyed by assay — never average
+    generalization panel must keep them as two bars keyed by assay, never average
     two independently-trained models into one fabricated number. Renames still
     relabel; they no longer pool.
     """
@@ -121,7 +121,7 @@ def test_same_behavior_in_two_assays_stays_two_generalization_bars() -> None:
     assert len(df) == 2
     assert set(df["behavior"]) == {"Groom"}
     assert set(df["label"]) == {"Novel Object · Groom", "EPM_v2 · Groom"}
-    # Each row keeps only its own project's 3 seed cells — no cross-assay pooling.
+    # Each row keeps only its own project's 3 seed cells, no cross-assay pooling.
     assert sorted(df["n_cells"]) == [3, 3]
     by_label = df.set_index("label")
     assert by_label.loc["Novel Object · Groom", "kappa"] == pytest.approx(0.9)

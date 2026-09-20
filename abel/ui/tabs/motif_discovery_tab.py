@@ -1,4 +1,4 @@
-"""Motif Discovery tab — unsupervised clustering of pose-feature windows.
+"""Motif Discovery tab: unsupervised clustering of pose-feature windows.
 
 Takes the kinematic feature matrices produced by the Pose Features tab and
 discovers recurring movement motifs via K-Means or UMAP + HDBSCAN.
@@ -88,7 +88,7 @@ class MotifDiscoveryTab(QWidget):
         self._behavior_combo = QComboBox()
         self._behavior_combo.currentIndexChanged.connect(self._on_behavior_changed)
         refresh_seed_btn = QPushButton("Refresh")
-        refresh_seed_btn.setToolTip("Reload behaviours and seed examples")
+        refresh_seed_btn.setToolTip("Reload behaviors and seed examples")
         refresh_seed_btn.clicked.connect(self._refresh_seed_clicked)
         behavior_row = QHBoxLayout()
         behavior_row.addWidget(self._behavior_combo, 1)
@@ -99,9 +99,9 @@ class MotifDiscoveryTab(QWidget):
         )
         self._seed_filter_chk.setChecked(False)
         self._seed_filter_chk.setToolTip(
-            "When checked, only feature windows overlapping your labelled seed examples\n"
+            "When checked, only feature windows overlapping your labeled seed examples\n"
             "are used for clustering.  This focuses motif discovery on the kinematic\n"
-            "signature of the selected behaviour rather than the entire recording."
+            "signature of the selected behavior rather than the entire recording."
         )
         self._seed_filter_chk.toggled.connect(self._update_seed_coverage_label)
         self._seed_coverage_label = QLabel("No seeds loaded.")
@@ -109,7 +109,7 @@ class MotifDiscoveryTab(QWidget):
         self._seed_coverage_label.setStyleSheet("color: #78909C; font-size: 11px;")
 
         seed_form = QFormLayout()
-        seed_form.addRow("Behaviour:", behavior_row)
+        seed_form.addRow("Behavior:", behavior_row)
         seed_form.addRow("", self._seed_filter_chk)
         seed_form.addRow(self._seed_coverage_label)
 
@@ -255,7 +255,7 @@ class MotifDiscoveryTab(QWidget):
         right_layout = QVBoxLayout(right_widget)
 
         info_label = QLabel(
-            "ℹ  Motif discovery clusters pose-feature windows — no video is decoded.\n"
+            "ℹ  Motif discovery clusters pose-feature windows, no video is decoded.\n"
             "Results are saved to derived/motifs/ and used by Candidate Generation."
         )
         info_label.setWordWrap(True)
@@ -301,7 +301,7 @@ class MotifDiscoveryTab(QWidget):
         self._result_table.verticalHeader().setVisible(False)
         self._result_table.horizontalHeader().setStretchLastSection(True)
 
-        # Visual readout for interpreting discovery quality and behaviour relevance.
+        # Visual readout for interpreting discovery quality and behavior relevance.
         readout_box = QGroupBox("Discovery Readout")
         readout_layout = QVBoxLayout(readout_box)
 
@@ -313,15 +313,15 @@ class MotifDiscoveryTab(QWidget):
 
         self._bar_cluster_coverage = QProgressBar()
         self._bar_cluster_coverage.setRange(0, 100)
-        self._bar_cluster_coverage.setFormat("Clustered windows: —")
+        self._bar_cluster_coverage.setFormat("Clustered windows:,")
 
         self._bar_assigned_coverage = QProgressBar()
         self._bar_assigned_coverage.setRange(0, 100)
-        self._bar_assigned_coverage.setFormat("Assigned to motifs: —")
+        self._bar_assigned_coverage.setFormat("Assigned to motifs:,")
 
         self._bar_noise_rate = QProgressBar()
         self._bar_noise_rate.setRange(0, 100)
-        self._bar_noise_rate.setFormat("Noise rate: —")
+        self._bar_noise_rate.setFormat("Noise rate:,")
 
         self._readout_seed_note = QLabel("")
         self._readout_seed_note.setWordWrap(True)
@@ -417,7 +417,7 @@ class MotifDiscoveryTab(QWidget):
 
         if not positive_seeds:
             self._seed_coverage_label.setText(
-                "⚠  No positive seed examples found for this behaviour.  "
+                "⚠  No positive seed examples found for this behavior.  "
                 "Add seeds in the Seed Examples tab first."
             )
             self._seed_coverage_label.setStyleSheet("color: #FF8A65; font-size: 11px;")
@@ -436,7 +436,7 @@ class MotifDiscoveryTab(QWidget):
             color = "#4FC3F7" if covered else "#FF8A65"
         else:
             txt = (
-                f"{len(positive_seeds)} positive seed(s) available — "
+                f"{len(positive_seeds)} positive seed(s) available, "
                 "seed filter is disabled, full recording will be clustered."
             )
             color = "#78909C"
@@ -495,7 +495,7 @@ class MotifDiscoveryTab(QWidget):
         if not self._project_root:
             return
         self._refresh_behavior_combo()
-        self._append_log("Behaviours and seed examples refreshed.")
+        self._append_log("Behaviors and seed examples refreshed.")
 
     def _refresh_model_status(self) -> None:
         model = self._service.load_model()
@@ -533,7 +533,7 @@ class MotifDiscoveryTab(QWidget):
                 behavior_id=model.parameters.get("behavior_id"),
             )
         else:
-            self._model_status.setText("No motif model for this project — run discovery to create one.")
+            self._model_status.setText("No motif model for this project: run discovery to create one.")
             self._model_status.setStyleSheet("color: #78909C; font-size: 11px; padding: 2px 0;")
             self._update_readout(0, 0, 0, 0, 0, False, None)
 
@@ -773,7 +773,7 @@ class MotifDiscoveryTab(QWidget):
                 return
 
             if not use_seed_filter:
-                # Separate per-behaviour analyses require behaviour-specific window filters.
+                # Separate per-behavior analyses require behavior-specific window filters.
                 # Enforce seed filtering to avoid repeated pooled clustering runs.
                 use_seed_filter = True
                 self._seed_filter_chk.setChecked(True)
@@ -794,14 +794,14 @@ class MotifDiscoveryTab(QWidget):
                         self,
                         "No Seeds",
                         "Seed filter is enabled but no positive seed examples were found in the selected sessions.\n\n"
-                        "Either add seeds in the Seed Examples tab, select a behaviour with\n"
+                        "Either add seeds in the Seed Examples tab, select a behavior with\n"
                         "seeds, or uncheck 'Filter windows to seed examples'.",
                     )
                     return
                 behavior_label = self._behavior_combo.currentText().split("[")[0].strip()
                 self._append_log(
-                    f"  Seed filter ON — {len(seeds)} positive seed(s), "
-                    f"behaviour: {behavior_label}"
+                    f"  Seed filter ON: {len(seeds)} positive seed(s), "
+                    f"behavior: {behavior_label}"
                 )
 
             if behavior_targets:
@@ -825,7 +825,7 @@ class MotifDiscoveryTab(QWidget):
                     f"  All behaviors: {seeded_count}/{len(behavior_targets)} behavior(s) have positive seeds in selected sessions."
                 )
         else:
-            self._append_log("  Seed filter OFF — clustering full recording windows.")
+            self._append_log("  Seed filter OFF: clustering full recording windows.")
 
         self._cancel_flag[0] = False
         self._run_btn.setEnabled(False)
@@ -886,7 +886,7 @@ class MotifDiscoveryTab(QWidget):
                     labels = [
                         "Loading features…",
                         "Filtering to seeds…",
-                        "Normalising…",
+                        "Normalizing…",
                         "UMAP…",
                         "Clustering…",
                         "Building assignments…",
@@ -990,7 +990,7 @@ class MotifDiscoveryTab(QWidget):
             labels = [
                 "Loading features…",
                 "Filtering to seeds…",
-                "Normalising…",
+                "Normalizing…",
                 "UMAP…",
                 "Clustering…",
                 "Building assignments…",
@@ -1018,7 +1018,7 @@ class MotifDiscoveryTab(QWidget):
             self._append_log(f"  ⚠ {w}")
 
         if not result.success:
-            self._progress.setFormat("Failed — see log")
+            self._progress.setFormat("Failed: see log")
             self._append_log("Motif discovery did not complete successfully.")
             return
 
@@ -1028,7 +1028,7 @@ class MotifDiscoveryTab(QWidget):
         # Update progress
         self._progress.setValue(self._progress.maximum())
         self._progress.setFormat(
-            f"Done — {result.n_motifs} motifs from {result.n_windows_clustered} "
+            f"Done: {result.n_motifs} motifs from {result.n_windows_clustered} "
             f"clustered windows ({result.noise_count} noise)"
         )
 
@@ -1112,7 +1112,7 @@ class MotifDiscoveryTab(QWidget):
         total: int,
         sessions: list[str],
     ) -> None:
-        pct = f"{100.0 * count / total:.1f}%" if total > 0 else "—"
+        pct = f"{100.0 * count / total:.1f}%" if total > 0 else "-"
         row = self._result_table.rowCount()
         self._result_table.insertRow(row)
         self._result_table.setItem(row, 0, QTableWidgetItem(motif_id))
@@ -1144,9 +1144,9 @@ class MotifDiscoveryTab(QWidget):
             self._bar_cluster_coverage.setValue(0)
             self._bar_assigned_coverage.setValue(0)
             self._bar_noise_rate.setValue(0)
-            self._bar_cluster_coverage.setFormat("Clustered windows: —")
-            self._bar_assigned_coverage.setFormat("Assigned to motifs: —")
-            self._bar_noise_rate.setFormat("Noise rate: —")
+            self._bar_cluster_coverage.setFormat("Clustered windows:,")
+            self._bar_assigned_coverage.setFormat("Assigned to motifs:,")
+            self._bar_noise_rate.setFormat("Noise rate:,")
             self._readout_seed_note.setText("")
             return
 
@@ -1178,7 +1178,7 @@ class MotifDiscoveryTab(QWidget):
             if behavior_id:
                 self._readout_seed_note.setText(
                     "Seed filter was ON: clustering focused on windows that overlap positive seed examples "
-                    f"for behaviour '{self._behavior_service.display_name(behavior_id)}'."
+                    f"for behavior '{self._behavior_service.display_name(behavior_id)}'."
                 )
             else:
                 self._readout_seed_note.setText(
@@ -1186,5 +1186,5 @@ class MotifDiscoveryTab(QWidget):
                 )
         else:
             self._readout_seed_note.setText(
-                "Seed filter was OFF: motifs reflect all selected recording windows, not one behaviour." 
+                "Seed filter was OFF: motifs reflect all selected recording windows, not one behavior." 
             )

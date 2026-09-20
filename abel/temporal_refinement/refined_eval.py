@@ -7,7 +7,7 @@ stage, which turns per-window probabilities into clean bouts via
 ``smooth -> threshold -> merge close bouts -> drop short bouts`` using
 per-behavior settings tuned in ``config/temporal_review_settings.json``. Those
 steps remove isolated false positives and fill dropout gaps, materially changing
-TP/FP/FN — so the honest, publication-grade quality number is computed *after*
+TP/FP/FN, so the honest, publication-grade quality number is computed *after*
 refinement.
 
 This module is the single source of truth for that computation, shared by:
@@ -54,7 +54,7 @@ DEFAULT_TEMPORAL_SETTINGS: dict[str, Any] = {
 BOUT_MATCH_IOU = 0.2
 
 # Refined metrics are suppressed once more than this fraction of held-out positives
-# sit in observed islands too short to hold a min_bout-length prediction — beyond it
+# sit in observed islands too short to hold a min_bout-length prediction, beyond it
 # the score measures label sparsity, not the model.  See refinement_evaluability.
 _REFINE_UNSUPPORTED_MAX = 0.10
 
@@ -163,7 +163,7 @@ def observed_islands(
 
     Why this exists: :func:`_refine_binary_trace` needs a probability for every
     frame and interpolates whatever lies between segments.  At **inference** that
-    is right and costs nothing — windows tile the video densely (measured on a
+    is right and costs nothing, windows tile the video densely (measured on a
     real session: 5513 segments over 22,063 frames, ~375% coverage, *zero* gaps,
     11-frame overlap), so interpolation only fills tiling seams and this function
     returns a single island, leaving behavior unchanged.
@@ -202,7 +202,7 @@ def apply_temporal_refinement(
     """Apply the real bout-extraction pipeline and map results back to segments.
 
     For each session, and within it each run of contiguously observed frames
-    (see :func:`observed_islands` — one island covering everything at inference):
+    (see :func:`observed_islands`, one island covering everything at inference):
     1. Build a frame-level probability trace by assigning each segment's
        target-class probability to its ``[start_frame, end_frame]`` range, then
        linearly interpolating gaps between segments.
@@ -323,7 +323,7 @@ def _refined_bout_counts(
     """Event-level TP/FP/FN by matching refined bouts against ground-truth bouts.
 
     .. warning::
-       **Not a valid held-out metric — do not report it.**  It is retained only
+       **Not a valid held-out metric, do not report it.**  It is retained only
        so :mod:`abel.temporal_refinement.auto_settings` can be checked against it,
        and it keeps the original dense-trace behavior deliberately.
 
@@ -371,7 +371,7 @@ def _refined_bout_counts(
 
         # Ground-truth bouts on the same frame axis. Merge-gap closes the 1-frame
         # seams between contiguous positive windows so a single labeled bout does
-        # not fragment; no min-bout is applied — real short bouts must still count.
+        # not fragment; no min-bout is applied, real short bouts must still count.
         true_trace = np.zeros(n_frames, dtype=np.uint8)
         for i in range(len(sf)):
             local_s = max(0, int(sf[i]) - trace_start)
@@ -409,7 +409,7 @@ def _frames_from_segment_ids(seg_ids: "pd.Series | np.ndarray") -> tuple[np.ndar
 
 
 def _macro_prf(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, float]:
-    """Macro precision/recall/F1 — matches the trainer's metrics.json convention."""
+    """Macro precision/recall/F1: matches the trainer's metrics.json convention."""
     from sklearn.metrics import f1_score, precision_score, recall_score  # noqa: PLC0415
 
     return (
@@ -422,7 +422,7 @@ def _macro_prf(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float, fl
 def _target_encoded_index(model_dir: Path, target_behavior_id: str) -> int | None:
     """Find which encoded label index is the target (positive) class.
 
-    Behavior models are one-vs-rest but the target is NOT always encoded as 1 —
+    Behavior models are one-vs-rest but the target is NOT always encoded as 1,
     e.g. an Approach model has ``label_map = {0: <approach id>, 1: no_behavior}``,
     so the positive class is 0. Reading the encoding is essential; assuming
     ``label_true == 1`` is positive silently inverts every metric. Prefers the
@@ -461,7 +461,7 @@ def refined_holdout_metrics(
 
     Reads the honest held-out target probability stored in the model's own
     ``validation_predictions.parquet`` (``prediction_prob``, written at train time
-    from the train/val split — NOT the leaky deploy-model ``segment_predictions``)
+    from the train/val split, NOT the leaky deploy-model ``segment_predictions``)
     and scores the segments twice from the SAME probabilities: once raw
     (``P(target) >= 0.5``) and once after temporal refinement using the project's
     per-behavior settings. Both use macro averaging so the two are directly
@@ -469,7 +469,7 @@ def refined_holdout_metrics(
 
     The positive class is taken from the stored ``target_index`` when present,
     else resolved from the model's label encoding (see
-    :func:`_target_encoded_index`) — never assumed, since behavior models
+    :func:`_target_encoded_index`), never assumed, since behavior models
     frequently encode the target as class 0.
 
     ``seg_meta`` (segment_id -> start_frame/end_frame) is optional; when omitted,
@@ -490,7 +490,7 @@ def refined_holdout_metrics(
         return None
     # The honest held-out probability must be present. Models trained before this
     # column existed cannot be graded leak-free after the fact (the held-out model
-    # is not persisted), so we return None and the UI shows "—" until retrained.
+    # is not persisted), so we return None and the UI shows "-" until retrained.
     if "prediction_prob" not in df.columns:
         return None
 
@@ -555,7 +555,7 @@ def refinement_evaluability(
     inference that removes flicker.  On a held-out *labeled* subset the observed
     stretches are isolated windows (measured median island: 15 frames), so when
     ``min_bout`` exceeds the island length **no prediction can survive there no
-    matter how good the model is** — every positive in that island is forced to a
+    matter how good the model is**, every positive in that island is forced to a
     false negative.  Measured on a real project: an 87% unsupported fraction for a
     ``min_bout=30`` behavior, which dragged its refined recall to 0.60 while its
     raw recall was 0.90.
@@ -626,7 +626,7 @@ def score_raw_and_refined(
     Shared by the single-split path and leave-one-subject-out CV so the two
     always agree on the math. Returns positive-class TP/FP/FN/TN for both raw
     (``prob >= 0.5``) and refined predictions, plus P/R/F1 in two flavours:
-    ``*_target_*`` (the target class alone — what the Validation tab reports and
+    ``*_target_*`` (the target class alone, what the Validation tab reports and
     the only one that reconciles with the counts) and the legacy macro keys.
 
     Refined metrics come back as NaN (with ``refined_evaluable`` False) when the
@@ -680,11 +680,11 @@ def score_raw_and_refined(
     )
 
     # NOTE: event-level ("bout") TP/FP/FN used to be reported here and has been
-    # removed — it was not identifiable from a held-out labeled subset.  Bouts
+    # removed: it was not identifiable from a held-out labeled subset.  Bouts
     # need contiguous observation, but the evaluated unit is an isolated ~15-frame
     # window; scoring them inflated FP (interpolation across unobserved gaps
     # manufactured bouts) and FN (sparse labels fragment one real bout into
-    # several, and an island shorter than min_bout can hold no prediction at all —
+    # several, and an island shorter than min_bout can hold no prediction at all,
     # measured 87% of islands for a min_bout=30 behavior).  The counts below are
     # window-level against the reviewer's own accepted labels, which is what the
     # ground truth actually supports.  See `observed_islands`.

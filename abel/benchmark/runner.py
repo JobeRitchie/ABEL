@@ -1,4 +1,4 @@
-"""Ablation benchmark runner — trains models under different feature configs.
+"""Ablation benchmark runner: trains models under different feature configs.
 
 Supports repeated cross-validation (mean ± SEM) and per-behavior evaluation.
 """
@@ -161,10 +161,10 @@ class AblationRunner:
 
     @staticmethod
     def _collapse_alternate_labels(df: pd.DataFrame, target_label: str) -> pd.DataFrame:
-        """Remap non-target behaviour labels to no_behavior.
+        """Remap non-target behavior labels to no_behavior.
 
         Rows that were produced by expanding a co-occurring (pipe-separated) label
-        and do NOT match target_label are dropped rather than remapped — remapping
+        and do NOT match target_label are dropped rather than remapped, remapping
         them would make the same clip simultaneously a positive and a negative.
         """
         nb_tokens = {"no_behavior", "no_behaviour", "nobehavior", "nobehaviour"}
@@ -196,6 +196,7 @@ class AblationRunner:
             "density_outlier_score", "uncertainty_score", "uncertainty_entropy",
             "uncertainty_margin", "overlap_allowed", "overlap_allowed_x",
             "overlap_allowed_y", "label_true", "label_pred",
+            "pose_present_frac", "partner_present_frac",
         }
         return [
             c for c in df.columns
@@ -237,7 +238,7 @@ class AblationRunner:
         motion = _pick(motion_keys)
         visual = _pick(visual_keys)
 
-        # Keep families disjoint — visual takes priority
+        # Keep families disjoint: visual takes priority
         visual_set = set(visual)
         context = [c for c in context if c not in visual_set]
         motion = [c for c in motion if c not in visual_set]
@@ -343,7 +344,7 @@ class AblationRunner:
         ----------
         n_jobs : int
             Thread/process parallelism *inside* the estimator.  Use ``1`` when
-            the caller already parallelises across runs (avoids deadlocks when
+            the caller already parallelizes across runs (avoids deadlocks when
             multiple XGBoost / LightGBM instances each try to use all cores).
         """
         from sklearn.ensemble import HistGradientBoostingClassifier
@@ -966,5 +967,5 @@ class AblationRunner:
 
         results.sort(key=_sort_key)
         total_sec = time.perf_counter() - t_start
-        self._emit(f"Ablation suite complete — {total_sec:.1f}s total.", 1.0)
+        self._emit(f"Ablation suite complete: {total_sec:.1f}s total.", 1.0)
         return results

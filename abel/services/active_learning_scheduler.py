@@ -88,9 +88,9 @@ class ActiveLearningScheduler:
         """Select next batch of candidates for review using active learning strategies.
 
         Combines:
-        1. Uncertainty sampling — candidates with scores near decision boundary
-        2. Diversity sampling — candidates far from previously reviewed examples
-        3. Hard negative sampling — candidates with conflicting review outcomes
+        1. Uncertainty sampling: candidates with scores near decision boundary
+        2. Diversity sampling: candidates far from previously reviewed examples
+        3. Hard negative sampling: candidates with conflicting review outcomes
         """
         config = config or ActiveLearningConfig()
         result = ActiveLearningResult()

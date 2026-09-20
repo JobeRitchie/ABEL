@@ -25,17 +25,17 @@ except ImportError:
     _HAS_MPL = False
 
 
-# ── Colour palette ────────────────────────────────────────────────────
+# ── Color palette ────────────────────────────────────────────────────
 
 _PALETTE = [
-    "#2196F3",  # blue — baseline
+    "#2196F3",  # blue: baseline
     "#F44336",  # red
     "#4CAF50",  # green
     "#FF9800",  # orange
     "#9C27B0",  # purple
     "#00BCD4",  # cyan
     "#795548",  # brown
-    "#607D8B",  # blue-grey
+    "#607D8B",  # blue-gray
     "#E91E63",  # pink
     "#CDDC39",  # lime
 ]
@@ -98,7 +98,7 @@ def metric_bar_chart(
         )
         ax.set_ylabel("Score")
         beh_label = behavior if behavior else "(all)"
-        ax.set_title(f"Ablation — {beh_label}")
+        ax.set_title(f"Ablation: {beh_label}")
         ax.legend(loc="upper right", fontsize=8)
         ax.set_ylim(0, 1.05)
         ax.grid(axis="y", alpha=0.3)
@@ -131,7 +131,7 @@ def delta_impact_chart(
     if n_beh == 0:
         return None
 
-    # Collect deltas for each behavior — relative to all_on so we see cost of removing each feature
+    # Collect deltas for each behavior: relative to all_on so we see cost of removing each feature
     per_beh: list[tuple[str, pd.DataFrame]] = []
     toggle_set: set[str] = set()
     standalone_set: set[str] = set()
@@ -205,7 +205,7 @@ def delta_impact_chart(
             label.set_fontstyle("italic")
     ax.axvline(0, color="gray", linewidth=0.8)
     ax.set_xlabel("ΔF1 (negative = removing feature hurts performance)")
-    ax.set_title("Feature Impact — Effect of Removing Each Feature")
+    ax.set_title("Feature Impact: Effect of Removing Each Feature")
     ax.legend(loc="lower right", fontsize=8, frameon=False)
     ax.grid(axis="x", alpha=0.3)
 
@@ -241,7 +241,7 @@ def pr_curves_overlay(
 
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
-    ax.set_title("Precision-Recall Curves — Ablation Comparison")
+    ax.set_title("Precision-Recall Curves: Ablation Comparison")
     ax.legend(loc="lower left", fontsize=7, frameon=False)
     ax.set_xlim(0, 1.02)
     ax.set_ylim(0, 1.05)
@@ -307,7 +307,7 @@ def confusion_matrix_grid(
         row, col = divmod(idx, cols)
         axes[row, col].set_visible(False)
 
-    fig.suptitle("Confusion Matrices — Per Ablation", fontsize=11)
+    fig.suptitle("Confusion Matrices: Per Ablation", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
 
     if save_path:
@@ -385,7 +385,7 @@ def delta_heatmap(
                 fontsize=8, color="black" if abs(val) < vmax * 0.6 else "white",
             )
 
-    ax.set_title("ΔF1 Heatmap — Effect of Removing Each Feature", fontsize=11)
+    ax.set_title("ΔF1 Heatmap: Effect of Removing Each Feature", fontsize=11)
     fig.colorbar(im, ax=ax, label="ΔF1", shrink=0.8)
     fig.tight_layout()
 

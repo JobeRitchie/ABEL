@@ -1,4 +1,4 @@
-"""Info tab — app version, in-app updater, methods documentation, version history.
+"""Info tab: app version, in-app updater, methods documentation, version history.
 
 A sub-notebook keeps the "About & Updates" controls, the "Methods" references /
 formulas / write-up helper, and the "Version History" changelog together. Updates are **manual only**: nothing is checked on launch;
@@ -122,7 +122,7 @@ class InfoTab(QWidget):
 
         desc = QLabel(
             "Check for and install the latest version from GitHub. ABEL never "
-            "updates on its own — use the button below. Installing pulls the "
+            "updates on its own: use the button below. Installing pulls the "
             "update and restarts the app."
         )
         desc.setWordWrap(True)
@@ -177,7 +177,7 @@ class InfoTab(QWidget):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(14, 14, 14, 14)
 
-        header = QLabel("Version History — What's Changed")
+        header = QLabel("Version History: What's Changed")
         header.setStyleSheet("font-size: 14px; font-weight: 800; color: #90CAF9;")
         layout.addWidget(header)
 
@@ -228,7 +228,7 @@ class InfoTab(QWidget):
         if status.update_available:
             n = status.behind
             self._set_status(
-                f"⚠ Update available — {n} commit(s) behind", "#EF5350"
+                f"⚠ Update available: {n} commit(s) behind", "#EF5350"
             )
             self._install_btn.setEnabled(True)
             self._append(f"Update available: {n} new commit(s) on {self._svc.REMOTE}/{self._svc.BRANCH}.")
@@ -270,7 +270,7 @@ class InfoTab(QWidget):
         if ok:
             self._append("=" * 60)
             self._append("✓ Update successful. Restarting ABEL in 2 seconds…")
-            self._set_status("✓ Updated — restarting", "#66BB6A")
+            self._set_status("✓ Updated: restarting", "#66BB6A")
             QTimer.singleShot(2000, self._restart)
         else:
             self._append("✗ Update failed. See the log above.")

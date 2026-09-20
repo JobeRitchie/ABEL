@@ -1,4 +1,4 @@
-"""Workflow snapshot — serialise the current trained-pipeline state.
+"""Workflow snapshot: serialize the current trained-pipeline state.
 
 A *workflow snapshot* records everything needed to apply a trained ABEL
 model to a new batch of videos, without re-running the full active-learning
@@ -10,8 +10,8 @@ Snapshot layout (derived/workflow_snapshot.json):
 {
   "schema_version": "1.0",
   "created_at": "<ISO-8601>",
-  "model_version": "<dir name under derived/models/>",  # target behaviour's model
-  "target_behavior": "<behavior_id>",                    # first active behaviour
+  "model_version": "<dir name under derived/models/>",  # target behavior's model
+  "target_behavior": "<behavior_id>",                    # first active behavior
   "selected_behavior_models": {behavior_id: model_dir},  # ALL competing models
   "excluded_behavior_ids": [behavior_id, ...],
   "behavior_definitions": [ {...}, ... ],
@@ -28,9 +28,9 @@ Snapshot layout (derived/workflow_snapshot.json):
 }
 
 ``selected_behavior_models`` is the key field for Direct Use: it lists every
-behaviour that participates in the competitive inference run.  ``build_from_
+behavior that participates in the competitive inference run.  ``build_from_
 project`` auto-discovers all trained models from ``derived/models/`` (mirroring
-the live inference path) so the snapshot replays the full multi-behaviour
+the live inference path) so the snapshot replays the full multi-behavior
 competition rather than collapsing to a single model.  ``no_behavior`` is not
 run as a competitor unless explicitly selected in the Temporal Refinement tab.
 
@@ -88,7 +88,7 @@ class WorkflowSnapshot:
     # Per-behavior review thresholds from the Temporal Review tab.
     # Structure: {"__all__": {...}, "by_behavior": {behavior_id: {onset_threshold, ...}}}
     temporal_review_settings: dict[str, Any] = field(default_factory=dict)
-    # Mapping of behavior_id → model_version directory name (all behaviours
+    # Mapping of behavior_id → model_version directory name (all behaviors
     # that should participate in the competitive inference run).
     selected_behavior_models: dict[str, str] = field(default_factory=dict)
     # Behavior IDs excluded from inference (e.g. "no_behavior").
@@ -351,7 +351,7 @@ class WorkflowSnapshotService:
         #   2. Auto-discovery of *every* trained model on disk, mirroring
         #      the live inference path (TemporalRefinementService.
         #      _resolve_competition_model_versions).  This is what makes
-        #      Direct Use replay the full multi-behaviour competition
+        #      Direct Use replay the full multi-behavior competition
         #      instead of collapsing to a single model.
         by_behavior = (base.temporal_refinement_settings.get("by_behavior") or {})
         tb_block = by_behavior.get("target_behavior") or {}
@@ -368,7 +368,7 @@ class WorkflowSnapshotService:
 
         auto_sbm = self._auto_resolve_behavior_models(project_root)
         if explicit_sbm:
-            # Start from auto-discovery so newly-trained behaviours that the
+            # Start from auto-discovery so newly-trained behaviors that the
             # user never revisited in the TR tab are still captured, then
             # let the explicit choices override.
             resolved = dict(auto_sbm)
@@ -382,24 +382,24 @@ class WorkflowSnapshotService:
         # Carry forward whatever the user excluded in the TR tab.  We do
         # NOT auto-include no_behavior as a competitor (see
         # _auto_resolve_behavior_models), so there is no need to special-
-        # case it here — it simply never enters the map unless the user
-        # picked it explicitly, in which case we honour that choice.
+        # case it here: it simply never enters the map unless the user
+        # picked it explicitly, in which case we honor that choice.
         excluded_set = set(explicit_excluded) | set(base.excluded_behavior_ids or [])
-        # Drop any stale exclusions that no longer name a captured behaviour.
+        # Drop any stale exclusions that no longer name a captured behavior.
         base.excluded_behavior_ids = sorted(
             bid for bid in excluded_set if bid in base.selected_behavior_models
         )
 
         # ── Derive target_behavior (first active, non-excluded) ──────
         # Stored target_behavior may be stale from a prior snapshot, so we
-        # always recompute it from the current behaviour map/definitions.
+        # always recompute it from the current behavior map/definitions.
         active_ids = [
             bid for bid in base.selected_behavior_models
             if bid not in base.excluded_behavior_ids
         ]
         base.target_behavior = ""
         if active_ids:
-            # Prefer the first behaviour (by definition order) that is active.
+            # Prefer the first behavior (by definition order) that is active.
             def_order = [
                 b.get("behavior_id", b.get("name", ""))
                 for b in base.behavior_definitions
@@ -408,7 +408,7 @@ class WorkflowSnapshotService:
             ordered += [bid for bid in active_ids if bid not in ordered]
             base.target_behavior = ordered[0] if ordered else active_ids[0]
         if not base.target_behavior:
-            # Fallback: first active behaviour from definitions.  Note the
+            # Fallback: first active behavior from definitions.  Note the
             # field is "is_active" (legacy snapshots may use "active").
             for b in base.behavior_definitions:
                 bid = b.get("behavior_id", b.get("name", ""))
@@ -419,7 +419,7 @@ class WorkflowSnapshotService:
 
         # ── model_version: keep it consistent with target_behavior ───
         # It is used by is_valid() and as the single-model legacy fallback,
-        # so point it at the chosen target behaviour's model when possible.
+        # so point it at the chosen target behavior's model when possible.
         if base.target_behavior and base.target_behavior in base.selected_behavior_models:
             base.model_version = base.selected_behavior_models[base.target_behavior]
 
@@ -521,13 +521,13 @@ class WorkflowSnapshotService:
         return sorted(c[: -len(suffix)] for c in cols if c.endswith(suffix))
 
     def _auto_resolve_behavior_models(self, project_root: Path) -> dict[str, str]:
-        """Map every trained behaviour → its newest model directory.
+        """Map every trained behavior → its newest model directory.
 
         Scans ``derived/models/`` for directories that contain a usable
         ``model_state.pkl`` and reads each one's ``run_settings.json`` to
         recover the ``target_behavior`` it was trained for.  When more than
-        one directory targets the same behaviour, the most recently modified
-        one wins.  ``no_behavior`` models are skipped — they are not run as a
+        one directory targets the same behavior, the most recently modified
+        one wins.  ``no_behavior`` models are skipped, they are not run as a
         competitor in the auto path (matching the inference-time
         ``_resolve_competition_model_versions``); the null class is handled
         separately by the competition logic.

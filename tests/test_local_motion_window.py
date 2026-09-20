@@ -2,7 +2,7 @@
 
 Regression: the MOG2 background model ran on a crop that shrank whenever the
 animal came within one Local radius of the frame edge (or collapsed to 1x1 on a
-missing keypoint).  OpenCV's MOG2 re-initialises on any input-size change and
+missing keypoint).  OpenCV's MOG2 re-initializes on any input-size change and
 the next frame then reads as 100% foreground, so wall-hugging animals got
 spurious local_surface_energy / nose_surface_energy spikes of ~1.0.
 """
@@ -70,8 +70,10 @@ def test_no_foreground_spikes_at_frame_edge(tmp_path) -> None:
         assert energy.max() < 0.05, (key, energy.max())
 
 
-def test_preview_nose_traces_equal_extracted_features(tmp_path) -> None:
-    """The Smoothing Preview's nose traces are the extracted features, value for value."""
+@pytest.mark.parametrize("bg_threshold", [16, 6])
+def test_preview_nose_traces_equal_extracted_features(tmp_path, bg_threshold) -> None:
+    """The Smoothing Preview's nose traces are the extracted features, value for value,
+    at the default and at a project-specific BG threshold."""
     import pandas as pd
 
     pytest.importorskip("PySide6")
@@ -104,6 +106,7 @@ def test_preview_nose_traces_equal_extracted_features(tmp_path) -> None:
         video_path=path, raw_pose=pose, smooth_pose=pose,
         smoothing=PoseSmoothingSettings(), start_frame=start, n_frames=count,
         target_height=80, cancel_flag=[False], local_radius_px=r,
+        bg_var_threshold=bg_threshold,
     )
     zeros = np.zeros(n)
     extracted = ContextFeatureService._process_video_chunk(
@@ -113,6 +116,7 @@ def test_preview_nose_traces_equal_extracted_features(tmp_path) -> None:
         nose_x=nose_x, nose_y=nose_y,
         target_roi={}, has_target=False, local_radius=r,
         config=ContextFeatureConfig(downsample_factor=0, prefer_gpu=False),
+        mog2_var_threshold=bg_threshold,
     )
     for trace, feature in (
         ("nose_bg_energy", "nose_surface_energy"),

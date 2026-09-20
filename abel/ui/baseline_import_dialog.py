@@ -1,9 +1,9 @@
 """Detection + mapping dialog for importing another project as a baseline.
 
-Shows whether the host is a new project or already has behaviours/models, lists
-each source behaviour with its labeled-example count and trained-model coverage,
-and lets the user map each one onto an existing host behaviour, add it as a new
-behaviour, or skip it.  The import is gated behind an explicit Accept.
+Shows whether the host is a new project or already has behaviors/models, lists
+each source behavior with its labeled-example count and trained-model coverage,
+and lets the user map each one onto an existing host behavior, add it as a new
+behavior, or skip it.  The import is gated behind an explicit Accept.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def _format_diagnosis_html(diag: CoverageDiagnosis) -> str:
             "extracted features:</p><ul>"
         )
         for label, count in diag.missing_groups:
-            parts.append(f"<li>{_esc(label)} — <b>{count}</b></li>")
+            parts.append(f"<li>{_esc(label)}, <b>{count}</b></li>")
         parts.append("</ul>")
 
     if diag.causes:
@@ -85,7 +85,7 @@ class BaselineDiagnosisDialog(QDialog):
     def __init__(self, diagnosis: CoverageDiagnosis, tag: str,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Model coverage — {tag}")
+        self.setWindowTitle(f"Model coverage: {tag}")
         self.resize(620, 520)
         layout = QVBoxLayout(self)
 
@@ -114,7 +114,7 @@ class BaselineImportDialog(QDialog):
         self._host_behaviors = list(host_behaviors)
         self._combos: list[tuple[str, QComboBox]] = []  # (source_behavior_id, combo)
 
-        self.setWindowTitle(f"Import Baseline — {preview.tag}")
+        self.setWindowTitle(f"Import Baseline: {preview.tag}")
         self.resize(720, 480)
 
         layout = QVBoxLayout(self)
@@ -123,13 +123,13 @@ class BaselineImportDialog(QDialog):
         if preview.host_is_new:
             banner = (
                 "<b>New project.</b> This project has extracted features but no "
-                "behaviours, models, or training set yet — importing will seed it "
+                "behaviors, models, or training set yet, importing will seed it "
                 f"from <b>{preview.tag}</b>."
             )
         else:
             banner = (
-                "<b>Existing project.</b> This project already has behaviours/models. "
-                f"Imported behaviours from <b>{preview.tag}</b> will be added as new "
+                "<b>Existing project.</b> This project already has behaviors/models. "
+                f"Imported behaviors from <b>{preview.tag}</b> will be added as new "
                 "or mapped onto your existing ones below."
             )
         banner_lbl = QLabel(banner)
@@ -167,7 +167,7 @@ class BaselineImportDialog(QDialog):
         if diag is not None and diag.has_blocked_models:
             warn_lines.append(
                 f"⚠ {diag.models_blocked} of {diag.models_total} trained model(s) "
-                f"can't be imported — this project is missing "
+                f"can't be imported, this project is missing "
                 f"{diag.missing_total} feature column(s) they were trained on. "
                 "Examples still import; the models won't be copied."
             )
@@ -181,7 +181,7 @@ class BaselineImportDialog(QDialog):
         # Offer the coverage-diagnosis helper whenever models are blocked.
         if diag is not None and diag.has_blocked_models:
             diag_row = QHBoxLayout()
-            diag_btn = QPushButton("Diagnose models — why & how to fix")
+            diag_btn = QPushButton("Diagnose Models: Why and How to Fix")
             diag_btn.clicked.connect(
                 lambda: BaselineDiagnosisDialog(diag, preview.tag, self).exec()
             )
@@ -190,18 +190,18 @@ class BaselineImportDialog(QDialog):
             layout.addLayout(diag_row)
 
         intro = QLabel(
-            "For each behaviour below choose how to apply it: <i>Auto-create</i> "
-            "adds it as a new behaviour (carrying the source's definition), "
-            "<i>Map to</i> folds it onto an existing behaviour, and <i>skip</i> "
+            "For each behavior below choose how to apply it: <i>Auto-create</i> "
+            "adds it as a new behavior (carrying the source's definition), "
+            "<i>Map to</i> folds it onto an existing behavior, and <i>skip</i> "
             "imports neither its examples nor its model."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        # ── Per-behaviour table ───────────────────────────────────────
+        # ── Per-behavior table ───────────────────────────────────────
         self._table = QTableWidget(len(preview.rows), 4)
         self._table.setHorizontalHeaderLabels(
-            ["Behaviour (source)", "Examples", "Model", "Apply as"]
+            ["Behavior (source)", "Examples", "Model", "Apply as"]
         )
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -222,7 +222,7 @@ class BaselineImportDialog(QDialog):
             self._table.setItem(r, 1, ex_item)
 
             if not row.has_model:
-                model_txt = "—"
+                model_txt = "-"
             elif row.model_compatible:
                 model_txt = f"✓ {row.model_coverage:.0%}"
             else:
@@ -241,7 +241,7 @@ class BaselineImportDialog(QDialog):
             combo.addItem(f"Auto-create “{row.source_name}”", AUTO_CREATE_BEHAVIOR)
             for host_id, host_name in self._host_behaviors:
                 combo.addItem(f"Map to: {host_name}", host_id)
-            combo.addItem("— skip (don't import) —", SKIP_BEHAVIOR)
+            combo.addItem("(skip, do not import)", SKIP_BEHAVIOR)
             # Default to the detected match, else auto-create.
             if row.matched_host_id:
                 idx = combo.findData(row.matched_host_id)

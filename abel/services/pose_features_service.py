@@ -34,7 +34,7 @@ logger = logging.getLogger("abel")
 DEFAULT_PRESETS: list[PoseFeaturePreset] = [
     PoseFeaturePreset(
         preset_id="standard",
-        name="Standard — 0.5 s window, 0.5 s stride",
+        name="Standard: 0.5 s window, 0.5 s stride",
         window_duration_sec=0.5,
         stride_sec=0.5,
         source_fps=30.0,
@@ -44,7 +44,7 @@ DEFAULT_PRESETS: list[PoseFeaturePreset] = [
     ),
     PoseFeaturePreset(
         preset_id="long_window",
-        name="Long Window — 1 s window, 0.5 s stride",
+        name="Long Window: 1 s window, 0.5 s stride",
         window_duration_sec=1.0,
         stride_sec=0.5,
         source_fps=30.0,
@@ -54,7 +54,7 @@ DEFAULT_PRESETS: list[PoseFeaturePreset] = [
     ),
     PoseFeaturePreset(
         preset_id="high_res",
-        name="High-Res — 0.25 s window, 0.5 s stride",
+        name="High-Res: 0.25 s window, 0.5 s stride",
         window_duration_sec=0.25,
         stride_sec=0.5,
         source_fps=30.0,
@@ -68,7 +68,7 @@ DEFAULT_PRESETS: list[PoseFeaturePreset] = [
 # Data structures
 # ---------------------------------------------------------------------------
 
-# Feature vector layout — each window is described by these scalars.
+# Feature vector layout: each window is described by these scalars.
 # Order must match _build_feature_vector.
 FEATURE_NAMES = [
     "speed_mean",          # mean units/second (mm/s when px/mm is provided)
@@ -76,7 +76,7 @@ FEATURE_NAMES = [
     "speed_max",
     "disp_mean",           # mean per-frame displacement (mm when px/mm is provided)
     "disp_std",
-    "axis_cos_mean",       # mean cos(body-axis angle) — rotation-invariant representation
+    "axis_cos_mean",       # mean cos(body-axis angle): rotation-invariant representation
     "axis_sin_mean",
     "axis_angle_std",      # angular variability
     "likelihood_mean",     # average pose confidence (quality proxy)
@@ -277,7 +277,7 @@ class PoseFeaturesService:
 
         for i, sf in enumerate(starts):
             if cancel_flag and cancel_flag[0]:
-                result.warnings.append("Cancelled by user.")
+                result.warnings.append("Canceled by user.")
                 break
             ef = sf + win_frames
             s = speed[sf:ef]
@@ -322,7 +322,7 @@ class PoseFeaturesService:
             )
             self._save_session_summary(summary)
             logger.info(
-                "Pose features saved: %s — %d frames, %d windows, %d body parts",
+                "Pose features saved: %s, %d frames, %d windows, %d body parts",
                 config.session_id, pose.n_frames, n_windows, len(pose.body_parts),
             )
 

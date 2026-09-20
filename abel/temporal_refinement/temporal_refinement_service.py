@@ -2,12 +2,12 @@
 
 Uses existing active-learning behavior models to score every frame at high
 temporal resolution.  Overlapping window predictions are averaged per frame,
-then a subtractive mutual-inhibition step penalises frames where multiple
+then a subtractive mutual-inhibition step penalizes frames where multiple
 behaviors are simultaneously likely.  The result is a calibrated probability
 trace per behavior that feeds into the Temporal Review tab for threshold
 tuning and bout extraction.
 
-No model training occurs here — all models come from the active-learning
+No model training occurs here, all models come from the active-learning
 pipeline.
 """
 
@@ -31,6 +31,7 @@ import pandas as pd
 from abel.core.constants import APP_SCHEMA_VERSION
 from abel.services.behavior_service import BehaviorService
 from abel.services.behavior_representation_service import (
+    _PRESENCE_COLS,
     BehaviorRepresentationService,
     align_model_feature_columns,
     is_no_behavior_label,
@@ -163,7 +164,7 @@ class TemporalRefinementService:
 
     @staticmethod
     def _is_no_behavior_label(label: str) -> bool:
-        # Delegates to the shared implementation so the no-behaviour token set
+        # Delegates to the shared implementation so the no-behavior token set
         # stays in lockstep with target-class resolution.
         return is_no_behavior_label(label)
 
@@ -262,7 +263,7 @@ class TemporalRefinementService:
                 return str(candidates[0].name)
 
             # Strategy 2: scan all model dirs for matching target_behavior
-            # in run_settings.json (handles dirs named by behaviour name
+            # in run_settings.json (handles dirs named by behavior name
             # rather than UUID, e.g. behavior_model_Freeze).
             if models_root.exists():
                 for p in models_root.iterdir():
@@ -344,7 +345,11 @@ class TemporalRefinementService:
         cache_dir = self._temporal_tab_cache_root() / "frame_representations"
         cache_path = cache_dir / "frame_features.parquet"
         cache_meta_path = cache_dir / "meta.json"
-        id_cols = {"frame", "session_id", "animal_id", "video_id"}
+        # Presence bookkeeping travels with the frame table but is not a
+        # feature: it must not be z-scored or handed to a model.  It is carried
+        # through to the dense windows separately, to blank out the stretches
+        # where the animal is not in the arena.
+        id_cols = {"frame", "session_id", "animal_id", "video_id", *_PRESENCE_COLS}
 
         def _to_grouped(df: pd.DataFrame) -> tuple[dict[str, pd.DataFrame], list[str]]:
             if df.empty:
@@ -414,7 +419,7 @@ class TemporalRefinementService:
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         })
         # Frame features are the inner join of pose and context, so any session
-        # with pose but no context is dropped. Make that visible — a partial
+        # with pose but no context is dropped. Make that visible, a partial
         # context coverage is the usual reason temporal refinement "sees" fewer
         # sessions than expected.
         if ctx_df is not None:
@@ -454,9 +459,9 @@ class TemporalRefinementService:
     ) -> tuple[list[str], list[str], list[str]]:
         """Split requested session ids into (present, missing_context, missing_features).
 
-        * present          — have usable frame features (pose ∩ context).
-        * missing_context  — have pose but no context features (dropped by the join).
-        * missing_features — have neither (no frame features at all).
+        * present         : have usable frame features (pose ∩ context).
+        * missing_context : have pose but no context features (dropped by the join).
+        * missing_features: have neither (no frame features at all).
         """
         project_root = self._require_project_root()
         pose_ids = self._parquet_session_ids(
@@ -495,7 +500,7 @@ class TemporalRefinementService:
         """Refuse to score when a model's features are missing for some sessions.
 
         The ROI preflight reads the ROI *config*, so it cannot tell that a
-        representation cache was built before a zone was drawn — the config is
+        representation cache was built before a zone was drawn, the config is
         correct by then and the cached features are still all-NaN.  This checks
         the features actually about to be scored, and so also catches the other
         ways coverage goes lopsided (a partial R3D backfill, a distance column
@@ -545,7 +550,7 @@ class TemporalRefinementService:
         a zero-size box unless the project sets one.  Every ROI/target feature
         then comes out all-NaN, and since a tree model routes all-NaN rows down
         one fixed default path, the model emits a near-constant probability for
-        the whole session — a flat trace that yields zero bouts (or, for models
+        the whole session, a flat trace that yields zero bouts (or, for models
         that lean the other way, fires on most of the video).  Neither looks like
         an error downstream, so catch it before spending the inference pass.
 
@@ -581,12 +586,12 @@ class TemporalRefinementService:
             f"{len(model_payloads)} behavior model(s) score against one "
             f"(e.g. {worst_bid} uses {len(worst_cols)} ROI/target feature(s)).\n\n"
             f"Without a zone these sessions produce all-NaN ROI features, and the "
-            f"models return a near-constant probability for the whole video — a "
+            f"models return a near-constant probability for the whole video, a "
             f"flat trace with no bouts, which is indistinguishable from a genuine "
             f"absence of the behavior.\n\n"
             f"Draw the zone for these sessions in the ROI tab, then re-run feature "
-            f"extraction — context features rebuild automatically once the ROI "
-            f"config changes — and retry: "
+            f"extraction, context features rebuild automatically once the ROI "
+            f"config changes, and retry: "
             f"{self._fmt_session_list([f'{subject_by_session.get(s, s)} ({s})' for s in bad], limit=20)}"
         )
 
@@ -636,12 +641,66 @@ class TemporalRefinementService:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _absent_chunk_mask(
+        session_df: pd.DataFrame, n_chunks: int, step_frames: int,
+        window_frames: "int | None" = None,
+        min_presence: float = 1.0,
+    ) -> "np.ndarray | None":
+        """Per-chunk "the animal was not in the arena" mask, or None if unknown.
+
+        Measured over the *window* each chunk's probability was computed from
+        (``[k*step, k*step + window_frames)``), not over the stride slice: a
+        chunk whose own frames are all tracked still scores from a window that
+        may reach into an absence.
+
+        ``min_presence`` is 1.0 because the window summary is not NaN-aware --
+        one absent frame makes every feature of that window NaN, so the window
+        carries no signal at all and its probability is not a measurement.  A
+        lower threshold would leave those windows scored.
+
+        Returns None for frame tables extracted before presence tracking, so an
+        old project's trace is unchanged until it is re-extracted.
+        """
+        if "pose_present" not in session_df.columns or n_chunks <= 0:
+            return None
+        present = pd.to_numeric(session_df["pose_present"], errors="coerce").to_numpy(dtype=float)
+        # An unreadable flag means "unknown", which must not read as absent.
+        present = np.nan_to_num(present, nan=1.0)
+        n = len(present)
+        if n == 0:
+            return None
+        step = max(1, int(step_frames))
+        win = max(1, int(window_frames if window_frames else step))
+        csum = np.concatenate(([0.0], np.cumsum(present)))
+        starts = np.minimum(np.arange(n_chunks, dtype=int) * step, n)
+        ends = np.minimum(starts + win, n)
+        lengths = (ends - starts).astype(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            frac = np.where(lengths > 0, (csum[ends] - csum[starts]) / lengths, 1.0)
+        return frac < float(min_presence)
+
+    @staticmethod
+    def _session_frame_count(session_df: pd.DataFrame) -> int:
+        """Length of a session's frame axis.
+
+        The frame table holds one row per (frame, animal), so ``len(df)`` is the
+        row count, not the frame count: in a two-animal session it is double.
+        Using it as the trace length stretched every trace over twice the
+        video's frames, leaving the whole back half flat at zero.
+        """
+        if "frame" not in session_df.columns:
+            return len(session_df)
+        frames = pd.to_numeric(session_df["frame"], errors="coerce").dropna()
+        return int(frames.max()) + 1 if not frames.empty else 0
+
+    @staticmethod
     def _build_dense_windows_for_session(
         session_df: pd.DataFrame,
         feature_cols: list[str],
         window_frames: int,
         step_frames: int,
         include_posture_deltas: bool = False,
+        presence_cols: "list[str] | None" = None,
     ) -> pd.DataFrame:
         n_frames = len(session_df)
         if n_frames <= 0:
@@ -666,6 +725,7 @@ class TemporalRefinementService:
             stride=step,
             include_periodicity=True,
             include_posture_deltas=include_posture_deltas,
+            presence_cols=presence_cols,
         )
 
         if result.empty:
@@ -917,7 +977,7 @@ class TemporalRefinementService:
         }
 
     # ==================================================================
-    # INFERENCE — dense sliding-window with mutual inhibition
+    # INFERENCE: dense sliding-window with mutual inhibition
     # ==================================================================
 
     def run_temporal_refinement_inference(
@@ -956,7 +1016,7 @@ class TemporalRefinementService:
         # The representation frame cache can retain sessions that have since been
         # removed from the project (it is a large content-keyed store that is not
         # rebuilt on session removal). Never infer over sessions that are no
-        # longer in the manifest — restrict to the current project membership so
+        # longer in the manifest: restrict to the current project membership so
         # a stale cache cannot resurrect deleted sessions.
         if manifest_sids and frame_by_session:
             _stale = [sid for sid in frame_by_session if sid not in manifest_sids]
@@ -991,7 +1051,7 @@ class TemporalRefinementService:
             self._emit(
                 progress_cb,
                 "WARNING: "
-                f"{len(missing_context)} selected session(s) skipped — they have "
+                f"{len(missing_context)} selected session(s) skipped, they have "
                 "pose but no CONTEXT features. Temporal refinement needs both; "
                 "run context-feature extraction (with arena/zone ROIs defined) for "
                 f"these, then retry: {self._fmt_session_list(missing_context)}",
@@ -1000,7 +1060,7 @@ class TemporalRefinementService:
             self._emit(
                 progress_cb,
                 "WARNING: "
-                f"{len(missing_features)} selected session(s) skipped — no frame "
+                f"{len(missing_features)} selected session(s) skipped, no frame "
                 "(pose/context) features were found for them. Run feature "
                 f"extraction first: {self._fmt_session_list(missing_features)}",
             )
@@ -1090,6 +1150,8 @@ class TemporalRefinementService:
         traces_dir.mkdir(parents=True, exist_ok=True)
         chunk_traces_dir = run_dir / "chunk_probability_traces"
         chunk_traces_dir.mkdir(parents=True, exist_ok=True)
+        animal_traces_dir = run_dir / "animal_probability_traces"
+        animal_traces_dir.mkdir(parents=True, exist_ok=True)
 
         workers = self._resolve_inference_workers(cfg, len(target_sessions), progress_cb)
         if gpu_or_xgb and workers > 1:
@@ -1098,6 +1160,7 @@ class TemporalRefinementService:
 
         trace_paths: dict[str, str] = {}
         chunk_trace_paths: dict[str, str] = {}
+        animal_trace_paths: dict[str, dict[str, str]] = {}
         step_frames_by_session: dict[str, int] = {}
         total_windows = total_frames = 0
         t0 = time.perf_counter()
@@ -1111,18 +1174,25 @@ class TemporalRefinementService:
         ).enable_clipwise_deltas
 
         # --- Per-session inference ---
-        def _run_session(sid: str) -> dict[str, Any] | None:
-            ts = time.perf_counter()
-            session_df = frame_by_session.get(sid)
-            if session_df is None or session_df.empty:
-                return None
-            n_frames = len(session_df)
-            fps = max(1.0, float(fps_by_session.get(sid, 30.0) or 30.0))
-            step_f = max(1, int(round(step_seconds * fps)))
+        def _score_animal(
+            sid: str,
+            session_df: pd.DataFrame,
+            n_chunks: int,
+            step_f: int,
+            fps: float,
+        ) -> "tuple[dict[str, np.ndarray], int] | None":
+            """Score one animal's frame table into per-chunk probabilities.
 
+            The frame table holds one row per (frame, animal), so a multi-animal
+            session must be scored one animal at a time: windowing the mixed
+            table would blend two animals' poses into every window, halve each
+            window's real duration, and stretch the trace over twice as many
+            frames as the video has.
+            """
             dense_segs = self._build_dense_windows_for_session(
                 session_df, repr_feature_cols, window_frames, step_f,
                 include_posture_deltas=posture_deltas,
+                presence_cols=[c for c in _PRESENCE_COLS if c in session_df.columns],
             )
             if dense_segs.empty:
                 return None
@@ -1130,7 +1200,7 @@ class TemporalRefinementService:
             # R3D is a *segment*-level video feature: the frame table these
             # windows are rebuilt from has never carried it, so without this the
             # aligner below zero-fills all 512 columns.  That is not a small
-            # degradation — on a labelled EPM stretch it takes Stretch Attend
+            # degradation: on a labeled EPM stretch it takes Stretch Attend
             # from 254 detected windows to 0 while inventing Head Dip where
             # there is none.  Anchored embeddings bring the trace back to a
             # probability MAE of 0.005 against a true per-window computation.
@@ -1145,7 +1215,6 @@ class TemporalRefinementService:
             starts = dense_segs["start_frame"].to_numpy(dtype=int)
             ends = dense_segs["end_frame"].to_numpy(dtype=int)
 
-            n_chunks = int(np.ceil(n_frames / step_f))
             chunk_sum = {bid: np.zeros(n_chunks, dtype=np.float64) for bid in behavior_ids}
             chunk_count = {bid: np.zeros(n_chunks, dtype=np.float64) for bid in behavior_ids}
 
@@ -1160,7 +1229,7 @@ class TemporalRefinementService:
                     continue
                 # Align the model's stored feature names onto the data's canonical
                 # pairwise-distance spelling.  Models trained before distance
-                # canonicalisation (v0.5.2) stored ``dist_b_to_a`` while freshly
+                # canonicalization (v0.5.2) stored ``dist_b_to_a`` while freshly
                 # extracted features now use the sorted ``dist_a_to_b``; without this
                 # remap every such column reindexes to a missing name and is silently
                 # zero-filled, which is what broke Direct Use for older models.
@@ -1191,11 +1260,11 @@ class TemporalRefinementService:
 
                 label_map = payload.get("label_map", {})
                 probs_arr = np.asarray(probs_raw, dtype=float)
-                # Shared resolver: matches by behaviour id, and for a binary
-                # behaviour-vs-no_behavior model falls back to the single positive
+                # Shared resolver: matches by behavior id, and for a binary
+                # behavior-vs-no_behavior model falls back to the single positive
                 # class even when the stored id is the *source* project's UUID
                 # (imported models). This is what keeps the dense trace scoring the
-                # same class active-learning does — not np.max, which returns the
+                # same class active-learning does: not np.max, which returns the
                 # winning-class confidence and produced a meaningless flat-high trace.
                 class_idx = resolve_target_class_index(label_map, bid)
                 if class_idx is not None and probs_arr.ndim == 2 and 0 <= class_idx < probs_arr.shape[1]:
@@ -1213,7 +1282,7 @@ class TemporalRefinementService:
                         pred_prob = np.clip(np.max(probs_arr, axis=1), 0.0, 1.0)
                 return bid, pred_prob
 
-            # Run predictions sequentially — XGBoost CUDA is not thread-safe
+            # Run predictions sequentially: XGBoost CUDA is not thread-safe
             # for concurrent calls on Windows; GPU CUDA streams are already used
             # efficiently within each booster.predict(DMatrix) call.
             pred_results: dict[str, np.ndarray] = {}
@@ -1291,6 +1360,65 @@ class TemporalRefinementService:
                 for bid in per_behavior_prob:
                     per_behavior_prob[bid][:warmup_chunks] = 0.0
 
+            # ── Absence suppression ──────────────────────────────────────
+            # A behavior cannot be detected in an animal that is not in the
+            # arena.  Before this, a mouse added to the cage part-way through
+            # was scored from frame 0 against a frozen copy of its entry pose,
+            # so its trace opened with a stretch of confident nonsense.
+            absent_chunks = self._absent_chunk_mask(
+                session_df, n_chunks, step_f, window_frames=window_frames
+            )
+            if absent_chunks is not None and absent_chunks.any():
+                for bid in per_behavior_prob:
+                    per_behavior_prob[bid][absent_chunks] = 0.0
+            return per_behavior_prob, n_windows
+
+        def _run_session(sid: str) -> dict[str, Any] | None:
+            ts = time.perf_counter()
+            session_df = frame_by_session.get(sid)
+            if session_df is None or session_df.empty:
+                return None
+            n_frames = self._session_frame_count(session_df)
+            if n_frames <= 0:
+                return None
+            fps = max(1.0, float(fps_by_session.get(sid, 30.0) or 30.0))
+            step_f = max(1, int(round(step_seconds * fps)))
+            n_chunks = int(np.ceil(n_frames / step_f))
+            if n_chunks <= 0:
+                return None
+
+            if "animal_id" in session_df.columns:
+                animal_tables = [
+                    (str(aid), grp.sort_values("frame").reset_index(drop=True))
+                    for aid, grp in session_df.groupby("animal_id", sort=True)
+                    if not grp.empty
+                ]
+            else:
+                animal_tables = [("", session_df)]
+
+            # Each animal is scored on its own.  Its trace is kept per animal
+            # (so the review plot can show one subject at a time), and the
+            # session-level trace keeps the strongest evidence per chunk --
+            # which matches the identity-agnostic way these behaviors are
+            # labeled ("a mouse is a mouse").
+            per_animal_prob: list[tuple[str, dict[str, np.ndarray]]] = []
+            per_behavior_prob: dict[str, np.ndarray] = {}
+            n_windows = 0
+            for animal_id, animal_df in animal_tables:
+                scored = _score_animal(sid, animal_df, n_chunks, step_f, fps)
+                if scored is None:
+                    continue
+                animal_prob, animal_windows = scored
+                n_windows += int(animal_windows)
+                per_animal_prob.append((animal_id, {b: np.asarray(a, dtype=float).copy() for b, a in animal_prob.items()}))
+                for bid, arr in animal_prob.items():
+                    if bid in per_behavior_prob:
+                        per_behavior_prob[bid] = np.maximum(per_behavior_prob[bid], arr)
+                    else:
+                        per_behavior_prob[bid] = np.asarray(arr, dtype=float).copy()
+            if not per_behavior_prob:
+                return None
+
             # FP feedback suppression
             session_fp = fp_by_session.get(sid, [])
             if session_fp:
@@ -1298,9 +1426,10 @@ class TemporalRefinementService:
                     c_lo = max(0, int(fp_s) // step_f)
                     c_hi = min(n_chunks - 1, int(fp_e) // step_f)
                     if c_lo <= c_hi:
-                        for bid in per_behavior_prob:
-                            if not self._is_no_behavior_label(bid):
-                                per_behavior_prob[bid][c_lo : c_hi + 1] = 0.0
+                        for probs in [per_behavior_prob, *(d for _, d in per_animal_prob)]:
+                            for bid in probs:
+                                if not self._is_no_behavior_label(bid):
+                                    probs[bid][c_lo : c_hi + 1] = 0.0
 
             # Determine winner per chunk
             competition_labels = list(per_behavior_prob.keys())
@@ -1349,10 +1478,46 @@ class TemporalRefinementService:
             trace_out = traces_dir / f"{self._safe_name(sid)}_trace.parquet"
             trace_df.to_parquet(trace_out, index=False)
 
+            # Per-animal traces.  The session trace above is the max across
+            # animals, which cannot say *which* subject a spike belongs to;
+            # these keep each subject's own confidence so the review plot can
+            # show one subject at a time.
+            animal_trace_paths: dict[str, str] = {}
+            if len(per_animal_prob) > 1 or (per_animal_prob and per_animal_prob[0][0]):
+                for animal_id, probs in per_animal_prob:
+                    a_labels = [b for b in competition_labels if b in probs]
+                    if not a_labels:
+                        continue
+                    a_matrix = np.vstack([probs[b] for b in a_labels]).T
+                    a_winner = np.array(
+                        [a_labels[i] for i in np.argmax(a_matrix, axis=1)], dtype=object
+                    )
+                    a_non_no = [b for b in a_labels if not self._is_no_behavior_label(b)]
+                    if concept_id in a_labels:
+                        a_target = probs[concept_id]
+                    elif a_non_no:
+                        a_target = np.max(np.vstack([probs[b] for b in a_non_no]), axis=0)
+                    else:
+                        a_target = a_matrix[:, 0]
+                    a_df = pd.DataFrame({
+                        "frame": np.arange(n_frames, dtype=int),
+                        "animal_id": str(animal_id),
+                        "probability": a_target[frame_to_chunk].astype(float),
+                        "predicted_behavior": a_winner[frame_to_chunk],
+                        "chunk_index": frame_to_chunk.astype(int),
+                        "chunk_step_frames": step_f,
+                    })
+                    for i, label in enumerate(a_labels):
+                        a_df[f"prob_{self._safe_name(label)}"] = a_matrix[frame_to_chunk, i].astype(float)
+                    a_out = animal_traces_dir / f"{self._safe_name(sid)}__{self._safe_name(str(animal_id))}_trace.parquet"
+                    a_df.to_parquet(a_out, index=False)
+                    animal_trace_paths[str(animal_id)] = str(a_out)
+
             return {
                 "sid": sid, "step_frames": step_f, "n_frames": n_frames,
                 "n_windows": n_windows, "elapsed_sec": time.perf_counter() - ts,
                 "trace_path": str(trace_out), "chunk_trace_path": str(chunk_out),
+                "animal_trace_paths": animal_trace_paths,
             }
 
         # --- Execute ---
@@ -1365,6 +1530,8 @@ class TemporalRefinementService:
                 s_out = str(result["sid"])
                 trace_paths[s_out] = result["trace_path"]
                 chunk_trace_paths[s_out] = result["chunk_trace_path"]
+                if result.get("animal_trace_paths"):
+                    animal_trace_paths[s_out] = dict(result["animal_trace_paths"])
                 step_frames_by_session[s_out] = result["step_frames"]
                 total_windows += result["n_windows"]
                 total_frames += result["n_frames"]
@@ -1385,6 +1552,8 @@ class TemporalRefinementService:
                     s_out = str(result["sid"])
                     trace_paths[s_out] = result["trace_path"]
                     chunk_trace_paths[s_out] = result["chunk_trace_path"]
+                    if result.get("animal_trace_paths"):
+                        animal_trace_paths[s_out] = dict(result["animal_trace_paths"])
                     step_frames_by_session[s_out] = result["step_frames"]
                     total_windows += result["n_windows"]
                     total_frames += result["n_frames"]
@@ -1409,6 +1578,7 @@ class TemporalRefinementService:
                 "probability_temperature": prob_temp,
             },
             "step_frames_by_session": step_frames_by_session,
+            "animal_trace_paths": animal_trace_paths,
             "throughput": {
                 "total_elapsed_seconds": elapsed_total,
                 "sessions_processed": len(trace_paths),
@@ -1428,7 +1598,7 @@ class TemporalRefinementService:
         return {"status": "ok", "inference_dir": str(run_dir), "trace_paths": trace_paths, "parameter_hash": parameter_hash}
 
     # ==================================================================
-    # POSTPROCESS — bouts from probability traces
+    # POSTPROCESS: bouts from probability traces
     # ==================================================================
 
     def run_temporal_refinement_postprocess(
@@ -1468,7 +1638,7 @@ class TemporalRefinementService:
         # competition / Direct-Use mode (concept_id="target_behavior") that column
         # does NOT exist; the generic "probability" column holds the per-frame MAX
         # across all behaviors (see _run_inference_for_session), so thresholding it
-        # would emit a bout wherever ANY behavior is active — measuring "time doing
+        # would emit a bout wherever ANY behavior is active, measuring "time doing
         # anything", not a specific behavior. Instead, split the competition trace
         # into its per-behavior prob_{behavior} columns and emit one bout set per
         # real behavior. Fall back to "probability" only for legacy single-behavior
@@ -1510,7 +1680,7 @@ class TemporalRefinementService:
         bout_paths: dict[str, str] = {}
         # In per-behavior (competition) mode a session maps to MANY bout files (one
         # per behavior), so they are keyed separately here and NOT folded into
-        # bout_paths — readers such as the Temporal Review tab treat bout_paths keys
+        # bout_paths: readers such as the Temporal Review tab treat bout_paths keys
         # as session ids, and composite keys would corrupt the session list.
         per_behavior_bout_paths: dict[str, dict[str, str]] = {}
 

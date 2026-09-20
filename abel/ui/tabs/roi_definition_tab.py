@@ -92,13 +92,13 @@ class _ROICanvas(QWidget):
     roi_n_changed(index, roi_dict)
         Emitted when target zone at *index* is redrawn.  ``index`` is 0-based.
     roi_changed(roi_dict)
-        Legacy alias — emitted for index 0 only.
+        Legacy alias, emitted for index 0 only.
     crop_changed(roi_dict)
         Emitted when the subject crop zone is redrawn.
     """
 
     roi_n_changed = Signal(int, dict)   # (roi_index, roi_shape_dict)
-    roi_changed   = Signal(dict)        # legacy — index 0 only
+    roi_changed   = Signal(dict)        # legacy: index 0 only
     crop_changed  = Signal(dict)        # subject crop
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -128,7 +128,7 @@ class _ROICanvas(QWidget):
         self._pixmap: QPixmap | None = None
         # Optional user zoom (multiplier on the fit-to-viewport scale).  Only
         # active once :py:meth:`set_zoom` is given a viewport size; until then
-        # the canvas keeps its default auto-fit behaviour.
+        # the canvas keeps its default auto-fit behavior.
         self._zoom: float = 1.0
         self._viewport: "QSize | None" = None
 
@@ -177,7 +177,7 @@ class _ROICanvas(QWidget):
 
     def _apply_zoom(self) -> None:
         # No viewport supplied → zoom feature unused (e.g. ROIDefinitionTab),
-        # keep the original auto-fit/Expanding behaviour untouched.
+        # keep the original auto-fit/Expanding behavior untouched.
         if self._viewport is None:
             return
         if self._pixmap is None or not self._img_w or not self._img_h:
@@ -511,7 +511,7 @@ class _ROICanvas(QWidget):
             )
             painter.drawPixmap(self._offset_x, self._offset_y, scaled)
 
-        # Target Zone ROI overlays (one per slot, each with its own colour)
+        # Target Zone ROI overlays (one per slot, each with its own color)
         colors = _roi_qcolors()
         for idx, roi in enumerate(self._rois):
             if roi.get("w", 0) > 0 and roi.get("h", 0) > 0:
@@ -537,7 +537,7 @@ class _ROICanvas(QWidget):
                 label_pt = crect.topLeft() + QPoint(4, 14)
             painter.drawText(label_pt, "Subject Crop")
 
-        # Active preview (colour matches current draw mode) — rectangle/circle
+        # Active preview (color matches current draw mode), rectangle/circle
         # rubber-band or the live freehand-polygon trace.
         if self._drag_rect is not None or self._freehand_pts is not None:
             if self._draw_mode == "subject_crop":
@@ -593,11 +593,11 @@ class _ROICanvas(QWidget):
 class ROIDefinitionTab(QWidget):
     """Define project/subject ROIs used by context features.
 
-    Left panel: visual video-frame canvas — drag to draw the Target Zone ROI.
+    Left panel: visual video-frame canvas, drag to draw the Target Zone ROI.
     Right panel: subject list with quick navigation, spinboxes, and save controls.
 
-    Subject-override mode shows a scrollable subject list with colour-coded
-    status indicators (green = configured, grey = pending).  Prev/Next buttons
+    Subject-override mode shows a scrollable subject list with color-coded
+    status indicators (green = configured, gray = pending).  Prev/Next buttons
     and keyboard shortcuts (Alt+Up / Alt+Down) let the user rapidly step
     through subjects.  The current subject's ROI is auto-saved when the user
     navigates away, so the workflow is just: draw → next → draw → next.
@@ -671,7 +671,7 @@ class ROIDefinitionTab(QWidget):
         draw_mode_row.addWidget(QLabel("Draw mode:"))
         draw_mode_row.addWidget(self._draw_mode_combo, 1)
 
-        # Shape selector — applies to target-zone ROIs (the subject crop is
+        # Shape selector: applies to target-zone ROIs (the subject crop is
         # always a rectangle).
         self._shape_combo = QComboBox()
         self._shape_combo.addItem("Rectangle", userData="rect")
@@ -679,9 +679,9 @@ class ROIDefinitionTab(QWidget):
         self._shape_combo.addItem("Freehand polygon", userData="polygon")
         self._shape_combo.setToolTip(
             "ROI shape to draw:\n"
-            "• Rectangle — drag a box.\n"
-            "• Circle — drag a box; the inscribed circle is used.\n"
-            "• Freehand polygon — drag to trace an outline, then optionally\n"
+            "• Rectangle: drag a box.\n"
+            "• Circle: drag a box; the inscribed circle is used.\n"
+            "• Freehand polygon: drag to trace an outline, then optionally\n"
             "  Smooth or Angularize it. Applies to target zones only."
         )
         self._shape_combo.currentIndexChanged.connect(self._on_shape_changed)
@@ -761,7 +761,7 @@ class ROIDefinitionTab(QWidget):
         )
         self._copy_all_btn.clicked.connect(self._copy_to_all_subjects)
 
-        self._auto_load_video_cb = QPushButton("Auto-load subject video")
+        self._auto_load_video_cb = QPushButton("Auto-Load Subject Video")
         self._auto_load_video_cb.setCheckable(True)
         self._auto_load_video_cb.setChecked(True)
         self._auto_load_video_cb.setToolTip(
@@ -783,7 +783,7 @@ class ROIDefinitionTab(QWidget):
         self._roi_count_spin.setValue(1)
         self._roi_count_spin.setToolTip(
             f"Number of target-zone ROIs to define per subject (1–{MAX_ROIS}).\n"
-            "Each zone gets a distinct colour on the canvas."
+            "Each zone gets a distinct color on the canvas."
         )
         self._roi_count_spin.valueChanged.connect(self._on_roi_count_changed)
 
@@ -982,8 +982,8 @@ class ROIDefinitionTab(QWidget):
 
         A session whose subject name never got parsed out of its filename has
         ``subject_id`` unset in the manifest.  Feature extraction still gives
-        it an ROI, keyed ``session_id::session_id`` — ``_build_prep_jobs``
-        falls back to the session id for ``subject_id`` — so fall back the same
+        it an ROI, keyed ``session_id::session_id``, ``_build_prep_jobs``
+        falls back to the session id for ``subject_id``, so fall back the same
         way here instead of dropping the row.  Dropping it left projects with
         no parsed subject names showing an empty list under "Subject override",
         with no way to reach the very sessions that need per-session zones.
@@ -1087,7 +1087,7 @@ class ROIDefinitionTab(QWidget):
     # ── Subject list ──────────────────────────────────────────────────
 
     def _refresh_subject_list(self) -> None:
-        """Rebuild the subject list — one entry per subject × session."""
+        """Rebuild the subject list: one entry per subject × session."""
         if not self._project_root:
             return
 
@@ -1128,7 +1128,7 @@ class ROIDefinitionTab(QWidget):
 
         if not pairs:
             hint = QListWidgetItem(
-                "  No imported sessions — import videos and poses first."
+                "  No imported sessions: import videos and poses first."
             )
             hint.setFlags(Qt.ItemFlag.NoItemFlags)
             hint.setForeground(QColor("#78909C"))
@@ -1426,7 +1426,7 @@ class ROIDefinitionTab(QWidget):
         """Return the authoritative shape dict for every ROI slot.
 
         Rectangular slots are refreshed from their spinboxes (so manual numeric
-        edits are honoured); circle/polygon slots keep the geometry drawn on the
+        edits are honored); circle/polygon slots keep the geometry drawn on the
         canvas.
         """
         zones: list[dict] = []
@@ -1482,7 +1482,7 @@ class ROIDefinitionTab(QWidget):
         )
         self._canvas.set_rois(list(self._roi_shapes))
         self._canvas.set_crop(src.get("subject_crop", {}))
-        # Day exclusions are project-level — always load from project config
+        # Day exclusions are project-level: always load from project config
         excl_days = cfg.get("roi_excluded_day_labels", [])
         self._day_exclusions_list.blockSignals(True)
         self._day_exclusions_list.clear()
@@ -1494,7 +1494,7 @@ class ROIDefinitionTab(QWidget):
     # ── Canvas ↔ spinbox bidirectional sync ───────────────────────────
 
     def _on_canvas_roi_n_changed(self, index: int, roi: dict) -> None:
-        """Canvas draw finished — store the shape and mirror its bbox to spins."""
+        """Canvas draw finished: store the shape and mirror its bbox to spins."""
         if index >= len(self._roi_spinbox_groups):
             return
         shape = roi_geometry.normalize_roi(roi)
@@ -1507,7 +1507,7 @@ class ROIDefinitionTab(QWidget):
         self._current_subject_dirty = True
 
     def _on_canvas_crop_changed(self, roi: dict) -> None:
-        """Canvas drag finished (subject crop) — push result to spinboxes."""
+        """Canvas drag finished (subject crop): push result to spinboxes."""
         self._set_roi_spins(
             (self._crop_x, self._crop_y, self._crop_w, self._crop_h), roi
         )
@@ -1583,7 +1583,7 @@ class ROIDefinitionTab(QWidget):
         self._draw_mode_combo.setCurrentIndex(next_idx)
 
     def _on_roi_spinbox_changed(self, roi_index: int) -> None:
-        """ROI spinbox edited manually — the slot reverts to a rectangle."""
+        """ROI spinbox edited manually: the slot reverts to a rectangle."""
         if roi_index < len(self._roi_spinbox_groups):
             roi = self._read_roi_spins(self._roi_spinbox_groups[roi_index])
             if roi_index < len(self._roi_shapes):

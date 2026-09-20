@@ -35,7 +35,7 @@ class _Recorder:
 
 class _FakeContext:
     def compute_frame_context(self, *, progress_cb=None, **_kw):
-        progress_cb(0, 1, "Detected 1920x1080 — downsampling 2x")
+        progress_cb(0, 1, "Detected 1920x1080: downsampling 2x")
         for i in range(4):
             progress_cb(0, 4, f"chunk {i + 1}/4: starting frames …")
             progress_cb(i + 1, 4, f"chunk {i + 1}/4 done (frames …)")

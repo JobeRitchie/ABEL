@@ -371,8 +371,8 @@ _ETHOGRAM_GAP_COLOR = "#dfe4e8"
 # the userData stored on each combo item.
 FACET_COMBINE = "__combine__"   # pool across this factor (ignore it)
 FACET_SPLIT = "__split__"       # one series per level of this factor
-FACET_COMBINE_LABEL = "— combine —"
-FACET_SPLIT_LABEL = "— split —"
+FACET_COMBINE_LABEL = "(combine)"
+FACET_SPLIT_LABEL = "(split)"
 
 
 def facet_session_labels(
@@ -566,11 +566,11 @@ def _legend_fs_to_pt(value: Any, default: int = 8) -> int:
 def _legend_right_margin(labels: list, fig_width_px: int = 700) -> tuple:
     """Compute (rect_right, legend_x) so an external legend fits within figure bounds.
 
-    rect_right — right edge for tight_layout's rect parameter (axes stay left of this).
-    legend_x   — x-anchor for figure.legend bbox_to_anchor (figure coordinates).
+    rect_right, right edge for tight_layout's rect parameter (axes stay left of this).
+    legend_x  , x-anchor for figure.legend bbox_to_anchor (figure coordinates).
 
     The legend zone is fixed at a physical pixel width so it does not shrink
-    when the figure is wide — the axes simply get more room.
+    when the figure is wide, the axes simply get more room.
     """
     max_len = max((len(str(s)) for s in labels), default=0)
     # Approximate legend width in pixels: swatch (22px) + char width + padding.
@@ -638,8 +638,8 @@ def _stable_fill_width(scroll: Any, content_h_at: Any, min_w: int = 200) -> int:
     scrollbar toggles; pairing that with an aspect-locked height makes the canvas
     flip-flop forever at the threshold where the scrollbar appears (the "can't
     decide if it wants a scrollbar" shimmer).  We instead read
-    ``maximumViewportSize()`` — the viewport size assuming *no* scrollbars,
-    independent of the current scrollbar state — and reserve the scrollbar gutter
+    ``maximumViewportSize()``, the viewport size assuming *no* scrollbars,
+    independent of the current scrollbar state, and reserve the scrollbar gutter
     up-front, deterministically, when the content would overflow the viewport.
     Because the decision is made against the scrollbar-free width it is stable:
     one pass settles instead of toggling forever.
@@ -676,7 +676,7 @@ def _autofill_canvas(
     *canvas_scroll* viewport.
 
     Generalises ``_GraphsWidget._sync_canvas_to_viewport`` so every analytics
-    subtab can share one dynamic-resize behaviour.  The content aspect ratio is
+    subtab can share one dynamic-resize behavior.  The content aspect ratio is
     taken from the canvas's *current* width/height (each draw routine sets that
     from the figure content), so spatial heatmaps and grid plots keep their
     proportions instead of being stretched.  When the resulting height exceeds
@@ -688,9 +688,9 @@ def _autofill_canvas(
         return
     try:
         if preserve_aspect:
-            # Aspect comes from the figure's current size — draw routines set
+            # Aspect comes from the figure's current size: draw routines set
             # this to the content-appropriate dimensions, so the proportion is
-            # honoured whether we are called right after a draw or on a plain
+            # honored whether we are called right after a draw or on a plain
             # viewport resize (the figure keeps its last-synced aspect).
             fig_w_in = float(figure.get_figwidth()) or 1.0
             fig_h_in = float(figure.get_figheight()) or 1.0
@@ -733,8 +733,8 @@ def _autofill_canvas(
 # ======================================================================
 
 class BehaviorAnalyticsTab(QWidget):
-    """Summarise bout counts / durations, visualise graphs, and render
-    spatial heatmaps — organised across three sub-tabs."""
+    """Summarize bout counts / durations, visualize graphs, and render
+    spatial heatmaps, organised across three sub-tabs."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -794,7 +794,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._merge_service = ProjectMergeService()
         self._pose_cache: dict[str, Any] = {}  # session_id → PoseData
         self._pose_vel_cache: dict[str, "np.ndarray"] = {}  # session_id → centroid_velocity array
-        # Per-refresh caches — invalidated at the start of each _refresh call.
+        # Per-refresh caches: invalidated at the start of each _refresh call.
         self._manifest_cache: Any = _MANIFEST_UNSET  # ImportManifest | None
         self._fps_cache: float | None = None
         self._tr_bouts_cache: dict[str, pd.DataFrame] | None = None
@@ -839,13 +839,13 @@ class BehaviorAnalyticsTab(QWidget):
         )
         self._clear_btn.clicked.connect(self._clear_display)
 
-        self._behavior_filter_btn = QPushButton("All behaviors ▾")
+        self._behavior_filter_btn = QPushButton("All Behaviors ▾")
         self._behavior_filter_btn.setToolTip("Select which behaviors to include in analytics.")
         self._behavior_filter_menu = QMenu(self)
         self._behavior_filter_btn.setMenu(self._behavior_filter_menu)
         self._behavior_filter_actions: list[tuple[str, str, QAction]] = []  # (bid, label, action)
 
-        self._subject_prechop_btn = QPushButton("Per-Subject Prechop...")
+        self._subject_prechop_btn = QPushButton("Per-Subject Prechop…")
         self._subject_prechop_btn.setToolTip(
             "Set per-subject frame offsets so analytics starts after an initial pre-period."
         )
@@ -877,11 +877,11 @@ class BehaviorAnalyticsTab(QWidget):
             )
         self._roi_attr_combo.setToolTip(
             "How a bout that straddles the ROI boundary is counted:\n"
-            "  • Split at the boundary — exact durations; a crossing bout "
+            "  • Split at the boundary: exact durations; a crossing bout "
             "becomes two bouts, so counts rise.\n"
-            "  • By where it started — whole bout kept if it began in the zone; "
+            "  • By where it started: whole bout kept if it began in the zone; "
             "counts and latencies stay comparable to the unscoped analysis.\n"
-            "  • If mostly in zone — whole bout kept when >50% of its frames "
+            "  • If mostly in zone: whole bout kept when >50% of its frames "
             "are in the zone."
         )
         self._roi_attr_combo.currentIndexChanged.connect(self._on_roi_scope_changed)
@@ -903,7 +903,7 @@ class BehaviorAnalyticsTab(QWidget):
         # -- Merge Projects button (opens a popup panel) --------------
         self._merge_btn = QPushButton("\u229e Merge Projects\u2026")
         self._merge_btn.setToolTip(
-            "Import bout data from other ABEL projects to analyse\n"
+            "Import bout data from other ABEL projects to analyze\n"
             "them together with the current project (e.g. across cohorts)."
         )
         self._merge_btn.setCheckable(True)
@@ -1098,8 +1098,8 @@ class BehaviorAnalyticsTab(QWidget):
         """Keep a timestamped copy of the file when a save removes a factor.
 
         Factor assignments are typed in by hand and exist nowhere else, so a
-        save that drops a whole factor column — deliberately via Remove Factor,
-        or by any bug — leaves a recoverable copy next to the original.
+        save that drops a whole factor column, deliberately via Remove Factor,
+        or by any bug, leaves a recoverable copy next to the original.
         """
         try:
             old = json.loads(out_path.read_text(encoding="utf-8"))
@@ -1211,7 +1211,7 @@ class BehaviorAnalyticsTab(QWidget):
         main_vbox = QVBoxLayout(dlg)
         hint = QLabel(
             "Set the display order of levels within each factor. "
-            "This order applies to all charts — including the 'All Factors (interaction)' mode, "
+            "This order applies to all charts: including the 'All Factors (interaction)' mode, "
             "where groups are ordered as the cross-product of each factor's levels "
             "(e.g. Drug: Water→Fentanyl, Sex: Male→Female → Water Male, Water Female, Fentanyl Male, Fentanyl Female)."
         )
@@ -1310,7 +1310,7 @@ class BehaviorAnalyticsTab(QWidget):
 
         self._subject_prechop_frames = new_offsets
         self._save_group_state()
-        self._status.setText("Updated per-subject prechop. Refreshing analytics...")
+        self._status.setText("Updated per-subject prechop. Refreshing analytics…")
         self._refresh()
 
     def _analysis_prechop_for_session(self, session_id: str) -> int:
@@ -1365,11 +1365,11 @@ class BehaviorAnalyticsTab(QWidget):
 
         ``_raw_bouts`` is rebased to the analysis prechop (frame 0 = test start)
         so latency and time-bin metrics are measured from test onset.  Pose
-        arrays are never rebased — they stay indexed by raw video frame.  Any
+        arrays are never rebased, they stay indexed by raw video frame.  Any
         view that looks a bout's *position* up in the pose (spatial heatmap,
         density maps) must add the offset back first; without it the plotted
         coordinates come from wherever the animal happened to be 30–140 s
-        before the behaviour occurred, which smears every behaviour into the
+        before the behavior occurred, which smears every behavior into the
         same generic arena-occupancy map.  Mirrors the ``+ pre`` correction
         already used by :meth:`_bout_velocity_records`.
         """
@@ -1549,7 +1549,7 @@ class BehaviorAnalyticsTab(QWidget):
         """Drop stale factors and add missing ones (defaulting to combine).
 
         Keeps the facet controls coherent with the current factor definitions.
-        All-combine is a valid state — it pools every session into one "All"
+        All-combine is a valid state, it pools every session into one "All"
         series; fresh projects instead seed a split via
         :meth:`_default_facet_controls`.
         """
@@ -1706,7 +1706,7 @@ class BehaviorAnalyticsTab(QWidget):
         return out
 
     def _group_color(self, group_name: str, index: int) -> str:
-        """Return the colour for *group_name*, falling back to the palette."""
+        """Return the color for *group_name*, falling back to the palette."""
         return self._group_colors.get(group_name, _PALETTE[index % len(_PALETTE)])
 
     def _detected_session_types(self) -> list[str]:
@@ -1795,7 +1795,7 @@ class BehaviorAnalyticsTab(QWidget):
         real_selected = sum(1 for bid in selected if not is_pseudo_behavior_id(bid))
         has_pseudo_selected = any(is_pseudo_behavior_id(bid) for bid in selected)
         if real_selected == real_total and not has_pseudo_selected:
-            self._behavior_filter_btn.setText("All behaviors ▾")
+            self._behavior_filter_btn.setText("All Behaviors ▾")
         elif not selected:
             self._behavior_filter_btn.setText("(none) ▾")
         elif len(selected) == 1:
@@ -1900,7 +1900,7 @@ class BehaviorAnalyticsTab(QWidget):
         # These thresholded traces are genuine temporal-refinement output and
         # are the only supplement to the per-behavior TR bouts above.
         # Reuse the result cached by _load_from_target_behavior_tr when
-        # available — avoids re-reading parquet files and re-running smoothing.
+        # available: avoids re-reading parquet files and re-running smoothing.
         if self._tr_bouts_cache is not None:
             recomputed = self._tr_bouts_cache
         else:
@@ -1928,7 +1928,7 @@ class BehaviorAnalyticsTab(QWidget):
         # NOTE: derived/behavior_bouts/<id>_bouts.parquet is intentionally NOT
         # read here. That file is ambiguous provenance: it is written both by
         # the evaluation pipeline (raw window-level classification, NOT temporal
-        # refinement — see evaluation_service.evaluate_and_save) and by
+        # refinement: see evaluation_service.evaluate_and_save) and by
         # direct_run's TR export. Analytics must only ever surface bouts that
         # passed temporal refinement, so we rely exclusively on the TR
         # postprocess output above (Source 1) and the target_behavior trace
@@ -1987,10 +1987,10 @@ class BehaviorAnalyticsTab(QWidget):
                     except OSError:
                         pass
 
-        # The manifest lives at exactly one path (ImportService.load_manifest).
-        # This used to glob for it and fall back to a recursive walk of the whole
-        # derived tree — thousands of cache files on a real project — which never
-        # matched anything and cost a full directory traversal on every refresh.
+        # The manifest lives at exactly one path (ImportService.load_manifest), so
+        # stat that path directly.  Globbing for it, or walking the derived tree as
+        # a fallback, costs a traversal of thousands of cache files on every refresh
+        # and finds nothing the direct stat would have missed.
         manifest_path = derived / "review_tables" / "import_manifest.json"
         try:
             st = manifest_path.stat()
@@ -2019,7 +2019,7 @@ class BehaviorAnalyticsTab(QWidget):
         if not summary_rows:
             return None
         # Cached rows carry the behavior *name* that was current when they were
-        # written, and the fingerprint only tracks the data files — a rename
+        # written, and the fingerprint only tracks the data files, a rename
         # touches behavior_definitions.yaml alone. Relabel from behavior_id so
         # renames reach the graphs without discarding the cache. Pseudo-
         # behaviors (distance / ROI) are absent from the map and keep their
@@ -2203,7 +2203,7 @@ class BehaviorAnalyticsTab(QWidget):
             self._session_groups[label] = group
 
         # Apply factor assignments imported from merged projects' analytics_groups.json.
-        # Only fills in empty slots — manual assignments from the user are preserved.
+        # Only fills in empty slots: manual assignments from the user are preserved.
         extra_factor_assignments: dict = result.get("extra_factor_assignments", {})
         if extra_factor_assignments:
             for label, factors in extra_factor_assignments.items():
@@ -2252,7 +2252,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._refresh_btn.setText("Refresh Analytics")
         self._refresh_btn.setEnabled(True)
         self._close_loading_popup()
-        self._status.setText("Error loading analytics \u2014 see log for details.")
+        self._status.setText("Error loading analytics: see log for details.")
         logger.error("Analytics refresh failed:\n%s", traceback_str)
         # Surface the top-level exception in the UI so failures are not silent.
         last_line = ""
@@ -2273,7 +2273,7 @@ class BehaviorAnalyticsTab(QWidget):
         """Background-thread worker: load all analytics data.
 
         Builds summary_rows and raw_bouts in a single I/O pass, eliminating
-        the previous double-read.  Per-behavior file reads are parallelised
+        the previous double-read.  Per-behavior file reads are parallelized
         with ThreadPoolExecutor so large projects load much faster.
         Results are returned as a plain dict; _on_refresh_done applies them
         to self.* on the main thread.
@@ -2400,7 +2400,7 @@ class BehaviorAnalyticsTab(QWidget):
                 "distance_cm": 0.0,
             }
 
-        # ── Source 1: behavior-specific TR folders (parallelised) ──────────
+        # ── Source 1: behavior-specific TR folders (parallelized) ──────────
         tr_root = project_root / "derived" / "temporal_refinement"
 
         def _load_tr_behavior(behavior) -> tuple[list[dict], list[dict], str]:
@@ -2539,7 +2539,7 @@ class BehaviorAnalyticsTab(QWidget):
 
         # ── (removed) Source 3: behavior_bouts parquet fallback ────────────
         # derived/behavior_bouts/<id>_bouts.parquet is deliberately NOT used as
-        # a summary source. It carries ambiguous provenance — the evaluation
+        # a summary source. It carries ambiguous provenance, the evaluation
         # pipeline writes raw window-level bouts there (see
         # evaluation_service.evaluate_and_save), which have NOT passed temporal
         # refinement. Surfacing those would inflate n_bouts/time with unrefined
@@ -2643,8 +2643,8 @@ class BehaviorAnalyticsTab(QWidget):
     # ------------------------------------------------------------------
     # Pseudo-behavior rows (distance + ROI occupancy)
     #
-    # Both are derived from pose files, which the behaviour analytics cache
-    # does not store — so before this cache they were re-read in full on every
+    # Both are derived from pose files, which the behavior analytics cache
+    # does not store: so before this cache they were re-read in full on every
     # refresh, on the main thread, even on a cache hit (~7 s of frozen UI for a
     # 69-session project).  They now have their own on-disk cache keyed by the
     # pose files and the settings that feed them, and the miss path runs on a
@@ -2730,7 +2730,7 @@ class BehaviorAnalyticsTab(QWidget):
         """Give cached rows the subject, label and session type they have now.
 
         A subject rename leaves pose-derived values unchanged, so it does not
-        miss the cache — but the rows still carry the old names, and each
+        miss the cache, but the rows still carry the old names, and each
         renamed session would show up twice (old label and current label).
         Sessions outside this manifest (merged projects) keep their labels.
         """
@@ -2783,7 +2783,7 @@ class BehaviorAnalyticsTab(QWidget):
             return
 
         # Miss: compute off the UI thread.  A refresh started while an earlier
-        # job is still running supersedes it — the token check on completion
+        # job is still running supersedes it: the token check on completion
         # drops the stale result.
         self._pseudo_rows_token += 1
         token = self._pseudo_rows_token
@@ -2831,7 +2831,7 @@ class BehaviorAnalyticsTab(QWidget):
     def _compute_pseudo_rows_background(self, session_ids: list[str]) -> list[dict]:
         """Worker thread: build the distance and ROI rows for *session_ids*.
 
-        Touches no widgets — it reads pose files and the (already loaded)
+        Touches no widgets, it reads pose files and the (already loaded)
         manifest and returns plain dicts for the main thread to install.
         """
         rows: list[dict] = []
@@ -2985,7 +2985,7 @@ class BehaviorAnalyticsTab(QWidget):
         return time_s, n_entries, mean_s, latency_s
 
     # ------------------------------------------------------------------
-    # ROI scope — restrict every analysis to behavior inside/outside a zone
+    # ROI scope: restrict every analysis to behavior inside/outside a zone
     # ------------------------------------------------------------------
 
     def _set_roi_scope_controls_visible(self, visible: bool) -> None:
@@ -2995,7 +2995,7 @@ class BehaviorAnalyticsTab(QWidget):
     def _refresh_roi_scope_combo(self) -> None:
         """Rebuild the ROI scope choices for the current project's zones.
 
-        Hidden entirely when the project defines no zone with area — an
+        Hidden entirely when the project defines no zone with area, an
         always-visible control that can only say "Whole arena" is noise.
         """
         roi_count = self._configured_roi_count()
@@ -3079,7 +3079,7 @@ class BehaviorAnalyticsTab(QWidget):
         summary table, statistics, all chart styles, ethograms and exports at
         once.  The ROI-occupancy and distance pseudo-behaviors are left alone:
         "Time in ROI 1, restricted to ROI 1" is a tautology, and total distance
-        travelled is an arena-level measure.
+        traveled is an arena-level measure.
         """
         if not self._raw_bouts_unscoped:
             self._raw_bouts_unscoped = {
@@ -3092,7 +3092,7 @@ class BehaviorAnalyticsTab(QWidget):
             }
             self._rewrite_summary_from_raw_bouts()
             self._refresh_all_views()
-            self._status.setText("ROI scope cleared — showing whole-arena behavior.")
+            self._status.setText("ROI scope cleared: showing whole-arena behavior.")
             return
 
         sessions = sorted({
@@ -3127,7 +3127,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._refresh_all_views()
 
         n_bouts = sum(len(df) for df in scoped.values())
-        msg = f"ROI scope: {self.roi_scope_label()} — {n_bouts} bout(s)."
+        msg = f"ROI scope: {self.roi_scope_label()}, {n_bouts} bout(s)."
         if unscopable:
             msg += (
                 f"  {len(unscopable)} session(s) excluded: no pose data or no "
@@ -3140,7 +3140,7 @@ class BehaviorAnalyticsTab(QWidget):
 
         Unlike :meth:`_recompute_summary_stats_from_shifted_bouts`, a
         (session, behavior) pair with no surviving bouts is written down to
-        zero rather than left at its previous value — under an ROI scope
+        zero rather than left at its previous value, under an ROI scope
         "no bouts in the zone" is the answer, not a reason to fall back to the
         whole-arena number.  Sessions in *drop_sessions* could not be scoped at
         all and are removed so they can't be read as a genuine zero.
@@ -3588,7 +3588,10 @@ class BehaviorAnalyticsTab(QWidget):
                 continue
             dx = np.diff(seg_cx)
             dy = np.diff(seg_cy)
-            total += float(np.sum(np.sqrt(dx * dx + dy * dy)))
+            # nansum, not sum: an untracked stretch (animal absent or lost) has
+            # no centroid, and one NaN step would otherwise make the whole
+            # session's distance NaN.
+            total += float(np.nansum(np.sqrt(dx * dx + dy * dy)))
         return total
 
     def _compute_session_distance(self, session_id: str) -> float:
@@ -3609,7 +3612,7 @@ class BehaviorAnalyticsTab(QWidget):
             return 0.0
         dx = np.diff(cx)
         dy = np.diff(cy)
-        return float(np.sum(np.sqrt(dx * dx + dy * dy)))
+        return float(np.nansum(np.sqrt(dx * dx + dy * dy)))
 
     def _compute_session_distance_binned(
         self, session_id: str, bin_seconds: float,
@@ -3641,6 +3644,8 @@ class BehaviorAnalyticsTab(QWidget):
         dx = np.diff(cx_sub)
         dy = np.diff(cy_sub)
         segment_dist = np.sqrt(dx * dx + dy * dy)
+        # Untracked steps contribute no distance rather than poisoning the bin.
+        segment_dist = np.nan_to_num(segment_dist, nan=0.0)
         segment_times = times_s[:-1]
         keep = np.ones(len(segment_times), dtype=bool)
         if lo_s is not None:
@@ -4190,7 +4195,7 @@ class _SummaryStatsWidget(QWidget):
         stats_row.addStretch(1)
 
         self._stats_output_text = ""
-        self._stats_view_btn = QPushButton("\U0001f4ca View Results\u2026")
+        self._stats_view_btn = QPushButton("View Results\u2026")
         self._stats_view_btn.setToolTip("Show the last statistics results in a popup.")
         self._stats_view_btn.clicked.connect(self._show_summary_stats_popup)
         self._stats_view_btn.setEnabled(False)
@@ -4235,7 +4240,7 @@ class _SummaryStatsWidget(QWidget):
                         return self._host._session_type_by_session.get(sid, "")
                 return ""
             return sorted(all_labels, key=lambda l: (_type_key(l), l))
-        # "custom" — respect user-defined order
+        # "custom": respect user-defined order
         return all_labels
 
     def _refresh_session_table(self) -> None:
@@ -4272,13 +4277,13 @@ class _SummaryStatsWidget(QWidget):
                     | Qt.ItemFlag.ItemIsDragEnabled
                 )
                 if prev_had_rows and label in prev_labels:
-                    # Label was in the table before — preserve user's choice
+                    # Label was in the table before: preserve user's choice
                     item0.setCheckState(
                         Qt.CheckState.Checked if label in prev_checked
                         else Qt.CheckState.Unchecked
                     )
                 else:
-                    # Brand-new label (or first population) — default to Checked
+                    # Brand-new label (or first population): default to Checked
                     item0.setCheckState(Qt.CheckState.Checked)
                 self._session_table.setItem(row_idx, 0, item0)
 
@@ -4320,7 +4325,7 @@ class _SummaryStatsWidget(QWidget):
         if self._rebuilding:
             return
         if col == 0:
-            # Checkbox toggled — update graphs
+            # Checkbox toggled: update graphs
             self.rebuild()
             self._host._graphs_tab.update_graph()
             return
@@ -4949,7 +4954,7 @@ class _SummaryStatsWidget(QWidget):
             factor1_combo.addItem(f)
 
         factor2_combo = QComboBox(dlg)
-        factor2_combo.addItem("(none \u2014 one-way design)", userData="__none__")
+        factor2_combo.addItem("(none: one-way design)", userData="__none__")
         for f in factors:
             factor2_combo.addItem(f, userData=f)
 
@@ -5176,7 +5181,7 @@ class _SummaryStatsWidget(QWidget):
         ms_error = ss_error / df_error
 
         lines: list[str] = []
-        lines.append(f"Two-way ANOVA \u2014 Metric: {metric_label}")
+        lines.append(f"Two-way ANOVA. Metric: {metric_label}")
         lines.append(f"  Factor A: {factor1_name} ({', '.join(levels_a)})")
         lines.append(f"  Factor B: {factor2_name} ({', '.join(levels_b)})")
         lines.append(f"  Design: {len(levels_a)} x {len(levels_b)}, n={n_total}")
@@ -5192,7 +5197,7 @@ class _SummaryStatsWidget(QWidget):
                 return (
                     f"{label:<24s} {ss:10.3f} {df:4d} {ms:10.3f} {f_val:10.4f} {p_val:10.6f}  {sig}"
                 )
-            _dash = "\u2014"
+            _dash = "-"
             return f"{label:<24s} {ss:10.3f} {df:4d} {ms:10.3f} {_dash:>10s} {_dash:>10s}"
 
         lines.append(_row(factor1_name, ss_a, df_a, ms_a))
@@ -5218,7 +5223,7 @@ class _SummaryStatsWidget(QWidget):
                     cell_mean = float(np.mean(values[mask]))
                     row_str += f"  {cell_mean:10.3f}({n_cell})"
                 else:
-                    row_str += "  " + "\u2014".rjust(12)
+                    row_str += "  " + "-".rjust(12)
             lines.append(row_str)
 
         self._stats_output_text = "\n".join(lines)
@@ -5246,7 +5251,7 @@ class _SummaryStatsWidget(QWidget):
         layout = QVBoxLayout(dlg)
         te = QTextEdit(dlg)
         te.setReadOnly(True)
-        te.setPlainText(self._stats_output_text or "(No results yet — run statistics first.)")
+        te.setPlainText(self._stats_output_text or "(No results yet: run statistics first.)")
         te.setStyleSheet(
             "QTextEdit{background:#0A1929;color:#cfd8dc;font-family:Consolas,monospace;"
             "font-size:11px;border:1px solid #1E3A5F;border-radius:4px;}"
@@ -5357,7 +5362,7 @@ def _time_bin_index(t_s: float, origin_s: float, bin_seconds: float) -> int:
 # ======================================================================
 
 class _GraphsWidget(QWidget):
-    """All chart visualisation types."""
+    """All chart visualization types."""
 
     # toggle-button style sheet
     _BTN_STYLE = (
@@ -5375,7 +5380,7 @@ class _GraphsWidget(QWidget):
         self._bin_cache: pd.DataFrame | None = None  # cached _bin_bouts result
         self._bin_cache_key: tuple[Any, ...] = ()  # key to invalidate cache
         # Ethogram cache: pre-processed {bid: {sess_label: [(start_s, dur_s), ...]}}
-        # Does NOT include session filter — session changes just re-render from cache.
+        # Does NOT include session filter: session changes just re-render from cache.
         self._ethogram_cache: dict[str, dict[str, list[tuple[float, float]]]] | None = None
         self._ethogram_cache_key: tuple[Any, ...] = ()
 
@@ -5399,7 +5404,7 @@ class _GraphsWidget(QWidget):
             row.addStretch(1)
             return row, grp, btns
 
-        # Chart style — two rows so buttons fit in a narrow left panel
+        # Chart style: two rows so buttons fit in a narrow left panel
         self._style_grp = QButtonGroup(self)
         self._style_grp.setExclusive(True)
         self._style_btns: dict[str, QPushButton] = {}
@@ -5421,7 +5426,7 @@ class _GraphsWidget(QWidget):
         style_row1.addStretch(1)
         style_row2.addStretch(1)
 
-        # Metric — two rows
+        # Metric: two rows
         self._metric_grp = QButtonGroup(self)
         self._metric_grp.setExclusive(True)
         self._metric_btns: dict[str, QPushButton] = {}
@@ -5443,7 +5448,7 @@ class _GraphsWidget(QWidget):
         metric_row1.addStretch(1)
         metric_row2.addStretch(1)
 
-        # Row 3 — individual vs group
+        # Row 3: individual vs group
         _mode_opts = [("Individual Sessions", "individual"), ("By Group", "group")]
         mode_row, self._mode_grp, self._mode_btns = _toggle_row(_mode_opts)
 
@@ -5451,7 +5456,7 @@ class _GraphsWidget(QWidget):
         self._metric_grp.idClicked.connect(lambda _: self.update_graph())
         self._mode_grp.idClicked.connect(lambda _: self.update_graph())
 
-        # Row 4 — secondary options
+        # Row 4: secondary options
         self._time_bin_spin = QSpinBox()
         self._time_bin_spin.setRange(10, 3600)
         self._time_bin_spin.setValue(300)
@@ -5480,7 +5485,7 @@ class _GraphsWidget(QWidget):
         self._export_excel_btn.clicked.connect(self._export_excel_data)
 
         self._groups_btn = QPushButton("Groups…")
-        self._groups_btn.setToolTip("Reorder groups and customise group colours.")
+        self._groups_btn.setToolTip("Reorder groups and customize group colors.")
         self._groups_btn.clicked.connect(self._open_groups_dialog)
 
         self._level_order_btn = QPushButton("Level Order…")
@@ -5499,7 +5504,7 @@ class _GraphsWidget(QWidget):
             "QPushButton:hover{background:#1976d2;}"
         )
 
-        # Row 5 — axis range overrides (empty field == "auto"; see _AutoDoubleSpinBox)
+        # Row 5: axis range overrides (empty field == "auto"; see _AutoDoubleSpinBox)
         self._x_min = _AutoDoubleSpinBox()
         self._x_min.setRange(-1e6, 1e6)
         self._x_min.setValue(self._x_min.minimum())  # "auto"
@@ -5524,7 +5529,7 @@ class _GraphsWidget(QWidget):
         self._y_max.setDecimals(1)
         self._y_max.setMinimumWidth(90)
 
-        # Row 6 — data range (seconds) — filters which bouts contribute.
+        # Row 6: data range (seconds): filters which bouts contribute.
         # Empty field == "auto" (see _AutoDoubleSpinBox); the unit lives in the
         # row label so the empty box can show its "auto" placeholder.
         self._data_min_s = _AutoDoubleSpinBox()
@@ -5566,12 +5571,12 @@ class _GraphsWidget(QWidget):
             )
         )
 
-        # Row 4 — faceted grouping: one combine/split/level dropdown per factor.
+        # Row 4: faceted grouping: one combine/split/level dropdown per factor.
         self._facet = _FacetControls("Group by:")
         self._facet.setToolTip(
             "For each factor choose:\n"
-            "  • — combine —  pool across that factor\n"
-            "  • — split —    one series per level\n"
+            "  • (combine)    pool across that factor\n"
+            "  • (split)      one series per level\n"
             "  • a level      keep only that level\n"
             "Split two or more factors to plot their interaction."
         )
@@ -5663,7 +5668,7 @@ class _GraphsWidget(QWidget):
         _bin_origin_row.addWidget(self._bin_from_range_chk)
         _bin_origin_row.addStretch(1)
 
-        # Row 7 — bout filter (First N / Bouts Until Behavior)
+        # Row 7: bout filter (First N / Bouts Until Behavior)
         self._bout_filter_mode = QComboBox()
         self._bout_filter_mode.addItem("Disabled", userData="disabled")
         self._bout_filter_mode.addItem("First N Bouts", userData="first_n")
@@ -5861,7 +5866,7 @@ class _GraphsWidget(QWidget):
         _splitter_g.setStretchFactor(1, 1)
         _splitter_g.setSizes([360, 1000])
         # Kept as an attribute so showEvent can re-apply proportional sizes once
-        # the widget has real geometry — at construction time the left scroll
+        # the widget has real geometry: at construction time the left scroll
         # area's wide content gives it an oversized hint, so the splitter would
         # otherwise hand most of the width to the controls and leave the plot
         # small until the user dragged the handle.
@@ -5918,7 +5923,7 @@ class _GraphsWidget(QWidget):
             fig_w = max(MIN_W, min(n_behaviors, 3) * CELL_W)
             fig_h = max(MIN_H, ((n_behaviors + 2) // 3) * CELL_H)
         elif style == "ethogram":
-            # Ethogram height grows with behavior count — allow vertical scroll
+            # Ethogram height grows with behavior count: allow vertical scroll
             fig_h = max(MIN_H, n_behaviors * 0.55 + 0.8)
             fig_w = ref_w_in
         else:
@@ -5961,7 +5966,7 @@ class _GraphsWidget(QWidget):
         dpi = int(gs.get("dpi", 100))
         base_w = int(gs.get("max_w", 700))
         base_h = int(gs.get("max_h", 420))
-        # Current canvas height — preserve it (may be taller for multi-panel charts)
+        # Current canvas height: preserve it (may be taller for multi-panel charts)
         cur_h = self._canvas.height()
         # Scale width to viewport; scale height proportionally only if it
         # matches the default ratio (i.e. not an over-sized ethogram).
@@ -6023,11 +6028,11 @@ class _GraphsWidget(QWidget):
                     r for r in rows
                     if groups_map.get(r["session_label"], "") in checked_groups
                 ]
-            # Apply data range filter — recompute aggregated metrics from
+            # Apply data range filter: recompute aggregated metrics from
             # raw bouts clipped to the user-specified time window.
             if self._is_data_range_active():
                 rows = self._recompute_rows_for_range(rows)
-            # Apply bout filter — first N or bouts-until-behavior.
+            # Apply bout filter: first N or bouts-until-behavior.
             if self._is_bout_filter_active():
                 rows = self._recompute_rows_for_first_n(rows)
             rows = self._apply_latency_fallbacks(rows)
@@ -6098,8 +6103,8 @@ class _GraphsWidget(QWidget):
                     _gs_leg = self._gs()
                     _fig_w_px = self._canvas.width() if self._canvas else int(self._host._graph_settings.get("max_w", 700))
                     _rr, _lx = _legend_right_margin(_shared_labels, _fig_w_px)
-                    # Hide x-tick labels from all subplots — the right-side
-                    # legend already maps colours to group names.
+                    # Hide x-tick labels from all subplots: the right-side
+                    # legend already maps colors to group names.
                     for _ax in self._figure.axes:
                         _ax.set_xticklabels([])
                     self._figure.legend(
@@ -6193,13 +6198,13 @@ class _GraphsWidget(QWidget):
                     # Tight-fitting caps the canvas at max_w×max_h, which leaves
                     # the plot small in a wide window. Expand it to fill the
                     # available viewport width (preserving the just-computed
-                    # aspect) so the initial render uses the full plot area —
+                    # aspect) so the initial render uses the full plot area,
                     # matching what a manual splitter drag produces. Without this
                     # the plot stayed capped until a resize event happened to fire.
                     self._sync_canvas_to_viewport()
-                # Draw first so get_tightbbox measures the realised figure — on
+                # Draw first so get_tightbbox measures the realized figure, on
                 # the first render the renderer isn't ready yet, so an inline-only
-                # fit collapses to the minimum size (canvas appears miniaturised
+                # fit collapses to the minimum size (canvas appears miniaturized
                 # until a manual resize). Re-fit on the next layout pass.
                 self._canvas.draw_idle()
                 _fit()
@@ -6207,8 +6212,8 @@ class _GraphsWidget(QWidget):
             else:
                 # Fill the freshly-drawn figure to the viewport width so the
                 # initial render uses the full plot area (no manual drag needed).
-                # The deferred call re-runs after Qt finalises the layout pass —
-                # on the first render the viewport width is not yet realised, so
+                # The deferred call re-runs after Qt finalizes the layout pass,
+                # on the first render the viewport width is not yet realized, so
                 # the inline call alone would leave the canvas under-sized.
                 self._sync_canvas_to_viewport()
                 QTimer.singleShot(0, self._sync_canvas_to_viewport)
@@ -6307,7 +6312,7 @@ class _GraphsWidget(QWidget):
         return
 
     def _on_facets_changed(self) -> None:
-        """User changed a facet dropdown — recompute groups and redraw."""
+        """User changed a facet dropdown: recompute groups and redraw."""
         if self._updating:
             return
         self._host._facet_controls = self._facet.state()
@@ -6324,9 +6329,36 @@ class _GraphsWidget(QWidget):
 
     # -- ethogram session filter --------------------------------------
 
+    def _ethogram_roster(self) -> list[str]:
+        """Sessions the ethogram may draw, in display order.
+
+        Follows the Group-by selection: a factor pinned to a specific level
+        drops sessions outside that level in either view, and "By Group"
+        also keeps only sessions in a drawn group, ordered group-first.
+        """
+        roster = self._export_sessions()
+        level_filters = {
+            f: v for f, v in (self._host._facet_controls or {}).items()
+            if v not in (FACET_COMBINE, FACET_SPLIT)
+        }
+        if level_filters:
+            facs = self._host._session_factors
+            roster = [
+                s for s in roster
+                if all((facs.get(s, {}).get(f, "") or "") == v
+                       for f, v in level_filters.items())
+            ]
+        return roster
+
+    def _ethogram_sessions(self) -> list[str]:
+        """Roster sessions ticked in the ethogram filter (all if none ticked)."""
+        roster = self._ethogram_roster()
+        ticked = self._checked_ethogram_sessions()
+        return [s for s in roster if s in ticked] or roster
+
     def _refresh_ethogram_session_filter(self) -> None:
         """Rebuild the ethogram session checkboxes when sessions change."""
-        all_sessions = sorted(self._host._summary_tab._checked_subjects())
+        all_sessions = self._ethogram_roster()
         existing: list[str] = []
         for i in range(self._ethogram_session_list.count()):
             cb = self._ethogram_session_list.itemWidget(self._ethogram_session_list.item(i))
@@ -6334,13 +6366,15 @@ class _GraphsWidget(QWidget):
                 existing.append(cb.text())
         if existing == all_sessions:
             return
-        prev_checked = self._checked_ethogram_sessions()
+        # Remember what was unticked (not what was ticked) so sessions coming
+        # back into view after a group change start ticked.
+        prev_unchecked = set(existing) - self._checked_ethogram_sessions()
         self._ethogram_session_list.blockSignals(True)
         self._ethogram_session_list.clear()
         for sess in all_sessions:
             item = QListWidgetItem()
             cb = QCheckBox(sess)
-            cb.setChecked(not prev_checked or sess in prev_checked)
+            cb.setChecked(sess not in prev_unchecked)
             cb.stateChanged.connect(lambda _, s=self: QTimer.singleShot(0, s.update_graph))
             item.setSizeHint(cb.sizeHint())
             self._ethogram_session_list.addItem(item)
@@ -6714,7 +6748,7 @@ class _GraphsWidget(QWidget):
         """
         lo_s, hi_s = self._get_data_range_seconds()
         if lo_s is None and hi_s is None:
-            return rows  # no range filter — use original rows
+            return rows  # no range filter: use original rows
 
         fps = self._host._project_fps()
         raw = self._host._raw_bouts
@@ -6780,7 +6814,7 @@ class _GraphsWidget(QWidget):
         for key, template in wanted.items():
             if key not in processed:
                 if is_pseudo_behavior_id(template.get("behavior_id", "")):
-                    # Pseudo-behavior rows (distance / ROI) have no raw bouts —
+                    # Pseudo-behavior rows (distance / ROI) have no raw bouts,
                     # keep their whole-session values as-is.
                     result.append(template)
                 else:
@@ -6870,7 +6904,7 @@ class _GraphsWidget(QWidget):
 
     def _bar_individual(self, df: pd.DataFrame, metric: str, ylabel: str,
                         agg_fn: str) -> None:
-        """Clustered bar chart — one group of bars per session, one bar per behavior."""
+        """Clustered bar chart: one group of bars per session, one bar per behavior."""
         ax = self._figure.add_subplot(111)
         gs = self._gs()
         behaviors = sorted(df["behavior"].unique())
@@ -6966,7 +7000,7 @@ class _GraphsWidget(QWidget):
                             ha="right", va="top", transform=ax.transAxes,
                             fontsize=gs["tick_fontsize"], color="black", fontweight="bold",
                             bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
-        # Add labelled patches so update_graph can place a shared side legend.
+        # Add labeled patches so update_graph can place a shared side legend.
         from matplotlib.patches import Patch as _Patch
         _leg_handles = [_Patch(facecolor=c, label=g) for c, g in zip(colors, group_names)]
         ax.legend(handles=_leg_handles)  # collected and replaced by side legend
@@ -7136,7 +7170,7 @@ class _GraphsWidget(QWidget):
         self._apply(ax, title=f"Box Plot: {metric_label}", ylabel=metric_label)
 
     def _ethogram(self, df: pd.DataFrame) -> None:
-        """Raster/ethogram showing behaviour bouts across time for each subject.
+        """Raster/ethogram showing behavior bouts across time for each subject.
 
         Expensive DataFrame processing is cached keyed on raw bout data + settings.
         Changing only the session filter re-renders from the cache without
@@ -7149,7 +7183,6 @@ class _GraphsWidget(QWidget):
                     ha="center", va="center", transform=ax.transAxes)
             return
         fps = self._host._project_fps()
-        checked = self._host._summary_tab._checked_subjects()
 
         # -- Build color/name lookups (fast, no iteration) ------------------------
         bid_to_name: dict[str, str] = {}
@@ -7181,7 +7214,7 @@ class _GraphsWidget(QWidget):
 
         if self._ethogram_cache is None or self._ethogram_cache_key != _cache_key:
             # Build cache: {bid: {sess_label: [(start_s, dur_s), ...]}}
-            # Uses vectorized pandas ops — no Python-level iterrows.
+            # Uses vectorized pandas ops: no Python-level iterrows.
             _label_map = self._host._session_label_by_session
             new_cache: dict[str, dict[str, list[tuple[float, float]]]] = {}
             for bid, bdf in raw.items():
@@ -7221,9 +7254,9 @@ class _GraphsWidget(QWidget):
         # -- Render from cache (fast path, even on session filter changes) --------
         # The data range is intentionally excluded from the cache key so it can
         # be applied here at render time: bouts are clipped to [lo, hi] so the
-        # ethogram honours the same Data Range window as the bar/over-time views.
+        # ethogram honors the same Data Range window as the bar/over-time views.
         lo_s, hi_s = self._get_data_range_seconds()
-        sessions = sorted(self._checked_ethogram_sessions() or checked)
+        sessions = self._ethogram_sessions()
         session_idx = {s: i for i, s in enumerate(sessions)}
 
         for bid, sess_bouts in self._ethogram_cache.items():
@@ -7252,7 +7285,7 @@ class _GraphsWidget(QWidget):
                     if not bouts:
                         continue
                 y = session_idx[sess_label]
-                # broken_barh draws all segments as one PatchCollection — much
+                # broken_barh draws all segments as one PatchCollection, much
                 # faster than individual barh calls for large bout counts.
                 ax.broken_barh(
                     bouts, (y - 0.3, 0.6),
@@ -7262,7 +7295,16 @@ class _GraphsWidget(QWidget):
                 label_used = True
 
         ax.set_yticks(range(len(sessions)))
-        ax.set_yticklabels(sessions)
+        groups_map = self._host._session_groups
+        if self._get_mode() == "group" and len(
+            {groups_map.get(s, "") for s in sessions}
+        ) > 1:
+            ax.set_yticklabels([
+                f"{s} ({groups_map[s]})" if groups_map.get(s) else s
+                for s in sessions
+            ])
+        else:
+            ax.set_yticklabels(sessions)
         ax.invert_yaxis()
         self._apply(ax, title="Ethogram / Raster", xlabel="Time (s)", ylabel="Session")
         handles, labels_ = ax.get_legend_handles_labels()
@@ -7623,7 +7665,7 @@ class _GraphsWidget(QWidget):
                                           ec="black", alpha=0.8))
             except Exception:
                 pass
-        # Add labelled patches so the parent update_graph can collect handles
+        # Add labeled patches so the parent update_graph can collect handles
         # and place a shared side legend (hiding these x-tick labels).
         from matplotlib.patches import Patch as _Patch
         _leg_handles = [_Patch(facecolor=c, label=g) for c, g in zip(colors, group_names)]
@@ -7739,7 +7781,7 @@ class _GraphsWidget(QWidget):
 
     def _open_settings_dialog(self) -> None:
         # Bind to the real settings dict (not self._gs(), which returns a
-        # throwaway font-scaled copy when a figure is on screen — writes to it
+        # throwaway font-scaled copy when a figure is on screen, writes to it
         # would be discarded and never persist).
         gs = self._host._graph_settings
         dlg = QDialog(self)
@@ -7989,7 +8031,7 @@ class _GraphsWidget(QWidget):
                 )
             return float(hi_s) if hi_s is not None else 0.0
         if metric == "mean_bout_s":
-            # Undefined without bouts — NaN so mean/SEM skip it rather than
+            # Undefined without bouts: NaN so mean/SEM skip it rather than
             # being dragged toward zero by a subject that never performed it.
             return float("nan")
         return 0.0
@@ -8039,7 +8081,7 @@ class _GraphsWidget(QWidget):
 
         # Distance Traveled is a pseudo-behavior stored under a special ID.
         # _filtered_rows() only returns normal behavior rows (distance_cm = 0
-        # on those), so we must pull the distance rows directly — mirroring the
+        # on those), so we must pull the distance rows directly, mirroring the
         # logic in update_graph.
         if metric == "distance_cm":
             rows = [
@@ -8102,7 +8144,7 @@ class _GraphsWidget(QWidget):
 
         The scaling divides each subject's pre-target count/duration by that
         subject's own pre-target interval, so the result is a single rate per
-        session x behavior — it cannot be split into time bins, and summing it
+        session x behavior, it cannot be split into time bins, and summing it
         across bins is meaningless.  Exports use this table instead of the
         binned one whenever the scaling is active.
         """
@@ -8274,7 +8316,7 @@ class _GraphsWidget(QWidget):
                 return None
             fps = self._host._project_fps()
             selected_bids = self._host._selected_behavior_ids()
-            eth_checked = self._checked_ethogram_sessions() or checked
+            eth_checked = set(self._ethogram_sessions())
             out_rows = []
             for bid, bdf in raw.items():
                 if bid not in selected_bids:
@@ -8296,7 +8338,7 @@ class _GraphsWidget(QWidget):
         elif style == "overview":
             sessions = self._export_sessions() or sorted(df["session_label"].unique())
             counts = df.groupby("session_label")["n_bouts"].sum().reindex(sessions, fill_value=0)
-            # Mean bout duration is undefined without bouts — left blank.
+            # Mean bout duration is undefined without bouts: left blank.
             durations = df.groupby("session_label")["mean_bout_s"].mean().reindex(sessions)
             return pd.DataFrame({
                 "Session": sessions,
@@ -8390,7 +8432,7 @@ class _GraphsWidget(QWidget):
         metric = self._get_metric()
 
         if self._is_until_scaling_active():
-            # A pre-behavior rate has no per-bin decomposition — see
+            # A pre-behavior rate has no per-bin decomposition, see
             # _scaled_rate_table.
             data = self._scaled_rate_table()
             if data is None or data.empty:
@@ -8471,7 +8513,7 @@ class _GraphsWidget(QWidget):
         # subject over that subject's own pre-target interval.  It has no
         # per-bin decomposition, so exporting it as bins (which _bin_bouts
         # leaves unscaled) plus a "total" column reports numbers that are
-        # neither the graphed rate nor in the labelled unit.
+        # neither the graphed rate nor in the labeled unit.
         if self._is_until_scaling_active():
             self._export_excel_scaled_rate()
             return
@@ -8633,8 +8675,8 @@ class _GraphsWidget(QWidget):
 
         fps = self._host._project_fps()
         selected_bids = self._host._selected_behavior_ids()
-        checked = self._host._summary_tab._checked_subjects()
-        eth_checked = self._checked_ethogram_sessions() or checked
+        sessions_sorted = self._ethogram_sessions()
+        eth_checked = set(sessions_sorted)
         lo_s, hi_s = self._get_data_range_seconds()
         bid_to_name = {
             str(b.behavior_id): str(b.name or b.behavior_id)
@@ -8659,7 +8701,7 @@ class _GraphsWidget(QWidget):
                     continue
                 start_s = float(bout["start_frame"]) / fps
                 end_s = float(bout["end_frame"]) / fps
-                # Honour the Data Range window (matches the on-screen ethogram).
+                # Honor the Data Range window (matches the on-screen ethogram).
                 if lo_s is not None:
                     if end_s <= lo_s:
                         continue
@@ -8688,7 +8730,6 @@ class _GraphsWidget(QWidget):
             return
 
         try:
-            sessions_sorted = sorted(eth_checked)
             max_t = int(np.ceil(max_end_s)) + 1  # inclusive last second
             time_index = list(range(max_t))       # [0, 1, 2, ...]
 
@@ -8716,7 +8757,7 @@ class _GraphsWidget(QWidget):
     # -- groups dialog ------------------------------------------------
 
     def _open_groups_dialog(self) -> None:
-        """Open dialog to reorder groups and set custom colours."""
+        """Open dialog to reorder groups and set custom colors."""
         from PySide6.QtWidgets import QColorDialog
         from PySide6.QtGui import QColor
 
@@ -8731,10 +8772,10 @@ class _GraphsWidget(QWidget):
         ordered = self._host._ordered_group_list(groups)
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Group Order && Colours")
+        dlg.setWindowTitle("Group Order && Colors")
         dlg.resize(360, 300)
         layout = QVBoxLayout(dlg)
-        hint = QLabel("Drag or use arrows to reorder. Click the colour swatch to change.")
+        hint = QLabel("Drag or use arrows to reorder. Click the color swatch to change.")
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
@@ -8760,7 +8801,7 @@ class _GraphsWidget(QWidget):
             def _pick(btn: QPushButton = cbtn) -> None:
                 c = QColorDialog.getColor(
                     QColor(btn._color), dlg,  # type: ignore[attr-defined]
-                    f"Colour for {btn._group}",  # type: ignore[attr-defined]
+                    f"Color for {btn._group}",  # type: ignore[attr-defined]
                 )
                 if c.isValid():
                     btn._color = c.name()  # type: ignore[attr-defined]
@@ -8913,7 +8954,7 @@ class _HeatmapWidget(QWidget):
         self._bg_plate_key: Any = None
         self._bg_force_regen: bool = False
         # Per-session native video resolution (session_id → (w, h)), used to
-        # normalise pose coordinates onto the reference frame when pooling
+        # normalize pose coordinates onto the reference frame when pooling
         # subjects recorded at different resolutions.  Probed lazily.
         self._hm_dims_cache: dict[str, tuple[int, int]] = {}
 
@@ -8921,7 +8962,7 @@ class _HeatmapWidget(QWidget):
         self._select_subjects_btn = QPushButton("Select Subjects…")
         self._select_subjects_btn.clicked.connect(self._open_subject_selector)
 
-        self._behavior_filter_btn = QPushButton("All behaviors ▾")
+        self._behavior_filter_btn = QPushButton("All Behaviors ▾")
         self._behavior_filter_btn.setToolTip("Select which behaviors to include in the heatmap.")
         self._behavior_filter_menu = QMenu(self)
         self._behavior_filter_btn.setMenu(self._behavior_filter_menu)
@@ -8970,7 +9011,7 @@ class _HeatmapWidget(QWidget):
         sf = QFormLayout(scatter_grp)
         sf.setContentsMargins(4, 2, 4, 2)
         sf.setSpacing(3)
-        sf.addRow("Colour map:", self._colormap_combo)
+        sf.addRow("Color map:", self._colormap_combo)
         sf.addRow("Point size:", self._point_size_spin)
         sf.addRow("Opacity:", self._point_alpha)
         sf.addRow(self._show_points)
@@ -8992,7 +9033,7 @@ class _HeatmapWidget(QWidget):
         self._threshold_spin.setValue(15)
         self._threshold_spin.setSuffix("% of peak")
 
-        self._show_colorbar = QCheckBox("Show colour bar")
+        self._show_colorbar = QCheckBox("Show color bar")
         self._show_colorbar.setChecked(False)
 
         self._kde_check = QCheckBox()  # kept for API compat; group.isChecked() now drives it
@@ -9106,7 +9147,7 @@ class _HeatmapWidget(QWidget):
         self._export_transparent.setChecked(False)
         self._export_transparent.setToolTip(
             "When exporting, save with a transparent background\n"
-            "instead of the dark canvas colour."
+            "instead of the dark canvas color."
         )
 
         display_grp = QGroupBox("Display / Export")
@@ -9321,7 +9362,7 @@ class _HeatmapWidget(QWidget):
                 self._custom_bg_path = path
                 self._host._status.setText(f"Custom background: {path}")
             else:
-                # Revert to auto if they cancelled
+                # Revert to auto if they canceled
                 self._bg_mode_combo.blockSignals(True)
                 self._bg_mode_combo.setCurrentIndex(0)
                 self._bg_mode_combo.blockSignals(False)
@@ -9517,7 +9558,7 @@ class _HeatmapWidget(QWidget):
             # video and take the per-pixel TEMPORAL MEDIAN.  Because the animal
             # occupies any given pixel only briefly, the median collapses to the
             # static arena and the moving mouse blob disappears.  (Averaging
-            # first-frames — the old approach — left a ghost mouse wherever an
+            # first-frames: the old approach: left a ghost mouse wherever an
             # animal happened to be sitting at t=0.)
             AUTO_MEDIAN_VIDEOS = 3   # few videos suffice; time-sampling one already cleans the plate
             FRAMES_PER_VIDEO = 48    # temporal samples per video (median needs a spread)
@@ -9590,12 +9631,12 @@ class _HeatmapWidget(QWidget):
                                           interpolation=cv2.INTER_LINEAR)
             else:
                 self._host._status.setText(
-                    "No Density Analysis background yet — generate a figure on "
+                    "No Density Analysis background yet: generate a figure on "
                     "that tab first, then reselect this source."
                 )
 
         # Apply preprocessing to backgrounds this tab produced (auto/custom).
-        # A "From Density Analysis" plate is already adjusted — use it as-is.
+        # A "From Density Analysis" plate is already adjusted, use it as-is.
         if bg_image is not None and bg_mode != "from_density":
             bg_image = _apply_bg_adjustments(
                 bg_image,
@@ -9636,7 +9677,7 @@ class _HeatmapWidget(QWidget):
         if bg_session_id not in poses_by_sid:
             poses_by_sid[bg_session_id] = bg_pose
 
-        # behaviour colour map
+        # behavior color map
         bid_to_name: dict[str, str] = {}
         bid_to_color: dict[str, str] = {}
         for i_b, b in enumerate(behavior_list):
@@ -9644,11 +9685,11 @@ class _HeatmapWidget(QWidget):
             bid_to_name[bid] = str(b.name)
             bid_to_color[bid] = str(b.color or _PALETTE[i_b % len(_PALETTE)])
 
-        # bout intervals — read the SAME filtered/positive bouts that every
+        # bout intervals: read the SAME filtered/positive bouts that every
         # other analytics view uses: host._raw_bouts.  That collection is built
         # by _load_raw_bouts from (1) per-behavior temporal-refinement postprocess
         # output and (2) the target_behavior probability traces recomputed with
-        # the per-behavior thresholds from temporal_review_settings.json — i.e.
+        # the per-behavior thresholds from temporal_review_settings.json, i.e.
         # exactly what passes the temporal-review filter.  The Spatial Heatmap
         # previously used its own _load_tr_bouts, which skipped the
         # target_behavior trace recompute and so plotted nothing for
@@ -9701,7 +9742,7 @@ class _HeatmapWidget(QWidget):
 
         # Reference frame for pooling: the resolution the background plate and
         # axes are drawn in (the first target video).  Every session's pose
-        # coordinates are normalised onto it so subjects recorded at different
+        # coordinates are normalized onto it so subjects recorded at different
         # resolutions overlay correctly instead of collapsing into a corner.
         ref_w = _orig_video_w if _orig_video_w > 0 else (bg_image.shape[1] if bg_image is not None else 0)
         ref_h = _orig_video_h if _orig_video_h > 0 else (bg_image.shape[0] if bg_image is not None else 0)
@@ -9772,7 +9813,7 @@ class _HeatmapWidget(QWidget):
                     kw["cmap"] = use_cmap
                 ax.scatter(bxs, bys, **kw)
 
-        # Density contours — fast histogram2d + Gaussian blur (GPU-accelerated if
+        # Density contours: fast histogram2d + Gaussian blur (GPU-accelerated if
         # CuPy is available, otherwise NumPy CPU path).  Replaces the old
         # gaussian_kde approach which scaled as O(n²) in the number of points.
         if show_kde and per_bid_xy:
@@ -9956,7 +9997,7 @@ class _HeatmapWidget(QWidget):
                     continue
                 # The "target_behavior" run contains bouts for ALL
                 # behaviors combined.  We must filter to the requested
-                # behavior to avoid misassigning bouts/colours.
+                # behavior to avoid misassigning bouts/colors.
                 if token == "target_behavior" and not df.empty:
                     if "behavior_id" in df.columns:
                         df = df[df["behavior_id"].astype(str) == bid]
@@ -10036,29 +10077,29 @@ class _HeatmapWidget(QWidget):
 
 
 # ======================================================================
-# Sub-tab 4 (new): Density Analysis — normalized density maps + group diff
+# Sub-tab 4 (new): Density Analysis, normalized density maps + group diff
 # ======================================================================
 
 import math as _math
 
 
 def _make_diverging_transparent_center_cmap(base_cmap_name: str) -> Any:
-    """Build a two-colour diverging colormap: colour_A → transparent → colour_B.
+    """Build a two-color diverging colormap: colour_A → transparent → colour_B.
 
     The root problem with standard diverging colormaps (RdBu_r, coolwarm …)
-    is that their RGB values are *desaturated / white* near the centre.  Even
-    at low alpha those pale colours produce grey blobs over a dark background.
+    is that their RGB values are *desaturated / white* near the center.  Even
+    at low alpha those pale colors produce gray blobs over a dark background.
 
     This version avoids that by **only ever using the fully-saturated endpoint
-    colours** for RGB.  The left half of the LUT always uses colour_A's RGB
+    colors** for RGB.  The left half of the LUT always uses colour_A's RGB
     (sampled at t=0.02) and the right half always uses colour_B's RGB (sampled
     at t=0.98).  The alpha channel follows a squared V-shape so only
     genuinely large differences are opaque; near-zero differences are
     completely invisible regardless of the underlying colormap.
 
     Result: red (or whatever colour_A is) fades cleanly to *transparent* at the
-    midpoint and then reappears as blue (colour_B) on the other side — no white,
-    no grey, no desaturated haze.
+    midpoint and then reappears as blue (colour_B) on the other side, no white,
+    no gray, no desaturated haze.
     """
     try:
         import matplotlib.pyplot as _plt
@@ -10069,14 +10110,14 @@ def _make_diverging_transparent_center_cmap(base_cmap_name: str) -> Any:
         t = np.linspace(0.0, 1.0, N)
 
         # Sample only the outer 2 % of the original cmap to get pure,
-        # fully-saturated colours uncontaminated by the white centre.
+        # fully-saturated colors uncontaminated by the white center.
         c_left  = np.array(base(0.02)[:3], dtype=np.float64)  # e.g. deep red
         c_right = np.array(base(0.98)[:3], dtype=np.float64)  # e.g. deep blue
 
         rgba = np.ones((N, 4), dtype=np.float64)
         mid = N // 2
-        rgba[:mid, :3] = c_left    # left half  → colour A (constant RGB)
-        rgba[mid:, :3] = c_right   # right half → colour B (constant RGB)
+        rgba[:mid, :3] = c_left    # left half  → color A (constant RGB)
+        rgba[mid:, :3] = c_right   # right half → color B (constant RGB)
 
         # V-shape alpha: exactly 0 at t=0.5, exactly 1 at t=0 and t=1.
         # Power 0.7 keeps moderate differences clearly visible; the curve
@@ -10142,7 +10183,7 @@ def _scale_xy_to_reference(
     the top-left corner and lets higher-resolution subjects overflow the arena.
     Mapping every session onto the reference resolution (the frame the background
     plate and axes use) aligns them.  Assumes the arena fills each frame the same
-    way, differing only in pixel sampling — the standard case for a fixed camera.
+    way, differing only in pixel sampling, the standard case for a fixed camera.
 
     Coordinates are returned unchanged when either resolution is unknown or the
     session already matches the reference.
@@ -10218,9 +10259,9 @@ class _DensityAnalysisWidget(QWidget):
     """Density-map analysis with per-group heatmaps and group-difference maps.
 
     Offers two sub-tabs:
-      • **Density Maps** – normalised KDE density maps, one subplot per
+      • **Density Maps**: normalized KDE density maps, one subplot per
         behavior, with optional per-group overlay mode.
-      • **Group Comparison** – signed or normalised difference map between
+      • **Group Comparison**: signed or normalized difference map between
         two user-selected groups (or factor-combination groups), rendered
         with a diverging colormap.
 
@@ -10275,7 +10316,7 @@ class _DensityAnalysisWidget(QWidget):
         self._dm_cache_meta: dict[str, Any] = {}
         self._density_manifest_cache: dict[str, Any] = {}
         self._density_session_source_cache: dict[str, dict[str, Any] | None] = {}
-        # Per-session native video resolution, used to normalise pose
+        # Per-session native video resolution, used to normalize pose
         # coordinates onto a common reference frame when pooling subjects
         # recorded at different resolutions.  Probed lazily, cached here.
         self._density_dims_cache: dict[str, tuple[int, int]] = {}
@@ -10419,7 +10460,7 @@ class _DensityAnalysisWidget(QWidget):
             shared = self._host._shared_bg_images.get("heatmap")
             if shared is None:
                 self._host._status.setText(
-                    "No Spatial Heatmap background yet — generate one on that tab first."
+                    "No Spatial Heatmap background yet: generate one on that tab first."
                 )
                 return None
             return self._resize_bg(shared.copy(), video_w, video_h)
@@ -10650,7 +10691,7 @@ class _DensityAnalysisWidget(QWidget):
         btn_row.addWidget(self._dm_settings_btn)
         btn_row.addStretch(1)
 
-        self._dm_stale_lbl = QLabel("⚠ Data changed — click Generate to recompute.")
+        self._dm_stale_lbl = QLabel("⚠ Data changed: click Generate to recompute.")
         self._dm_stale_lbl.setStyleSheet("color:#ffb300; font-size:9px; padding:1px 4px;")
         self._dm_stale_lbl.setVisible(False)
 
@@ -10748,7 +10789,7 @@ class _DensityAnalysisWidget(QWidget):
         # ── Group / behavior selectors ────────────────────────────────
         self._diff_factor_combo = QComboBox()
         self._diff_factor_combo.setToolTip(
-            "Select which grouping factor to use for labelling groups.\n"
+            "Select which grouping factor to use for labeling groups.\n"
             "Leave blank to use the top-level 'Group' assignment."
         )
         self._diff_factor_combo.addItem("(top-level group)", userData="")
@@ -10774,12 +10815,12 @@ class _DensityAnalysisWidget(QWidget):
         # ── Comparison metric ─────────────────────────────────────────
         self._diff_metric_combo = QComboBox()
         self._diff_metric_combo.addItem("Signed difference  (A − B)", userData="signed")
-        self._diff_metric_combo.addItem("Normalised diff  (A−B)/(A+B)", userData="normalized")
+        self._diff_metric_combo.addItem("Normalized diff  (A−B)/(A+B)", userData="normalized")
         self._diff_metric_combo.addItem("Log₂ ratio  log₂(A/B)", userData="log2ratio")
         self._diff_metric_combo.setToolTip(
             "How to compute the comparison between groups:\n"
             "• Signed: raw difference, values in [−1, +1] after peak-norm.\n"
-            "• Normalised: (A−B)/(A+B+ε), insensitive to absolute density.\n"
+            "• Normalized: (A−B)/(A+B+ε), insensitive to absolute density.\n"
             "• Log₂ ratio: highlights relative enrichment (0 = equal)."
         )
         idx_dm = self._diff_metric_combo.findData(self._settings["diff_metric"])
@@ -10800,10 +10841,10 @@ class _DensityAnalysisWidget(QWidget):
         self._diff_smooth_slider.setRange(0, 80)
         self._diff_smooth_slider.setValue(int(self._settings["diff_smooth_radius"]))
         self._diff_smooth_slider.setToolTip(
-            "Spatially average each group's density over a larger neighbourhood\n"
+            "Spatially average each group's density over a larger neighborhood\n"
             "before subtracting.  0 = raw resolution (sharp, patchy).  Larger\n"
             "values pool a wider area, merging small opposite-sign specks into the\n"
-            "surrounding trend — e.g. isolated blue spots inside a mostly-red\n"
+            "surrounding trend: e.g. isolated blue spots inside a mostly-red\n"
             "region blend into one red field.  Units are grid cells."
         )
         self._diff_smooth_lbl = QLabel(
@@ -10959,7 +11000,7 @@ class _DensityAnalysisWidget(QWidget):
         btn_row.addWidget(self._diff_settings_btn)
         btn_row.addStretch(1)
 
-        self._diff_stale_lbl = QLabel("⚠ Data changed — click Generate to recompute.")
+        self._diff_stale_lbl = QLabel("⚠ Data changed: click Generate to recompute.")
         self._diff_stale_lbl.setStyleSheet("color:#ffb300; font-size:9px; padding:1px 4px;")
         self._diff_stale_lbl.setVisible(False)
 
@@ -11466,7 +11507,7 @@ class _DensityAnalysisWidget(QWidget):
         normalize: str,
         threshold_pct: int,
     ) -> np.ndarray:
-        """Compute a normalised 2-D density grid using histogram2d + Gaussian blur.
+        """Compute a normalized 2-D density grid using histogram2d + Gaussian blur.
 
         Returns a float64 array of shape (grid_res_h, grid_res_w) with values
         in [0, 1], or zero-filled on failure.
@@ -11548,7 +11589,7 @@ class _DensityAnalysisWidget(QWidget):
         many frames spread across each source video and takes the *per-pixel
         temporal median*.  Because the animal occupies any given pixel only
         briefly, the median collapses to the static arena and the mouse blob
-        disappears — no explicit segmentation needed.  Returns RGB uint8 or
+        disappears, no explicit segmentation needed.  Returns RGB uint8 or
         None.
         """
         if bg_mode == "none" or not _ensure_cv2():
@@ -11652,7 +11693,7 @@ class _DensityAnalysisWidget(QWidget):
         if not _ensure_matplotlib() or self._density_figure is None:
             QMessageBox.warning(self, "Density Map", "Matplotlib is required.")
             return
-        self._host._status.setText("Computing density maps — please wait…")
+        self._host._status.setText("Computing density maps: please wait…")
         QTimer.singleShot(30, self._render_density)
 
     def _render_density(self) -> None:
@@ -11774,7 +11815,7 @@ class _DensityAnalysisWidget(QWidget):
         grid_h_fb = max(1, int(round(grid_res * video_h / max(video_w, 1))))
 
         # Compose the final background once (adjusted plate, custom image, or the
-        # Spatial Heatmap's shared background) — reused across every subplot.
+        # Spatial Heatmap's shared background): reused across every subplot.
         bg_render = self._compose_render_bg(bg_mode, bg_image, video_w, video_h)
 
         for r_idx, b in enumerate(behaviors):
@@ -11865,7 +11906,7 @@ class _DensityAnalysisWidget(QWidget):
             QMessageBox.warning(self, "Group Comparison",
                                 "Group A and Group B must be different.")
             return
-        self._host._status.setText("Computing group-comparison density map — please wait…")
+        self._host._status.setText("Computing group-comparison density map: please wait…")
         QTimer.singleShot(30, self._render_diff)
 
     def _render_diff(self) -> None:
@@ -12000,13 +12041,13 @@ class _DensityAnalysisWidget(QWidget):
             n_b  = cached_b.get("n_b", 0)
 
             # Optional extra spatial averaging: pool each group's density over a
-            # wider neighbourhood before subtracting, so small opposite-sign
+            # wider neighborhood before subtracting, so small opposite-sign
             # specks dissolve into the surrounding trend.  A broad hotspot keeps
             # its magnitude through a Gaussian blur (only its edges soften),
-            # while a small sharp peak spreads thin and fades — so an isolated
+            # while a small sharp peak spreads thin and fades, so an isolated
             # blue spot inside a mostly-red region blends into one red field.
-            # Do NOT re-normalise each field afterwards: that would rescale the
-            # faded speck straight back up and defeat the merge.  Display-only —
+            # Do NOT re-normalize each field afterwards: that would rescale the
+            # faded speck straight back up and defeat the merge.  Display-only,
             # operates on the cached grids, no recompute.
             if smooth_radius > 0:
                 from scipy.ndimage import gaussian_filter as _gf
@@ -12164,7 +12205,7 @@ class _DensityAnalysisWidget(QWidget):
         canvas_f.addRow("Initial height:", max_h_spin)
         canvas_f.addRow(_desc(
             "Starting canvas size in pixels.  The canvas is automatically resized "
-            "after plotting to match the rendered figure — these values only affect "
+            "after plotting to match the rendered figure: these values only affect "
             "the blank canvas shown before the first plot."
         ))
         canvas_f.addRow("Export DPI:", export_dpi_spin)
@@ -12403,7 +12444,7 @@ class _BehaviorMotifWidget(QWidget):
         self._tr_gap_spin.editingFinished.connect(self._sync_gap_to_settings)
         self._tr_norm_cb = QCheckBox("Probabilities")
         self._tr_norm_cb.setChecked(self._settings.normalize_rows)
-        self._tr_norm_cb.setToolTip("Row-normalised probabilities (checked) or raw counts (unchecked).")
+        self._tr_norm_cb.setToolTip("Row-normalized probabilities (checked) or raw counts (unchecked).")
         self._tr_norm_cb.toggled.connect(lambda _=None: self._render_transition_from_cache())
         self._tr_run_btn = QPushButton("Run")
         self._tr_run_btn.clicked.connect(self._run_transition)
@@ -12530,7 +12571,7 @@ class _BehaviorMotifWidget(QWidget):
             layout.addWidget(QLabel("Matplotlib is required."))
 
         self._tr_stats_text = ""
-        self._tr_stats_btn = QPushButton("\U0001f4ca View Stats\u2026")
+        self._tr_stats_btn = QPushButton("View Stats\u2026")
         self._tr_stats_btn.setToolTip("Show transition statistics and permutation-test p-values.")
         self._tr_stats_btn.clicked.connect(self._show_tr_stats_popup)
         self._tr_stats_btn.setEnabled(False)
@@ -12720,7 +12761,7 @@ class _BehaviorMotifWidget(QWidget):
             layout.addWidget(QLabel("Matplotlib is required."))
 
         self._mo_stats_text = ""
-        self._mo_stats_btn = QPushButton("\U0001f4ca View Stats\u2026")
+        self._mo_stats_btn = QPushButton("View Stats\u2026")
         self._mo_stats_btn.setToolTip("Show motif statistics and group comparison results.")
         self._mo_stats_btn.clicked.connect(self._show_mo_stats_popup)
         self._mo_stats_btn.setEnabled(False)
@@ -12782,7 +12823,7 @@ class _BehaviorMotifWidget(QWidget):
         )
         self._hmm_occ_combo.currentIndexChanged.connect(self._sync_hmm_occupancy_method)
         self._hmm_occ_combo.setToolTip(
-            "How the time a subject spent in each state is measured \u2014 the number"
+            "How the time a subject spent in each state is measured, the number"
             "\nthe occupancy bars and the group comparison are built from."
             "\n\n"
             "Viterbi (hard): the fraction of that subject's bouts that the single"
@@ -12795,7 +12836,7 @@ class _BehaviorMotifWidget(QWidget):
             "\noccupancy rather than counts. Each subject's states still sum to 1."
             "\n\n"
             "They differ most for a state built on a rare behavior. Viterbi"
-            "\ndecoding optimises the whole path at once, so visiting a state for"
+            "\ndecoding optimizes the whole path at once, so visiting a state for"
             "\none or two bouts pays the transition cost twice; when that outweighs"
             "\nthe emission gain the path stays where it is and the subject reports"
             "\nexactly 0.000 even though the behavior did occur. Posterior"
@@ -12803,7 +12844,7 @@ class _BehaviorMotifWidget(QWidget):
             "\n\n"
             "Choose Viterbi when the claim is about the discrete state sequence,"
             "\nPosterior when it is about how much evidence there is for each"
-            "\nstate \u2014 and when a run of hard zeros would be misread as absence."
+            "\nstate: and when a run of hard zeros would be misread as absence."
             "\n\n"
             "The ethogram, state bouts and latency views always use the Viterbi"
             "\npath, because a state bout has to be a definite interval."
@@ -12886,7 +12927,7 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_view_combo.setToolTip(
             "Choose which aspect of the HMM to visualize.\n\n"
             "'State ethogram' draws one row per subject with the session time "
-            "axis coloured by hidden state, so state sequences can be compared "
+            "axis colored by hidden state, so state sequences can be compared "
             "animal by animal.\n"
             "'Latency to enter each state' plots time from assay start to the "
             "first state bout lasting at least the Min dwell setting."
@@ -12899,7 +12940,7 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_export_csv_btn.clicked.connect(lambda: self._export_data_csv("hmm"))
         self._hmm_export_boutframes_btn = QPushButton("Export State Boutframes\u2026")
         self._hmm_export_boutframes_btn.setToolTip(
-            "Write the hidden states as a boutframes workbook \u2014 one sheet per "
+            "Write the hidden states as a boutframes workbook, one sheet per "
             "subject, one column per state, bout start frames in raw video\n"
             "frame numbering. Identical in shape to the behavior boutframes "
             "export, so TRACY reads it the same way and the state bouts land\n"
@@ -12909,7 +12950,7 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_export_boutframes_btn.clicked.connect(self._export_state_boutframes)
         self._hmm_export_ethogram_btn = QPushButton("Export Ethogram CSV\u2026")
         self._hmm_export_ethogram_btn.setToolTip(
-            "Write the state ethogram as a frame-by-frame matrix \u2014 one column\n"
+            "Write the state ethogram as a frame-by-frame matrix, one column\n"
             "per subject, one row per frame, each cell the state number for that\n"
             "frame. Frames no state bout covers are left blank, or given a state\n"
             "number of their own. Choose that, and assay-aligned\n"
@@ -12974,7 +13015,7 @@ class _BehaviorMotifWidget(QWidget):
             layout.addWidget(QLabel("Matplotlib required."))
 
         self._hmm_stats_text = ""
-        self._hmm_stats_btn = QPushButton("\U0001f4ca View HMM Stats\u2026")
+        self._hmm_stats_btn = QPushButton("View HMM Stats\u2026")
         self._hmm_stats_btn.setToolTip("Show HMM model parameters, AIC/BIC, and per-group state occupancy.")
         self._hmm_stats_btn.clicked.connect(self._show_hmm_stats_popup)
         self._hmm_stats_btn.setEnabled(False)
@@ -13441,7 +13482,7 @@ class _BehaviorMotifWidget(QWidget):
             if not groups_to_show and group_matrices:
                 groups_to_show = list(group_matrices.keys())
             if not groups_to_show:
-                # No groups — pool everything
+                # No groups: pool everything
                 if per_session:
                     stacked = np.stack(list(per_session.values()), axis=0)
                     mean_mat = stacked.mean(axis=0)
@@ -13455,7 +13496,7 @@ class _BehaviorMotifWidget(QWidget):
                 ax.set_yticks(range(n)); ax.set_yticklabels(bnames, fontsize=9)
                 ax.set_xlabel("Second behavior (to)", fontsize=9)
                 ax.set_ylabel("First behavior (from)", fontsize=9)
-                ax.set_title(f"Transition Matrix \u2014 Pooled (max gap={gap_s:.1f}s)", fontsize=11)
+                ax.set_title(f"Transition Matrix: Pooled (max gap={gap_s:.1f}s)", fontsize=11)
                 _annotate(ax, dm, vmax)
             else:
                 ncols = min(len(groups_to_show), 4)
@@ -13617,7 +13658,7 @@ class _BehaviorMotifWidget(QWidget):
             max_h = int(mgs_ff.get("max_h", 450))
             _force_fit_canvas(self._tr_canvas, self._tr_fig, max_w, max_h)
         elif view == "bar":
-            # A grouped bar chart shouldn't grow taller than the visible area —
+            # A grouped bar chart shouldn't grow taller than the visible area,
             # cap the height to the viewport so a wide window doesn't balloon it
             # into a scroll-only figure. (Matrix/heatmap views keep their aspect.)
             _autofill_canvas(
@@ -13640,7 +13681,7 @@ class _BehaviorMotifWidget(QWidget):
         style: str = "pooled",
         selected_groups: list[str] | None = None,
     ) -> None:
-        """Draw directed network/chord diagrams — pooled or one per group."""
+        """Draw directed network/chord diagrams: pooled or one per group."""
         bnames: list[str] = result["bnames"]
         n = len(bnames)
         per_session: dict[str, Any] = result.get("per_session", {})
@@ -14378,7 +14419,7 @@ class _BehaviorMotifWidget(QWidget):
                                    color="white", edgecolors=color, linewidths=0.8,
                                    s=22, zorder=5)
 
-        # Significance stars — drawn above the tallest bar+error across all groups
+        # Significance stars: drawn above the tallest bar+error across all groups
         _show_stats = mgs.get("show_stats", True)
         for xi, it in enumerate(items):
             if not _show_stats:
@@ -14558,7 +14599,7 @@ class _BehaviorMotifWidget(QWidget):
                         fontweight="bold", clip_on=False,
                     )
             else:
-                # No groups — just show the total count as text overlay on block panel
+                # No groups: just show the total count as text overlay on block panel
                 ax_block.text(
                     0.99, 0.08, f"\u00d7{it['total']}",
                     ha="right", va="bottom", transform=ax_block.transAxes,
@@ -14570,7 +14611,7 @@ class _BehaviorMotifWidget(QWidget):
         for src in ("ngram_agg_results", "ngram_group_results"):
             data_dict = result.get(src, {})
             for n_val, items in sorted(data_dict.items()):
-                lines.append(f"\u2014\u2014 {n_val}-grams \u2014\u2014")
+                lines.append(f"-- {n_val}-grams --")
                 for it in items[:20]:
                     sig = "*" if it.get("pval", 1.0) < 0.05 else ""
                     means_str = "  ".join(
@@ -14628,7 +14669,7 @@ class _BehaviorMotifWidget(QWidget):
                 labels = labels[keep_indices]
                 session_ids = [session_ids[i] for i in keep_indices]
 
-        # Colour by group first; fall back to cluster label if no groups
+        # Color by group first; fall back to cluster label if no groups
         groups = sorted({g for g in session_groups.values() if g})
         group_color: dict[str, str] = {g: _PALETTE[gi % len(_PALETTE)] for gi, g in enumerate(groups)}
         cluster_color: dict[int, str] = {}
@@ -14695,7 +14736,7 @@ class _BehaviorMotifWidget(QWidget):
         n_cl = cr.get("n_clusters", "?")
         dim_note = "UMAP" if embedding.shape[0] > 4 else "PCA"
         ax.set_title(
-            f"Session Motif Landscape \u2014 {dim_note} ({n_cl} density clusters)\n"
+            f"Session Motif Landscape: {dim_note} ({n_cl} density clusters)\n"
             f"Each point = one session. Points close together share similar motif profiles.",
             fontsize=gs["title_fontsize"],
         )
@@ -14705,7 +14746,7 @@ class _BehaviorMotifWidget(QWidget):
         if len(session_ids) < 8:
             ax.text(
                 0.01, 0.01,
-                f"Note: only {len(session_ids)} sessions — UMAP may not be meaningful with so few points. "
+                f"Note: only {len(session_ids)} sessions, UMAP may not be meaningful with so few points. "
                 "Add more sessions or use n-gram views instead.",
                 transform=ax.transAxes,
                 fontsize=7, color="#ffcc80", va="bottom", wrap=True,
@@ -14912,7 +14953,7 @@ class _BehaviorMotifWidget(QWidget):
                             - all_v[p][n1:].mean()
                         ) >= obs
                     )
-                    # (b + 1) / (m + 1): the observed labelling is one of the
+                    # (b + 1) / (m + 1): the observed labeling is one of the
                     # possible arrangements, and a p-value of exactly 0 is not
                     # valid (Phipson & Smyth 2010).
                     pvals[st] = (count + 1) / (settings_snap.n_permutations + 1)
@@ -14958,7 +14999,7 @@ class _BehaviorMotifWidget(QWidget):
         bids, _bnames, _map = self._get_behavior_ids_and_names()
         if len(bids) < 2:
             self._status_lbl.setText(
-                "Select at least two behaviors \u2014 a one-symbol sequence carries no "
+                "Select at least two behaviors: a one-symbol sequence carries no "
                 "transition structure to model."
             )
             return
@@ -14996,7 +15037,7 @@ class _BehaviorMotifWidget(QWidget):
             lambda: calibrate_hmm_settings(
                 sequences, bids, settings_snap,
                 progress_cb=lambda msg, frac: worker.signals.line_emitted.emit(
-                    "Calibrating \u2014 %s (%d%%)" % (msg, int(frac * 100))
+                    "Calibrating: %s (%d%%)" % (msg, int(frac * 100))
                 ),
             )
         )
@@ -15123,7 +15164,7 @@ class _BehaviorMotifWidget(QWidget):
 
         dlg.exec()
         if not outcome["apply"]:
-            self._status_lbl.setText("Calibration complete \u2014 no settings changed.")
+            self._status_lbl.setText("Calibration complete: no settings changed.")
             return
 
         for key, val in proposed.items():
@@ -15158,7 +15199,7 @@ class _BehaviorMotifWidget(QWidget):
         saved_note = ""
         if self._project_root is not None:
             if save_hmm_result(self._project_root, result) is None:
-                saved_note = " — could not be saved, so it will need re-running next time"
+                saved_note = ", could not be saved, so it will need re-running next time"
             else:
                 saved_note = " and saved"
         self._status_lbl.setText(
@@ -15402,7 +15443,7 @@ class _BehaviorMotifWidget(QWidget):
                 best_idx = int(np.argmin(crit_vals))
                 best_n = model_sel[best_idx]["n_states"]
                 criterion_reason = (
-                    f" \u2014 selected N={best_n} because it has the lowest {sel_criterion} "
+                    f". Selected N={best_n} because it has the lowest {sel_criterion} "
                     f"({crit_vals[best_idx]:.1f}). Lower {sel_criterion} = better balance of "
                     f"model fit vs. complexity."
                 )
@@ -15414,14 +15455,14 @@ class _BehaviorMotifWidget(QWidget):
             stamp = f" (fitted {saved_at} UTC)" if saved_at else ""
             if cache_state == "stale":
                 lines += [
-                    "STALE SAVED FIT — the bouts, behaviors, sessions or fit settings",
+                    "STALE SAVED FIT: the bouts, behaviors, sessions or fit settings",
                     "have changed since this was fitted. The figures below describe the",
                     "older data. Click Run HMM to re-fit against what is loaded now.",
                     "",
                 ]
             elif cache_state == "current":
                 lines += [
-                    f"Saved fit restored{stamp} — its inputs match the data loaded now, "
+                    f"Saved fit restored{stamp}, its inputs match the data loaded now, "
                     "so no re-fit is needed.",
                     "",
                 ]
@@ -15439,7 +15480,7 @@ class _BehaviorMotifWidget(QWidget):
             "",
             "AIC/BIC graph: Each line shows the information criterion at different state "
             "counts. Lower = better model. The dashed vertical line marks the selected N. "
-            "AIC rewards fit more; BIC penalises complexity more heavily. "
+            "AIC rewards fit more; BIC penalizes complexity more heavily. "
             "Use 'Emission heatmap' to see what each hidden state represents "
             "(which behaviors it emits). Use 'State occupancy' to compare how much "
             "time each group spends in each state.",
@@ -15506,7 +15547,7 @@ class _BehaviorMotifWidget(QWidget):
             min_dwell = float(result.get("min_dwell_s", 0.0))
             lines.append(
                 f"\nLatency to first entry (min dwell "
-                f"{min_dwell:g}s{' — every entry counts' if min_dwell <= 0 else ''}):"
+                f"{min_dwell:g}s{', every entry counts' if min_dwell <= 0 else ''}):"
             )
             lat_arr = np.array([r["latency_s"] for r in latency.values()], dtype=float)
             entered = np.array([r["entered"] for r in latency.values()], dtype=bool)
@@ -15530,7 +15571,7 @@ class _BehaviorMotifWidget(QWidget):
     def _current_hmm_fingerprint(self) -> str:
         """Fingerprint of the data and settings a fit would use right now.
 
-        Returns ``""`` when there is nothing to fit — the caller then makes no
+        Returns ``""`` when there is nothing to fit, the caller then makes no
         staleness claim either way, rather than reporting a mismatch against an
         empty dataset.
         """
@@ -15581,7 +15622,7 @@ class _BehaviorMotifWidget(QWidget):
             return ""
         state = self._hmm_cache_state()
         if state == "stale":
-            return " — STALE: the bouts, behaviors or settings changed since it was fitted"
+            return ": STALE: the bouts, behaviors or settings changed since it was fitted"
         saved_at = str(self._hmm_result.get("saved_at") or "")[:16].replace("T", " ")
         stamp = f" (fitted {saved_at} UTC)" if saved_at else ""
         return stamp if state == "current" else f"{stamp}, not checked against the current data"
@@ -15594,8 +15635,8 @@ class _BehaviorMotifWidget(QWidget):
         Deliberately not ``_GraphsWidget._session_analysis_end_s``: that helper
         returns the raw video duration when a pose file is available but the
         rebased bout extent when one is not, and the two differ by the prechop.
-        The ethogram and the latency denominator need one consistent clock —
-        the same rebased one the state bouts are in — so the prechop is taken
+        The ethogram and the latency denominator need one consistent clock,
+        the same rebased one the state bouts are in, so the prechop is taken
         off the pose length explicitly here.
         """
         try:
@@ -15636,7 +15677,7 @@ class _BehaviorMotifWidget(QWidget):
         return rows
 
     def _render_state_ethogram(self, result: dict[str, Any], gs: dict) -> None:
-        """One row per subject; session time coloured by hidden state.
+        """One row per subject; session time colored by hidden state.
 
         Draws the *state bouts* (runs of consecutive bouts sharing a state),
         not the individual behavior bouts, so a row shows how an animal moved
@@ -15650,7 +15691,7 @@ class _BehaviorMotifWidget(QWidget):
         state_bouts: dict[str, list[dict]] = result.get("state_bouts", {}) or {}
         rows = self._hmm_ordered_sessions(result)
         if not rows or n_states <= 0:
-            ax.text(0.5, 0.5, "No state bouts to draw — run the HMM first.",
+            ax.text(0.5, 0.5, "No state bouts to draw: run the HMM first.",
                     ha="center", va="center", transform=ax.transAxes)
             return
 
@@ -15663,9 +15704,9 @@ class _BehaviorMotifWidget(QWidget):
                 end_s = max((float(b["end_s"]) for b in state_bouts.get(sid, [])), default=0.0)
             max_x = max(max_x, end_s)
             # Session backdrop: makes the stretches with no bouts at all read
-            # as unmodelled rather than as whatever state happens to be
-            # adjacent — the HMM makes no claim about those.  Neutral grey, so
-            # it never competes with a state colour for the reader's attention.
+            # as unmodeled rather than as whatever state happens to be
+            # adjacent: the HMM makes no claim about those.  Neutral gray, so
+            # it never competes with a state color for the reader's attention.
             if end_s > 0:
                 ax.broken_barh([(0.0, end_s)], (y - bar_h / 2, bar_h),
                                facecolors=_ETHOGRAM_GAP_COLOR, edgecolors="none",
@@ -15728,7 +15769,7 @@ class _BehaviorMotifWidget(QWidget):
         n_states = int(result.get("n_states", 0))
         latency: dict[str, dict] = result.get("state_latency", {}) or {}
         if not latency or n_states <= 0:
-            ax.text(0.5, 0.5, "No latency data — run the HMM first.",
+            ax.text(0.5, 0.5, "No latency data: run the HMM first.",
                     ha="center", va="center", transform=ax.transAxes)
             return
 
@@ -15798,7 +15839,7 @@ class _BehaviorMotifWidget(QWidget):
         ax.tick_params(labelsize=gs["tick_fontsize"])
         if groups != [""]:
             ax.legend(fontsize="x-small")
-        # Only annotate censoring when there is some — an unconditional caption
+        # Only annotate censoring when there is some: an unconditional caption
         # would imply missing animals in every dataset.
         if any(int(c.sum()) for c in censored.values()):
             ax.set_xlabel(
@@ -15810,7 +15851,7 @@ class _BehaviorMotifWidget(QWidget):
         """Ask how to number the rows and what to put in stateless frames.
 
         Returns ``(raw_video_frames, no_state_value)``, or ``None`` if the user
-        cancelled.  Both choices change what the numbers in the file mean, so
+        canceled.  Both choices change what the numbers in the file mean, so
         neither can be guessed: the two frame clocks disagree by the per-session
         prechop, and a "no state" code is a number a reader could otherwise
         mistake for a state.
@@ -15828,12 +15869,12 @@ class _BehaviorMotifWidget(QWidget):
 
         clock_box = QGroupBox("Frame numbering")
         clock_v = QVBoxLayout(clock_box)
-        aligned_rb = QRadioButton("Assay-aligned \u2014 frame 0 is the assay start for every subject")
+        aligned_rb = QRadioButton("Assay-aligned: frame 0 is the assay start for every subject")
         aligned_rb.setToolTip(
             "The ethogram's own axis: a row is the same moment in every column, "
             "so subjects can be compared row by row."
         )
-        raw_rb = QRadioButton("Raw video frames \u2014 each subject keeps its own video numbering")
+        raw_rb = QRadioButton("Raw video frames: each subject keeps its own video numbering")
         raw_rb.setToolTip(
             "Matches the state boutframes export and TRACY. Columns are no longer "
             "aligned in time with each other, and pre-assay frames stay blank."
@@ -15855,7 +15896,7 @@ class _BehaviorMotifWidget(QWidget):
         gap_v.addWidget(blank_rb)
         gap_v.addWidget(code_rb)
         gap_note = QLabel(
-            "Frames outside a subject's own recording stay blank either way \u2014 "
+            "Frames outside a subject's own recording stay blank either way, "
             "nothing was observed there to call stateless."
         )
         gap_note.setWordWrap(True)
@@ -15985,7 +16026,7 @@ class _BehaviorMotifWidget(QWidget):
             for sid in set(chosen_bouts) | set(null_bouts)
         }
         # Prechop offsets go back on here: _raw_bouts is rebased so frame 0 is
-        # test onset, but TRACY aligns on raw video frames — the same numbering
+        # test onset, but TRACY aligns on raw video frames, the same numbering
         # the behavior boutframes and ABELposition exports use.
         intervals = state_bouts_to_frames(
             merged_bouts,
@@ -16076,7 +16117,7 @@ class _BehaviorMotifWidget(QWidget):
         layout = QVBoxLayout(dlg)
         te = QTextEdit(dlg)
         te.setReadOnly(True)
-        te.setPlainText(text or "(No results yet — run analysis first.)")
+        te.setPlainText(text or "(No results yet: run analysis first.)")
         te.setStyleSheet(
             "QTextEdit{background:#0A1929;color:#cfd8dc;font-family:Consolas,monospace;"
             "font-size:11px;border:1px solid #1E3A5F;border-radius:4px;}"
@@ -16423,7 +16464,7 @@ class _BehaviorMotifWidget(QWidget):
         )
         form.addRow("Transition p-value correction:", corr_combo)
 
-        form.addRow(QLabel("\u2014\u2014 N-gram \u2014\u2014"))
+        form.addRow(QLabel("-- N-gram --"))
         min_n_spin = QSpinBox(dlg); min_n_spin.setRange(2, 10); min_n_spin.setValue(s.ngram_min_n)
         form.addRow("Min N:", min_n_spin)
         max_n_spin = QSpinBox(dlg); max_n_spin.setRange(2, 10); max_n_spin.setValue(s.ngram_max_n)
@@ -16433,7 +16474,7 @@ class _BehaviorMotifWidget(QWidget):
         min_count_spin = QSpinBox(dlg); min_count_spin.setRange(1, 100); min_count_spin.setValue(s.min_ngram_count)
         form.addRow("Min motif count:", min_count_spin)
 
-        form.addRow(QLabel("\u2014\u2014 Sequence Clustering \u2014\u2014"))
+        form.addRow(QLabel("-- Sequence Clustering --"))
         cluster_n_spin = QSpinBox(dlg); cluster_n_spin.setRange(2, 8); cluster_n_spin.setValue(s.cluster_ngram_n)
         form.addRow("Cluster n-gram size:", cluster_n_spin)
         umap_nn_spin = QSpinBox(dlg); umap_nn_spin.setRange(2, 50); umap_nn_spin.setValue(s.umap_n_neighbors)
@@ -16441,7 +16482,7 @@ class _BehaviorMotifWidget(QWidget):
         hdbscan_mcs_spin = QSpinBox(dlg); hdbscan_mcs_spin.setRange(2, 20); hdbscan_mcs_spin.setValue(s.hdbscan_min_cluster_size)
         form.addRow("HDBSCAN min cluster:", hdbscan_mcs_spin)
 
-        form.addRow(QLabel("\u2014\u2014 HMM \u2014\u2014"))
+        form.addRow(QLabel("-- HMM --"))
         hmm_min_spin = QSpinBox(dlg); hmm_min_spin.setRange(2, 20); hmm_min_spin.setValue(s.hmm_n_states_min)
         form.addRow("N states min:", hmm_min_spin)
         hmm_max_spin = QSpinBox(dlg); hmm_max_spin.setRange(2, 20); hmm_max_spin.setValue(s.hmm_n_states_max)
@@ -16450,7 +16491,7 @@ class _BehaviorMotifWidget(QWidget):
         form.addRow("HMM iterations:", hmm_iter_spin)
         hmm_restart_spin = QSpinBox(dlg); hmm_restart_spin.setRange(1, 50); hmm_restart_spin.setValue(s.hmm_n_restarts)
         hmm_restart_spin.setToolTip(
-            "Random EM initialisations per state count; the best log-likelihood is kept.\n"
+            "Random EM initializations per state count; the best log-likelihood is kept.\n"
             "EM finds local optima, so too few restarts can report a worse fit for one\n"
             "state count than another and distort the criterion curve.\n"
             "Auto-calibrate measures the hit rate and sets this for you."
@@ -16463,15 +16504,15 @@ class _BehaviorMotifWidget(QWidget):
         _crit_idx = hmm_crit_combo.findData(str(s.hmm_criterion or "bic").lower())
         hmm_crit_combo.setCurrentIndex(_crit_idx if _crit_idx >= 0 else 1)
         hmm_crit_combo.setToolTip(
-            "ICL = BIC plus twice the posterior-assignment entropy; it penalises states\n"
+            "ICL = BIC plus twice the posterior-assignment entropy; it penalizes states\n"
             "that are not cleanly separable. AIC and BIC are known to over-select states\n"
-            "for behavioural sequence data (Pohle et al. 2017, JABES 22:270-293).\n"
+            "for behavioral sequence data (Pohle et al. 2017, JABES 22:270-293).\n"
             "AICc adds the small-sample correction to AIC."
         )
         form.addRow("Selection criterion:", hmm_crit_combo)
         hmm_seed_spin = QSpinBox(dlg); hmm_seed_spin.setRange(0, 999999); hmm_seed_spin.setValue(int(getattr(s, "hmm_random_seed", 0)))
         hmm_seed_spin.setToolTip(
-            "Seed for EM initialisation. Fixed so the same data and settings always\n"
+            "Seed for EM initialization. Fixed so the same data and settings always\n"
             "reproduce the same state count and the same state numbering."
         )
         form.addRow("HMM random seed:", hmm_seed_spin)
@@ -16541,7 +16582,7 @@ class _BehaviorMotifWidget(QWidget):
     ) -> set[str] | None:
         """Prompt the user to choose which relationship rows to export.
 
-        Returns selected relationship labels, or ``None`` if cancelled.
+        Returns selected relationship labels, or ``None`` if canceled.
         """
         rels = sorted({str(r) for r in relationships if str(r).strip()})
         if not rels:
@@ -16868,7 +16909,7 @@ class _BehaviorMotifWidget(QWidget):
 
 class _SessionSectionsWidget(QWidget):
     """Divide each session into user-defined named time sections and
-    analyse behavior count / duration within each section.
+    analyze behavior count / duration within each section.
 
     Sections are defined by a name and a duration in seconds and are
     applied sequentially from t=0 of the (prechop-adjusted) session.
@@ -16876,7 +16917,7 @@ class _SessionSectionsWidget(QWidget):
     Two chart styles are available:
     • By Section (bar)  – average count/duration per section, one
                           subplot per behavior.
-    • Across Sections (line) – trend line showing how each behavior
+    • Across Sections (line): trend line showing how each behavior
                                changes from section to section.
     """
 
@@ -17039,7 +17080,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 2", "duration": 60},
                 {"name": "Tone 3", "duration": 15},
                 {"name": "ITI 3", "duration": 60},
-                {"name": "Tone 4 (Shock)", "duration": 15},
+                {"name": "Tone 4", "duration": 15},
+                {"name": "Shock 4", "duration": 2},
                 {"name": "ITI 4", "duration": 60},
                 {"name": "Tone 5", "duration": 15},
                 {"name": "ITI 5", "duration": 60},
@@ -17057,7 +17099,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 11", "duration": 60},
                 {"name": "Tone 12", "duration": 15},
                 {"name": "ITI 12", "duration": 60},
-                {"name": "Tone 13 (Shock)", "duration": 15},
+                {"name": "Tone 13", "duration": 15},
+                {"name": "Shock 13", "duration": 2},
                 {"name": "ITI 13", "duration": 60},
                 {"name": "Tone 14", "duration": 15},
                 {"name": "ITI 14", "duration": 60},
@@ -17083,7 +17126,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 24", "duration": 60},
                 {"name": "Tone 25", "duration": 15},
                 {"name": "ITI 25", "duration": 60},
-                {"name": "Tone 26 (Shock)", "duration": 15},
+                {"name": "Tone 26", "duration": 15},
+                {"name": "Shock 26", "duration": 2},
                 {"name": "ITI 26", "duration": 60},
                 {"name": "Tone 27", "duration": 15},
                 {"name": "ITI 27", "duration": 60},
@@ -17093,7 +17137,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 29", "duration": 60},
                 {"name": "Tone 30", "duration": 15},
                 {"name": "ITI 30", "duration": 60},
-                {"name": "Tone 31 (Shock)", "duration": 15},
+                {"name": "Tone 31", "duration": 15},
+                {"name": "Shock 31", "duration": 2},
                 {"name": "ITI 31", "duration": 60},
                 {"name": "Tone 32", "duration": 15},
                 {"name": "ITI 32", "duration": 60},
@@ -17121,7 +17166,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 43", "duration": 60},
                 {"name": "Tone 44", "duration": 15},
                 {"name": "ITI 44", "duration": 60},
-                {"name": "Tone 45 (Shock)", "duration": 15},
+                {"name": "Tone 45", "duration": 15},
+                {"name": "Shock 45", "duration": 2},
                 {"name": "ITI 45", "duration": 60},
                 {"name": "Tone 46", "duration": 15},
                 {"name": "ITI 46", "duration": 60},
@@ -17143,7 +17189,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 1", "duration": 60},
                 {"name": "Tone 2", "duration": 15},
                 {"name": "ITI 2", "duration": 60},
-                {"name": "Tone 3 (Shock)", "duration": 15},
+                {"name": "Tone 3", "duration": 15},
+                {"name": "Shock 3", "duration": 2},
                 {"name": "ITI 3", "duration": 60},
                 {"name": "Tone 4", "duration": 15},
                 {"name": "ITI 4", "duration": 60},
@@ -17159,7 +17206,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 9", "duration": 60},
                 {"name": "Tone 10", "duration": 15},
                 {"name": "ITI 10", "duration": 60},
-                {"name": "Tone 11 (Shock)", "duration": 15},
+                {"name": "Tone 11", "duration": 15},
+                {"name": "Shock 11", "duration": 2},
                 {"name": "ITI 11", "duration": 60},
                 {"name": "Tone 12", "duration": 15},
                 {"name": "ITI 12", "duration": 60},
@@ -17179,7 +17227,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 19", "duration": 60},
                 {"name": "Tone 20", "duration": 15},
                 {"name": "ITI 20", "duration": 60},
-                {"name": "Tone 21 (Shock)", "duration": 15},
+                {"name": "Tone 21", "duration": 15},
+                {"name": "Shock 21", "duration": 2},
                 {"name": "ITI 21", "duration": 60},
                 {"name": "Tone 22", "duration": 15},
                 {"name": "ITI 22", "duration": 60},
@@ -17207,7 +17256,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 33", "duration": 60},
                 {"name": "Tone 34", "duration": 15},
                 {"name": "ITI 34", "duration": 60},
-                {"name": "Tone 35 (Shock)", "duration": 15},
+                {"name": "Tone 35", "duration": 15},
+                {"name": "Shock 35", "duration": 2},
                 {"name": "ITI 35", "duration": 60},
                 {"name": "Tone 36", "duration": 15},
                 {"name": "ITI 36", "duration": 60},
@@ -17221,7 +17271,8 @@ class _SessionSectionsWidget(QWidget):
                 {"name": "ITI 40", "duration": 60},
                 {"name": "Tone 41", "duration": 15},
                 {"name": "ITI 41", "duration": 60},
-                {"name": "Tone 42 (Shock)", "duration": 15},
+                {"name": "Tone 42", "duration": 15},
+                {"name": "Shock 42", "duration": 2},
                 {"name": "ITI 42", "duration": 60},
                 {"name": "Tone 43", "duration": 15},
                 {"name": "ITI 43", "duration": 60},
@@ -17475,7 +17526,7 @@ class _SessionSectionsWidget(QWidget):
         self._ss_facet_controls: dict[str, str] = {}
         self._facet = _FacetControls("Group by:")
         self._facet.setToolTip(
-            "For each factor choose — combine —, — split —, or a specific level.\n"
+            "For each factor choose (combine), (split), or a specific level.\n"
             "Split two or more factors to plot their interaction."
         )
         self._facet.changed.connect(self._on_facets_changed)
@@ -17766,7 +17817,7 @@ class _SessionSectionsWidget(QWidget):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([340, 1000])
         # Kept as attributes so showEvent can re-pin the controls width once the
-        # widget has real geometry — at construction the hard-coded 340 px clips
+        # widget has real geometry: at construction the hard-coded 340 px clips
         # the wider control rows (preset Save/Delete, Heatmap toggle, the
         # Duration column, the All/None buttons) behind a horizontal scrollbar.
         self._sec_splitter = splitter
@@ -17814,7 +17865,7 @@ class _SessionSectionsWidget(QWidget):
         self._preset_combo.blockSignals(True)
         current = self._preset_combo.currentText()
         self._preset_combo.clear()
-        self._preset_combo.addItem("— select a preset —")
+        self._preset_combo.addItem("(select a preset)")
         for p in self._BUILTIN_PRESETS:
             self._preset_combo.addItem(p["name"])
         for p in self._custom_presets:
@@ -18295,7 +18346,7 @@ class _SessionSectionsWidget(QWidget):
 
         One pivot replaces the per-session × per-section boolean scans the draw
         routines used to run: with a 101-section preset across 80 sessions that
-        was ~16 000 full-column comparisons per behaviour, which froze the UI
+        was ~16 000 full-column comparisons per behavior, which froze the UI
         for tens of seconds.  Missing (session, section) pairs stay NaN so the
         callers can tell "no data" (excluded from group means) from a real 0.
         """
@@ -18318,7 +18369,7 @@ class _SessionSectionsWidget(QWidget):
 
         ``ax.bar`` adds one patch per bar and re-derives the data limits for
         each; at 101 sections × 80 sessions that alone cost ~20 s per redraw.
-        The geometry, colour and legend entry are the same — only the artist
+        The geometry, color and legend entry are the same, only the artist
         count changes (one per series instead of one per bar).
         """
         from matplotlib.collections import PolyCollection
@@ -18731,8 +18782,8 @@ class _SessionSectionsWidget(QWidget):
     ) -> None:
         """Add the shared group legend and run tight_layout.
 
-        When the subplot grid leaves empty cells (e.g. 4 behaviours in a 3×2
-        grid), drop the legend into that genuinely empty bottom-right region —
+        When the subplot grid leaves empty cells (e.g. 4 behaviors in a 3×2
+        grid), drop the legend into that genuinely empty bottom-right region,
         ``tight_layout`` never expands axes into empty grid cells, so the legend
         cannot be overrun (unlike the reserved-right-margin strip, which
         ``_autofill_canvas``'s re-run of plain ``tight_layout`` would overlap).
@@ -18749,7 +18800,7 @@ class _SessionSectionsWidget(QWidget):
         empty_cells = ncols - filled_last_row if nrows >= 1 else 0
 
         if empty_cells >= 1:
-            # Centre of the empty cells in the last (bottom) row, figure coords.
+            # Center of the empty cells in the last (bottom) row, figure coords.
             x_center = (filled_last_row + ncols) / 2.0 / ncols
             y_center = (0.5 / nrows)
             self._figure.legend(
@@ -19261,7 +19312,7 @@ class _SessionSectionsWidget(QWidget):
                         out[i] = dur
             return out
 
-        # Choose a colourmap that works on both light and dark backgrounds
+        # Choose a colormap that works on both light and dark backgrounds
         _bg = fig_bg.strip().lstrip("#")
         try:
             _r = int(_bg[0:2], 16)
@@ -19546,9 +19597,9 @@ class _SessionSectionsWidget(QWidget):
     def _export_data(self) -> None:
         """Export the section data as an Excel workbook (or a long CSV).
 
-        The workbook opens on one Prism-ready sheet per metric — rows are
+        The workbook opens on one Prism-ready sheet per metric, rows are
         sections in timeline order, columns are subjects, one block per
-        behavior — followed by the long table and a README describing the
+        behavior, followed by the long table and a README describing the
         layout and the view settings that produced it.
         """
         prepared = self._prepare_export_frame()
@@ -19857,7 +19908,7 @@ class _SessionSectionsWidget(QWidget):
 # Sub-tab 7: Velocity During Behavior
 # ======================================================================
 
-# Number of normalised time-points used for the Profile chart.
+# Number of normalized time-points used for the Profile chart.
 _N_NORM_POINTS: int = 50
 
 
@@ -19866,10 +19917,10 @@ class _SocialInteractionWidget(QWidget):
 
     Two views over the per-frame ``social_*`` features:
 
-    * **Summary** — per (subject, session) dyadic metrics: mean inter-animal
+    * **Summary**: per (subject, session) dyadic metrics: mean inter-animal
       distance, time in contact, contact bouts, net approach, advance/yield
       balance, and orientation.
-    * **Dominance (HMM)** — a Gaussian HMM fit over continuous social + movement
+    * **Dominance (HMM)**: a Gaussian HMM fit over continuous social + movement
       features (pooled across the cohort so states are comparable), from which a
       spatial-displacement dominance score is derived per subject: the animal
       that advances into the other's space while the other yields ranks as more
@@ -20020,7 +20071,7 @@ class _SocialInteractionWidget(QWidget):
             return "yes" if value else ""
         if isinstance(value, float):
             if not np.isfinite(value):
-                return "—"
+                return "-"
             return f"{value:.3f}"
         return str(value)
 
@@ -20098,7 +20149,7 @@ class _SocialInteractionWidget(QWidget):
         lines: list[str] = []
         inter = set(res.get("interaction_states", []))
         lines.append("Latent-state feature profiles (raw means):")
-        lines.append(f"Interaction states (close proximity): {sorted(inter) or '—'}")
+        lines.append(f"Interaction states (close proximity): {sorted(inter) or '-'}")
         lines.append("")
         feats = res.get("feature_cols", [])
         for state, prof in sorted(res.get("state_profiles", {}).items()):
@@ -20106,7 +20157,7 @@ class _SocialInteractionWidget(QWidget):
             lines.append(f"State {state}{tag}:")
             for f in feats:
                 v = prof.get(f, float("nan"))
-                vs = f"{v:.3f}" if isinstance(v, float) and np.isfinite(v) else "—"
+                vs = f"{v:.3f}" if isinstance(v, float) and np.isfinite(v) else "-"
                 lines.append(f"    {f}: {vs}")
             lines.append("")
         lines.append(
@@ -20122,16 +20173,16 @@ class _VelocityWidget(QWidget):
 
     Five chart types are available via toggle buttons:
 
-    Summary      — Bar chart of mean/peak velocity per session or group.
-    Profile      — Time-normalised velocity profile (0–100 % of bout
+    Summary        Bar chart of mean/peak velocity per session or group.
+    Profile        Time-normalized velocity profile (0–100 % of bout
                    duration), averaged across bouts ± SEM/SD/CI.
                    Reveals whether animals accelerate or decelerate.
-    Bout Sequence— Velocity vs sequential bout index within each session.
+    Bout Sequence  Velocity vs sequential bout index within each session.
                    First-N bouts are highlighted in blue, last-N in red.
-    Distribution — Box plot of per-bout mean/peak velocities.
-    First vs Last— Paired bar chart: first-N vs last-N bouts per
+    Distribution   Box plot of per-bout mean/peak velocities.
+    First vs Last  Paired bar chart: first-N vs last-N bouts per
                    session/group, for detecting habituation or
-                   sensitisation.
+                   sensitization.
     """
 
     _BTN_STYLE = (
@@ -20207,7 +20258,7 @@ class _VelocityWidget(QWidget):
         self._chart_grp.idClicked.connect(lambda _: self._update())
         self._chart_grp.idClicked.connect(lambda _: self._on_chart_type_toggled())
 
-        # ── Profile normalisation toggle (shown only for Profile chart) ─
+        # ── Profile normalization toggle (shown only for Profile chart) ─
         norm_opts = [
             ("Time-Normalised", "normalized"),
             ("Absolute Time", "absolute"),
@@ -20375,7 +20426,7 @@ class _VelocityWidget(QWidget):
         self._vel_facet_controls: dict[str, str] = {}
         self._vel_facet = _FacetControls("Group by:")
         self._vel_facet.setToolTip(
-            "For each factor choose — combine —, — split —, or a specific level.\n"
+            "For each factor choose (combine), (split), or a specific level.\n"
             "Split two or more factors to plot their interaction."
         )
         self._vel_facet.changed.connect(self._on_vel_facets_changed)
@@ -20390,7 +20441,7 @@ class _VelocityWidget(QWidget):
         # ── Behavior selector ─────────────────────────────────────────
         self._behavior_combo = QComboBox()
         self._behavior_combo.setToolTip(
-            "Select the behavior whose bouts will be analysed for velocity."
+            "Select the behavior whose bouts will be analyzed for velocity."
         )
         self._behavior_combo.currentIndexChanged.connect(lambda _: self._update())
 
@@ -20756,8 +20807,8 @@ class _VelocityWidget(QWidget):
     def on_data_loaded(self) -> None:
         """Called by the host after each analytics refresh.
 
-        Drawing the chart reads the pose file of every session — about 7 s on a
-        69-session project, on the UI thread — and this is rarely the sub-tab on
+        Drawing the chart reads the pose file of every session, about 7 s on a
+        69-session project, on the UI thread, and this is rarely the sub-tab on
         screen when a refresh finishes.  The selectors are rebuilt immediately
         (they are cheap and must reflect the new data), but the chart itself
         waits until the tab is actually shown.
@@ -21101,7 +21152,7 @@ class _VelocityWidget(QWidget):
 
             # Fill the freshly-drawn figure to the viewport width on first render.
             # Deferred call re-runs after the layout pass (viewport width is not
-            # yet realised on the very first render).
+            # yet realized on the very first render).
             self._sync_canvas_to_viewport()
             QTimer.singleShot(0, self._sync_canvas_to_viewport)
             self._canvas.draw_idle()
@@ -21318,7 +21369,7 @@ class _VelocityWidget(QWidget):
             pass
         self._style_ax(ax)
 
-    # ── Chart: Normalised / Absolute profile ─────────────────────────
+    # ── Chart: Normalized / Absolute profile ─────────────────────────
 
     def _draw_profile(
         self,
@@ -21327,7 +21378,7 @@ class _VelocityWidget(QWidget):
         vel_unit: str,
         per_session: bool = False,
     ) -> None:
-        """Velocity profile – time-normalised (0–100 %) or absolute time (s).
+        """Velocity profile: time-normalized (0–100 %) or absolute time (s).
 
         When *per_session* is True, bouts within each session are averaged
         first so every session contributes equally regardless of bout count.
@@ -21394,7 +21445,7 @@ class _VelocityWidget(QWidget):
             return trace, actual_pre, ef - sf + 1
 
         def _stack_context_norm(records: list[dict]) -> "tuple[np.ndarray, np.ndarray]":
-            """Normalise all context traces to a common %-axis.
+            """Normalize all context traces to a common %-axis.
 
             Bout occupies 0–100 %; pre/post are expressed as fractions of the
             average bout length so all traces align at 0 and 100.
@@ -21467,7 +21518,7 @@ class _VelocityWidget(QWidget):
 
         def _plot_traces_context(records: list[dict], color: str, label: str) -> None:
             if norm_mode == "normalized":
-                # ── Normalised: bout occupies 0–100 % ─────────────────
+                # ── Normalized: bout occupies 0–100 % ─────────────────
                 if per_session:
                     by_s: dict[str, list[dict]] = {}
                     for d in records:
@@ -21652,10 +21703,10 @@ class _VelocityWidget(QWidget):
                     _plot_traces(by_grp[grp], self._host._group_color(grp, idx), grp)
 
         beh_label = self._behavior_combo.currentText()
-        per_sfx = " — per-session mean" if per_session else ""
+        per_sfx = ", per-session mean" if per_session else ""
         if use_context:
             if norm_mode == "normalized":
-                norm_suffix = "(normalised, with pre/post context)"
+                norm_suffix = "(normalized, with pre/post context)"
                 _xlabel = "Bout Time (%, 0–100 = during bout)"
             else:
                 norm_suffix = "(absolute time, with pre/post context)"
@@ -21791,7 +21842,7 @@ class _VelocityWidget(QWidget):
                 )
 
         beh_label = self._behavior_combo.currentText()
-        _title_str = f"Velocity Across Bout Sequence \u2014 \u201c{beh_label}\u201d"
+        _title_str = f"Velocity Across Bout Sequence: \u201c{beh_label}\u201d"
         ax.set_xlabel("Bout Number", fontsize=gs.get("axis_fontsize", 9), fontweight="bold")
         ax.set_ylabel(ml, fontsize=gs.get("axis_fontsize", 9), fontweight="bold")
         handles, labs_seq = ax.get_legend_handles_labels()
@@ -21919,7 +21970,7 @@ class _VelocityWidget(QWidget):
         """Paired bar chart: mean velocity of first-N vs last-N bouts.
 
         In individual mode each session gets a pair of bars linked by a
-        thin grey line so within-subject change is immediately visible.
+        thin gray line so within-subject change is immediately visible.
         In group mode error bars show SEM/SD/CI across sessions.
         """
         ax = self._figure.add_subplot(111)
@@ -22017,7 +22068,7 @@ class _VelocityWidget(QWidget):
             )
 
         beh_label = self._behavior_combo.currentText()
-        _title_str = f"First {n_bouts} vs Last {n_bouts} Bouts \u2014 \u201c{beh_label}\u201d"
+        _title_str = f"First {n_bouts} vs Last {n_bouts} Bouts: \u201c{beh_label}\u201d"
         ax.set_ylabel(ml, fontsize=gs.get("axis_fontsize", 9), fontweight="bold")
         handles_fl, labs_fl = ax.get_legend_handles_labels()
         if handles_fl:
@@ -22288,10 +22339,10 @@ class _VelocityWidget(QWidget):
         for instant paste into Excel / Prism / R, and a "Save CSV…" button
         for file output.  Two formats are offered:
 
-        Tidy (long) — one row per (label × x-point):
+        Tidy (long), one row per (label × x-point):
             x | label | mean_velocity | error | n
 
-        Wide — one column-pair per label:
+        Wide, one column-pair per label:
             x | <label>_mean | <label>_error | <label>_n | …
         """
         from PySide6.QtWidgets import (
@@ -22375,7 +22426,7 @@ class _VelocityWidget(QWidget):
             return float(_eb_val(arr, error_style))
 
         def _compute_series_norm(records: list[dict], ps: bool) -> "tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]":
-            """Return (x_axis, mean, err, n_per_point) for normalised mode."""
+            """Return (x_axis, mean, err, n_per_point) for normalized mode."""
             if ps:
                 by_s: dict[str, list[dict]] = {}
                 for d in records:
@@ -22657,14 +22708,14 @@ class _VelocityWidget(QWidget):
 
         # ── Dialog ────────────────────────────────────────────────────
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Export Profile Data \u2014 \u201c{beh_label}\u201d")
+        dlg.setWindowTitle(f"Export Profile Data: \u201c{beh_label}\u201d")
         dlg.setMinimumSize(620, 440)
         vbox = QVBoxLayout(dlg)
         vbox.setSpacing(8)
 
         info_lbl = _QL(
             f"<b>Behavior:</b> {beh_label} &nbsp;|&nbsp; "
-            f"<b>Mode:</b> {'Normalised (%)' if norm_mode == 'normalized' else 'Absolute time (s)'} &nbsp;|&nbsp; "
+            f"<b>Mode:</b> {'Normalized (%)' if norm_mode == 'normalized' else 'Absolute time (s)'} &nbsp;|&nbsp; "
             f"<b>Error:</b> {error_style} &nbsp;|&nbsp; "
             f"<b>Series:</b> {', '.join(s[0] for s in series)}"
         )
@@ -22677,8 +22728,8 @@ class _VelocityWidget(QWidget):
         fmt_lbl = _QL("Format:")
         fmt_lbl.setStyleSheet("font-size:11px;")
         fmt_row.addWidget(fmt_lbl)
-        rb_tidy = QRadioButton("Tidy (long) — one row per data point")
-        rb_wide = QRadioButton("Wide — one column-pair per series")
+        rb_tidy = QRadioButton("Tidy (long): one row per data point")
+        rb_wide = QRadioButton("Wide: one column-pair per series")
         rb_tidy.setChecked(True)
         fmt_grp = _BG(dlg)
         fmt_grp.addButton(rb_tidy, 0)

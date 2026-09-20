@@ -362,7 +362,7 @@ def test_overlap_clips_excluded_from_scoring(tmp_path: Path) -> None:
     answers = {
         "alice": {
             "c1": ValidationAnswerRecord(clip_id="c1", reviewer_id="alice", label="groom"),
-            # Picks the *other* flagged behavior on the overlap clip — must not be penalized.
+            # Picks the *other* flagged behavior on the overlap clip, must not be penalized.
             "c2": ValidationAnswerRecord(clip_id="c2", reviewer_id="alice", label="rear"),
         }
     }

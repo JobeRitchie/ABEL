@@ -59,7 +59,7 @@ def test_reimport_from_moved_folder_repoints_instead_of_duplicating(
     assert len(manifest.poses) == 2
     assert len(manifest.linked_sessions) == 2, "a moved recording must not gain a 2nd session"
     assert [s.session_id for s in manifest.linked_sessions] == original_ids, (
-        "session ids must survive a relocation — labels and derived data hang off them"
+        "session ids must survive a relocation: labels and derived data hang off them"
     )
     assert {Path(v.source_path).parent for v in manifest.videos} == {new_root / "raw" / "videos"}
 

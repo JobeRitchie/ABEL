@@ -174,7 +174,7 @@ def test_loso_restricted_to_selected_subjects(tmp_path, monkeypatch) -> None:
     assert res["n_subjects"] == 3
     assert res["subjects"] == ["MS1", "MS2", "MS3"]
     assert res["excluded_subjects"] == ["MS4"]
-    # 3 subjects x 3 positives pooled — MS4 never scored.
+    # 3 subjects x 3 positives pooled: MS4 never scored.
     assert res["raw_tp"] == 9
     assert all(f.get("subject") != "MS4" for f in res["folds"])
     # An excluded mouse is out of every fold's TRAINING pool too; refinement-only
@@ -329,7 +329,7 @@ def test_per_subject_table_has_one_row_per_scored_fold(tmp_path, monkeypatch) ->
         assert r["tp"] + r["fp"] + r["fn"] + r["tn"] == r["n_rows"]
         assert r["n_positives"] == 3 and r["n_rows"] == 10
         assert r["f1_target"] == pytest.approx(1.0)   # strong model catches all 3
-    # The pooled counts are the per-subject counts summed — no double counting.
+    # The pooled counts are the per-subject counts summed, no double counting.
     assert sum(r["tp"] for r in rows) == res["raw_tp"]
     assert sum(r["fp"] for r in rows) == res["raw_fp"]
 

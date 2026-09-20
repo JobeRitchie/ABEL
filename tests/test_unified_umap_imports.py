@@ -111,7 +111,7 @@ def test_embed_imported_segments_scores_into_prob_space(tmp_path: Path) -> None:
 
 
 def test_embed_imported_segments_missing_model_yields_zeros(tmp_path: Path) -> None:
-    """A behaviour whose model dir is absent must not crash — its prob is 0."""
+    """A behavior whose model dir is absent must not crash, its prob is 0."""
     root = tmp_path / "proj"
     md_freeze = _make_model_dir(root, "Freeze")
     imported_df = pd.DataFrame({

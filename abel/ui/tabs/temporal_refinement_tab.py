@@ -2,11 +2,11 @@
 
 
 
-No model training occurs here — all models come from the active-learning
+No model training occurs here, all models come from the active-learning
 
 pipeline.  Overlapping window predictions are averaged per frame, then a
 
-subtractive mutual-inhibition step penalises frames where multiple behaviors
+subtractive mutual-inhibition step penalizes frames where multiple behaviors
 
 are simultaneously likely.
 
@@ -293,7 +293,7 @@ class TemporalRefinementTab(QWidget):
 
             "   weight × (sum of all other behaviors' probabilities)\n\n"
 
-            "This penalises frames where multiple behaviors fire simultaneously,\n"
+            "This penalizes frames where multiple behaviors fire simultaneously,\n"
 
             "helping the dominant behavior stand out without distorting its absolute\n"
 
@@ -345,7 +345,7 @@ class TemporalRefinementTab(QWidget):
 
             "T < 1.0  → sharpens predictions, pushing probabilities further toward\n"
 
-            "           0 or 1. Use cautiously — can amplify noise.\n\n"
+            "           0 or 1. Use cautiously, can amplify noise.\n\n"
 
             "This affects probability traces and bout detection thresholds.\n\n"
 
@@ -1841,7 +1841,7 @@ class TemporalRefinementTab(QWidget):
 
         self._active_job = "refine"
 
-        self._status.setText("Generating bout calls from frame probabilities...")
+        self._status.setText("Generating bout calls from frame probabilities…")
 
         self._append_log("Starting bout postprocess...")
 
@@ -1965,7 +1965,7 @@ class TemporalRefinementTab(QWidget):
 
             "This forces the next run to recompute inference outputs.\n\n"
 
-            "R3D video embeddings are kept — they only change when the video "
+            "R3D video embeddings are kept: they only change when the video "
 
             "or pose does, and re-computing them costs GPU-hours.",
 
@@ -2073,7 +2073,7 @@ class TemporalRefinementTab(QWidget):
         # Generate preview graphs in the background so the main thread stays
         # responsive.  _refresh_visualization_preview calls
         # _ensure_competition_preview_graphs which does heavy matplotlib
-        # rendering + parquet I/O — doing that on the GUI thread was causing
+        # rendering + parquet I/O: doing that on the GUI thread was causing
         # "not responding" on Windows.
         self._generate_preview_graphs_async()
 
@@ -2175,7 +2175,7 @@ class TemporalRefinementTab(QWidget):
 
         # Definitions win over the built-in name so a project whose "no_behavior"
 
-        # id is still bound to a renamed behaviour shows that behaviour, not the
+        # id is still bound to a renamed behavior shows that behavior, not the
 
         # generic negative label.
 
@@ -2391,7 +2391,7 @@ class TemporalRefinementTab(QWidget):
 
         if str(inference_dir) and inference_dir.exists():
 
-            # Do NOT call _ensure_competition_preview_graphs here — it does
+            # Do NOT call _ensure_competition_preview_graphs here, it does
             # heavy matplotlib rendering + parquet I/O and blocks the GUI thread,
             # causing "not responding" on Windows.  Graph generation is handled
             # exclusively by _generate_preview_graphs_async (called from

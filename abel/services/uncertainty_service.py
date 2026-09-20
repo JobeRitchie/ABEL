@@ -25,9 +25,13 @@ class UncertaintyScoringService:
     # large segment tables while preserving the relative outlier ranking.
     _DENSITY_SUBSAMPLE: int = 5_000
 
+    # Columns per pass of the non-finite repair.  Bounds that step's temporary
+    # arrays to roughly (n_rows x this) instead of the full feature matrix.
+    _REPAIR_BLOCK_COLS: int = 64
+
     def __init__(self) -> None:
         # Cache keyed by a lightweight feature-matrix fingerprint so that
-        # repeated calls with the same features (e.g. multi-behaviour passes
+        # repeated calls with the same features (e.g. multi-behavior passes
         # within one session) skip the expensive kNN computation.
         self._density_cache: dict[str, np.ndarray] = {}
 
@@ -40,7 +44,7 @@ class UncertaintyScoringService:
         """Fast, collision-resistant fingerprint for a 2-D float array."""
         stride = max(1, features.size // 8192)
         sample = features.ravel()[::stride]
-        digest = hashlib.md5(sample.tobytes()).hexdigest()  # noqa: S324 – not crypto
+        digest = hashlib.md5(sample.tobytes()).hexdigest()  # noqa: S324, not crypto
         return f"{features.shape}:{features.dtype}:{digest}"
 
     # ------------------------------------------------------------------
@@ -85,21 +89,46 @@ class UncertaintyScoringService:
           O(n · k · log(subsample)) for tree-based lookups.
         * ``n_jobs=-1`` lets sklearn use all available CPU cores.
         * When ``n <= subsample`` the full dataset is used as the reference
-          (identical to the original behaviour).
+          (identical to the original behavior).
         """
         from sklearn.neighbors import NearestNeighbors
 
+        # float32 halves the footprint of the biggest array in the pipeline, and
+        # matches the dtype segment features are already stored in -- the caller
+        # upcasting to float64 bought nothing but bytes.
+        features = np.asarray(features)
+        owns_copy = features.dtype != np.float32
+        if owns_copy:
+            features = features.astype(np.float32)
+
         # NearestNeighbors rejects NaN/Inf (e.g. from z-scoring constant columns).
         # Replace non-finite values with column means so density scoring still runs.
-        if not np.isfinite(features).all():
-            col_means = np.where(
-                np.isfinite(features).any(axis=0),
-                np.nanmean(np.where(np.isfinite(features), features, np.nan), axis=0),
-                0.0,
-            )
-            nan_mask = ~np.isfinite(features)
-            features = features.copy()
-            features[nan_mask] = np.take(col_means, np.where(nan_mask)[1])
+        #
+        # Done in column blocks, in place.  The whole-array form of this repair
+        # allocated four full-size temporaries at once (the isfinite masks, the
+        # np.where result, and nanmean's internal copy); on a 628k x 1612 matrix
+        # that is ~30 GiB of peak demand and it ran the process out of memory.
+        # Blocking caps the temporaries at _REPAIR_BLOCK_COLS columns apiece.
+        for start in range(0, features.shape[1], UncertaintyScoringService._REPAIR_BLOCK_COLS):
+            stop = start + UncertaintyScoringService._REPAIR_BLOCK_COLS
+            block = features[:, start:stop]
+            bad = ~np.isfinite(block)
+            if not bad.any():
+                continue
+            if not owns_copy:
+                # Copy once, and only if there is something to repair: this
+                # matrix is the caller's model input and must not come back
+                # carrying our substituted values.
+                features = features.copy()
+                owns_copy = True
+                block = features[:, start:stop]
+            finite = ~bad
+            # float64 accumulation: a float32 sum over hundreds of thousands of
+            # rows loses real precision in the mean.
+            counts = finite.sum(axis=0)
+            sums = np.where(finite, block, np.float32(0.0)).sum(axis=0, dtype=np.float64)
+            means = np.divide(sums, counts, out=np.zeros_like(sums), where=counts > 0)
+            block[bad] = np.take(means, np.nonzero(bad)[1])
 
         n = len(features)
 
@@ -113,7 +142,14 @@ class UncertaintyScoringService:
             ref = features
 
         k_actual = min(k, len(ref))
-        nn = NearestNeighbors(n_neighbors=k_actual, n_jobs=n_jobs)
+        # Brute force, explicitly.  The default "auto" picks a KD-tree for
+        # euclidean metrics, and KDTree.query upcasts the *query* array to
+        # float64 -- which would silently rebuild the multi-GiB copy the
+        # float32 work above exists to avoid.  Brute force is exact (identical
+        # neighbors, not an approximation) and is the faster choice anyway at
+        # this dimensionality, where trees degenerate to a full scan; sklearn
+        # chunks its distance computation, so its working set stays bounded.
+        nn = NearestNeighbors(n_neighbors=k_actual, algorithm="brute", n_jobs=n_jobs)
         nn.fit(ref)
         dists, _ = nn.kneighbors(features)
         return np.mean(dists, axis=1)
@@ -135,7 +171,7 @@ class UncertaintyScoringService:
 
         ``feature_matrix`` is the model-aligned feature matrix, when the caller
         has already built one.  Pass it whenever the model's feature names do not
-        all exist as columns on ``segment_df`` — e.g. a model that spells
+        all exist as columns on ``segment_df``, e.g. a model that spells
         symmetric distances under the opposite keypoint ordering.  Indexing
         ``segment_df[feature_cols]`` in that case would raise; materialising the
         missing columns onto ``segment_df`` to avoid that is worse still, because
@@ -150,7 +186,7 @@ class UncertaintyScoringService:
 
         # Density is the most expensive metric (kNN over all segments).
         # Skip it entirely when its weight is zero, and use a per-instance
-        # cache to avoid redundant computation across multi-behaviour passes.
+        # cache to avoid redundant computation across multi-behavior passes.
         if w.density_outlier > 0.0:
             feat_matrix = (
                 feature_matrix if feature_matrix is not None

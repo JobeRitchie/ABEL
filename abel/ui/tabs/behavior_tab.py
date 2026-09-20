@@ -1,4 +1,4 @@
-"""Behavior Definitions tab — full CRUD editor for operational behavior definitions."""
+"""Behavior Definitions tab: full CRUD editor for operational behavior definitions."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class BehaviorTab(QWidget):
     co_occurring_changed = Signal()
 
     # Emitted whenever the set of behavior definitions changes (add/edit/delete/
-    # import) so other tabs—e.g. the Active Learning target-behavior dropdown—can
+    # import) so other tabs, e.g. the Active Learning target-behavior dropdown, can
     # refresh their behavior-derived options without a manual Refresh.
     behaviors_changed = Signal()
 
@@ -76,7 +76,7 @@ class BehaviorTab(QWidget):
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
 
         new_btn = QPushButton("＋ New")
-        self._delete_btn = QPushButton("🗑 Delete")
+        self._delete_btn = QPushButton("Delete")
         export_btn = QPushButton("Export…")
         import_btn = QPushButton("Import…")
 
@@ -115,7 +115,7 @@ class BehaviorTab(QWidget):
         )
         save_preset_btn.clicked.connect(self._save_current_as_preset)
 
-        self._delete_preset_btn = QPushButton("🗑")
+        self._delete_preset_btn = QPushButton("✕")
         self._delete_preset_btn.setToolTip("Delete the selected saved preset.")
         self._delete_preset_btn.setFixedWidth(int(self.fontMetrics().height() * 2.4))
         self._delete_preset_btn.clicked.connect(self._delete_preset)
@@ -136,7 +136,7 @@ class BehaviorTab(QWidget):
         self._co_occurring_chk.toggled.connect(self._on_co_occurring_toggled)
 
         # Repair banner for projects made before the reserved-label guard, where
-        # the built-in "No Behavior" was renamed into a real behaviour.
+        # the built-in "No Behavior" was renamed into a real behavior.
         self._conflict_label = QLabel()
         self._conflict_label.setWordWrap(True)
         self._conflict_label.setStyleSheet(
@@ -237,7 +237,7 @@ class BehaviorTab(QWidget):
 
         self._reserved_hint = QLabel(
             "“No Behavior” is the built-in negative label every model is trained "
-            "against. Its name cannot be changed and it cannot be deleted — add a "
+            "against. Its name cannot be changed and it cannot be deleted, add a "
             "new behavior instead. Color, shortcut and notes are still editable."
         )
         self._reserved_hint.setWordWrap(True)
@@ -283,7 +283,7 @@ class BehaviorTab(QWidget):
         self._f_description.setPlaceholderText("Describe this behavior so reviewers know what to look for.")
 
         # Save / Cancel
-        self._save_btn = QPushButton("💾 Save Behavior")
+        self._save_btn = QPushButton("Save Behavior")
         self._cancel_btn = QPushButton("Cancel")
         self._save_btn.clicked.connect(self._save_form)
         self._cancel_btn.clicked.connect(self._cancel_edit)
@@ -441,9 +441,9 @@ class BehaviorTab(QWidget):
     def _apply_reserved_lock(self, enabled: bool) -> None:
         """Lock the identity of the built-in negative label.
 
-        "No Behavior" is not an ordinary behaviour: every trainer collapses the
+        "No Behavior" is not an ordinary behavior: every trainer collapses the
         other labels onto it, so renaming it silently turns whatever it is renamed
-        to into "nothing happened" for training, refinement and export. Colour,
+        to into "nothing happened" for training, refinement and export. Color,
         shortcut and notes stay editable; name, short name and delete do not.
         """
         reserved = enabled and str(self._selected_id or "").strip() == NO_BEHAVIOR_ID

@@ -1,4 +1,4 @@
-"""HMM fitting and auto-calibration behaviour.
+"""HMM fitting and auto-calibration behavior.
 
 These cover the three things that were silently wrong before calibration
 existed: EM truncation making information criteria incomparable, unseeded

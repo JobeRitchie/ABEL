@@ -21,7 +21,7 @@ logger = logging.getLogger("abel")
 
 
 # ---------------------------------------------------------------------------
-# Body-part name normalisation
+# Body-part name normalization
 # ---------------------------------------------------------------------------
 
 _KNOWN_BODYPART_TOKENS: list[str] = [
@@ -43,7 +43,7 @@ _KNOWN_BODYPART_TOKENS.sort(key=len, reverse=True)
 def _split_known_tokens(segment: str) -> str:
     """Greedily split a lowercase segment into known tokens separated by ``_``.
 
-    Unrecognised remainders are kept as-is so novel body-part names pass
+    Unrecognized remainders are kept as-is so novel body-part names pass
     through unchanged.
     """
     parts: list[str] = []
@@ -57,7 +57,7 @@ def _split_known_tokens(segment: str) -> str:
                 matched = True
                 break
         if not matched:
-            # No known token matches — keep whatever is left as one chunk.
+            # No known token matches: keep whatever is left as one chunk.
             parts.append(remaining)
             break
     return "_".join(parts)
@@ -68,7 +68,7 @@ def normalize_bodypart_name(name: str) -> str:
 
     Handles camelCase (``LeftEar``), concatenated words (``leftear``),
     hyphens, spaces, and mixed digit boundaries (``spine1``) so that
-    different DLC labelling conventions resolve to the same canonical key.
+    different DLC labeling conventions resolve to the same canonical key.
 
     Examples
     --------
@@ -137,9 +137,9 @@ class PoseData(NamedTuple):
     """Cleaned pose data with per-frame kinematic summary."""
 
     body_parts: list[str]
-    x: pd.DataFrame           # (n_frames, n_parts)  — cleaned x coords
-    y: pd.DataFrame           # (n_frames, n_parts)  — cleaned y coords
-    likelihood: pd.DataFrame  # (n_frames, n_parts)  — raw likelihoods
+    x: pd.DataFrame           # (n_frames, n_parts) , cleaned x coords
+    y: pd.DataFrame           # (n_frames, n_parts) , cleaned y coords
+    likelihood: pd.DataFrame  # (n_frames, n_parts) , raw likelihoods
     centroid_x: np.ndarray    # (n_frames,)
     centroid_y: np.ndarray    # (n_frames,)
     n_frames: int
@@ -154,7 +154,7 @@ class MultiAnimalPoseData(NamedTuple):
     """One :class:`PoseData` per tracked individual in a multi-animal file.
 
     Single-animal files load into a 1-entry mapping (``individuals == []`` is
-    never used as a signal — check ``len(per_individual)``).  All individuals
+    never used as a signal, check ``len(per_individual)``).  All individuals
     share the same skeleton (body-part list); identity is best-effort from the
     DLC ``individuals`` header level and may swap across frames.
     """
@@ -304,9 +304,9 @@ class PoseProcessingService:
         nlevels = cols.nlevels
 
         # A DLC frame is one of:
-        #   (scorer, bodyparts, coords)               — single animal, 3 levels
-        #   (scorer, individuals, bodyparts, coords)  — multi animal, 4 levels
-        #   (bodyparts, coords)                       — already scorer-stripped
+        #   (scorer, bodyparts, coords)              , single animal, 3 levels
+        #   (scorer, individuals, bodyparts, coords) , multi animal, 4 levels
+        #   (bodyparts, coords)                      , already scorer-stripped
         # Level names are present for real DLC files but absent for hand-built
         # frames, so detect the ``individuals`` level by name OR by position.
         has_individuals = "individuals" in names or nlevels == 4
@@ -397,6 +397,7 @@ class PoseProcessingService:
                 interpolate=s.interpolate_dropouts,
                 interpolate_max_gap=s.interpolate_max_gap,
                 smoothing_window=s.smoothing_window,
+                absence_max_fill_frames=s.absence_max_fill_frames,
             )
             for ind, pose in multi.per_individual.items()
         }
@@ -416,7 +417,15 @@ class PoseProcessingService:
         individuals A and B for all frames ``>= t`` (a track exchange that undoes
         a tracker identity flip).  Multiple corrections compose as successive
         transpositions in frame order, so re-flagging the same pair toggles it
-        back.  Body parts and frame count are preserved; centroids are recomputed.
+        back.  ``t == 0`` is a whole-session exchange (the tracks were mislabeled
+        from the first frame).
+
+        Every per-frame array, body-part x/y, likelihood *and* the centroids,
+        is permuted as one block, so a corrected session's values are exactly the
+        cleaned values it would have had with correct tracking.  (Recomputing
+        centroids here instead would silently switch them to a different
+        likelihood-masking rule than :meth:`clean_pose` used, changing frames the
+        correction never touched.)
         """
         from collections import defaultdict
 
@@ -429,45 +438,85 @@ class PoseProcessingService:
                 a, b = str(c.get("a")), str(c.get("b"))
             except Exception:
                 continue
-            if a in inds and b in inds and a != b and 0 < f < n:
+            if a in inds and b in inds and a != b and 0 <= f < n:
                 by_frame[f].append((a, b))
         if not by_frame:
             return multi
 
+        # Individuals can carry fewer rows than the session (a track that ends
+        # early).  Pad every per-frame array to ``n`` first, otherwise a segment
+        # taken from a short track would shift all later frames of whichever
+        # identity it feeds.
+        padded = {o: PoseProcessingService._pad_pose_to(multi.per_individual[o], n) for o in inds}
+
         breaks = sorted(by_frame)
-        seg_bounds = [0, *breaks, n]
+        seg_bounds = sorted({0, *breaks, n})
         perm = {o: o for o in inds}  # output identity -> source individual
-        parts_x = {o: [] for o in inds}
-        parts_y = {o: [] for o in inds}
-        parts_l = {o: [] for o in inds}
+        parts: dict[str, dict[str, list]] = {
+            o: {"x": [], "y": [], "l": [], "cx": [], "cy": []} for o in inds
+        }
 
         for k in range(len(seg_bounds) - 1):
-            if k > 0:  # apply this breakpoint's transpositions before the segment
-                for a, b in by_frame[breaks[k - 1]]:
-                    perm[a], perm[b] = perm[b], perm[a]
             s_idx, e_idx = seg_bounds[k], seg_bounds[k + 1]
+            for a, b in by_frame.get(s_idx, []):  # this break takes effect here
+                perm[a], perm[b] = perm[b], perm[a]
             if e_idx <= s_idx:
                 continue
             for o in inds:
-                src = multi.per_individual[perm[o]]
-                parts_x[o].append(src.x.iloc[s_idx:e_idx])
-                parts_y[o].append(src.y.iloc[s_idx:e_idx])
-                parts_l[o].append(src.likelihood.iloc[s_idx:e_idx])
+                src = padded[perm[o]]
+                parts[o]["x"].append(src.x.iloc[s_idx:e_idx])
+                parts[o]["y"].append(src.y.iloc[s_idx:e_idx])
+                parts[o]["l"].append(src.likelihood.iloc[s_idx:e_idx])
+                parts[o]["cx"].append(np.asarray(src.centroid_x, dtype=float)[s_idx:e_idx])
+                parts[o]["cy"].append(np.asarray(src.centroid_y, dtype=float)[s_idx:e_idx])
 
         new_per_individual: dict[str, PoseData] = {}
         for o in inds:
-            x_df = pd.concat(parts_x[o]).reset_index(drop=True)
-            y_df = pd.concat(parts_y[o]).reset_index(drop=True)
-            l_df = pd.concat(parts_l[o]).reset_index(drop=True)
-            cx, cy = PoseProcessingService._compute_centroid(x_df, y_df, l_df)
+            x_df = pd.concat(parts[o]["x"]).reset_index(drop=True)
+            y_df = pd.concat(parts[o]["y"]).reset_index(drop=True)
+            l_df = pd.concat(parts[o]["l"]).reset_index(drop=True)
             base = multi.per_individual[o]
             new_per_individual[o] = PoseData(
                 body_parts=base.body_parts,
                 x=x_df, y=y_df, likelihood=l_df,
-                centroid_x=cx, centroid_y=cy,
+                centroid_x=np.concatenate(parts[o]["cx"]),
+                centroid_y=np.concatenate(parts[o]["cy"]),
                 n_frames=len(x_df),
             )
         return multi._replace(per_individual=new_per_individual)
+
+    @staticmethod
+    def _pad_pose_to(pose: PoseData, n: int) -> PoseData:
+        """Return ``pose`` with every per-frame array exactly ``n`` rows long."""
+        have = len(pose.x)
+        if have == n:
+            return pose
+        if have > n:
+            return PoseData(
+                body_parts=pose.body_parts,
+                x=pose.x.iloc[:n].reset_index(drop=True),
+                y=pose.y.iloc[:n].reset_index(drop=True),
+                likelihood=pose.likelihood.iloc[:n].reset_index(drop=True),
+                centroid_x=np.asarray(pose.centroid_x, dtype=float)[:n],
+                centroid_y=np.asarray(pose.centroid_y, dtype=float)[:n],
+                n_frames=n,
+            )
+        pad = pd.DataFrame(
+            np.nan, index=range(n - have), columns=pose.x.columns, dtype=float
+        )
+        nan_tail = np.full(n - have, np.nan, dtype=float)
+        return PoseData(
+            body_parts=pose.body_parts,
+            x=pd.concat([pose.x, pad]).reset_index(drop=True),
+            y=pd.concat([pose.y, pad.copy()]).reset_index(drop=True),
+            likelihood=pd.concat(
+                [pose.likelihood, pd.DataFrame(0.0, index=range(n - have),
+                                               columns=pose.likelihood.columns, dtype=float)]
+            ).reset_index(drop=True),
+            centroid_x=np.concatenate([np.asarray(pose.centroid_x, dtype=float), nan_tail]),
+            centroid_y=np.concatenate([np.asarray(pose.centroid_y, dtype=float), nan_tail]),
+            n_frames=n,
+        )
 
     def load_and_clean(
         self,
@@ -491,6 +540,7 @@ class PoseProcessingService:
             interpolate=s.interpolate_dropouts,
             interpolate_max_gap=s.interpolate_max_gap,
             smoothing_window=s.smoothing_window,
+            absence_max_fill_frames=s.absence_max_fill_frames,
         )
 
     def _parse_pose_df(self, df: pd.DataFrame, source: Path | None = None) -> PoseData:
@@ -503,7 +553,7 @@ class PoseProcessingService:
             norm = normalize_bodypart_name(part)
             if norm in seen_norms and seen_norms[norm] != part:
                 logger.warning(
-                    "Body parts '%s' and '%s' both normalise to '%s' in %s; "
+                    "Body parts '%s' and '%s' both normalize to '%s' in %s; "
                     "keeping '%s'",
                     seen_norms[norm], part, norm, source, part,
                 )
@@ -542,8 +592,16 @@ class PoseProcessingService:
         interpolate: bool = True,
         interpolate_max_gap: int = 10,
         smoothing_window: int = 5,
+        absence_max_fill_frames: int = 30,
     ) -> PoseData:
-        """Apply likelihood masking, gap interpolation, and temporal smoothing."""
+        """Apply likelihood masking, gap interpolation, and temporal smoothing.
+
+        Frames where the animal is not detected for longer than
+        *absence_max_fill_frames* consecutive frames are left as NaN instead of
+        being filled with the nearest known pose: the animal is absent, not
+        stationary.  Shorter dropouts are still filled, so ordinary tracking
+        jitter behaves exactly as before.  Pass 0 to fill everything.
+        """
         x = pose.x.copy()
         y = pose.y.copy()
 
@@ -551,6 +609,11 @@ class PoseProcessingService:
         mask = pose.likelihood < likelihood_threshold
         x[mask] = np.nan
         y[mask] = np.nan
+
+        # Frames with no usable detection at all.  Held aside now, before the
+        # fills below make every frame look tracked, so step 4 can tell a brief
+        # dropout apart from a stretch where the animal simply is not there.
+        undetected = x.isna().all(axis=1).to_numpy()
 
         # 2. Interpolate short gaps
         if interpolate and interpolate_max_gap > 0:
@@ -566,6 +629,16 @@ class PoseProcessingService:
         x = x.ffill().bfill().fillna(0.0)
         y = y.ffill().bfill().fillna(0.0)
 
+        # 5. Re-open the long absences that step 4 just papered over.  Without
+        #    this, an animal added to the cage 30 s in is back-filled with its
+        #    entry pose and appears as a frozen phantom from frame 0, which
+        #    also fabricates social features (distance, contact) for every
+        #    animal that really was there.
+        absent = self._absence_mask(undetected, absence_max_fill_frames)
+        if absent.any():
+            x = x.mask(pd.Series(absent, index=x.index), other=np.nan, axis=0)
+            y = y.mask(pd.Series(absent, index=y.index), other=np.nan, axis=0)
+
         cx, cy = self._compute_centroid(x, y, pose.likelihood, threshold=likelihood_threshold)
         return PoseData(
             body_parts=pose.body_parts,
@@ -573,6 +646,38 @@ class PoseProcessingService:
             centroid_x=cx, centroid_y=cy,
             n_frames=pose.n_frames,
         )
+
+    @staticmethod
+    def _absence_mask(undetected: np.ndarray, max_fill_frames: int) -> np.ndarray:
+        """True for frames inside an undetected run longer than *max_fill_frames*.
+
+        A run of exactly *max_fill_frames* is still a dropout to be filled; one
+        frame longer is an absence.  ``max_fill_frames <= 0`` disables the bound
+        and returns an all-False mask (every gap gets filled).
+        """
+        undetected = np.asarray(undetected, dtype=bool)
+        if max_fill_frames <= 0 or not undetected.any():
+            return np.zeros(undetected.shape, dtype=bool)
+        out = np.zeros(undetected.shape, dtype=bool)
+        # Run-length scan over the boolean series: mark only the long runs.
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], undetected.astype(np.int8), [0]))))
+        for start, stop in zip(edges[::2], edges[1::2]):
+            if stop - start > max_fill_frames:
+                out[start:stop] = True
+        return out
+
+    @staticmethod
+    def presence_mask(pose: PoseData) -> np.ndarray:
+        """Per-frame "this animal is in the arena" flag for a cleaned pose.
+
+        Absence is carried by the cleaned coordinates themselves (see
+        :meth:`clean_pose` step 5), so presence is simply "the centroid is
+        defined".  Poses cleaned before that step existed are all-present, which
+        is the old behavior.
+        """
+        cx = np.asarray(pose.centroid_x, dtype=float)
+        cy = np.asarray(pose.centroid_y, dtype=float)
+        return np.isfinite(cx) & np.isfinite(cy)
 
     # ------------------------------------------------------------------
     # Kinematics
@@ -720,7 +825,7 @@ class PoseProcessingService:
         body_length, body_length_pair = self._compute_body_length_with_pair(pose)
         safe_body_length = np.where(body_length > 1e-3, body_length, np.nan)
         # The distance pair that *defines* body length normalizes to a constant
-        # 1.0, so its `_norm` column is dead by construction — skip it below.
+        # 1.0, so its `_norm` column is dead by construction, skip it below.
         body_length_pair_set = frozenset(body_length_pair) if body_length_pair else frozenset()
 
         # ── Per-keypoint kinematics ─────────────────────────────────────────
@@ -742,7 +847,7 @@ class PoseProcessingService:
             kp_cols[f"{safe}_acceleration"] = acc
             kp_cols[f"{safe}_jerk"] = jerk
 
-            # ── Egocentric forward/lateral velocity (body-centred frame) ──
+            # ── Egocentric forward/lateral velocity (body-centered frame) ──
             if cfg.enable_egocentric_kinematics:
                 # Rotate world-frame velocity into body frame:
                 # forward = vx*cos(θ) + vy*sin(θ)
@@ -791,6 +896,12 @@ class PoseProcessingService:
             "animal_id": animal_id,
             "session_id": session_id,
             "video_id": video_id,
+            # Bookkeeping, not a feature: 1.0 while the animal is actually in
+            # the arena, 0.0 while it is absent (not yet added, removed, or
+            # lost by the tracker for longer than the fill bound).  Segment
+            # building aggregates it into ``pose_present_frac`` and drops
+            # windows the animal was not there for.
+            "pose_present": self.presence_mask(pose).astype(float),
             "forepaw_speed": forepaw_speed,
             "forepaw_vertical_velocity": paw_vy,
             "forepaw_oscillation_power": forepaw_oscillation_power,
@@ -883,8 +994,8 @@ class PoseProcessingService:
         out_dir.mkdir(parents=True, exist_ok=True)
         # Write directly to a per-session parquet file.  The old pattern
         # (global lock + read-modify-write on a shared monolithic file)
-        # serialised all parallel workers and forced an O(N²) write volume
-        # as the file grew with each session — the last sessions had to
+        # serialized all parallel workers and forced an O(N²) write volume
+        # as the file grew with each session: the last sessions had to
         # read/write the entire combined file.  Per-session files are
         # independent, so all workers can write concurrently with no lock.
         # Call consolidate_session_files() once after all sessions have
@@ -959,9 +1070,9 @@ class PoseProcessingService:
         then reduced over conspecifics into a **fixed** column schema independent
         of the animal count:
 
-        * ``social_{base}_nearest`` — the value for the closest conspecific
+        * ``social_{base}_nearest``: the value for the closest conspecific
           (smallest centroid-to-centroid distance) at that frame.
-        * ``social_{base}_mean`` — averaged over all other animals.
+        * ``social_{base}_mean``: averaged over all other animals.
 
         Distance bases additionally get body-length-normalized ``_norm`` variants.
         For two animals ``nearest`` and ``mean`` coincide.  Frames where an
@@ -973,7 +1084,7 @@ class PoseProcessingService:
 
         fcx = np.asarray(focal.centroid_x, dtype=float)
         fcy = np.asarray(focal.centroid_y, dtype=float)
-        # Focal's own centroid velocity — used to project movement onto the
+        # Focal's own centroid velocity: used to project movement onto the
         # direction toward each other animal (directed approach/yield signal).
         f_vx = self._finite_diff(fcx, fps)
         f_vy = self._finite_diff(fcy, fps)
@@ -1026,7 +1137,7 @@ class PoseProcessingService:
             # other's space; negative = focal yielding/retreating.  Unlike
             # approach_velocity (the symmetric rate of pairwise-distance change,
             # identical for both animals) this is asymmetric, so it can tell
-            # *which* animal advanced and which gave ground — the core signal for
+            # *which* animal advanced and which gave ground: the core signal for
             # spatial-displacement dominance.
             with np.errstate(invalid="ignore", divide="ignore"):
                 safe_dcc = np.where(dcc > 1e-6, dcc, np.nan)
@@ -1068,7 +1179,7 @@ class PoseProcessingService:
         # "In contact" when the closest keypoint pair to the *nearest* other
         # animal is within a fraction of the focal body length.  The duration
         # column reports how long the current uninterrupted contact bout has
-        # lasted (seconds), resetting to 0 the moment contact breaks — a stateful
+        # lasted (seconds), resetting to 0 the moment contact breaks, a stateful
         # descriptor of sustained interactions (huddling, mounting, fighting).
         near_min_kp = out["social_min_keypoint_dist_nearest"]
         contact_thresh = self._SOCIAL_CONTACT_BODY_FRAC * safe_bl
@@ -1076,8 +1187,14 @@ class PoseProcessingService:
             contact = np.isfinite(near_min_kp) & np.isfinite(contact_thresh) & (
                 near_min_kp <= contact_thresh
             )
-        out["social_in_contact"] = contact.astype(float)
-        out["social_in_contact_duration_s"] = self._run_length_seconds(contact, fps)
+        # Frames with no other animal to measure against are *unmeasurable*, not
+        # "not in contact": an absent partner (see ``clean_pose``) would
+        # otherwise average into a segment as a confident 0% contact rate.
+        unmeasurable = all_nan_frame | ~np.isfinite(near_min_kp)
+        out["social_in_contact"] = np.where(unmeasurable, np.nan, contact.astype(float))
+        out["social_in_contact_duration_s"] = np.where(
+            unmeasurable, np.nan, self._run_length_seconds(contact, fps)
+        )
 
         return pd.DataFrame(out, index=range(n))
 
@@ -1178,6 +1295,150 @@ class PoseProcessingService:
             "scale_px": move_thresh,
         }
 
+    @staticmethod
+    def analyze_identity_swaps(
+        multi: "MultiAnimalPoseData",
+        *,
+        cluster_gap: int = 10,
+        max_events: int = 200,
+    ) -> dict:
+        """Group suspected flips into reviewable *events*, one per pair.
+
+        :meth:`detect_identity_swaps` answers "did these two tracks exchange
+        between these two frames?".  A tracker that is unsure flips back and
+        forth over a few frames, so the raw frame list mixes one real exchange
+        with a handful of stutters.  This groups flips of the same pair that fall
+        within ``cluster_gap`` frames and reports the group's ``net`` parity: an
+        odd number of flips leaves the identities exchanged from then on (worth a
+        correction), an even number cancels out (worth a look, not a fix).
+
+        Returns ``{"events": [...], "n_events", "n_net", "scale_px"}`` where each
+        event is ``{"frame", "last_frame", "a", "b", "n_flips", "net"}`` and
+        ``frame`` is the first flip, the frame to correct from.
+        """
+        inds = [i for i in multi.individuals if i in multi.per_individual]
+        if len(inds) < 2:
+            return {"events": [], "n_events": 0, "n_net": 0, "scale_px": 0.0}
+
+        base = PoseProcessingService.detect_identity_swaps(multi, max_report=10 ** 9)
+        # Re-derive per-pair frames: detect_identity_swaps pools frames across
+        # pairs, which is ambiguous with 3+ animals.
+        per_pair = PoseProcessingService._swap_frames_by_pair(multi, base["scale_px"])
+
+        scatter = {i: PoseProcessingService._pose_scatter(multi.per_individual[i]) for i in inds}
+        events: list[dict] = []
+        for (a, b), frames in per_pair.items():
+            sep = PoseProcessingService._pair_separation(multi, a, b)
+            scat = np.fmax(scatter[a], scatter[b])
+            group: list[int] = []
+            for f in frames:
+                if group and f - group[-1] > cluster_gap:
+                    events.append(PoseProcessingService._swap_event(group, a, b, sep, scat))
+                    group = []
+                group.append(f)
+            if group:
+                events.append(PoseProcessingService._swap_event(group, a, b, sep, scat))
+        events.sort(key=lambda e: e["frame"])
+        return {
+            "events": events[:max_events],
+            "n_events": len(events),
+            "n_net": sum(1 for e in events if e["net"]),
+            "scale_px": base["scale_px"],
+        }
+
+    @staticmethod
+    def _swap_event(
+        frames: list[int], a: str, b: str, separation: np.ndarray, scatter: np.ndarray
+    ) -> dict:
+        """One reviewable event; ``separation`` is the pair's per-frame distance.
+
+        ``overlapping`` marks events where the two tracks sit far closer than
+        they usually do, animals on top of each other, or (commonly) both tracks
+        landing on the same animal while the other is occluded.  Which track is
+        which cannot be read off the positions there, so the user has to judge it
+        from the video.
+        """
+        f0 = int(frames[0])
+        gap = float(separation[f0]) if 0 <= f0 < len(separation) else float("nan")
+        typical = float(np.nanmedian(separation)) if len(separation) else float("nan")
+        scat = float(np.nanmax(scatter[f0: int(frames[-1]) + 1])) if len(scatter) > f0 else float("nan")
+        return {
+            "frame": f0,
+            "last_frame": int(frames[-1]),
+            "a": a,
+            "b": b,
+            "n_flips": len(frames),
+            "net": len(frames) % 2 == 1,
+            "separation_px": gap,
+            "typical_separation_px": typical,
+            "overlapping": bool(
+                np.isfinite(gap) and np.isfinite(typical) and typical > 0 and gap < 0.25 * typical
+            ),
+            "pose_scatter": scat,
+            "unreliable": bool(np.isfinite(scat) and scat > 2.0),
+        }
+
+    @staticmethod
+    def _pose_scatter(pose: PoseData, sample_every: int = 97) -> np.ndarray:
+        """Per-frame keypoint spread as a multiple of that animal's usual spread.
+
+        Spread is the widest gap between any two body parts, so a value well
+        above 1 means the "animal" is a scatter of points, the tracker lost it.
+        """
+        x = pose.x.to_numpy(dtype=float)
+        y = pose.y.to_numpy(dtype=float)
+        if x.size == 0:
+            return np.zeros(0, dtype=float)
+        spread = np.hypot(
+            np.nanmax(x, axis=1) - np.nanmin(x, axis=1),
+            np.nanmax(y, axis=1) - np.nanmin(y, axis=1),
+        )
+        typical = float(np.nanmedian(spread[::max(1, sample_every)]))
+        if not np.isfinite(typical) or typical <= 0:
+            return np.zeros(len(spread), dtype=float)
+        return spread / typical
+
+    @staticmethod
+    def _pair_separation(multi: "MultiAnimalPoseData", a: str, b: str) -> np.ndarray:
+        """Per-frame centroid distance between two individuals."""
+        pa, pb = multi.per_individual[a], multi.per_individual[b]
+        ax = np.asarray(pa.centroid_x, dtype=float); ay = np.asarray(pa.centroid_y, dtype=float)
+        bx = np.asarray(pb.centroid_x, dtype=float); by = np.asarray(pb.centroid_y, dtype=float)
+        n = min(len(ax), len(bx))
+        return np.hypot(ax[:n] - bx[:n], ay[:n] - by[:n])
+
+    @staticmethod
+    def _swap_frames_by_pair(
+        multi: "MultiAnimalPoseData", move_thresh: float
+    ) -> "dict[tuple[str, str], list[int]]":
+        """``{(a, b): [frames]}`` using the same test as detect_identity_swaps."""
+        inds = [i for i in multi.individuals if i in multi.per_individual]
+        cents = {
+            i: (
+                np.asarray(multi.per_individual[i].centroid_x, dtype=float),
+                np.asarray(multi.per_individual[i].centroid_y, dtype=float),
+            )
+            for i in inds
+        }
+        n = min((len(cx) for cx, _ in cents.values()), default=0)
+        out: dict[tuple[str, str], list[int]] = {}
+        for ii in range(len(inds)):
+            for jj in range(ii + 1, len(inds)):
+                a, b = inds[ii], inds[jj]
+                ax, ay = cents[a]
+                bx, by = cents[b]
+                d_a = np.hypot(np.diff(ax[:n]), np.diff(ay[:n]))
+                d_b = np.hypot(np.diff(bx[:n]), np.diff(by[:n]))
+                cross_a = np.hypot(ax[1:n] - bx[: n - 1], ay[1:n] - by[: n - 1])
+                cross_b = np.hypot(bx[1:n] - ax[: n - 1], by[1:n] - ay[: n - 1])
+                # NaN frames compare False on both tests, so gaps drop out here
+                # exactly as the per-frame loop skips them.
+                hit = (cross_a + cross_b < d_a + d_b) & (np.maximum(d_a, d_b) > move_thresh)
+                frames = (np.flatnonzero(hit) + 1).tolist()
+                if frames:
+                    out[(a, b)] = [int(f) for f in frames]
+        return out
+
     def extract_and_save_frame_pose_features_multi(
         self,
         project_root: Path,
@@ -1226,6 +1487,17 @@ class PoseProcessingService:
                 social = self.compute_frame_social_features(pose, others, fps, focal_body_length=bl)
                 if not social.empty:
                     df = pd.concat([df.reset_index(drop=True), social.reset_index(drop=True)], axis=1)
+                # Bookkeeping, not a feature: was there anyone to be social
+                # with on this frame?  Every social_* column is unmeasurable
+                # where this is 0, which is exactly the stretch before a second
+                # animal is added to the cage.
+                partner_present = np.zeros(len(df), dtype=float)
+                for opose in others.values():
+                    p_mask = self.presence_mask(opose)
+                    partner_present[: len(p_mask)] = np.maximum(
+                        partner_present[: len(p_mask)], p_mask.astype(float)
+                    )
+                df["partner_present"] = partner_present
             frames.append(df)
 
         combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -1640,7 +1912,7 @@ class PoseProcessingService:
         meta: dict = {"path": str(path), "n_frames": 0, "body_parts": [], "individuals": []}
 
         def _summarize(per_ind: dict[str, pd.DataFrame]) -> None:
-            # Body parts are shared across individuals — dedupe across all.
+            # Body parts are shared across individuals: dedupe across all.
             parts: list[str] = []
             seen: set[str] = set()
             for df2 in per_ind.values():

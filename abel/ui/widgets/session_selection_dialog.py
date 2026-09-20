@@ -3,7 +3,7 @@
 Both the Active Learning and Temporal Refinement tabs let the user restrict a
 run to a subset of linked sessions.  This dialog centralises that UI so the two
 tabs stay in sync and share the session-type selector: a dropdown of the session
-types present in the project plus a 'Check all of type' button that adds every
+types present in the project plus a 'Check All of Type' button that adds every
 session of the chosen type to the current selection.
 """
 
@@ -75,7 +75,7 @@ def choose_sessions(
     """Show the Choose Sessions dialog and return the selected session ids.
 
     ``current_selected`` seeds the initial check state.  Returns the list of
-    checked session ids on OK, or ``None`` if the dialog was cancelled.  The
+    checked session ids on OK, or ``None`` if the dialog was canceled.  The
     caller is responsible for interpreting an empty / full selection (e.g.
     collapsing 'all selected' to a None scope).
     """
@@ -108,7 +108,7 @@ def choose_sessions(
     select_all_btn.clicked.connect(lambda: _set_all(Qt.CheckState.Checked))
     deselect_all_btn.clicked.connect(lambda: _set_all(Qt.CheckState.Unchecked))
 
-    # ── Session-type filter: dropdown of present types + 'Check all of type' ──
+    # ── Session-type filter: dropdown of present types + 'Check All of Type' ──
     type_combo = QComboBox(dlg)
     type_combo.addItem(_ALL_TYPES)
     present_types = sorted({opt.session_type for opt in options if opt.session_type})
@@ -117,7 +117,7 @@ def choose_sessions(
     if any(not opt.session_type for opt in options):
         type_combo.addItem(_UNTYPED)
 
-    check_type_btn = QPushButton("Check all of type", dlg)
+    check_type_btn = QPushButton("Check All of Type", dlg)
     check_type_btn.setToolTip(
         "Add every session of the selected type to the current selection.\n"
         "Existing checks are left in place, so you can combine multiple types."

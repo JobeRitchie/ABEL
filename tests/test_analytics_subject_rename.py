@@ -1,7 +1,7 @@
 """Analytics group state follows a subject rename, even one it saved over.
 
 The tab keeps factors in memory keyed by session label.  A rename in Data
-Import while the tab is open used to leave those keys stale — and the tab's
+Import while the tab is open used to leave those keys stale, and the tab's
 next save wrote them back.  Saved anchors (the session ids behind each key) now
 let both a refresh and a later load re-key the state.
 """
@@ -96,7 +96,7 @@ def test_refresh_remaps_in_memory_state(_app, tmp_path: Path) -> None:
 
 def test_cached_distance_rows_take_current_labels(_app, tmp_path: Path) -> None:
     # The distance/ROI cache is keyed by pose files, not names, so a rename
-    # hits it — its rows must not bring the old labels back as extra sessions.
+    # hits it: its rows must not bring the old labels back as extra sessions.
     root, svc, manifest = _project(tmp_path)
     old_tab = _open(root)
     cached = old_tab._build_distance_rows(sorted(old_tab._subject_by_session))

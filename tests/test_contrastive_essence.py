@@ -1,6 +1,6 @@
 """Contrastive essence extraction + graded ranking.
 
-Guards the behaviour that fixes Targeted Clip Mining's over-selection: essence
+Guards the behavior that fixes Targeted Clip Mining's over-selection: essence
 must be inferred from how exemplars *differ from a background*, must ignore
 degenerate/constant features, must stay far tighter than the legacy min-max
 ranging, and must stay robust from a 2-clip selection up to hundreds.
@@ -67,7 +67,7 @@ def test_contrastive_essence_is_discriminative_and_tight():
 
 
 def test_saturating_feature_still_yields_k_distinct_signals():
-    """An extreme behaviour (freezing) is isolated by one feature alone; the box
+    """An extreme behavior (freezing) is isolated by one feature alone; the box
     must still describe it with up to k features rather than stopping at that
     one, skipping other statistics of the same signal and correlated copies."""
     rng = np.random.default_rng(1)

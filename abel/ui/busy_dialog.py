@@ -12,7 +12,7 @@ Two design points matter:
   used by the test suite it would wait forever.  :func:`show_busy` is a no-op
   on those platforms for the same reason.
 * ``closeEvent`` is deliberately *not* blocked. The titlebar has no close
-  button, so the only way one arrives is the application shutting down — and a
+  button, so the only way one arrives is the application shutting down, and a
   popup that refuses to close there would make a stuck background job into an
   unquittable app. Esc is swallowed by :meth:`BusyDialog.reject` instead.
 * Sizing comes from font metrics, not fixed pixels, so the text does not clip

@@ -2,7 +2,7 @@
 
 ABEL projects reference their source videos and pose files by path.  Those paths
 routinely point at removable or network storage (``H:\\``, ``J:\\``, a UNC share),
-so a project that worked yesterday can open today with every raw asset missing —
+so a project that worked yesterday can open today with every raw asset missing,
 the drive simply is not mounted.  Nothing about the project is corrupt; it is
 just unreadable.
 
@@ -12,14 +12,14 @@ falls back to random, clip extraction writes empty crops, a validation arm
 disables itself.  The user sees a finished run with a plausible-looking figure and
 no indication that a whole input was missing.
 
-So availability is checked once, centrally, and reported *up front* — see
+So availability is checked once, centrally, and reported *up front*, see
 :func:`check_project_raw_data`.  The UI layer turns the report into a dialog
 (:mod:`abel.ui.raw_data_warning`); headless callers can read the same report.
 
 Checks are existence-only (``Path.exists``), never a read, so a 47-session project
 resolves in milliseconds.  A drive letter that is not mapped at all fails fast on
 its own, but a *mapped* network share that is unreachable (VPN down, ``J:`` →
-``\\\\ad.unc.edu\\...``) blocks every ``stat`` for the full SMB timeout — measured
+``\\\\ad.unc.edu\\...``) blocks every ``stat`` for the full SMB timeout, measured
 ~158 s per path, uncached.  So each volume is probed once per check with a short
 timeout (:func:`_hung_volumes`), and files on a hung volume are reported missing
 without being stat'ed.
@@ -42,7 +42,7 @@ KIND_LABELS = {
     KIND_POSE: "pose",
 }
 
-# What breaks when each asset kind is unreachable — shown in the warning so the
+# What breaks when each asset kind is unreachable, shown in the warning so the
 # user can judge whether to proceed or go mount the drive.
 KIND_IMPACT = {
     KIND_VIDEO: ("clip extraction, review clips, video features, crops and any "
@@ -65,8 +65,8 @@ class MissingAsset:
     def drive(self) -> str:
         """Drive root / UNC share of the missing path ("" when relative).
 
-        Missing files cluster by *volume*, not by session — one unmounted drive
-        explains 47 missing files — so this is what the summary groups on.
+        Missing files cluster by *volume*, not by session, one unmounted drive
+        explains 47 missing files, so this is what the summary groups on.
         """
         try:
             anchor = self.path.anchor
@@ -84,7 +84,7 @@ class RawDataReport:
     n_checked: int = 0
     missing: list[MissingAsset] = field(default_factory=list)
     # Sessions whose manifest entry has no asset record at all (never imported),
-    # kept separate from "path recorded but file gone" — different user action.
+    # kept separate from "path recorded but file gone", different user action.
     unlinked_sessions: list[str] = field(default_factory=list)
 
     @property
@@ -155,8 +155,8 @@ def check_manifest_raw_data(
     """Existence-check the raw assets referenced by ``manifest``.
 
     Mirrors :meth:`ImportService.video_path_for_session` /
-    ``pose_path_for_session`` resolution order — local project copy first, then
-    the original source path — so an asset ABEL *can* open is never reported
+    ``pose_path_for_session`` resolution order, local project copy first, then
+    the original source path, so an asset ABEL *can* open is never reported
     missing.  ``session_ids`` narrows the check to the sessions a caller actually
     needs (a single-session preview does not care about the other 46).
     """
@@ -210,7 +210,7 @@ def check_project_raw_data(
 ) -> RawDataReport:
     """Load the project's import manifest and check its raw assets.
 
-    Returns an empty (``ok``) report when there is no manifest yet — a brand-new
+    Returns an empty (``ok``) report when there is no manifest yet, a brand-new
     project has nothing to be missing, and warning there would be noise.
     """
     root = Path(project_root)
@@ -235,7 +235,7 @@ _stuck_lock = threading.Lock()
 def _hung_volumes(anchors, timeout: float | None = None) -> set[str]:
     """Anchors (drive roots / UNC shares) whose root does not answer in ``timeout``.
 
-    Only a *hang* counts.  A root that answers — present or not — is left to the
+    Only a *hang* counts.  A root that answers, present or not, is left to the
     per-file check, so a share whose root is merely unlistable (permissions) is
     never mis-reported as missing.
     """

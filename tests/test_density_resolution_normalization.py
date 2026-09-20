@@ -1,12 +1,12 @@
-"""Regression: spatial density / heatmap pooling must normalise across resolutions.
+"""Regression: spatial density / heatmap pooling must normalize across resolutions.
 
 Bug (found on the TMT project): the Analytics tab's Spatial Heatmap and Density
 Analysis views pool raw pose centroid coordinates from every session and bin them
 against a single reference resolution (the first session's video), with no
-per-session normalisation.  Pose coordinates live in the pixel space of the video
+per-session normalization.  Pose coordinates live in the pixel space of the video
 each subject was tracked on, so when subjects are recorded at different
 resolutions the lower-resolution subjects collapse into the top-left corner and
-higher-resolution subjects overflow the arena — the data points land in the wrong
+higher-resolution subjects overflow the arena, the data points land in the wrong
 place and the two subjects never overlay.
 
 The fix rescales each session's coordinates from its own native video resolution
@@ -22,11 +22,11 @@ from abel.ui.tabs.behavior_analytics_tab import _scale_xy_to_reference
 
 
 def test_lower_res_subject_scales_up_to_reference() -> None:
-    # A subject centred in a 640x480 arena.
+    # A subject centered in a 640x480 arena.
     xs = np.array([320.0, 320.0])
     ys = np.array([240.0, 240.0])
     sx, sy = _scale_xy_to_reference(xs, ys, sess_w=640, sess_h=480, ref_w=1280, ref_h=720)
-    # Should map to the centre of the 1280x720 reference frame.
+    # Should map to the center of the 1280x720 reference frame.
     assert np.allclose(sx, 640.0)
     assert np.allclose(sy, 360.0)
 
@@ -41,17 +41,17 @@ def test_matching_resolution_is_untouched() -> None:
 def test_unknown_resolution_leaves_coords_unscaled() -> None:
     xs = np.array([10.0, 20.0])
     ys = np.array([30.0, 40.0])
-    # Missing session dims (0) → cannot normalise; leave as-is rather than corrupt.
+    # Missing session dims (0) → cannot normalize; leave as-is rather than corrupt.
     sx, sy = _scale_xy_to_reference(xs, ys, 0, 0, 1280, 720)
     assert sx is xs and sy is ys
 
 
 def test_pooling_two_resolutions_aligns_a_shared_location() -> None:
     """Two subjects at the SAME physical arena location, filmed at different
-    resolutions, must land on the same reference pixel after normalisation."""
+    resolutions, must land on the same reference pixel after normalization."""
     ref_w, ref_h = 1280, 720
 
-    # Subject A (native reference res) hugging the arena's right-centre edge.
+    # Subject A (native reference res) hugging the arena's right-center edge.
     ax = np.full(100, 1200.0)
     ay = np.full(100, 360.0)
     a_sx, a_sy = _scale_xy_to_reference(ax, ay, 1280, 720, ref_w, ref_h)
@@ -61,7 +61,7 @@ def test_pooling_two_resolutions_aligns_a_shared_location() -> None:
     by = np.full(100, 180.0)   # 360/2
     b_sx, b_sy = _scale_xy_to_reference(bx, by, 640, 360, ref_w, ref_h)
 
-    # After normalisation both subjects occupy the same reference pixel.
+    # After normalization both subjects occupy the same reference pixel.
     assert np.allclose(a_sx, b_sx)
     assert np.allclose(a_sy, b_sy)
 
@@ -72,7 +72,7 @@ def test_pooling_two_resolutions_aligns_a_shared_location() -> None:
                              range=[[0, ref_w], [0, ref_h]])
     assert int((H > 0).sum()) == 1  # single occupied bin
 
-    # Sanity: WITHOUT normalisation the same raw points land in two bins.
+    # Sanity: WITHOUT normalization the same raw points land in two bins.
     H_raw, _, _ = np.histogram2d(
         np.concatenate([ax, bx]), np.concatenate([ay, by]),
         bins=64, range=[[0, ref_w], [0, ref_h]],

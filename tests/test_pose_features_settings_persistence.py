@@ -106,7 +106,7 @@ def test_partial_extraction_block_does_not_reset_legacy_settings(_app, tmp_path:
     A project.yaml that predates this tab keeps its settings under
     ``behavior_model``.  If a one-key ``feature_extraction`` block made the
     loader treat the project as "already migrated", every unwritten parameter
-    would silently snap back to its default — including turning video features
+    would silently snap back to its default, including turning video features
     off for a project trained with them.
     """
     project = tmp_path / "proj"
@@ -124,7 +124,7 @@ def test_partial_extraction_block_does_not_reset_legacy_settings(_app, tmp_path:
 
     assert tab._p_use_video.isChecked() is True      # legacy value survived
     assert tab._p_advanced_roi.isChecked() is False  # legacy value survived
-    assert tab._p_use_r3d.isChecked() is False       # partial block still honoured
+    assert tab._p_use_r3d.isChecked() is False       # partial block still honored
 
 
 def test_r3d_toggle_greys_out_without_video_features(_app, tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Overlay appearance customisation dialog with live video-frame preview."""
+"""Overlay appearance customization dialog with live video-frame preview."""
 
 from __future__ import annotations
 
@@ -40,13 +40,13 @@ _DEFAULTS: dict[str, Any] = {
     "panel_opacity": 0.72,           # 0-1, background darkness blend
     "panel_border_gray": 60,         # 0-255, border brightness
 
-    # Active-behaviour highlighting
-    "highlight_intensity": 0.30,     # 0-1, colour tint blend
+    # Active-behavior highlighting
+    "highlight_intensity": 0.30,     # 0-1, color tint blend
     "active_glow_ring_px": 4,        # extra radius for glow ring
-    "accent_bar_enabled": True,      # show coloured bar under active row
+    "accent_bar_enabled": True,      # show colored bar under active row
     "accent_bar_height_factor": 0.18,  # fraction of row height
 
-    # Text colours (BGR lists for JSON compat)
+    # Text colors (BGR lists for JSON compat)
     "active_text_color": [255, 255, 255],
     "inactive_text_color": [160, 160, 160],
 
@@ -150,7 +150,7 @@ def _numpy_to_qpixmap(bgr: np.ndarray, max_width: int = 720) -> QPixmap:
 # ---------------------------------------------------------------------------
 
 class OverlaySettingsDialog(QDialog):
-    """Live-preview overlay customisation dialog."""
+    """Live-preview overlay customization dialog."""
 
     settings_saved = Signal()
 
@@ -285,8 +285,8 @@ class OverlaySettingsDialog(QDialog):
 
         layout.addWidget(hl_group)
 
-        # --- Text colours section ---
-        clr_group = QGroupBox("Text Colours")
+        # --- Text colors section ---
+        clr_group = QGroupBox("Text Colors")
         clr_form = QFormLayout(clr_group)
 
         self._active_clr_btn = self._color_button(self._settings["active_text_color"])
@@ -385,7 +385,7 @@ class OverlaySettingsDialog(QDialog):
         initial = QColorDialog.getColor(
             initial=QColor(cur[2], cur[1], cur[0]),
             parent=self,
-            title=f"Choose colour for {key.replace('_', ' ')}",
+            title=f"Choose color for {key.replace('_', ' ')}",
         )
         if not initial.isValid():
             return
@@ -444,7 +444,7 @@ class OverlaySettingsDialog(QDialog):
 
         # Build synthetic data so the overlay looks realistic
         names = sorted(self._behavior_info.keys(), key=str.lower) or ["Behavior A", "Behavior B", "Behavior C"]
-        # Simulate: first behaviour is "active"
+        # Simulate: first behavior is "active"
         active = [names[0]] if names else []
         cumulative = {}
         for i, name in enumerate(names):
@@ -468,7 +468,7 @@ class OverlaySettingsDialog(QDialog):
             (200, 120, 255), (255, 110, 110), (220, 220, 220),
             (255, 170, 0), (180, 255, 255),
         ]
-        # Scatter keypoints in the centre-ish area of the frame
+        # Scatter keypoints in the center-ish area of the frame
         rng = random.Random(42)  # deterministic so dots don't jump on refresh
         for i in range(12):
             px = int(w * rng.uniform(0.25, 0.75))

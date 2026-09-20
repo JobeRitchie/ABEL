@@ -2,7 +2,7 @@
 
 A trimmed, self-contained player adapted from the Review tab's
 ``CandidateVideoPlayer``.  Supports play/pause, frame stepping, a scrub slider,
-adjustable playback speed, and clip looping — everything the Validation quiz
+adjustable playback speed, and clip looping, everything the Validation quiz
 needs to reuse the proven review-style playback experience.
 """
 

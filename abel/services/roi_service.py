@@ -15,19 +15,28 @@ from abel.utils.roi_geometry import (
     simplify_freehand,
 )
 
-# Per-ROI overlay colours (index 0 = ROI 1, index 1 = ROI 2, …).
+# Per-ROI overlay colors (index 0 = ROI 1, index 1 = ROI 2, …).
 # Eight slots covers reasonable multi-zone experiments.
 ROI_COLORS = [
-    "#FFC107",  # ROI 1 — amber/yellow  (legacy "Target Zone" colour)
-    "#4FC3F7",  # ROI 2 — light blue
-    "#FF7043",  # ROI 3 — orange
-    "#CE93D8",  # ROI 4 — lavender
-    "#A5D6A7",  # ROI 5 — light green
-    "#F48FB1",  # ROI 6 — pink
-    "#80CBC4",  # ROI 7 — teal
-    "#FFCC80",  # ROI 8 — pale amber
+    "#FFC107",  # ROI 1: amber/yellow  (legacy "Target Zone" color)
+    "#4FC3F7",  # ROI 2: light blue
+    "#FF7043",  # ROI 3: orange
+    "#CE93D8",  # ROI 4: lavender
+    "#A5D6A7",  # ROI 5: light green
+    "#F48FB1",  # ROI 6: pink
+    "#80CBC4",  # ROI 7: teal
+    "#FFCC80",  # ROI 8: pale amber
 ]
 MAX_ROIS = len(ROI_COLORS)
+
+# MOG2 variance threshold for the local background-subtraction windows (squared
+# Mahalanobis distance a pixel must exceed to count as foreground): lower = more
+# sensitive.  Stored as motion.bg_var_threshold only when it differs from the
+# default, so projects that never touch it keep a byte-identical ROI file and
+# their context-feature cache stays valid.
+DEFAULT_BG_VAR_THRESHOLD = 16
+BG_VAR_THRESHOLD_MIN = 4
+BG_VAR_THRESHOLD_MAX = 100
 
 # Every feature emitted against a target zone, at frame or segment level:
 #   in_roi_1_nose, nose_to_roi_1_edge_dist, nose_roi_1_axial_abs_p90,
@@ -107,7 +116,7 @@ class ROIService:
 
     @classmethod
     def _extract_target_zones(cls, roi_block: dict, legacy_fallback: Any = None) -> list[dict[str, int]]:
-        """Extract a normalised list of target-zone dicts from a config block.
+        """Extract a normalized list of target-zone dicts from a config block.
 
         Handles three storage layouts:
         - New: ``{"target_zones": [{…}, …]}``
@@ -165,6 +174,10 @@ class ROIService:
 
         motion = data.get("motion", {}) if isinstance(data.get("motion", {}), dict) else {}
         cfg["motion"]["local_radius_px"] = max(8, int(motion.get("local_radius_px", 36) or 36))
+        if "bg_var_threshold" in motion:
+            bg = cls._clamp_bg_threshold(motion.get("bg_var_threshold"))
+            if bg != DEFAULT_BG_VAR_THRESHOLD:
+                cfg["motion"]["bg_var_threshold"] = bg
         raw_excl = data.get("roi_excluded_day_labels", [])
         cfg["roi_excluded_day_labels"] = [
             str(d) for d in (raw_excl if isinstance(raw_excl, list) else []) if d
@@ -176,8 +189,8 @@ class ROIService:
 
         ``mutable=False`` hands back the cached object itself instead of a copy.
         On a megabyte-scale file the defensive deep copy costs more than
-        everything else put together, so read-only callers — which build fresh
-        dicts out of what they read — opt out.  Anyone who edits the result and
+        everything else put together, so read-only callers, which build fresh
+        dicts out of what they read, opt out.  Anyone who edits the result and
         saves it must take the default.
         """
         path = (project_root / self.ROI_FILE).resolve()
@@ -207,7 +220,7 @@ class ROIService:
             if stamp is None:
                 _CONFIG_CACHE.pop(path, None)
             else:
-                # We just produced the canonical form — cache it rather than
+                # We just produced the canonical form: cache it rather than
                 # making the next load() re-parse what we only now wrote out.
                 _CONFIG_CACHE[path] = (stamp[0], stamp[1], copy.deepcopy(clean))
 
@@ -338,7 +351,7 @@ class ROIService:
         A subject with no ``subject_rois`` entry falls back to the project
         defaults, which are a zero-size box unless the project draws one.  That
         resolves silently, and every downstream ROI/target feature then comes out
-        all-NaN (see ``context_feature_service._roi_point_features``) — models
+        all-NaN (see ``context_feature_service._roi_point_features``), models
         that lean on those features score such a session off a constant input.
         Callers use this to refuse the run instead of emitting a flat trace.
 
@@ -375,3 +388,30 @@ class ROIService:
         cfg = self.load(project_root, mutable=False)
         motion = cfg.get("motion", {})
         return max(8, int(motion.get("local_radius_px", 36) or 36))
+
+    def bg_var_threshold(self, project_root: Path) -> int:
+        """MOG2 variance threshold for the local background-subtraction windows."""
+        cfg = self.load(project_root, mutable=False)
+        return self._clamp_bg_threshold(cfg.get("motion", {}).get("bg_var_threshold"))
+
+    def set_bg_var_threshold(self, project_root: Path, value: int) -> bool:
+        """Persist the threshold; returns False (and writes nothing) when unchanged.
+
+        Skipping no-op writes matters: the context-feature cache signature
+        hashes this file, so even a cosmetic rewrite could force a rebuild.
+        """
+        value = self._clamp_bg_threshold(value)
+        if value == self.bg_var_threshold(project_root):
+            return False
+        cfg = self.load(project_root)
+        cfg.setdefault("motion", {})["bg_var_threshold"] = value
+        self.save(project_root, cfg)
+        return True
+
+    @staticmethod
+    def _clamp_bg_threshold(raw: Any) -> int:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return DEFAULT_BG_VAR_THRESHOLD
+        return max(BG_VAR_THRESHOLD_MIN, min(BG_VAR_THRESHOLD_MAX, value))

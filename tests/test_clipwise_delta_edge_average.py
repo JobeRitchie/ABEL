@@ -17,7 +17,7 @@ import pandas as pd
 from abel.utils.gpu_feature_ops import build_segment_df_fast
 
 
-# A column name that _is_roi_spatial_col() recognises, so it gets _delta/_trend.
+# A column name that _is_roi_spatial_col() recognizes, so it gets _delta/_trend.
 DELTA_COL = "nose_to_target_dist"
 
 

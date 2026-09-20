@@ -1,7 +1,7 @@
 """Tests for cross-session feature coverage auditing.
 
 The failure this guards against is a column that pools to a healthy-looking
-feature while being entirely absent for a subset of sessions — those sessions
+feature while being entirely absent for a subset of sessions, those sessions
 then get scored off a constant input.
 """
 

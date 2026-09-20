@@ -2,7 +2,7 @@
 
 The validation run that produced the manuscript exports takes hours and needs the
 original ABEL projects.  Every figure here, though, is a pure function of a CSV that
-the run already wrote — so this rebuilds them from the exported CSVs alone, using the
+the run already wrote, so this rebuilds them from the exported CSVs alone, using the
 fixed plot functions in ``abel.validation.{plots,video_value,benchmark}``.
 
     python scripts/regenerate_meta_figures.py "J:/.../Meta analysis metric exports"
@@ -43,7 +43,7 @@ def _no_error(row) -> bool:
     """True when the row's ``error`` cell is blank.
 
     An empty CSV cell reads back as NaN, and ``str(nan)`` is the *non-empty* string
-    ``"nan"`` — so a naive truthiness check silently discards every good row.
+    ``"nan"``, so a naive truthiness check silently discards every good row.
     """
     val = row.get("error", "")
     return pd.isna(val) or not str(val).strip()

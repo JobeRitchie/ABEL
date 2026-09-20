@@ -1,4 +1,4 @@
-"""Behaviorscape — the feature-landscape meta-analysis.
+"""Behaviorscape: the feature-landscape meta-analysis.
 
 Trains one model per ``(project, behavior)`` (leakage-checked holdout split,
 reusing the shared engine) and captures each model's per-feature importance
@@ -6,15 +6,15 @@ reusing the shared engine) and captures each model's per-feature importance
 behavior name (with an optional alias map so slight naming drift is harmless),
 and every surviving feature is tagged with one of five **data modalities**:
 
-* ``pose``       — static pose geometry (angles, curvature, positions, pairwise
+* ``pose``      : static pose geometry (angles, curvature, positions, pairwise
                    distances between body parts).
-* ``kinematics`` — pose-derived motion (velocity, speed, acceleration, jerk).
-* ``video``      — pixel-derived signal (optical flow, surface motion energy,
-                   oscillation/appearance) — the value-add of clip-based features.
-* ``context``    — relationship to the environment (distance/angle to ROIs,
+* ``kinematics``: pose-derived motion (velocity, speed, acceleration, jerk).
+* ``video``     : pixel-derived signal (optical flow, surface motion energy,
+                   oscillation/appearance), the value-add of clip-based features.
+* ``context``   : relationship to the environment (distance/angle to ROIs,
                    targets, zones).
-* ``social``     — inter-animal interaction (``social_*``: distance to nearest
-                   animal, approach/radial velocity, heading alignment, contact) —
+* ``social``    : inter-animal interaction (``social_*``: distance to nearest
+                   animal, approach/radial velocity, heading alignment, contact),
                    the value-add of multi-animal projects.
 
 The resulting :class:`BehaviorscapeData` (a feature×behavior matrix + modality
@@ -61,7 +61,7 @@ MODALITY_LABELS: dict[str, str] = {
     MODALITY_SOCIAL: "Social (interaction)",
 }
 
-# Colour-blind-safe-ish, distinct in print.
+# Color-blind-safe-ish, distinct in print.
 MODALITY_COLORS: dict[str, str] = {
     MODALITY_POSE: "#4C72B0",        # blue
     MODALITY_KINEMATICS: "#55A868",  # green
@@ -154,7 +154,7 @@ def collect_feature_importance(
         for bid in bids:
             name = project.behavior_label(bid)
             if progress_cb is not None:
-                progress_cb(f"Feature importance — {project.project_id}: {name}",
+                progress_cb(f"Feature importance: {project.project_id}: {name}",
                             done / total)
             n_pos = subsample.count_positives(pool, bid)
             n_neg = int(len(pool) - n_pos)
@@ -225,7 +225,7 @@ class BehaviorscapeData:
         canonical order.
 
         The taxonomy has five modalities, but a given set of projects need not use
-        all of them — ``social`` exists only in multi-animal projects, so a run over
+        all of them, ``social`` exists only in multi-animal projects, so a run over
         single-animal projects has *zero* social features.  Figures and exports must
         key off this, not off ``MODALITY_ORDER``: a modality with no features behind
         it otherwise shows up as a phantom legend entry and an all-zero series,
@@ -262,7 +262,7 @@ class BehaviorscapeData:
         return pd.DataFrame.from_records(recs)
 
     def modality_fraction_long_df(self) -> pd.DataFrame:
-        """Tidy per-behavior modality shares — the data behind the modality-bars figure.
+        """Tidy per-behavior modality shares: the data behind the modality-bars figure.
 
         One row per (behavior, modality): ``importance_share`` is the fraction (0–1)
         of that behavior's total feature importance carried by the modality, plus a
@@ -285,7 +285,7 @@ class BehaviorscapeData:
         return pd.DataFrame.from_records(recs)
 
     def similarity_matrix_df(self) -> pd.DataFrame:
-        """Behavior×behavior profile correlation — the data behind the similarity figure.
+        """Behavior×behavior profile correlation: the data behind the similarity figure.
 
         Square matrix (behaviors as both rows and columns) of the correlation between
         behaviors' feature-importance vectors, clipped to [0, 1] exactly as plotted.
@@ -299,7 +299,7 @@ class BehaviorscapeData:
 
 
 def distinctiveness_df(stats: "DistinctivenessStats | None") -> pd.DataFrame:
-    """Tidy per-behavior distinctiveness table — the data behind the PERMANOVA figure."""
+    """Tidy per-behavior distinctiveness table: the data behind the PERMANOVA figure."""
     if stats is None:
         return pd.DataFrame()
     order = sorted(stats.behaviors, key=lambda b: stats.distinctiveness[b], reverse=True)
@@ -321,7 +321,7 @@ def _normalize_importance(imp: dict[str, float], how: str) -> dict[str, float]:
     vals = np.asarray(list(imp.values()), dtype=float)
     if how == "max":
         denom = float(np.nanmax(vals))
-    else:  # "fraction" — share of the model's total gain
+    else:  # "fraction": share of the model's total gain
         denom = float(np.nansum(vals))
     if not np.isfinite(denom) or denom <= 0:
         return {k: 0.0 for k in imp}
@@ -342,22 +342,22 @@ def build_behaviorscape(
     ----------
     threshold:
         Keep a feature as long as it reaches ``threshold`` in **any single
-        (project, behavior) model** — a feature that is dead in one project but
+        (project, behavior) model**, a feature that is dead in one project but
         important in another survives.  The test uses the per-model maximum
         importance, *not* the pooled mean (which dilution across projects could
         push below threshold).
     alias_map:
-        Maps raw behavior names to a display name, harmonising label drift
+        Maps raw behavior names to a display name, harmonizing label drift
         *within* a project.  Behaviors are NOT merged across projects: each
         column is scoped to its assay (``"<project> · <behavior>"``), so an
-        assay's Rear and another assay's Rear stay two separate columns — they
+        assay's Rear and another assay's Rear stay two separate columns, they
         are independently-trained models and averaging them would invent a
         behavior no model represents.
     normalize:
         ``"fraction"`` (per-model share of total gain, default) or ``"max"``.
     drop_excluded_behaviors:
         Behavior names (aliased, un-prefixed) to omit entirely (e.g. user
-        unchecked them) — applied before the assay prefix.
+        unchecked them), applied before the assay prefix.
     """
     drop_excluded_behaviors = drop_excluded_behaviors or set()
     usable = [s for s in sources if s.ok]
@@ -423,7 +423,7 @@ def build_behaviorscape(
     )
 
 
-# ── "Do behaviors rely on different features?" — significance testing ────────
+# ── "Do behaviors rely on different features?", significance testing ────────
 
 
 @dataclass
@@ -433,7 +433,7 @@ class DistinctivenessStats:
     ``permanova`` (when present) is the headline test of the hypothesis that
     *different behaviors rely on different features*: it asks whether behavior
     identity explains the variance among the per-(project, behavior) importance
-    vectors more than a random labelling would.
+    vectors more than a random labeling would.
     """
 
     behaviors: list[str]
@@ -525,7 +525,7 @@ def behavior_distinctiveness_stats(
 
     Behaviors are assay-scoped (never pooled across projects), so each behavior is
     a single model: replicate counts are 1, standard errors are 0, and the global
-    PERMANOVA — which needs ≥2 replicates per group — does not run (``permanova`` is
+    PERMANOVA, which needs ≥2 replicates per group, does not run (``permanova`` is
     ``None``). The distinctiveness ranking remains a valid descriptive readout.
     """
     if data is None or data.is_empty():
@@ -599,7 +599,7 @@ def behavior_distinctiveness_stats(
 
 
 def _behaviorscape_dominant_modality(data: BehaviorscapeData) -> dict[str, str]:
-    """Behavior -> modality with the largest importance share (for bar colouring)."""
+    """Behavior -> modality with the largest importance share (for bar coloring)."""
     frac = data.modality_fraction_by_behavior()
     out: dict[str, str] = {}
     for beh in frac.index:

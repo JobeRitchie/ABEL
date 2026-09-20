@@ -1,7 +1,7 @@
-"""Regression tests for workflow-snapshot behaviour-model resolution.
+"""Regression tests for workflow-snapshot behavior-model resolution.
 
 These lock in the Direct Use fix: a snapshot must capture *every* trained
-behaviour (not just one), auto-discovering models from ``derived/models/``
+behavior (not just one), auto-discovering models from ``derived/models/``
 when the Temporal Refinement tab was left on "auto" (empty explicit map).
 """
 
@@ -41,7 +41,7 @@ def _write_behavior_defs(project_root: Path, defs: list[dict]) -> None:
 
 
 def _basic_project(tmp_path: Path) -> Path:
-    """A project with 3 real behaviours + no_behavior, all trained."""
+    """A project with 3 real behaviors + no_behavior, all trained."""
     root = tmp_path / "proj"
     _make_model(root, "behavior_model_Walk", "walk-id")
     _make_model(root, "behavior_model_Rear", "rear-id")
@@ -60,7 +60,7 @@ def test_auto_resolves_all_trained_behaviors(tmp_path: Path) -> None:
     root = _basic_project(tmp_path)
     snap = WorkflowSnapshotService().build_from_project(root)
 
-    # All three real behaviours captured; no_behavior excluded as a competitor.
+    # All three real behaviors captured; no_behavior excluded as a competitor.
     assert snap.selected_behavior_models == {
         "walk-id": "behavior_model_Walk",
         "rear-id": "behavior_model_Rear",
@@ -75,7 +75,7 @@ def test_target_behavior_and_model_version_are_consistent(tmp_path: Path) -> Non
 
     # target_behavior follows definition order (first active, non-no_behavior).
     assert snap.target_behavior == "rear-id"
-    # model_version points at the chosen target behaviour's model.
+    # model_version points at the chosen target behavior's model.
     assert snap.model_version == "behavior_model_Rear"
 
 
@@ -119,7 +119,7 @@ def test_use_video_features_captured_from_run_settings(tmp_path: Path) -> None:
     ])
     snap = WorkflowSnapshotService().build_from_project(root)
     assert snap.use_video_features is True
-    # Survives a round-trip through dict serialisation.
+    # Survives a round-trip through dict serialization.
     from abel.services.workflow_snapshot_service import WorkflowSnapshot
     assert WorkflowSnapshot.from_dict(snap.to_dict()).use_video_features is True
 

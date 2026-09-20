@@ -71,7 +71,7 @@ def test_gpu_booster_predicts_without_device_warning(data):
         "device-mismatch warning still raised"
     # XGBoost only emits that warning once per process, so an earlier test could use
     # it up and let this one pass vacuously.  The booster's device is the same fact
-    # stated deterministically — assert it too.
+    # stated deterministically: assert it too.
     assert _booster_device(est) == "cpu"
 
 
@@ -89,7 +89,7 @@ def test_probabilities_unchanged_by_moving_to_cpu(data):
 
 @gpu_only
 def test_booster_moves_but_estimator_still_trains_on_gpu(data):
-    """Only the booster's device changes — a refit still uses the GPU."""
+    """Only the booster's device changes: a refit still uses the GPU."""
     x, y = data
     est = _fit("cuda", x, y)
     ensure_cpu_prediction(est)

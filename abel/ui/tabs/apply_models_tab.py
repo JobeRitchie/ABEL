@@ -1,12 +1,12 @@
-"""Apply Models tab — run another project's trained models in this project.
+"""Apply Models tab: run another project's trained models in this project.
 
 This is Direct Use without creating a new project or re-extracting features: it
-copies a source project's trained behaviour models into the *current* project so
+copies a source project's trained behavior models into the *current* project so
 they can score this project's already-extracted features.  Once imported, the
 models appear wherever models are selected (inference, Visualize, …).
 
 Only models whose feature schema this project's features cover can be imported;
-each model's behaviour is mapped onto a project behaviour (or auto-created from
+each model's behavior is mapped onto a project behavior (or auto-created from
 the source's definition) before import.
 """
 
@@ -107,7 +107,7 @@ class ApplyModelsTab(QWidget):
         desc = QLabel(
             "Run another project's trained models on this project without "
             "re-extracting features or creating a new project. Pick a source "
-            "project, map each model's behaviour onto this project (or auto-create "
+            "project, map each model's behavior onto this project (or auto-create "
             "it), and import. Imported models become selectable everywhere models "
             "are used. Only models whose features this project covers can be imported."
         )
@@ -118,7 +118,7 @@ class ApplyModelsTab(QWidget):
         self._add_btn = QPushButton("+ Select Source Project…")
         self._add_btn.setStyleSheet(_BTN)
         self._add_btn.clicked.connect(self._select_source)
-        self._map_btn = QPushButton("Map Behaviours…")
+        self._map_btn = QPushButton("Map Behaviors…")
         self._map_btn.setStyleSheet(_BTN)
         self._map_btn.clicked.connect(self._map_behaviours)
         self._map_btn.setEnabled(False)
@@ -137,7 +137,7 @@ class ApplyModelsTab(QWidget):
 
         self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
-            ["Model", "Behaviour", "Feature match", "Apply as", "Status"]
+            ["Model", "Behavior", "Feature match", "Apply as", "Status"]
         )
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, hdr.ResizeMode.Stretch)
@@ -214,7 +214,7 @@ class ApplyModelsTab(QWidget):
         if not pv.items:
             QMessageBox.information(
                 self, "Apply Models",
-                f"'{pv.tag}' has no trained behaviour models to import.",
+                f"'{pv.tag}' has no trained behavior models to import.",
             )
             return
         self._source_root = src
@@ -231,7 +231,7 @@ class ApplyModelsTab(QWidget):
         if self._preview is None or self._host_root is None:
             return
         host_behaviors = self._svc.list_host_behaviors(self._host_root)
-        # One row per distinct source behaviour among the compatible models.
+        # One row per distinct source behavior among the compatible models.
         seen: set[str] = set()
         rows: list[tuple[str, str, str]] = []
         for it in self._preview.items:
@@ -317,7 +317,7 @@ class ApplyModelsTab(QWidget):
         reply = QMessageBox.question(
             self, "Remove Imported Models",
             f"Remove all models imported from '{tag}'?\n\n"
-            "This deletes the copied model directories. Behaviours that were "
+            "This deletes the copied model directories. Behaviors that were "
             "auto-created stay defined. This project's own models are untouched.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -343,7 +343,7 @@ class ApplyModelsTab(QWidget):
             return "Auto-create"
         if decision == SKIP_BEHAVIOR:
             return "Skip"
-        # Otherwise it's a host behaviour id — show its name.
+        # Otherwise it's a host behavior id: show its name.
         if self._host_root is not None:
             for hid, hname in self._svc.list_host_behaviors(self._host_root):
                 if hid == decision:
@@ -379,7 +379,7 @@ class ApplyModelsTab(QWidget):
                 status_item.setForeground(QColor("#66BB6A" if status == "Ready" else "#90A4AE"))
             else:
                 status_item = QTableWidgetItem(
-                    f"Blocked — {it.missing_features} feature(s) missing"
+                    f"Blocked: {it.missing_features} feature(s) missing"
                 )
                 status_item.setForeground(QColor("#EF5350"))
             for c, item in enumerate((name_item, beh_item, cov_item, apply_item, status_item)):

@@ -1,4 +1,4 @@
-"""Per-segment R3D-18 appearance features — a *video* feature family.
+"""Per-segment R3D-18 appearance features: a *video* feature family.
 
 These are pixel-derived features in exactly the sense
 :mod:`abel.validation.features` means it: they exist only because a camera saw
@@ -14,14 +14,14 @@ Design notes, each of which was measured rather than assumed:
   frame's pose centroid, with the box sized from the animal's own body extent
   (``_CROP_BODY_MULT`` × median distance from centroid to the furthest tracked
   keypoint).  A fixed frame-relative rectangle embeds whatever happens to sit
-  at those coordinates — usually empty arena.  In a multi-animal session each
-  individual gets its own centre track and its own box size, so a segment
+  at those coordinates, usually empty arena.  In a multi-animal session each
+  individual gets its own center track and its own box size, so a segment
   belonging to ``Mouse2`` is not embedded from a crop around ``Mouse1``.
 * **The full trunk runs.**  Pooling after ``layer4`` gives the 512-d semantic
   embedding.  Stopping earlier yields texture/motion primitives that carry no
-  behaviour information.
+  behavior information.
 * **The embedding stays a vector.**  Collapsing 512 dimensions to one scalar by
-  a fixed formula discards the signal: on a labelled TMT digging set the 512-d
+  a fixed formula discards the signal: on a labeled TMT digging set the 512-d
   vector alone reaches PR-AUC 0.79 against a 0.32 base rate, while a hand-rolled
   scalar over the same network scored at chance.
 
@@ -30,11 +30,11 @@ segment id plus the window geometry, so re-extraction with unchanged settings is
 a parquet read.
 
 Dense inference (:meth:`R3DFeatureService.attach_dense`) asks for a window every
-``inference_step_seconds`` — five times as many windows as training builds.  It
+``inference_step_seconds``, five times as many windows as training builds.  It
 gets them from an *anchor grid* rather than a clip per window, for reasons that
 were measured on the manuscript projects rather than assumed:
 
-* **Anchors sit on the training stride.**  The embedding summarises a 15-frame
+* **Anchors sit on the training stride.**  The embedding summarizes a 15-frame
   window and does not move meaningfully in 3 frames: interpolating onto the
   dense grid from anchors one training-stride apart costs 5x fewer forwards for
   a probability MAE of 0.005, against 0.064 for the zero fill that dense
@@ -55,6 +55,8 @@ were measured on the manuscript projects rather than assumed:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import threading
 import warnings
@@ -86,7 +88,7 @@ _STACK_CHUNK = 8192
 _IMAGENET_MEAN = (0.43216, 0.394666, 0.37645)
 _IMAGENET_STD = (0.22803, 0.22145, 0.216989)
 
-# Serialise GPU forwards so concurrent worker threads can't collide on CUDA.
+# Serialize GPU forwards so concurrent worker threads can't collide on CUDA.
 _gpu_lock = threading.Lock()
 _model_lock = threading.Lock()
 _MODELS: dict[str, Any] = {}
@@ -167,7 +169,7 @@ class R3DFeatureService:
         """Return ``segment_df`` with ``r3d_*`` columns merged on ``segment_id``.
 
         Sessions whose video or pose can't be reached are skipped and their rows
-        left as NaN — the trainer's dead-feature pass handles an all-NaN column,
+        left as NaN, the trainer's dead-feature pass handles an all-NaN column,
         and a partially covered project still benefits from the sessions that
         did resolve.  With ``strict`` the first failure raises instead.
         """
@@ -224,11 +226,21 @@ class R3DFeatureService:
         ends = grp["end_frame"].to_numpy(dtype=int)
 
         cache_path = self._cache_path(project_root, session_id)
+        identity_sig = self._identity_signature(manifest, session_id)
         cached = pd.DataFrame()
         if cache_path.exists():
             try:
                 cached = pd.read_parquet(cache_path)
                 if str(cached.attrs.get("cache_version", _CACHE_VERSION)) != _CACHE_VERSION:
+                    cached = pd.DataFrame()
+                # A segment id survives an identity correction unchanged while the
+                # animal inside its crop box does not, so the id alone cannot say
+                # whether an embedding is still valid.
+                elif str(cached.attrs.get("identity_signature", "")) != identity_sig:
+                    logger.info(
+                        "R3D cache for %s was built under different identity "
+                        "corrections: re-embedding.", session_id,
+                    )
                     cached = pd.DataFrame()
             except Exception:
                 cached = pd.DataFrame()
@@ -259,8 +271,9 @@ class R3DFeatureService:
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             merged.attrs["cache_version"] = _CACHE_VERSION
+            merged.attrs["identity_signature"] = identity_sig
             merged.to_parquet(cache_path, index=False)
-        except Exception as exc:  # cache is an optimisation, never a hard failure
+        except Exception as exc:  # cache is an optimization, never a hard failure
             logger.debug("Could not write R3D cache for %s: %s", session_id, exc)
         return merged[merged["segment_id"].astype(str).isin(seg_ids)][["segment_id", *cols]]
 
@@ -274,7 +287,7 @@ class R3DFeatureService:
         A multi-animal session yields one track per individual, keyed by the same
         ``animal_id`` the pose/context feature tables use, so each segment crops
         around the animal it actually describes.  Pose is loaded with the
-        project's own smoothing settings and identity corrections — the same
+        project's own smoothing settings and identity corrections, the same
         tracks the rest of the feature pipeline sees.
         """
         session = next(
@@ -328,7 +341,7 @@ class R3DFeatureService:
 
     @staticmethod
     def _crop_geometry(pose: Any) -> tuple[np.ndarray, np.ndarray, int]:
-        """Per-frame crop centre plus a single session-wide crop side in px."""
+        """Per-frame crop center plus a single session-wide crop side in px."""
         cx = np.asarray(pose.centroid_x, dtype=float)
         cy = np.asarray(pose.centroid_y, dtype=float)
         xs = pose.x.to_numpy(dtype=float)
@@ -342,7 +355,7 @@ class R3DFeatureService:
             )
         med = float(np.nanmedian(extent)) if np.isfinite(extent).any() else 0.0
         side = max(_CROP_MIN_PX, int(round(_CROP_BODY_MULT * med))) if med > 0 else _CROP_MIN_PX
-        # Carry the centre across untracked frames so every sampled frame crops
+        # Carry the center across untracked frames so every sampled frame crops
         # somewhere sensible rather than at (0, 0).
         cx = pd.Series(cx).ffill().bfill().to_numpy()
         cy = pd.Series(cy).ffill().bfill().to_numpy()
@@ -364,7 +377,7 @@ class R3DFeatureService:
 
         Frames are read in ascending order and dispatched to every segment that
         wants them, so a video is decoded once no matter how much its segments
-        overlap — including when the segments belong to different animals in the
+        overlap, including when the segments belong to different animals in the
         same video, each with its own crop track (``tracks[animal_row[i]]``).
         """
         import cv2
@@ -447,8 +460,8 @@ class R3DFeatureService:
         Embeddings are computed on anchors ``anchor_stride`` frames apart (the
         training stride by default, so anchors coincide with rows already in
         ``derived/r3d_features/``) and linearly interpolated onto each window's
-        centre.  A session whose video or pose can't be reached is returned
-        unchanged, leaving the caller's existing zero fill in place — a degraded
+        center.  A session whose video or pose can't be reached is returned
+        unchanged, leaving the caller's existing zero fill in place, a degraded
         trace for one session, not a failed run.
 
         Anchors that the training cache does not cover are persisted under
@@ -494,7 +507,9 @@ class R3DFeatureService:
             if not len(anchors):
                 raise RuntimeError("no anchor fits the session")
 
-            signature = self._dense_signature(manifest, Path(video_path), Path(pose_path))
+            signature = self._dense_signature(
+                manifest, Path(video_path), Path(pose_path), session_id
+            )
             cached = self._load_dense_anchors(
                 project_root, session_id, window_frames, signature
             )
@@ -596,13 +611,16 @@ class R3DFeatureService:
         return base / f"{stem}.parquet", base / f"{stem}.json"
 
     @staticmethod
-    def _dense_signature(manifest: Any, video_path: Path, pose_path: Path) -> dict[str, Any]:
+    def _dense_signature(
+        manifest: Any, video_path: Path, pose_path: Path, session_id: str | None = None
+    ) -> dict[str, Any]:
         """What the cached anchors depend on, beyond the window geometry.
 
         An embedding is a function of the pixels inside a crop box, and the box
-        comes from the pose read under the project's smoothing settings.  So a
-        re-encoded video, a re-exported pose file or a change to smoothing all
-        invalidate the cache; nothing else does.
+        comes from the pose read under the project's smoothing settings and the
+        session's identity corrections.  So a re-encoded video, a re-exported
+        pose file, a change to smoothing or a new swap correction all invalidate
+        the cache; nothing else does.
         """
         sig: dict[str, Any] = {"cache_version": _DENSE_CACHE_VERSION}
         for key, path in (("video", video_path), ("pose", pose_path)):
@@ -621,7 +639,43 @@ class R3DFeatureService:
                 sig["smoothing"] = dump()
             except Exception:
                 pass
+        # Only added when the session actually has corrections, so caches from
+        # before this key existed stay valid for every untouched session.
+        identity = R3DFeatureService._identity_signature(manifest, session_id)
+        if identity:
+            sig["identity"] = identity
         return sig
+
+    @staticmethod
+    def _identity_signature(manifest: Any, session_id: "str | None") -> str:
+        """Stable digest of a session's identity map + swap corrections.
+
+        Empty when the session has no corrections and no renamed individuals, so
+        that caches written before this check are not thrown away for the many
+        sessions whose identities were never touched.
+        """
+        if session_id is None:
+            return ""
+        session = next(
+            (s for s in getattr(manifest, "linked_sessions", [])
+             if str(s.session_id) == str(session_id)),
+            None,
+        )
+        if session is None:
+            return ""
+        corrections = sorted(
+            (int(c.get("frame", 0)), str(c.get("a")), str(c.get("b")))
+            for c in (getattr(session, "identity_corrections", None) or [])
+        )
+        imap = {
+            str(k): str(v)
+            for k, v in (getattr(session, "individual_subject_map", None) or {}).items()
+            if str(k) != str(v)
+        }
+        if not corrections and not imap:
+            return ""
+        payload = json.dumps({"corrections": corrections, "map": imap}, sort_keys=True)
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
     def _load_dense_anchors(
         self,
@@ -679,7 +733,7 @@ class R3DFeatureService:
                 "signature": signature,
             })
             log(f"R3D dense features: cached {len(df)} anchors for {session_id}.")
-        except Exception as exc:  # a cache is an optimisation, never a hard failure
+        except Exception as exc:  # a cache is an optimization, never a hard failure
             logger.debug("Could not write R3D dense cache for %s: %s", session_id, exc)
 
     def _anchor_embeddings(
@@ -756,7 +810,7 @@ class R3DFeatureService:
             nearest = good[np.argmin(np.abs(good[None, :] - np.flatnonzero(~filled)[:, None]), axis=1)]
             emb[~filled] = emb[nearest]
             logger.debug(
-                "R3D dense features: %s carried %d undecodable anchors from neighbours.",
+                "R3D dense features: %s carried %d undecodable anchors from neighbors.",
                 session_id, int((~filled).sum()),
             )
         return emb

@@ -1,9 +1,9 @@
-"""Motif discovery service — unsupervised clustering of pose-feature windows.
+"""Motif discovery service: unsupervised clustering of pose-feature windows.
 
 Supports two algorithm modes:
 - *K-Means* (scikit-learn, Tier-2 required)
-- *K-Means + UMAP* — UMAP dimensionality reduction then K-Means clustering
-- *HDBSCAN + UMAP* — requires umap-learn + HDBSCAN (sklearn >= 1.3 or hdbscan package)
+- *K-Means + UMAP*: UMAP dimensionality reduction then K-Means clustering
+- *HDBSCAN + UMAP*: requires umap-learn + HDBSCAN (sklearn >= 1.3 or hdbscan package)
 
 Graceful degradation:
     scikit-learn missing  → returns early with a clear warning
@@ -170,15 +170,15 @@ class MotifDiscoveryService:
         """Run the full motif-discovery pipeline for the given sessions.
 
         When *seeds* are provided the cluster model is trained on seed-overlapping
-        windows only (to focus on the behaviour's kinematic signature), but motif
+        windows only (to focus on the behavior's kinematic signature), but motif
         labels are then assigned to every window in the full recording so that
         candidate generation can search across the entire dataset.
 
         Steps (each increments progress 0→6):
           0. Load & stack feature matrices (full session)
           1. Filter to seed windows for clustering (skipped when seeds=None)
-          2. Standardise (z-score) — fit on seeds, transform all
-          3. Optional UMAP — fit on seeds, transform all
+          2. Standardize (z-score): fit on seeds, transform all
+          3. Optional UMAP: fit on seeds, transform all
           4. Cluster (fit on seeds)
           5. Assign labels to all windows; build assignments
           6. Done
@@ -218,7 +218,7 @@ class MotifDiscoveryService:
             result.seed_filtered = True
             if X_cluster.shape[0] == 0:
                 result.warnings.append(
-                    "Seed filter removed all windows — aborting.  "
+                    "Seed filter removed all windows: aborting.  "
                     "Check that seed frame ranges overlap with the extracted feature windows."
                 )
                 return result
@@ -231,7 +231,7 @@ class MotifDiscoveryService:
         if cancel_flag and cancel_flag[0]:
             return result
 
-        # ── Step 2: Standardise — fit on cluster windows, transform ALL ──
+        # ── Step 2: Standardize, fit on cluster windows, transform ALL ──
         _prog(2, 6)
         try:
             from sklearn.preprocessing import StandardScaler  # noqa: PLC0415
@@ -251,7 +251,7 @@ class MotifDiscoveryService:
         if cancel_flag and cancel_flag[0]:
             return result
 
-        # ── Step 3: Optional UMAP — fit on cluster windows, transform ALL ──
+        # ── Step 3: Optional UMAP, fit on cluster windows, transform ALL ──
         _prog(3, 6)
         X_cluster_embed = X_cluster_scaled
         X_all_embed = X_all_scaled
@@ -354,7 +354,7 @@ class MotifDiscoveryService:
         result.model = MotifModel(
             model_id=uuid.uuid4().hex,
             name=(
-                f"{algo_label}{umap_hint} {cluster_hint}{seed_hint} — "
+                f"{algo_label}{umap_hint} {cluster_hint}{seed_hint}, "
                 f"{len(session_ids)} session(s), "
                 f"{result.n_windows_clustered} windows clustered"
             ),
@@ -481,7 +481,7 @@ class MotifDiscoveryService:
             msg = "No positive seed examples found"
             if behavior_id:
                 msg += f" for behavior '{behavior_id}'"
-            msg += " — using all feature windows."
+            msg += ", using all feature windows."
             warnings_.append(msg)
             return X, provenance, warnings_
 
@@ -533,9 +533,9 @@ class MotifDiscoveryService:
         """Load and stack feature matrices for all sessions.
 
         Returns (X, provenance, warnings) where:
-          X          — float32 array (n_windows_total × n_features)
-          provenance — list of (session_id, start_frame, end_frame) per row in X
-          warnings   — list of warning strings for missing / failed sessions
+          X         , float32 array (n_windows_total × n_features)
+          provenance, list of (session_id, start_frame, end_frame) per row in X
+          warnings  , list of warning strings for missing / failed sessions
         """
         if not self._project_root:
             return None, [], ["No project loaded."]
@@ -548,7 +548,7 @@ class MotifDiscoveryService:
         for sid in session_ids:
             npz_path = features_dir / f"{sid}.npz"
             if not npz_path.exists():
-                warnings.append(f"[SKIP] {sid}: feature file not found — run Pose Features first.")
+                warnings.append(f"[SKIP] {sid}: feature file not found, run Pose Features first.")
                 continue
             try:
                 data = np.load(npz_path, allow_pickle=True)
@@ -565,7 +565,7 @@ class MotifDiscoveryService:
                     ef = int(wf[row_idx, 1]) if row_idx < len(wf) else 0
                     provenance.append((sid, sf, ef))
             except Exception as exc:
-                warnings.append(f"[SKIP] {sid}: failed to load features — {exc}")
+                warnings.append(f"[SKIP] {sid}: failed to load features, {exc}")
 
         if not all_features:
             return None, [], warnings
@@ -612,12 +612,12 @@ class MotifDiscoveryService:
             return X_fit_reduced, X_transform_reduced, warnings
         except ImportError:
             warnings.append(
-                "umap-learn is not installed — falling back to raw features.  "
+                "umap-learn is not installed: falling back to raw features.  "
                 "Install it via the Dependencies tab for better clustering."
             )
             return X_fit, X_transform, warnings
         except Exception as exc:
-            warnings.append(f"UMAP failed ({exc}) — falling back to raw features.")
+            warnings.append(f"UMAP failed ({exc}), falling back to raw features.")
             return X_fit, X_transform, warnings
 
     def _run_kmeans(
@@ -641,7 +641,7 @@ class MotifDiscoveryService:
         X: np.ndarray,
         labels: np.ndarray,
     ) -> np.ndarray:
-        """Compute per-window confidence as inverse normalised intra-cluster distance."""
+        """Compute per-window confidence as inverse normalized intra-cluster distance."""
         confidences = np.ones(len(labels), dtype=np.float32)
         dists = np.linalg.norm(X - km.cluster_centers_[labels], axis=1)
         n_clusters = km.cluster_centers_.shape[0]
@@ -671,7 +671,7 @@ class MotifDiscoveryService:
         non_noise = [l for l in unique_labels if l != -1]
 
         if not non_noise:
-            # All seed windows were noise — assign everything as noise
+            # All seed windows were noise: assign everything as noise
             return (
                 np.full(len(X_all), -1, dtype=np.int64),
                 np.zeros(len(X_all), dtype=np.float32),
@@ -690,7 +690,7 @@ class MotifDiscoveryService:
         nearest = np.argmin(dists, axis=1)
         labels_all = centroid_labels[nearest]
 
-        # Confidence = 1 - normalised distance to assigned centroid
+        # Confidence = 1 - normalized distance to assigned centroid
         min_dists = dists[np.arange(len(X_all)), nearest]
         confidences_all = np.ones(len(X_all), dtype=np.float32)
         for ki, k in enumerate(non_noise):

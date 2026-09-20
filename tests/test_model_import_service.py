@@ -109,7 +109,7 @@ def test_preview_reports_coverage_and_behavior_match(tmp_path: Path) -> None:
     assert by_name["Freeze"].compatible
     assert by_name["Freeze"].coverage == 1.0
     assert by_name["Freeze"].host_behavior_id == "host-freeze"
-    # Explore: compatible features, but no host behaviour → unmatched.
+    # Explore: compatible features, but no host behavior → unmatched.
     assert by_name["Explore"].compatible
     assert not by_name["Explore"].behavior_matched
     assert any(i.model.behavior_name == "Explore" for i in pv.unmatched_behaviors)
@@ -166,13 +166,13 @@ def test_import_auto_creates_missing_behavior(tmp_path: Path) -> None:
         behavior_decisions={"src-explore": AUTO_CREATE_BEHAVIOR},
     )
     assert res["status"] == "success", res
-    # The source's Explore behaviour definition is now in the host project.
+    # The source's Explore behavior definition is now in the host project.
     host_behaviors = yaml.safe_load(
         (host / "config" / "behavior_definitions.yaml").read_text()
     )["behaviors"]
     ids = {b["behavior_id"] for b in host_behaviors}
     assert "src-explore" in ids
-    # The imported model targets that (preserved) behaviour id.
+    # The imported model targets that (preserved) behavior id.
     rs = json.loads(
         (host / "derived" / "models" / res["imported"][0]["model_dir"] / "run_settings.json").read_text()
     )
@@ -189,7 +189,7 @@ def test_import_skip_decision_is_respected(tmp_path: Path) -> None:
     )
     assert res["status"] == "error"  # nothing imported
     assert not res["imported"]
-    assert any(s["reason"] == "behaviour skipped" for s in res["skipped"])
+    assert any(s["reason"] == "behavior skipped" for s in res["skipped"])
 
 
 def test_remove_model_import_deletes_dirs(tmp_path: Path) -> None:
@@ -211,9 +211,9 @@ def test_remove_model_import_deletes_dirs(tmp_path: Path) -> None:
 #
 # Distance is symmetric, so dist_A_to_B and dist_B_to_A are the same
 # measurement. Older extractor builds ordered the pair by keypoint position in
-# the pose file; the current one canonicalises the ordering. A model trained
+# the pose file; the current one canonicalizes the ordering. A model trained
 # before that change asks for the opposite spelling to the one a new project
-# emits — which is a naming difference, not missing data, and must not block
+# emits: which is a naming difference, not missing data, and must not block
 # the import.
 # ---------------------------------------------------------------------------
 
@@ -268,7 +268,7 @@ def test_import_keeps_feature_cols_intact_and_records_pair_order(tmp_path: Path)
     with open(md / "model_state.pkl", "rb") as f:
         payload = pickle.load(f)
 
-    # The classifier's input width is fixed, so the columns survive verbatim —
+    # The classifier's input width is fixed, so the columns survive verbatim,
     # scoring re-derives the mapping, it does not need them rewritten.
     assert set(_PAIR_FEATS).issubset(payload["feature_cols"])
 

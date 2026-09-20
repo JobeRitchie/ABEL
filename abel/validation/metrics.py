@@ -4,22 +4,22 @@ A single, defensively-written home for the classifier- and agreement-metrics the
 rest of the suite reports.  Every function returns ``float('nan')`` (or an empty
 structure) on degenerate input instead of raising, because these run across many
 heterogeneous projects/behaviors where a held-out fold can legitimately be
-single-class, tiny, or empty — one bad cell must never sink a whole run.
+single-class, tiny, or empty, one bad cell must never sink a whole run.
 
 The metrics fall into three families, each motivated by the automated-behavior
 literature:
 
-* **Imbalanced-classification summaries** — Matthews correlation coefficient
+* **Imbalanced-classification summaries**: Matthews correlation coefficient
   (MCC), balanced accuracy, specificity, ROC-AUC.  Behavior labels are heavily
   skewed (rare positives), where F1/accuracy alone mislead; MCC and balanced
   accuracy are the community-recommended robust summaries (Chicco & Jurman 2020),
   and DeepEthogram reports AUROC alongside precision/recall.
-* **Biological-readout agreement** — Lin's concordance correlation coefficient
+* **Biological-readout agreement**: Lin's concordance correlation coefficient
   (CCC), Pearson r, R², and Bland-Altman bias / limits-of-agreement.  These grade
   whether the model recovers the *scientific measure* (per-session time budget,
   bout counts) a human scorer would report, which is the validation reviewers
-  actually care about — not just per-frame accuracy.
-* **Probability calibration** — expected/maximum calibration error and the Brier
+  actually care about, not just per-frame accuracy.
+* **Probability calibration**: expected/maximum calibration error and the Brier
   score, so a project that turns on ABEL's probability calibration can show the
   predicted scores mean what they say (a reliability claim F1 cannot capture).
 """
@@ -45,7 +45,7 @@ _T_975 = {
 def t_critical_95(n: int) -> float:
     """Two-sided 95% t multiplier for ``n`` observations (df = n − 1).
 
-    Using 1.96 here — the *normal* quantile — is a real and common error at these
+    Using 1.96 here, the *normal* quantile, is a real and common error at these
     sample sizes: with the suite's default of 3 seeds, a "±1.96·SEM" interval is
     actually an **81%** interval (70% at 2 seeds), so it declares differences
     significant that a genuine 95% test would not. df=2 needs 4.303, not 1.96.
@@ -83,18 +83,18 @@ def paired_p(deltas) -> float:
 
     The companion to :func:`ci95`: every seeded analysis in the suite reports a
     *difference* (with-feature minus without), and a boolean "significant" is not
-    something a manuscript can print — the exact p is.  Because both arms saw the
+    something a manuscript can print, the exact p is.  Because both arms saw the
     same clips under the same seed, the paired form is the correct test.
 
     Returns NaN, never 0, when the test is undefined: fewer than 2 seeds, or
     differences that are constant across seeds (zero variance ⇒ an infinite t).
     NaN also comes back if scipy is absent, since the t survival function has no
-    small table equivalent — callers must treat p as optional and fall back on
+    small table equivalent, callers must treat p as optional and fall back on
     ``|mean| > ci95`` (which needs no scipy) for the significance decision.
 
     The zero-variance guard is a *tolerance*, not ``sd == 0``.  ``np.std`` of three
     identical floats leaves ~1e-18 of dust, which sails past an exact comparison and
-    lets scipy return p ≈ 1e-33 — a fabricated "overwhelming" result manufactured
+    lets scipy return p ≈ 1e-33, a fabricated "overwhelming" result manufactured
     out of no variance at all, which then dominates any volcano it is plotted on.
     """
     vals = np.asarray([v for v in deltas if np.isfinite(v)], dtype=float)
@@ -128,14 +128,14 @@ class ClusteredMeanTest:
     t_stat: float = float("nan")
     df: float = float("nan")            # Satterthwaite, or k−1 when unestimable
     p_value: float = float("nan")       # the primary: mixed model, df-corrected
-    icc: float = float("nan")           # ICC(1) — between-cluster share of variance
+    icc: float = float("nan")           # ICC(1): between-cluster share of variance
     n_obs: int = 0
     n_clusters: int = 0
     design_effect: float = float("nan")
     n_effective: float = float("nan")
     p_naive: float = float("nan")       # one-sample t over all obs (clustering ignored)
     p_cluster_mean: float = float("nan")  # t over cluster means (fully aggregated)
-    p_sign_flip: float = float("nan")   # exact cluster sign-flip randomisation test
+    p_sign_flip: float = float("nan")   # exact cluster sign-flip randomization test
     n_clusters_positive: int = 0
     df_method: str = ""                 # "satterthwaite" | "between-within"
 
@@ -144,8 +144,8 @@ def _reml_profile(y: np.ndarray, idx: np.ndarray, ns: np.ndarray, lam: float) ->
     """−2 REML log-likelihood of the intercept-only random-intercept model.
 
     Profiled over the residual variance, leaving one parameter: ``lam`` = τ²/σ².
-    That parameterisation is what makes the fit robust at τ² = 0 — the boundary a
-    log-scale optimiser cannot reach and where roughly a third of these rungs sit.
+    That parameterization is what makes the fit robust at τ² = 0, the boundary a
+    log-scale optimizer cannot reach and where roughly a third of these rungs sit.
     """
     denom = 1.0 + ns * lam
     s = np.array([y[idx == j].sum() for j in range(len(ns))], dtype=float)
@@ -171,7 +171,7 @@ def _var_mu(tau2: float, sigma2: float, ns: np.ndarray) -> float:
 
 
 def _sign_flip_p(cluster_means: np.ndarray) -> float:
-    """Exact two-sided cluster sign-flip randomisation p (Rademacher, enumerated).
+    """Exact two-sided cluster sign-flip randomization p (Rademacher, enumerated).
 
     The assumption-light companion to the t-test: it asks only whether the observed
     arrangement of cluster means is extreme among all 2^k sign assignments, so a
@@ -207,7 +207,7 @@ def clustered_mean_test(values, clusters) -> ClusteredMeanTest:
     observations as independent, and they are not: behaviors within a project share
     animals, sessions, the holdout split and the negative pool.  Measured on the
     manuscript runs the intra-class correlation is ~0.3-0.4, which inflates the
-    naive t by enough to move a headline p from 0.054 to 0.0002 — two orders of
+    naive t by enough to move a headline p from 0.054 to 0.0002, two orders of
     magnitude of significance manufactured purely by counting the same subjects
     repeatedly.
 
@@ -224,7 +224,7 @@ def clustered_mean_test(values, clusters) -> ClusteredMeanTest:
     really exceed k − 1 by much, and the z-test's implicit claim of infinite df is
     the entire difference.  We therefore compute Satterthwaite df from the REML
     information matrix and fall back to between-within (k − 1, SAS ``ddfm=betwithin``)
-    whenever τ̂² sits on the zero boundary and the information matrix is singular —
+    whenever τ̂² sits on the zero boundary and the information matrix is singular,
     the conservative direction, chosen deliberately because an unestimable clustering
     term is not evidence of no clustering.
 
@@ -292,7 +292,7 @@ def clustered_mean_test(values, clusters) -> ClusteredMeanTest:
     var_mu = _var_mu(tau2, sigma2, ns) if (tau2 + sigma2) > 0 else float("nan")
     se = float(np.sqrt(var_mu)) if np.isfinite(var_mu) and var_mu > 0 else float("nan")
 
-    # ICC(1) and the design effect it implies — the plain-language version of why
+    # ICC(1) and the design effect it implies: the plain-language version of why
     # the naive n is not the real n.
     icc = float(tau2 / (tau2 + sigma2)) if (tau2 + sigma2) > 0 else 0.0
     nbar = float(n / k)
@@ -327,7 +327,7 @@ def _satterthwaite_df(y: np.ndarray, idx: np.ndarray, ns: np.ndarray,
     """Satterthwaite denominator df for the GLS mean: 2·V² / (g' Cov(θ̂) g).
 
     ``Cov(θ̂)`` is the inverse REML information for (τ², σ²), obtained by numerically
-    differentiating the REML objective — analytic traces for this model are a page of
+    differentiating the REML objective, analytic traces for this model are a page of
     algebra that would buy nothing here, since the objective itself is closed-form and
     cheap.  Returns NaN on a singular information matrix so the caller falls back to
     the conservative between-within df.
@@ -335,7 +335,7 @@ def _satterthwaite_df(y: np.ndarray, idx: np.ndarray, ns: np.ndarray,
     def _obj(t2: float, s2: float) -> float:
         if t2 < 0 or s2 <= 0:
             return float("inf")
-        # Re-express in the profiled parameterisation the fit used.
+        # Re-express in the profiled parameterization the fit used.
         return _reml_profile_unprofiled(y, idx, ns, t2, s2)
 
     h_t = max(abs(tau2) * 1e-4, 1e-10)
@@ -373,7 +373,7 @@ def _satterthwaite_df(y: np.ndarray, idx: np.ndarray, ns: np.ndarray,
 
 def _reml_profile_unprofiled(y: np.ndarray, idx: np.ndarray, ns: np.ndarray,
                              tau2: float, sigma2: float) -> float:
-    """−2 REML log-likelihood at explicit (τ², σ²) — the un-profiled objective."""
+    """−2 REML log-likelihood at explicit (τ², σ²), the un-profiled objective."""
     d = sigma2 + ns * tau2
     if np.any(d <= 0) or sigma2 <= 0:
         return float("inf")
@@ -396,12 +396,12 @@ def benjamini_hochberg_threshold(pvalues, alpha: float = 0.05) -> float:
 
     A full discrimination run tests ~40-100 pair × feature-family combinations, so a
     bare p<0.05 line on a volcano expects a handful of false positives by
-    construction.  This returns a second, honest reference line — NaN when nothing
+    construction.  This returns a second, honest reference line, NaN when nothing
     survives, so the caller draws no line rather than an invented one.
 
     Returns the critical value ``k/m · alpha`` of the last rejection, NOT the largest
     rejected p.  The two reject exactly the same tests (no observed p can fall
-    between them — one there would itself have been rejected, contradicting ``k``),
+    between them, one there would itself have been rejected, contradicting ``k``),
     but a line drawn at the largest rejected p lands *on top of* that point, leaving
     a reader unable to tell whether it passed.  The critical value sits cleanly above
     every point it rejects.
@@ -429,9 +429,9 @@ def benjamini_hochberg_adjust(pvalues) -> list[float]:
     reader than a bare reject/keep at one arbitrary alpha.
 
     Non-finite inputs stay non-finite in the output and are excluded from ``m``
-    rather than counted as tests that happened to fail — a NaN p is a test that
+    rather than counted as tests that happened to fail, a NaN p is a test that
     could not be run (zero variance, too few seeds), and inflating the family with
-    them would penalise every other test for its absence.  Enforces the standard
+    them would penalize every other test for its absence.  Enforces the standard
     monotonicity (cumulative minimum from the largest p down) so a q can never come
     back smaller than that of a more significant test.
     """
@@ -457,7 +457,7 @@ def is_degenerate_fit(tp: int, fp: int, fn: int, tn: int) -> bool:
     The guardrail that has to exist once F1 is reported target-class rather than
     macro-averaged.  Macro-F1 scored an always-predict-target model correctly as
     broken (its ~0.50 floor was doing double duty as a collapse detector); target
-    F1 scores the same model *well* — recall 1.0, specificity 0.0.  Measured across
+    F1 scores the same model *well*, recall 1.0, specificity 0.0.  Measured across
     the manuscript runs, 438 cells are literal ``tn == 0 & fn == 0`` collapses and
     the worst of them roughly double their reported score (NSF Eat-vs-Freeze:
     macro 0.392, target 0.784).
@@ -467,10 +467,10 @@ def is_degenerate_fit(tp: int, fp: int, fn: int, tn: int) -> bool:
     summary this module already recommends (Chicco & Jurman 2020) and it is exactly
     zero for *any* constant classifier, at any prevalence.  That last property is
     what makes it the right test and a predicted-positive-fraction threshold the
-    wrong one: the obvious rule — "flags ≥50% of the eval set as positive" — is
+    wrong one: the obvious rule, "flags ≥50% of the eval set as positive", is
     correct for a rare-behavior detection curve but catastrophic for pairwise
     discrimination, where A-vs-B is ~50% positive *by construction*.  On the real
-    cells that rule flags 1080 of 2000 discrimination fits (median F1 0.971 —
+    cells that rule flags 1080 of 2000 discrimination fits (median F1 0.971,
     healthy fits, every one); MCC ≤ 0 flags 9 (median F1 0.383).
 
     A held-out set that is single-class returns False: nothing can be concluded
@@ -480,7 +480,7 @@ def is_degenerate_fit(tp: int, fp: int, fn: int, tn: int) -> bool:
     if tp + fp + fn + tn <= 0:
         return False
     if (tp + fn) == 0 or (tn + fp) == 0:
-        return False  # truth has one class — a holdout problem, not a fit collapse
+        return False  # truth has one class: a holdout problem, not a fit collapse
     denom = float(tp + fp) * float(tp + fn) * float(tn + fp) * float(tn + fn)
     if denom <= 0:
         # A zero prediction margin: every row went to one class. MCC is 0 by
@@ -517,7 +517,7 @@ def matthews_corrcoef(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """Mean of sensitivity and specificity — the imbalance-corrected accuracy."""
+    """Mean of sensitivity and specificity: the imbalance-corrected accuracy."""
     yt, yp = _finite_binary(y_true, y_pred)
     if yt.size == 0 or np.unique(yt).size < 2:
         return float("nan")
@@ -531,7 +531,7 @@ def balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 
 
 def specificity(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    """True-negative rate TN / (TN + FP) — the recall of the *negative* class."""
+    """True-negative rate TN / (TN + FP): the recall of the *negative* class."""
     yt, yp = _finite_binary(y_true, y_pred)
     if yt.size == 0:
         return float("nan")
@@ -581,9 +581,9 @@ def pearson_r(x: np.ndarray, y: np.ndarray) -> float:
 def concordance_ccc(x: np.ndarray, y: np.ndarray) -> float:
     """Lin's concordance correlation coefficient between two measures.
 
-    Unlike Pearson r (which rewards any linear relation), CCC also penalises
+    Unlike Pearson r (which rewards any linear relation), CCC also penalizes
     location/scale shift, so it directly measures agreement with the *identity*
-    line — exactly the "does the automated measure equal the manual one" question
+    line, exactly the "does the automated measure equal the manual one" question
     that behavior-scoring validations pose (Lin 1989).
     """
     xa = np.asarray(x, dtype=float).ravel()
@@ -624,7 +624,7 @@ class BlandAltman:
         interval include zero (no systematic over/under-scoring).
 
         Uses the t multiplier: this is a CI of a *mean*, at the small session
-        counts a held-out split yields. (The limits of agreement above keep 1.96 —
+        counts a held-out split yields. (The limits of agreement above keep 1.96,
         those are a population spread, ±1.96·SD, not a CI, so t does not apply.)
         """
         if self.n < 2 or not np.isfinite(self.sd_diff):
@@ -677,7 +677,7 @@ class CalibrationCurve:
     the bins on a fixed ``[0,1]`` grid (comparable across behaviors) instead of
     inferring positions from ``bin_confidence``. ``bin_count`` matters as much as
     the values: behavior-model scores are strongly bimodal, so the middle bins can
-    hold a handful of samples each — connecting them as if they were equal-weight
+    hold a handful of samples each, connecting them as if they were equal-weight
     points draws a violent zigzag that misrepresents a well-calibrated model.
     """
 

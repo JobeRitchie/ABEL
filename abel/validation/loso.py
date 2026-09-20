@@ -1,7 +1,7 @@
 """Leave-one-subject-out cross-validation for behavior models.
 
 A single random 2-mouse holdout makes the reported number hostage to *which*
-mice land in validation — if the hardest mouse is drawn, the behavior looks
+mice land in validation, if the hardest mouse is drawn, the behavior looks
 broken even when it generalizes fine to the others. Leave-one-subject-out (LOSO)
 CV removes that lottery: it trains N models, each holding out exactly one subject,
 pools every subject's held-out predictions, and reports one stable, honest
@@ -12,7 +12,7 @@ This reuses the validation suite's leakage-checked per-fold primitive
 (:func:`abel.temporal_refinement.refined_eval.score_raw_and_refined`), so LOSO
 numbers agree with the single-split Validation-tab math by construction.
 
-Running this trains one model per subject per behavior, so it is compute-heavy —
+Running this trains one model per subject per behavior, so it is compute-heavy,
 intended as an on-demand analysis, not part of the standard pipeline.
 """
 
@@ -150,7 +150,7 @@ def available_subjects(
 def _mean_std_sem(values: list[float]) -> tuple[float, float, float]:
     """Mean, sample std (ddof=1) and SEM = s/sqrt(n) across folds, NaN-aware.
 
-    DESCRIPTIVE ONLY — do not publish this SEM as an error bar. LOSO folds are
+    DESCRIPTIVE ONLY, do not publish this SEM as an error bar. LOSO folds are
     not independent observations: any two folds share (N-2)/(N-1) of their
     training data, so their scores are strongly positively correlated and
     s/sqrt(n) understates the true uncertainty. Bengio & Grandvalet (2004,
@@ -267,14 +267,14 @@ def leave_one_subject_out(
     """Run LOSO CV for one behavior and return pooled raw+refined metrics.
 
     ``subjects`` restricts the analysis to the given mice (``None`` = all). An
-    unselected mouse is dropped from the analysis entirely — it is neither held out
-    nor trained on — so the result is a clean LOSO over exactly the mice the user
+    unselected mouse is dropped from the analysis entirely, it is neither held out
+    nor trained on, so the result is a clean LOSO over exactly the mice the user
     chose. Refinement-only rows are kept in the training pool regardless, since they
     are corrections rather than subjects in their own right.
 
     Returns a dict with pooled macro P/R/F1 + TP/FP/FN for raw and refined,
     pooled *target-class* P/R/F1 and PR-AUC, a subject-level bootstrap CI
-    (``boot_*``, ``n_boot`` replicates — the interval to publish), a
+    (``boot_*``, ``n_boot`` replicates, the interval to publish), a
     ``per_subject`` table, the per-fold F1s, and fold bookkeeping including how
     many folds were skipped and why. ``error`` is set instead when the run
     cannot proceed (too few subjects, no target positives, etc.).
@@ -373,7 +373,7 @@ def leave_one_subject_out(
         yv, pv = y[valid], p[valid]
         predv = (pv >= 0.5).astype(int)
         # PR-AUC (average precision) is undefined when the held-out subject has a
-        # single class — record NaN so it drops out of the mean/SEM cleanly.
+        # single class: record NaN so it drops out of the mean/SEM cleanly.
         fold_prauc = (
             float(average_precision_score(yv, pv)) if np.unique(yv).size > 1 else float("nan")
         )
@@ -464,13 +464,13 @@ def leave_one_subject_out(
         # for a whole-cohort one in the figure, CSV or report.
         "selected_subjects": list(selected),
         "excluded_subjects": excluded,
-        # Target-class metrics — what the manuscript reports. The macro raw_*/
+        # Target-class metrics: what the manuscript reports. The macro raw_*/
         # refined_* keys above are retained unchanged for the GUI.
         "pooled_f1_target": pooled_f1t,
         "pooled_precision_target": pooled_prec,
         "pooled_recall_target": pooled_rec,
         "pooled_prauc": pooled_prauc,
-        # Fold-level descriptive spread. NOT a valid error bar — see
+        # Fold-level descriptive spread. NOT a valid error bar, see
         # _mean_std_sem's docstring and fold_sem_valid below.
         "fold_f1_mean": f1_mean,
         "fold_f1_std": f1_std,
@@ -492,7 +492,7 @@ def leave_one_subject_out(
         "folds": per_fold,
     })
     if n_total > 0 and (n_total - n_scored) / n_total > 0.25:
-        pooled["warning"] = "majority-skipped — per-fold mean is survivorship-biased"
+        pooled["warning"] = "majority-skipped: per-fold mean is survivorship-biased"
     return pooled
 
 

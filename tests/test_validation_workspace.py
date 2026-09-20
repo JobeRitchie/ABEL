@@ -1,6 +1,6 @@
 """Saved validation sessions: the setup a run came from, and where it is filed.
 
-A session is the audit trail for a figure — which projects were loaded, which
+A session is the audit trail for a figure, which projects were loaded, which
 behaviors were checked, and every rename applied on top.  The load-bearing
 invariants are that a reload reproduces the setup exactly (including which
 behaviors were *un*checked), that renames survive the round trip without ever
@@ -57,7 +57,7 @@ def test_workspace_root_lives_in_the_user_home_and_honours_the_override(monkeypa
 
 
 def test_slugify_makes_a_folder_safe_stem() -> None:
-    assert slugify("Manuscript — main / v2") == "manuscript-main-v2"
+    assert slugify("Manuscript: main / v2") == "manuscript-main-v2"
     assert slugify("   ") == "session"
 
 
@@ -111,8 +111,8 @@ def test_an_offline_project_survives_a_reload_and_resave(
 ) -> None:
     """An unmounted drive must not quietly erase a project from the record.
 
-    Reload while the drive is offline, save again, reconnect: the setup — including
-    which behaviors were checked — has to still be there.
+    Reload while the drive is offline, save again, reconnect: the setup, including
+    which behaviors were checked, has to still be there.
     """
     other = ProjectRef.load(_make_project(tmp_path, "OFT", {"c1": "Rear"}))
     store.save(SessionRecord.capture(
@@ -124,7 +124,7 @@ def test_an_offline_project_survives_a_reload_and_resave(
     restored = store.load("main").restore()
     assert list(restored.projects) == ["OFT"]
 
-    # The user carries on and saves — DG_EPM must not be dropped.
+    # The user carries on and saves: DG_EPM must not be dropped.
     store.save(SessionRecord.capture(
         "main", restored.projects, restored.selected,
         keep_entries=restored.unavailable))
@@ -152,7 +152,7 @@ def test_a_reachable_project_with_no_training_set_is_reported_not_loaded(
 def test_two_projects_restoring_to_one_name_do_not_silently_merge(
     project: ProjectRef, store: SessionStore, tmp_path: Path
 ) -> None:
-    """project_id is what every figure groups by — a collision would merge results."""
+    """project_id is what every figure groups by: a collision would merge results."""
     clash = ProjectRef.load(_make_project(tmp_path, "clash", {"c1": "Rear"}))
     clash.rename("DG_EPM")
     store.save(SessionRecord.capture(
@@ -182,7 +182,7 @@ def test_restore_reports_a_behavior_deleted_since_the_save(
 def test_restore_picks_up_a_behavior_added_since_the_save(
     project: ProjectRef, store: SessionStore
 ) -> None:
-    """Reloading must not hide new labelling work — it just leaves it unchecked."""
+    """Reloading must not hide new labeling work: it just leaves it unchecked."""
     store.save(SessionRecord.capture("main", {project.project_id: project},
                                      {project.project_id: {"b1"}}))
     bd = project.root / "config" / "behavior_definitions.yaml"

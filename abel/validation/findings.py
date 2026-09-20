@@ -1,7 +1,7 @@
 """Turn raw analysis results into plain-language findings.
 
 The validation suite already writes every number to CSV and every series to a
-figure.  What it never did was *say what happened* — a reader had to open eight
+figure.  What it never did was *say what happened*, a reader had to open eight
 folders and know, for instance, that a raw ΔAUC of +0.004 on a pair whose
 baseline is already 0.984 is actually a 24% cut in the remaining error, or that
 a "time budget" computed over reviewed segments is a prevalence, not a time
@@ -147,9 +147,9 @@ def _overview_findings(inp: FindingsInput) -> list[Finding]:
              or ov.get("n_behaviors", 0))
 
     # The headline accuracy must come from models fit the way the product fits them.
-    # ov["f1_mean"] averages over EVERY cell in the run — including 10-clip
+    # ov["f1_mean"] averages over EVERY cell in the run, including 10-clip
     # learning-curve points and pose-only ablation baselines, which are crippled on
-    # purpose — so it understates the shipped model and means nothing on its own.
+    # purpose: so it understates the shipped model and means nothing on its own.
     gen_f1 = _finite([g.f1_mean for g in inp.gen_results])
     if n_proj and gen_f1:
         out.append(Finding(
@@ -162,8 +162,8 @@ def _overview_findings(inp: FindingsInput) -> list[Finding]:
             f"number in this report comes from models trained on a training pool of "
             f"subjects/sessions and scored on subjects/sessions the model never saw. "
             f"(The run-wide mean over all {ov.get('n_cells', 0)} fitted cells is "
-            f"{_f(ov.get('f1_mean'))}, but that pools deliberately handicapped models — "
-            f"low-clip learning-curve points and pose-only ablation baselines — so it "
+            f"{_f(ov.get('f1_mean'))}, but that pools deliberately handicapped models, "
+            f"low-clip learning-curve points and pose-only ablation baselines, so it "
             f"is not the model's accuracy.)",
         ))
     elif n_proj:
@@ -193,7 +193,7 @@ def _overview_findings(inp: FindingsInput) -> list[Finding]:
                 "Overview",
                 f"{len(sparse)} (project × behavior) {_plural(len(sparse), 'combination')} "
                 f"{_plural(len(sparse), 'is', 'are')} too sparsely labeled to score "
-                f"reliably — treat {_plural(len(sparse), 'its', 'their')} metrics as "
+                f"reliably, treat {_plural(len(sparse), 'its', 'their')} metrics as "
                 f"labeling artifacts, not pipeline performance.",
                 "Fewer than 40 labeled positives in the training pool. At that density "
                 "the target-class κ collapses toward 0 and F1 is pinned by the majority "
@@ -211,7 +211,7 @@ def _confusion_findings(inp: FindingsInput) -> list[Finding]:
     F1 = 0.91 is a number a reader takes on trust; "found 191 of 214 and raised 17
     false alarms" is one they can check against their own scoring experience.  Both
     are emitted, because the counts alone are not comparable across behaviors (the
-    held-out denominators differ) — the rate does the comparing, the count makes it
+    held-out denominators differ), the rate does the comparing, the count makes it
     concrete.
     """
     from abel.validation.analyses.cross_project import confusion_by_behavior  # noqa: PLC0415
@@ -240,23 +240,23 @@ def _confusion_findings(inp: FindingsInput) -> list[Finding]:
         f"{_plural(len(conf), 'model')}, the model recovered {tp} of the {n_pos} "
         f"held-out clips the reviewer marked positive ({_pct(tp / n_pos)}) and "
         f"raised {fp} false {_plural(fp, 'alarm')}.",
-        f"Best recall — {_row(best)}. Weakest — {_row(worst)}. Counts are per fit, "
+        f"Best recall: {_row(best)}. Weakest, {_row(worst)}. Counts are per fit, "
         f"averaged over seeds (each seed re-scores the same held-out pool, so they "
-        f"are not additive) and totalled across behaviors, each of which brings its "
+        f"are not additive) and totaled across behaviors, each of which brings its "
         f"own positives. Per-behavior counts: cross_project/confusion_by_behavior.csv.",
     )]
 
     # The single most misreadable thing about a count table, stated up front.
     out.append(Finding(
         "Held-out counts",
-        "These counts are clips the reviewer scored, not bouts — a 'false alarm' "
+        "These counts are clips the reviewer scored, not bouts, a 'false alarm' "
         "is one mis-scored clip, not a spurious behavioral event.",
         "Bout-level counts are not identifiable from a held-out labeled subset: the "
         "evaluated unit is one short, isolated clip (a fraction of a second in most "
-        "projects — see clip_sec in confusion_by_behavior.csv), while a bout needs "
+        "projects: see clip_sec in confusion_by_behavior.csv), while a bout needs "
         "contiguous observation longer than itself, so event-level FP/FN measure "
         "label sparsity rather than the model. True negatives are reported in the "
-        "CSV to close the 2×2 but are not summarized here — under this class "
+        "CSV to close the 2×2 but are not summarized here, under this class "
         "imbalance any accuracy derived from them is ~0.99 regardless of the model.",
         kind=KIND_CAVEAT,
     ))
@@ -292,7 +292,7 @@ def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
         out.append(Finding(
             "Learning curves",
             f"A median of ~{_clips(median_knee)} labeled clips per behavior{knee_ci} "
-            f"reaches {knee_pct} of that behavior's peak held-out F1 — this is the "
+            f"reaches {knee_pct} of that behavior's peak held-out F1, this is the "
             f"recommended labeling budget.",
             f"Per-behavior knee ranges from {_clips(best_k)} clips "
             f"({best_lc.behavior_name}) to {_clips(worst_k)} clips "
@@ -307,7 +307,7 @@ def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
             f"{worst_lc.behavior_name} is the most label-hungry behavior "
             f"({_clips(worst_k)} clips to plateau); {best_lc.behavior_name} is the "
             f"cheapest ({_clips(best_k)} clips).",
-            f"Peak F1 — {worst_lc.behavior_name}: {_f(worst_lc.f1_max)}; "
+            f"Peak F1: {worst_lc.behavior_name}: {_f(worst_lc.f1_max)}; "
             f"{best_lc.behavior_name}: {_f(best_lc.f1_max)}.",
         ))
     unplateaued = [lc for lc, k in knees
@@ -317,7 +317,7 @@ def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
         out.append(Finding(
             "Learning curves",
             f"{len(unplateaued)} {_plural(len(unplateaued), 'behavior')} had not "
-            f"plateaued at the largest clip budget tested — {_plural(len(unplateaued), 'it', 'they')} "
+            f"plateaued at the largest clip budget tested: {_plural(len(unplateaued), 'it', 'they')} "
             f"would still improve with more labels.",
             f"No knee within the schedule: {names}. Extend the clip-size schedule to "
             f"find their plateau.",
@@ -376,7 +376,7 @@ def _ablation_findings(inp: FindingsInput) -> list[Finding]:
             f"{_f(np.mean(top_gains))} across behaviors.",
             "Each bar adds ONE enhancement to a pose-only baseline (every enhancement "
             "off); gains are paired per seed, so the same subsample trains baseline and "
-            "config. Mean ΔF1 by single addition — "
+            "config. Mean ΔF1 by single addition, "
             + "; ".join(f"{labels.get(c, c).lstrip('+ ')} {_f(np.mean(g), 3)}"
                         for c, g in singles)
             + "." + combined_txt,
@@ -388,14 +388,14 @@ def _ablation_findings(inp: FindingsInput) -> list[Finding]:
             f"statistically significant gain on at least one behavior.",
             "Significant = the 95% CI of the paired per-seed gain excludes 0. Counts "
             "(behaviors with a significant gain, of "
-            f"{n_beh}) — "
+            f"{n_beh}), "
             + "; ".join(f"{labels.get(c, c).lstrip('+ ')}: {sig_count.get(c, 0)}"
                         for c, _ in singles)
             + ".",
         ))
     # The statistic a manuscript should quote. `sig_count` above pairs across
     # random SEEDS, so its n is the seed count and it only says "this behavior's
-    # gain reproduces under reseeding" — adding seeds shrinks that p without adding
+    # gain reproduces under reseeding": adding seeds shrinks that p without adding
     # evidence. The claim being made is "this family helps behaviors in general",
     # whose unit is the behavior. `by_config[cfg]` is already one seed-averaged
     # value per behavior, so it is exactly the right vector to test.
@@ -417,7 +417,7 @@ def _ablation_findings(inp: FindingsInput) -> list[Finding]:
             "averaged within a behavior first, then a two-sided paired t-test runs "
             "across behaviors. This is the test to report; the per-behavior "
             "significance counts above answer the narrower question of whether one "
-            "behavior's gain reproduces under reseeding. Mean ΔF1 (p) — "
+            "behavior's gain reproduces under reseeding. Mean ΔF1 (p), "
             + "; ".join(f"{labels.get(c, c).lstrip('+ ')} {_f(m, 3)} (p={p:.3g})"
                         for c, m, p, _ in pooled)
             + ".",
@@ -429,7 +429,7 @@ def _ablation_findings(inp: FindingsInput) -> list[Finding]:
             "Ablation (detection)",
             f"{', '.join(dead)} did not measurably improve detection on this data.",
             "A detection ablation asks 'behavior X vs. everything else', and 'everything "
-            "else' is dominated by easy negatives — a feature family can look worthless "
+            "else' is dominated by easy negatives: a feature family can look worthless "
             "here while still being the thing that separates two confusable behaviors. "
             "Read this beside the discrimination section before concluding a family is "
             "useless.",
@@ -465,7 +465,7 @@ def _discrimination_findings(inp: FindingsInput) -> list[Finding]:
     # What, if anything, rescues the hardest pair.  This is the actionable result:
     # a family that removes the remaining error is where to invest.  The
     # "all_features" rung is the union of the families, so it wins any ranking by
-    # construction — it is reported as the ceiling, never as the answer to "which
+    # construction: it is reported as the ceiling, never as the answer to "which
     # family?".
     def _label(fs: str) -> str:
         return discrimination.FEATURE_SET_LABELS.get(fs, fs).lstrip("+ ").strip()
@@ -500,10 +500,10 @@ def _discrimination_findings(inp: FindingsInput) -> list[Finding]:
         else:
             out.append(Finding(
                 "Discrimination (pairwise)",
-                f"No feature family rescues {hardest.pair_label} — the best "
+                f"No feature family rescues {hardest.pair_label}, the best "
                 f"({lbl}) removes only {_pct(best_er)} of the remaining error. "
                 f"This pair needs new features, not more data.",
-                f"Error reduction by family — {breakdown}.{combined_txt} A targeting "
+                f"Error reduction by family: {breakdown}.{combined_txt} A targeting "
                 "result: these two behaviors are not separable by any feature family "
                 "currently extracted.",
                 kind=KIND_WARNING,
@@ -524,7 +524,7 @@ def _discrimination_findings(inp: FindingsInput) -> list[Finding]:
             f"Across every pair with headroom left, {_family(_label(top_fs))} remove the "
             f"most remaining error (mean {_pct(float(np.mean(top_ers)))}).",
             "Mean error reduction by family, over pairs the pose baseline has not already "
-            "solved — "
+            "solved: "
             + "; ".join(f"{_label(fs)} {_pct(float(np.mean(ers)))} (n={len(ers)})"
                         for fs, ers in ranked)
             + ".",
@@ -534,8 +534,8 @@ def _discrimination_findings(inp: FindingsInput) -> list[Finding]:
         out.append(Finding(
             "Discrimination (pairwise)",
             f"{len(ceiling)} of {len(scored)} pairs are already solved from pose alone "
-            f"(AUC > {_f(1.0 - discrimination.MIN_HEADROOM)}) and are greyed out of the "
-            f"figures — there is no discrimination question left to ask there.",
+            f"(AUC > {_f(1.0 - discrimination.MIN_HEADROOM)}) and are grayed out of the "
+            f"figures, there is no discrimination question left to ask there.",
             "Pairwise A-vs-B is a far easier task than detecting a behavior against all "
             "others, so pose-only AUC saturates. Raw ΔAUC is meaningless at that ceiling "
             "(every cell reads +0.00), which is why the figures plot the share of "
@@ -579,7 +579,7 @@ def _generalization_findings(inp: FindingsInput) -> list[Finding]:
                 f"(κ = {_f(worst_k)}, F1 = {_f(worst_r.f1_mean)}) and should not be "
                 f"reported without review.",
                 f"Every other behavior scores above it. κ < 0.6 is below the "
-                f"'substantial agreement' band — a model at this level disagrees with "
+                f"'substantial agreement' band, a model at this level disagrees with "
                 f"the reviewer often enough that its per-session numbers are unsafe.",
                 kind=KIND_WARNING,
             ))
@@ -601,7 +601,7 @@ def _time_budget_findings(inp: FindingsInput) -> list[Finding]:
             f"report, best for {best_t.behavior_name} (Lin's CCC = {_f(best_c)}).",
             f"CCC across {len(cccs)} {_plural(len(cccs), 'behavior')}: "
             f"{_f(min(vals))}–{_f(max(vals))}. CCC (not r) is the right statistic: r "
-            f"rewards correlation even under a constant offset, CCC penalises the "
+            f"rewards correlation even under a constant offset, CCC penalizes the "
             f"offset. Bland-Altman limits of agreement, not r, decide whether a "
             f"single animal's number is usable.",
         ))
@@ -611,12 +611,12 @@ def _time_budget_findings(inp: FindingsInput) -> list[Finding]:
         out.append(Finding(
             "Biological readout",
             "These are PREVALENCE figures (share of *reviewed segments*), not time "
-            "budgets (share of session time) — reviewed segments cover a median of only "
+            "budgets (share of session time): reviewed segments cover a median of only "
             f"{_pct(float(np.median(covs)), 1)} of each session and are "
             "active-learning-biased toward positives.",
             "A genuine %-time-in-behavior figure requires dense inference over ALL frames "
             "of held-out sessions using the held-out model. The deploy-model traces on "
-            "disk cannot be used for this — they are trained on all data, so scoring "
+            "disk cannot be used for this: they are trained on all data, so scoring "
             "held-out sessions with them leaks. This is a known gap, not an error in "
             "these numbers: as prevalence they are correct.",
             kind=KIND_CAVEAT,
@@ -626,7 +626,7 @@ def _time_budget_findings(inp: FindingsInput) -> list[Finding]:
         out.append(Finding(
             "Biological readout",
             f"Bout counts are reported as not-computable for "
-            f"{len(no_bouts)} {_plural(len(no_bouts), 'behavior')} — correctly so.",
+            f"{len(no_bouts)} {_plural(len(no_bouts), 'behavior')}, correctly so.",
             "Labeled segments are not contiguous in time (gaps reach thousands of "
             "frames), so counting runs of adjacent positive rows would merge far-apart "
             "clips into one 'bout' and yield a plausible but fabricated bout count. The "
@@ -657,7 +657,7 @@ def _calibration_findings(inp: FindingsInput) -> list[Finding]:
         f"{_f(mean_ece)}).",
         f"Expected calibration error ranges {_f(min(vals))}–{_f(max(vals))}; worst is "
         f"{worst_c.behavior_name} ({_f(worst_e)}). Note the score distribution is "
-        f"strongly bimodal — very few held-out segments land between p=0.1 and p=0.9 — "
+        f"strongly bimodal, very few held-out segments land between p=0.1 and p=0.9, "
         f"so the mid-range bins of the reliability diagram carry only a handful of "
         f"samples each and are drawn hollow. Judge calibration from ECE and the filled "
         f"bins, not from the shape of the sparse middle.",
@@ -682,7 +682,7 @@ def _al_findings(inp: FindingsInput) -> list[Finding]:
             "Active learning",
             f"ABEL's candidate ranking finds {mean_ratio:.1f}× more positive clips per "
             f"unit of labeling effort than reviewing clips at random.",
-            "Positives discovered at the end of the labeling budget, active vs. random — "
+            "Positives discovered at the end of the labeling budget, active vs. random, "
             + "; ".join(f"{r.behavior_name} {a:.0f} vs {b:.0f}"
                         for r, _, a, b in ratios[:6])
             + ". Both arms warm-start from the same seed set and are scored on the same "
@@ -703,9 +703,9 @@ def _al_findings(inp: FindingsInput) -> list[Finding]:
         out.append(Finding(
             "Active learning",
             f"On F1, active learning reaches 95% of peak sooner for "
-            f"{len(faster)} of {n_total} {_plural(n_total, 'behavior')} — a real but "
+            f"{len(faster)} of {n_total} {_plural(n_total, 'behavior')}, a real but "
             f"modest advantage, clearest for rarer behaviors.",
-            "Clips to 95% of peak F1, active vs. random — "
+            "Clips to 95% of peak F1, active vs. random, "
             + "; ".join(f"{n} {a:.0f} vs {b:.0f}" for n, a, b in faster[:6])
             + ". Common, easy behaviors roughly tie on F1: the robust, defensible claim "
               "is positives-discovered-per-effort, not a universal F1 win.",
@@ -752,7 +752,7 @@ def _behaviorscape_findings(inp: FindingsInput) -> list[Finding]:
         sig = pm["p"] < 0.05
         out.append(Finding(
             "Behaviorscape",
-            (f"Different behaviors genuinely rely on different feature types — behavior "
+            (f"Different behaviors genuinely rely on different feature types, behavior "
              f"identity explains {_pct(pm['R2'])} of the variance in feature importance "
              f"({p_txt})."
              if sig else
@@ -773,7 +773,7 @@ def _behaviorscape_findings(inp: FindingsInput) -> list[Finding]:
         out.append(Finding(
             "Behaviorscape",
             f"{top_mod.capitalize()} features dominate {top_n} of {len(dom)} behaviors.",
-            "Dominant feature modality per behavior — "
+            "Dominant feature modality per behavior: "
             + "; ".join(f"{m}: {n}" for m, n in ranked) + ".",
         ))
     return out
@@ -790,7 +790,7 @@ def _throughput_findings(inp: FindingsInput) -> list[Finding]:
         rates = [float(r.faster_than_realtime) for r in ex]
         out.append(Finding(
             "Throughput",
-            f"Feature extraction runs at {float(np.mean(rates)):.1f}× real-time — one "
+            f"Feature extraction runs at {float(np.mean(rates)):.1f}× real-time, one "
             f"hour of video is processed in about "
             f"{60 / max(float(np.mean(rates)), 1e-6):.0f} minutes.",
             "Timed on one representative session per project, as a full pose + video + "
@@ -849,7 +849,7 @@ def _review_effort_findings(inp: FindingsInput) -> list[Finding]:
             n_all = int(pooled.get("n_projects", 0))
             n_vid = int(pooled.get("n_projects_with_video", n_all))
             # Every ratio below is over the projects whose footage could be measured,
-            # which may be fewer than were reviewed — say so rather than let the two
+            # which may be fewer than were reviewed: say so rather than let the two
             # hour figures silently disagree.
             scope = ("" if n_vid >= n_all else
                      f" Measured over the {n_vid} of {n_all} projects whose video "
@@ -858,7 +858,7 @@ def _review_effort_findings(inp: FindingsInput) -> list[Finding]:
             out.append(Finding(
                 "Review effort",
                 f"That is {_f(pooled['review_min_per_video_hour'], 1)} review-minutes "
-                f"per hour of video — "
+                f"per hour of video, "
                 f"{_f(anchors[0][2], 0)}–{_f(anchors[-1][2], 0)}× less human time than "
                 "scoring every frame by hand.",
                 f"{_f(pooled['video_hours'], 0)} h of footage; manual scoring at "
@@ -872,7 +872,7 @@ def _review_effort_findings(inp: FindingsInput) -> list[Finding]:
 
     out.append(Finding(
         "Review effort",
-        "Review hours are a floor, not a total — only time *between* consecutive "
+        "Review hours are a floor, not a total, only time *between* consecutive "
         "decisions is counted.",
         f"Gaps under {review_effort.BATCH_SEC:g} s are one bulk UI action and gaps "
         f"over {review_effort.BREAK_SEC:g} s are breaks; neither is charged to a "
@@ -894,7 +894,7 @@ def _review_effort_findings(inp: FindingsInput) -> list[Finding]:
             f"Those figures convert clip budgets to minutes at a fixed "
             f"{assumed:g} s/clip, so they overstate hunting time by about "
             f"{_f(assumed / median, 1)}× relative to this reviewer's measured pace. "
-            "Nothing here changes that constant — it is reported so the two can be "
+            "Nothing here changes that constant: it is reported so the two can be "
             "read together.",
             KIND_CAVEAT,
         ))
@@ -923,14 +923,14 @@ _DERIVERS = (
 def derive_findings(inp: FindingsInput) -> list[Finding]:
     """Every plain-language finding a run supports, in report order.
 
-    A deriver that trips over an unexpected shape must not sink the report — the
+    A deriver that trips over an unexpected shape must not sink the report, the
     findings are a *summary* of results already safely on disk.  Each is isolated.
     """
     out: list[Finding] = []
     for fn in _DERIVERS:
         try:
             out.extend(fn(inp))
-        except Exception as exc:  # noqa: BLE001 — a bad summary must not lose the run
+        except Exception as exc:  # noqa: BLE001, a bad summary must not lose the run
             out.append(Finding(
                 fn.__name__.strip("_").replace("_findings", "").replace("_", " ").title(),
                 "Could not summarize this analysis.",
@@ -948,7 +948,7 @@ def findings_frame(items: list[Finding]) -> pd.DataFrame:
 
 def findings_markdown(run_id: str, items: list[Finding]) -> str:
     """The findings as a portable Markdown document."""
-    lines = [f"# ABEL Validation — Key Findings", "", f"Run: `{run_id}`", ""]
+    lines = [f"# ABEL Validation: Key Findings", "", f"Run: `{run_id}`", ""]
     by_analysis: dict[str, list[Finding]] = {}
     for f in items:
         by_analysis.setdefault(f.analysis, []).append(f)
@@ -956,8 +956,8 @@ def findings_markdown(run_id: str, items: list[Finding]) -> str:
         lines.append(f"## {analysis}")
         lines.append("")
         for f in group:
-            prefix = {KIND_CAVEAT: "⚠️ **Caveat** — ",
-                      KIND_WARNING: "🔴 **Warning** — "}.get(f.kind, "")
+            prefix = {KIND_CAVEAT: "⚠️ **Caveat**: ",
+                      KIND_WARNING: "🔴 **Warning**: "}.get(f.kind, "")
             lines.append(f"- {prefix}{f.headline}")
             if f.detail:
                 lines.append(f"  - {f.detail}")

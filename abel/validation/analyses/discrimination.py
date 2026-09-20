@@ -1,28 +1,28 @@
-"""Pairwise behavior discrimination — which feature families let ABEL tell two
+"""Pairwise behavior discrimination: which feature families let ABEL tell two
 *similar* behaviors apart?
 
 The standard ablation (:mod:`abel.validation.analyses.ablation`) asks a
 **detection** question: with feature family F on, how well is behavior X found
 against everything else?  Because "everything else" is dominated by easy
 negatives (no_behavior, locomotion, …), a feature family can look worthless there
-while doing the one job that actually matters scientifically — separating the two
+while doing the one job that actually matters scientifically, separating the two
 behaviors a human scorer would agonise over (Freeze vs. Groom; Sniff vs. Eat).
 
 This module asks the **discrimination** question instead.  For every pair of
 behaviors (A, B) in a project:
 
 1. Restrict the training pool *and* the held-out set to clips labeled exactly A
-   or exactly B (co-occurring "A|B" clips are excluded — they are not an
+   or exactly B (co-occurring "A|B" clips are excluded, they are not an
    either/or decision).
 2. Train a binary A-vs-B classifier once per feature family, all families sharing
    the same seed and the same clips, so each family's effect is a **paired**
    difference.
-3. Score separability on the held-out A/B clips with ROC-AUC (threshold-free —
+3. Score separability on the held-out A/B clips with ROC-AUC (threshold-free,
    it measures how well the two classes are *ordered apart*, and is invariant to
    probability calibration), plus balanced accuracy and MCC.
 
 The headline output is a **behavior × behavior separability matrix** and its
-**Δ matrix** (e.g. what adding video features buys for each pair) — so the answer
+**Δ matrix** (e.g. what adding video features buys for each pair), so the answer
 to "does video disambiguate freezing from grooming?" is read straight off the
 figure, per pair, rather than inferred from a single target-vs-rest bar.
 
@@ -57,7 +57,7 @@ MIN_HOLDOUT_PER_CLASS = 3
 # Minimum pose-only error (1 − AUC) a pair must still carry before an
 # error-reduction ratio is even defined: below this the baseline has essentially no
 # misranked pairs left and the ratio is a division by noise. This is only a
-# divide-by-zero guard, NOT a significance filter — a hard 0.005 cliff was doing
+# divide-by-zero guard, NOT a significance filter, a hard 0.005 cliff was doing
 # the latter job badly, suppressing a *significant* 75% error reduction
 # (Approach Familiar vs Rear, headroom 0.0041) and 60% of TMT's pairs on a purely
 # arbitrary threshold. Whether a gain is real is decided by `is_significant()`
@@ -97,7 +97,7 @@ def build_feature_sets(
 ) -> list[FeatureSetSpec]:
     """The feature-family ladder for the discrimination ablation.
 
-    ``pose`` is the animal's body ALONE — environment/ROI features are their own
+    ``pose`` is the animal's body ALONE, environment/ROI features are their own
     rung. Without that separation the baseline can tell two objects apart using a
     single object-distance column and every pair involving object identity reports
     as trivially solved (see :mod:`abel.validation.features`).
@@ -176,7 +176,7 @@ class PairResult:
 
         Excludes ``all_features``: that rung is the *union* of the families, so
         attributing a pair's rescue to it answers "do more features help" rather
-        than "WHICH modality disambiguates this pair" — the question the pairwise
+        than "WHICH modality disambiguates this pair", the question the pairwise
         design exists to ask.  Returns "" when no single family scored.
         """
         best, best_er = "", float("-inf")
@@ -210,12 +210,12 @@ class PairResult:
 
         ``(auc_f − auc_pose) / (1 − auc_pose)``. Pairwise AUC saturates near 1.0 for
         behaviors that barely resemble each other, and a raw ΔAUC of +0.004 reads as
-        nothing there — yet at a baseline of 0.984 it has closed a quarter of the
-        gap to perfect. This normalises the gain by the headroom that actually
+        nothing there, yet at a baseline of 0.984 it has closed a quarter of the
+        gap to perfect. This normalizes the gain by the headroom that actually
         existed, so easy pairs stop drowning out the real effects.
 
         Returns NaN when the baseline leaves less than :data:`MIN_HEADROOM` of error
-        to remove. Without that floor the ratio explodes on already-perfect pairs —
+        to remove. Without that floor the ratio explodes on already-perfect pairs,
         wiping out 0.0002 of 0.0002 error scores a triumphant "+100%" that is pure
         noise, and it would dominate the figure. A pair the pose baseline already
         solves simply has no discrimination question left to ask.
@@ -231,7 +231,7 @@ class PairResult:
 
 
 def _ci95(values) -> float:
-    """95% CI half-width across seeds (t-based — see :func:`metrics.ci95`)."""
+    """95% CI half-width across seeds (t-based: see :func:`metrics.ci95`)."""
     return vmetrics.ci95(values)
 
 
@@ -251,13 +251,13 @@ def rank_pairs_by_proximity(
 ) -> pd.DataFrame:
     """Rank behavior pairs by how *close together* they sit in feature space.
 
-    A training-free proxy for confusability: standardise the pose feature columns,
+    A training-free proxy for confusability: standardize the pose feature columns,
     take each behavior's centroid, and measure pairwise Euclidean distance.  Pairs
     whose centroids nearly coincide are the ones a classifier is most likely to
     mix up.
 
     This exists only to decide **which pairs survive the ``max_pairs`` cap** when a
-    project has many behaviors — it is a cheap pre-filter, not a result.  The real,
+    project has many behaviors, it is a cheap pre-filter, not a result.  The real,
     trained answer to "which behaviors does ABEL confuse" is the pose-only
     separability column of :func:`confusable_pairs_table`.
     """
@@ -290,7 +290,7 @@ def rank_pairs_by_proximity(
         })
     if not rows:
         return pd.DataFrame(columns=cols)
-    # Closest first — those are the pairs worth spending training budget on.
+    # Closest first: those are the pairs worth spending training budget on.
     return pd.DataFrame(rows, columns=cols).sort_values(
         "centroid_distance"
     ).reset_index(drop=True)
@@ -373,7 +373,7 @@ def run_pair_discrimination(
     pool_ab = pool.loc[pa | pb].reset_index(drop=True)
     hold_ab = hold.loc[ha | hb].reset_index(drop=True)
 
-    # Informative, not merely present — a constant column cannot separate a pair,
+    # Informative, not merely present, a constant column cannot separate a pair,
     # so a rung built from one is a structural zero. See features.informative_cols.
     has_social = bool(features.informative_cols(pool_ab, features.social_only_cols(pool_ab)))
     has_video = bool(features.informative_cols(pool_ab, features.video_only_cols(pool_ab)))
@@ -534,7 +534,7 @@ def discrimination_rows(results: list[PairResult]) -> pd.DataFrame:
                 "auc_gain_ci95": 0.0 if is_base else r.gain_ci.get(name, float("nan")),
                 "p_value": float("nan") if is_base else r.gain_p.get(name, float("nan")),
                 "n_seeds": len(r.auc_seeds.get(name, [])),
-                # Fraction of the baseline's remaining error the family removes —
+                # Fraction of the baseline's remaining error the family removes,
                 # the honest magnitude once AUC is near ceiling.
                 "error_reduction": 0.0 if is_base else r.error_reduction(name),
                 "significant": "" if is_base else bool(r.is_significant(name)),
@@ -574,32 +574,32 @@ def discrimination_seed_rows(results: list[PairResult]) -> pd.DataFrame:
 
 
 def pooled_gain_by_pair(disc_df: pd.DataFrame) -> pd.DataFrame:
-    """Pool each feature family's effect **across behavior pairs** — one row per
+    """Pool each feature family's effect **across behavior pairs**, one row per
     family, the manuscript-level test.
 
     ``p_value`` on a :class:`PairResult` pairs across random *seeds*, so its n is
     the seed count and it says only "this pair's gain reproduces under reseeding".
-    The claim being made is broader — "this family separates confusable behaviors"
-    — and its unit is the pair.  Each pair contributes one value, then a paired
+    The claim being made is broader, "this family separates confusable behaviors"
+   , and its unit is the pair.  Each pair contributes one value, then a paired
     t-test runs across pairs.
 
     Only pairs with real headroom count.  A pair the pose baseline already solves
     at AUC 0.999 has no discrimination question left, and including it pulls every
     mean toward zero while inflating n with pairs that could not have moved (see
     the ceiling-effect note on :meth:`PairResult.error_reduction`).  Error
-    reduction — the share of the baseline's *remaining* error removed — is the
+    reduction, the share of the baseline's *remaining* error removed, is the
     magnitude reported, because raw ΔAUC is uninterpretable near ceiling.
 
     **That filter is a selection effect and the table now says so.**  Headroom is
     ``1 − pose_only_auc``, computed from the same baseline arm the gain is measured
     against, and across the manuscript pairs headroom correlates with gain at
-    r = 0.93-0.95.  Most of that is a legitimate ceiling constraint — a pair at AUC
+    r = 0.93-0.95.  Most of that is a legitimate ceiling constraint, a pair at AUC
     0.999 *cannot* gain 0.03, so bounded-by-headroom is arithmetic, not bias.  The
     real problem is narrower: selection uses a *noisy estimate* of the baseline and
     the test then measures a difference from that same estimate, so a pair admitted
     on a lucky-low baseline draw brings an upward-biased gain with it.  Reported
-    rather than silently corrected, because the honest fix — re-estimating headroom
-    on a split independent of the one scored — costs a whole extra baseline arm per
+    rather than silently corrected, because the honest fix, re-estimating headroom
+    on a split independent of the one scored, costs a whole extra baseline arm per
     pair and is a run-cost decision, not a code decision:
 
     - ``n_pairs_excluded`` / ``frac_near_cutoff`` size the exposure (pairs whose
@@ -607,7 +607,7 @@ def pooled_gain_by_pair(disc_df: pd.DataFrame) -> pd.DataFrame:
       can flip),
     - ``mean_gain_excluded`` shows what the discarded pairs were doing,
     - ``r_headroom_gain`` is the correlation itself,
-    - ``mean_auc_gain_all_pairs`` is the unfiltered mean — the conservative bound,
+    - ``mean_auc_gain_all_pairs`` is the unfiltered mean: the conservative bound,
       free of any selection.
 
     Pairs cluster in projects exactly as behaviors do, so the reported p comes from
@@ -638,8 +638,8 @@ def pooled_gain_by_pair(disc_df: pd.DataFrame) -> pd.DataFrame:
                     else list(range(gains.size)))
         mm = vmetrics.clustered_mean_test(gains, clusters)
 
-        # Selection-effect diagnostics, computed over every pair of this family —
-        # kept and excluded alike — so the filter can be audited from the table.
+        # Selection-effect diagnostics, computed over every pair of this family,
+        # kept and excluded alike: so the filter can be audited from the table.
         fam = df[df["feature_set"].astype(str) == str(fs)]
         excl = fam[(fam["_head"] < MIN_HEADROOM)]["_gain"].dropna().to_numpy(dtype=float)
         both = fam.dropna(subset=["_gain", "_head"])
@@ -686,8 +686,8 @@ def pooled_gain_by_pair(disc_df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    # Every family here is a screening test of the same kind — no pre-specified
-    # primary among them — so the whole table is one BH family.
+    # Every family here is a screening test of the same kind, no pre-specified
+    # primary among them: so the whole table is one BH family.
     out["endpoint"] = "secondary"
     from abel.validation.analyses.ablation import _add_bh  # noqa: PLC0415
 

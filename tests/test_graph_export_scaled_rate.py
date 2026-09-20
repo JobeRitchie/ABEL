@@ -4,7 +4,7 @@
 pre-target count by that subject's *own* pre-target interval, producing one
 rate per subject (e.g. bouts / min).  The Excel export used to route it through
 the time-binned path, which emitted raw unscaled per-bin counts plus a "total"
-column -- neither the graphed rate nor the labelled unit.  It now exports one
+column -- neither the graphed rate nor the labeled unit.  It now exports one
 value per subject per behavior instead.
 
 The helpers are exercised on a lightweight stub rather than a real widget so

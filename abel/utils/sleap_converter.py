@@ -2,11 +2,11 @@
 
 ABEL's pose pipeline reads DeepLabCut layouts only (a pandas ``DataFrame`` with
 ``scorer/individuals/bodyparts/coords`` columns, stored under the HDF5 key
-``df_with_missing``).  SLEAP's native ``.slp`` — and even its ``analysis.h5``
-export — use a different structure, so this module bridges the two: it reads a
+``df_with_missing``).  SLEAP's native ``.slp``, and even its ``analysis.h5``
+export, use a different structure, so this module bridges the two: it reads a
 ``.slp`` with :mod:`sleap_io` and writes a DLC ``.h5`` that flows through the
 existing importer unchanged (probe, keypoint mapping, multi-animal identity,
-features, analytics — everything DLC files get).
+features, analytics, everything DLC files get).
 
 The output matches DeepLabCut's multi-animal HDF5 exactly:
 

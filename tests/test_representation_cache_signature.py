@@ -169,7 +169,7 @@ def test_value_change_same_schema_invalidates(tmp_path: Path):
     frame1, _, msgs1 = _build(project, pose_path, ctx_path, cfg)
     assert _zscored(msgs1), "first build should compute z-scores"
 
-    # Overwrite one session's pose values in place — identical columns, identical
+    # Overwrite one session's pose values in place: identical columns, identical
     # row count, brand-new numbers.
     pose_sess = pose_path.parent / "sessions" / "s1.parquet"
     df = pd.read_parquet(pose_sess)

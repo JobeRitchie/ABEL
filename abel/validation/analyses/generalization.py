@@ -29,7 +29,7 @@ class HoldoutPredictions:
 
     Retained so the downstream biological-readout (time budget) and calibration
     analyses can be computed from the SAME held-out predictions the generalization
-    metrics use — no extra model training. Arrays are aligned 1-D, target-vs-rest
+    metrics use, no extra model training. Arrays are aligned 1-D, target-vs-rest
     encoded (positive class == 1), with ``prob`` = P(target).
     """
 
@@ -99,7 +99,7 @@ def run_generalization(
     for rep in range(n_seeds):
         seed = 2000 + rep
         _log(f"{behavior_name}: generalization seed {rep + 1}/{n_seeds}…")
-        # Retain the estimator/meta only on the first seed — that's all the
+        # Retain the estimator/meta only on the first seed, that's all the
         # biological-readout + calibration analyses need (the folds share the
         # same pool + holdout, so any seed is representative).
         keep = retain_predictions and rep == 0
@@ -146,7 +146,7 @@ def run_generalization(
 
     result.f1_mean = float(np.nanmean(f1s)) if f1s else float("nan")
     result.kappa_mean = float(np.nanmean(kappas)) if kappas else float("nan")
-    # Seed spread was computed and thrown away — the figure needs error bars.
+    # Seed spread was computed and thrown away: the figure needs error bars.
     result.f1_ci = vmetrics.ci95(f1s)
     result.kappa_ci = vmetrics.ci95(kappas)
     result.n_seeds = len(f1s)

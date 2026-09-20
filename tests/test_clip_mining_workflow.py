@@ -1,6 +1,6 @@
 """Targeted Clip Mining workflow: don't re-offer reviewed clips, spread the batch.
 
-Three behaviours the mining loop depends on:
+Three behaviors the mining loop depends on:
 
 * matches that already carry a review decision are never handed back (and the
   check is live, so a clip judged while the modeless dialog is open drops out of
@@ -8,7 +8,7 @@ Three behaviours the mining loop depends on:
 * the capped batch takes turns between *subjects* rather than loading whichever
   animal happens to score highest;
 * "Clear Unreviewed Clips" removes the mined windows themselves, not just their
-  clip files — otherwise the mined queue keeps listing clips the user asked to
+  clip files, otherwise the mined queue keeps listing clips the user asked to
   clear.
 """
 
@@ -107,7 +107,7 @@ def test_batch_is_spread_across_subjects(_app, tmp_path) -> None:
 
 
 def test_unbalanced_batch_drains_the_top_scoring_session(_app, tmp_path) -> None:
-    """Without the toggle it is a plain top-N cut — the behaviour being fixed."""
+    """Without the toggle it is a plain top-N cut: the behavior being fixed."""
     dlg = _dialog(tmp_path, set(), {})
     dlg._balance_subjects_chk.setChecked(False)
 

@@ -3,10 +3,10 @@
 The supervised pipeline needs three derived artefacts before any model can be
 trained:
 
-1. **frame-pose features** (parquet, per session) — :class:`PoseProcessingService`
-2. **frame-context features** (optical flow etc., only when video is enabled) —
+1. **frame-pose features** (parquet, per session): :class:`PoseProcessingService`
+2. **frame-context features** (optical flow etc., only when video is enabled),
    :class:`ContextFeatureService`
-3. **frame/segment representations** built from (1)+(2) —
+3. **frame/segment representations** built from (1)+(2),
    :class:`BehaviorRepresentationService`
 
 Historically all three were produced inside the Active Learning tab's pipeline,
@@ -50,7 +50,7 @@ from abel.storage.file_store import read_json, write_json
 
 logger = logging.getLogger("abel")
 
-# Stage keys — shared with the UI timeline so labels/ETA line up across tabs.
+# Stage keys: shared with the UI timeline so labels/ETA line up across tabs.
 STAGE_PREPROCESS = "preprocess"
 STAGE_CONSOLIDATE = "consolidate"
 STAGE_REPRESENTATIONS = "representations"
@@ -144,8 +144,8 @@ def plan_session_workers(
     """Decide session/intra-session worker counts (pure, testable).
 
     Mirrors the Active Learning pipeline's GPU-aware policy: when GPU optical
-    flow is active every session worker serialises on a single GPU lock, so
-    spawning one-per-core is wasteful — we cap parallelism to what the hardware
+    flow is active every session worker serializes on a single GPU lock, so
+    spawning one-per-core is wasteful, we cap parallelism to what the hardware
     can actually sustain and spread the remaining cores across intra-session
     frame chunks.
     """
@@ -211,7 +211,7 @@ class FeaturePrepService:
 
     # ── Feature-cache invalidation ────────────────────────────────────
     # The per-session caches embed the inputs they were built from, so they go
-    # stale when those inputs change and must be rebuilt — otherwise re-running
+    # stale when those inputs change and must be rebuilt, otherwise re-running
     # feature extraction silently reuses the old result:
     #   • pose features depend on the body-part rename map.
     #   • context features additionally depend on the ROI config (target zones,
@@ -226,11 +226,17 @@ class FeaturePrepService:
     #       contact-state (in_contact + duration) columns.
     #   v5: spine_curvature on by default (single-animal extraction always uses
     #       the schema defaults, so every such project gains the column).
-    _POSE_SCHEMA_VERSION = "5"
+    #   v6: animals absent from the arena are no longer back-filled with a
+    #       frozen copy of their entry pose, and the table gains the
+    #       pose_present / partner_present bookkeeping columns.
+    _POSE_SCHEMA_VERSION = "6"
     # Same, for context-feature *formulas* (values change, columns may not).
     #   v2: local surface-motion windows are a fixed size (edge-replicated), so
     #       MOG2 no longer resets to 100% foreground near the frame edge.
-    _CONTEXT_SCHEMA_VERSION = "2"
+    #   v3: the local motion window follows a NaN (absent) position instead of
+    #       the phantom back-filled one, so its values change wherever an
+    #       animal was untracked.
+    _CONTEXT_SCHEMA_VERSION = "3"
 
     @staticmethod
     def _hash(obj: object) -> str:
@@ -280,7 +286,7 @@ class FeaturePrepService:
             "roi": roi_blob,
             "flow_temporal_stride": int(getattr(config, "flow_temporal_stride", 0) or 0),
             # Toggling advanced ROI features changes the context column set, so
-            # it must invalidate the cache — otherwise enabling it would leave
+            # it must invalidate the cache: otherwise enabling it would leave
             # the new columns missing until an unrelated ROI edit forced a rebuild.
             "advanced_roi": bool(getattr(config, "advanced_roi_features", True)),
         })
@@ -297,7 +303,7 @@ class FeaturePrepService:
         """True when the cached pose features were built from a different rename map."""
         # Content check first: if the cached features still carry a body-part
         # name that the current aliases should have renamed, they were built
-        # before the rename map was set and are stale — regardless of any
+        # before the rename map was set and are stale: regardless of any
         # recorded signature.  This is the case where aliases were added after
         # the features were first extracted.
         if cls._pose_cache_has_unapplied_aliases(project_root, aliases):
@@ -402,9 +408,75 @@ class FeaturePrepService:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, {"pose": "stale", "context": "stale"})
 
+    @classmethod
+    def invalidate_sessions(cls, project_root: Path, session_ids: "list[str] | set[str]") -> dict:
+        """Drop the cached features of specific sessions, leaving the rest alone.
+
+        For fixing one session, a corrected identity swap, a re-exported pose
+        file, where re-extracting the whole project would be hours of work for
+        a few minutes of change.  Deletes that session's per-session pose and
+        context parquet (which is exactly what marks it "needs extraction"), its
+        kinematic window cache and its R3D embeddings, then drops the
+        representation manifest.
+
+        The manifest matters: the representation cache is keyed on the row count
+        and columns of the monolithic feature files, and re-extracting a session
+        changes neither, so without this the segment features would silently keep
+        the values built from the old tracking.
+
+        Returns ``{"sessions": n, "files": n}``.
+        """
+        derived = project_root / "derived"
+        removed = 0
+        sids = [str(s) for s in (session_ids or []) if str(s)]
+        for sid in sids:
+            candidates = [
+                derived / "pose_features" / "sessions" / f"{sid}.parquet",
+                derived / "context_features" / "sessions" / f"{sid}.parquet",
+                derived / "pose_features" / f"{sid}.npz",
+                derived / "r3d_features" / f"{sid}.parquet",
+            ]
+            dense = derived / "r3d_features" / "dense_anchors"
+            if dense.exists():
+                candidates.extend(dense.glob(f"{sid}__w*.parquet"))
+                candidates.extend(dense.glob(f"{sid}__w*.json"))
+            for path in candidates:
+                try:
+                    if path.exists():
+                        path.unlink()
+                        removed += 1
+                except OSError as exc:  # pragma: no cover - locked file
+                    logger.warning("Could not remove %s: %s", path, exc)
+        if sids:
+            try:
+                (derived / "representations" / "representations.manifest.json").unlink(
+                    missing_ok=True
+                )
+            except OSError as exc:  # pragma: no cover - locked file
+                logger.warning("Could not drop the representation manifest: %s", exc)
+        return {"sessions": len(sids), "files": removed}
+
+    @classmethod
+    def sessions_needing_extraction(
+        cls, project_root: Path, session_ids: "list[str]", *, use_video_features: bool = True
+    ) -> "list[str]":
+        """Which of ``session_ids`` have no usable feature cache right now.
+
+        Used to offer "re-extract just what changed" after a tracking fix.
+        """
+        pose_ok = cls.cached_pose_sessions(project_root)
+        ctx_ok = cls.cached_context_sessions(project_root)
+        stale_all = cls._pose_changed(project_root, cls.keypoint_aliases(project_root))
+        out = []
+        for sid in session_ids:
+            sid = str(sid)
+            if stale_all or sid not in pose_ok or (use_video_features and sid not in ctx_ok):
+                out.append(sid)
+        return out
+
     # Directories under ``derived/`` that hold *only* generated feature caches.
     # Deleting them forces the next ``prepare`` to rebuild every stage from the
-    # source pose/video — the nuclear option when stale caches are being reused.
+    # source pose/video: the nuclear option when stale caches are being reused.
     _CACHE_DIRS = ("pose_features", "context_features", "representations")
 
     @classmethod
@@ -482,12 +554,12 @@ class FeaturePrepService:
         for job in jobs:
             label = f"{job.subject_id or '?'} ({job.session_id})"
             if not job.pose_path or not Path(job.pose_path).exists():
-                missing.append(f"  {label}: pose file not found — {job.pose_path}")
+                missing.append(f"  {label}: pose file not found, {job.pose_path}")
             if config.use_video_features:
                 if not job.video_path:
                     missing.append(f"  {label}: no video linked (video context is ON)")
                 elif not Path(job.video_path).exists():
-                    missing.append(f"  {label}: video not found — {job.video_path}")
+                    missing.append(f"  {label}: video not found, {job.video_path}")
         if not missing:
             return
         raise PrepInputError(
@@ -536,11 +608,11 @@ class FeaturePrepService:
         if reuse and pose_changed:
             obs.log(
                 "Pose feature inputs changed (body-part renames or an updated "
-                "feature format) — rebuilding pose features for a consistent, "
+                "feature format): rebuilding pose features for a consistent, "
                 "cross-project-compatible schema."
             )
         if reuse and ctx_changed:
-            obs.log("ROI configuration changed — rebuilding context features for the new ROIs.")
+            obs.log("ROI configuration changed: rebuilding context features for the new ROIs.")
         cached_pose = (
             self.cached_pose_sessions(project_root) if reuse and not pose_changed else set()
         )
@@ -594,7 +666,7 @@ class FeaturePrepService:
 
         result.frame_pose_path = pose_mono
         # Only treat context as available when the monolithic file actually
-        # exists — e.g. video was enabled but no selected session had a video.
+        # exists: e.g. video was enabled but no selected session had a video.
         result.frame_context_path = (
             ctx_mono if (config.use_video_features and ctx_mono.exists()) else None
         )
@@ -607,7 +679,7 @@ class FeaturePrepService:
         repr_svc = BehaviorRepresentationService()
         # Build the full project-wide cache (session_ids=None).  ``ensure_only``
         # avoids re-reading the multi-GB cache just to hand back dataframes the
-        # prep step does not need — we read row counts from the parquet footers.
+        # prep step does not need: we read row counts from the parquet footers.
         frame_df, segment_df = repr_svc.build(
             project_root=project_root,
             frame_pose_path=pose_mono,
@@ -680,7 +752,7 @@ class FeaturePrepService:
         )
         obs.log(
             f"Preprocessing {len(jobs)} session(s): {plan.max_workers} session worker(s) "
-            f"× {plan.intra_session_workers} chunk worker(s) — {plan.source}."
+            f"× {plan.intra_session_workers} chunk worker(s), {plan.source}."
         )
 
         warn_lock = threading.Lock()
@@ -819,8 +891,8 @@ class FeaturePrepService:
             n_timeout = sum(1 for w in result.gpu_warnings if "timed out" in w)
             parts = []
             if n_oom:
-                parts.append(f"{n_oom} GPU out-of-memory event(s) — fell back to CPU")
+                parts.append(f"{n_oom} GPU out-of-memory event(s), fell back to CPU")
             if n_timeout:
-                parts.append(f"{n_timeout} GPU lock timeout(s) — fell back to CPU")
+                parts.append(f"{n_timeout} GPU lock timeout(s), fell back to CPU")
             obs.log("⚠ " + ("; ".join(parts) or f"{len(result.gpu_warnings)} GPU issue(s)") +
                     ". Results are valid (CPU fallback) but slower than expected.")

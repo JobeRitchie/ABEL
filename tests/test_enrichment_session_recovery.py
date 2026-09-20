@@ -1,8 +1,8 @@
 """On-the-fly enrichment must not recompute the same segments on every retrain.
 
-The retrain pipeline enriches reviewed segments once per behaviour (for training)
+The retrain pipeline enriches reviewed segments once per behavior (for training)
 and again for inference. Segments that yield no feature row left no trace in the
-enrichment cache, so they were re-attempted on every pass — and a session with no
+enrichment cache, so they were re-attempted on every pass, and a session with no
 per-session pose file re-read the whole frame-pose store each time, only to find
 it held nothing. Labels recorded under a since-replaced session id hit exactly
 that path: they were both the slowest and the ones silently lost from training.
@@ -108,7 +108,7 @@ def test_stale_session_labels_are_recovered_and_never_recomputed(
     stale_id = f"bout_abcd_{STALE}_100_129"
     assert stale_id in set(enriched["segment_id"]), (
         "a label recorded under the recording's previous session id must still be "
-        "featurised from the session that now owns those frames"
+        "featurized from the session that now owns those frames"
     )
     assert calls == [stale_id]
     assert float(enriched.loc[enriched["segment_id"] == stale_id, "speed_mean"].iloc[0]) != 0.0
@@ -118,7 +118,7 @@ def test_stale_session_labels_are_recovered_and_never_recomputed(
     assert skipped["segment_ids"] == [f"{GHOST}_100_129"]
 
     # Second pass (the inference half of the same retrain, and every retrain after):
-    # everything is either cached or known-unfeaturisable, so nothing is recomputed.
+    # everything is either cached or known-unfeaturizable, so nothing is recomputed.
     again = tab._enrich_segment_df_for_reviewed_labels(_segment_df())
 
     assert calls == [stale_id], "enrichment recomputed segments it had already resolved"

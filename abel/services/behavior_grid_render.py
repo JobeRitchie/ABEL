@@ -1,18 +1,18 @@
 """Rendering helpers for the Validation tab's Behavior Grid montage.
 
-The Behavior Grid stitches 25 short clips — each a strong positive bout of one
-behavior, drawn from across sessions — into a single 5×5 looping video with pose
+The Behavior Grid stitches 25 short clips, each a strong positive bout of one
+behavior, drawn from across sessions, into a single 5×5 looping video with pose
 keypoints overlaid.  This module holds the pure, OpenCV-only rendering primitives
 so the heavy/IO-bound work is isolated from :class:`ValidationService` and can be
 unit-tested without a Qt or project context.
 
 Three primitives:
 
-* :func:`draw_keypoints` — overlay pose dots on a full frame (original coords),
+* :func:`draw_keypoints`, overlay pose dots on a full frame (original coords),
   ported from the Review tab's player so the look matches.
-* :func:`render_cell` — decode one bout window, draw keypoints, crop a square
+* :func:`render_cell`, decode one bout window, draw keypoints, crop a square
   region around the (smoothed) pose centroid, and write a square cell clip.
-* :func:`stitch_grid` — tile per-cell clips into one square grid video, looping
+* :func:`stitch_grid`, tile per-cell clips into one square grid video, looping
   shorter cells so every tile always shows motion.
 """
 
@@ -133,8 +133,8 @@ def render_cell(
     """Render one bout window to a square ``cell_px`` clip; return True on success.
 
     Frames ``[start_frame, end_frame]`` are decoded from *video_path*.  When pose
-    centroids are available the crop follows the subject (smoothed, jump-limited —
-    the same dynamic-centering used by Clip Review); otherwise a fixed centre crop
+    centroids are available the crop follows the subject (smoothed, jump-limited,
+    the same dynamic-centering used by Clip Review); otherwise a fixed center crop
     is used.  Keypoints, when enabled, are drawn on the full frame *before*
     cropping so they stay pixel-aligned.
 

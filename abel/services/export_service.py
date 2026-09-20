@@ -466,7 +466,7 @@ class ExportService:
 
         Same workbook shape, subject naming and session-type splitting as
         :meth:`export_boutframes_xlsx`, but the intervals come from the caller
-        instead of from review decisions — which is what lets HMM state bouts be
+        instead of from review decisions, which is what lets HMM state bouts be
         exported in the format TRACY already reads.  Because both exports share
         one writer, a state column and a behavior column land on the photometry
         signal identically, and the subject IDs match the ``ABELposition.csv``
@@ -535,8 +535,8 @@ class ExportService:
         """Write one workbook per session type; return (paths, total rows).
 
         The single writer behind every boutframes-shaped export.  *columns* is
-        the column set each sheet carries — behaviors for the review export,
-        HMM states for the state export — and appears on every sheet in the
+        the column set each sheet carries, behaviors for the review export,
+        HMM states for the state export, and appears on every sheet in the
         given order even where a subject has none of them, so sheets stay
         directly comparable.
         """
@@ -560,7 +560,7 @@ class ExportService:
             type_groups.setdefault(stype, []).append(sid)
 
         # Split into one workbook per session type only when multiple sessions
-        # per subject are the design rather than the exception — most subjects
+        # per subject are the design rather than the exception, most subjects
         # ran every session type.  A lone subject with a duplicate or stale
         # session must not shatter the export: where video filenames carry
         # timestamps each session derives its own unique "type", which would
@@ -586,7 +586,7 @@ class ExportService:
         # Sheet label per session.  A subject with one session keeps its bare
         # name; one with several gets the session appended so its sessions land
         # on separate sheets rather than silently merging into one.  Where no
-        # session type is known the video stem stands in — the bare session id
+        # session type is known the video stem stands in, the bare session id
         # would not, since every id starts with the same "session_" prefix.
         session_token_by_sid = self._session_token_by_session()
         label_by_session: dict[str, str] = {}
@@ -738,7 +738,7 @@ class ExportService:
 
         The file is the ABEL analogue of an acquisition AnimalPosition file, but
         it carries *video* time rather than the photometry rig's computer clock,
-        because ABEL never sees that clock.  TRACY recognises the
+        because ABEL never sees that clock.  TRACY recognizes the
         ``ABELposition`` filename marker and aligns the track to the signal with
         the same video-frame -> photometry-sample transform it already uses for
         boutframes, so the position track and the bouts exported from this same
@@ -748,7 +748,7 @@ class ExportService:
         named-column reader so the file still parses if the special case is
         ever bypassed):
 
-        ``frame``      0-based video frame index — the same numbering ABEL's
+        ``frame``      0-based video frame index, the same numbering ABEL's
                        boutframes export uses.
         ``timestamp``  video elapsed seconds (``frame / fps``).  Not a computer
                        timestamp; TRACY uses it only to verify the frame rate.
@@ -767,7 +767,7 @@ class ExportService:
 
         manifest = self._imports.load_manifest(self._project_root)
         if manifest is None:
-            out.warnings.append("No import manifest found — import sessions first.")
+            out.warnings.append("No import manifest found: import sessions first.")
             return out
 
         sessions = list(manifest.linked_sessions)
@@ -792,7 +792,7 @@ class ExportService:
         out_dir = self._project_root / "exports" / out_subdir
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # A name outside the UI's list is still honoured as a literal body part,
+        # A name outside the UI's list is still honored as a literal body part,
         # so a project with an unusual skeleton can be exported without code
         # changes -- and reports a warning when that part is not tracked rather
         # than silently substituting the centroid.
@@ -809,7 +809,7 @@ class ExportService:
             session_id = session.session_id
             pose_path = self._imports.pose_path_for_session(manifest, session_id)
             if not pose_path or not pose_path.exists():
-                out.warnings.append(f"[{session_id}] pose file not found — skipped.")
+                out.warnings.append(f"[{session_id}] pose file not found, skipped.")
                 continue
 
             try:
@@ -823,7 +823,7 @@ class ExportService:
                 if not np.isfinite(x_vals).any():
                     out.warnings.append(
                         f"[{session_id}] body part '{track_point}' not tracked "
-                        f"(available: {', '.join(pose.body_parts)}) — used the centroid instead."
+                        f"(available: {', '.join(pose.body_parts)}), used the centroid instead."
                     )
                     x_vals = np.asarray(pose.centroid_x, dtype=float)
                     y_vals = np.asarray(pose.centroid_y, dtype=float)
@@ -834,14 +834,14 @@ class ExportService:
             fps = self._session_video_fps(manifest, session_id, video_by_id)
             if not fps or fps <= 0:
                 out.warnings.append(
-                    f"[{session_id}] video frame rate unknown — skipped "
+                    f"[{session_id}] video frame rate unknown, skipped "
                     f"(TRACY needs the frame rate to place the track on the signal)."
                 )
                 continue
 
             n_frames = int(len(x_vals))
             if n_frames == 0:
-                out.warnings.append(f"[{session_id}] pose file has no frames — skipped.")
+                out.warnings.append(f"[{session_id}] pose file has no frames, skipped.")
                 continue
 
             frames = np.arange(n_frames, dtype=np.int64)
@@ -873,7 +873,7 @@ class ExportService:
             used_names.add(name.lower())
 
             output = out_dir / name
-            # 6 decimals, not 4: at 4 the rounded timestamps quantise to 0.0333 s
+            # 6 decimals, not 4: at 4 the rounded timestamps quantize to 0.0333 s
             # and TRACY recovers 30.030 fps from a 30.000 fps video, which reads
             # as a real rate disagreement in its frame-rate cross-check.
             df.to_csv(output, index=False, float_format="%.6f")
@@ -1001,7 +1001,7 @@ class ExportService:
         """Export annotated tracking videos for sessions that have confirmed bouts.
 
         When *whole_video* is True (the default) each session is re-encoded in full
-        — every frame from 0 to the last frame — with overlays drawn on the frames
+       , every frame from 0 to the last frame, with overlays drawn on the frames
         that fall inside a behavior bout.  This produces one continuous video per
         session with no gaps, so the animal never "teleports" between bouts.
 
@@ -1013,8 +1013,8 @@ class ExportService:
         *overlay_mode* controls the on-screen annotation style:
         - ``"basic"``: current active behavior label in the top-right corner.
         - ``"advanced"``: live cumulative durations for every behavior plus a
-          top-centre prediction panel showing the most likely behavior and its
-          colour-coded probability.
+          top-center prediction panel showing the most likely behavior and its
+          color-coded probability.
         """
         out = ExportResult()
         if not self._project_root:
@@ -1367,7 +1367,7 @@ class ExportService:
 
         Used only where no session type can be derived.  Prefers the video
         filename stem (meaningful to the user) and falls back to the unique part
-        of the generated session id — never the bare ``session_`` prefix, which
+        of the generated session id, never the bare ``session_`` prefix, which
         every id shares and which therefore collapses a subject's sessions onto
         one sheet.
         """
@@ -1698,7 +1698,7 @@ class ExportService:
             for col in prob_cols:
                 if single_prob:
                     # Single-column traces don't encode a behavior token;
-                    # skip — they are handled by the bout-parquet fallback.
+                    # skip: they are handled by the bout-parquet fallback.
                     continue
                 token = str(col).removeprefix("prob_").strip()
                 if not token or self._is_no_behavior_token(token):
@@ -1885,7 +1885,7 @@ class ExportService:
         # is encoded continuously so the output never jumps between distant bouts;
         # the full range is split into contiguous chunks only so the segment
         # workers can still render in parallel (the chunks are merged back in
-        # order, yielding one seamless video).  Otherwise only bout windows are
+        # order, yielding one continuous video).  Otherwise only bout windows are
         # encoded.
         if task.whole_video:
             export_segments = ExportService._split_contiguous_range(
@@ -2339,7 +2339,7 @@ class ExportService:
         ov = overlay_settings or {}
         h, w = frame.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
-        # Scale text relative to video height — larger for HD+ content
+        # Scale text relative to video height: larger for HD+ content
         scale = max(0.35, min(0.8, h / 1200.0)) * float(ov.get("basic_label_scale_factor", 1.0))
         thickness = max(1, int(round(h / 600)) + int(ov.get("text_thickness_offset", 0)))
         (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
@@ -2417,7 +2417,7 @@ class ExportService:
         return (b, g, r)
 
     def _get_behavior_overlay_info(self) -> dict[str, dict[str, Any]]:
-        """Return ``{name: {color_bgr, threshold, short_name}}`` for active behaviours."""
+        """Return ``{name: {color_bgr, threshold, short_name}}`` for active behaviors."""
         info: dict[str, dict[str, Any]] = {}
         if not self._behaviors:
             return info

@@ -31,7 +31,7 @@ def test_batch_eta_spans_all_remaining_behaviors():
     t[0] = 5.0
     eta = est.update(1, 0)
 
-    # Whole-run remaining spans behaviors 1, 2 and 3 — ~15 stages × 1 s ≈ 15 s.
+    # Whole-run remaining spans behaviors 1, 2 and 3, ~15 stages × 1 s ≈ 15 s.
     # The pre-fix per-behavior ETA would top out near one behavior (~5 s).
     assert eta > 12.0, f"ETA {eta:.1f}s should span all remaining behaviors, not one"
 
@@ -75,7 +75,7 @@ def test_single_behavior_run_calibrates():
     for stage in range(5):
         t[0] = float(stage)
         est.update(0, stage)
-    # 4 of 5 stages measured (the last is never crossed) — calibrated anyway.
+    # 4 of 5 stages measured (the last is never crossed), calibrated anyway.
     assert est.is_calibrated()
 
 
@@ -149,7 +149,7 @@ def test_blend_falls_back_to_live_without_history():
 
 def test_blend_anchors_to_measured_total_at_start():
     # At the very start (frac≈0) the ETA equals the measured whole-run total,
-    # regardless of a noisy early live estimate — the drift-free anchor.
+    # regardless of a noisy early live estimate: the drift-free anchor.
     eta = blend_whole_run_eta(hist_total=120.0, elapsed=0.0, live_remaining=5.0, frac=0.0)
     assert abs(eta - 120.0) < 1e-9
 

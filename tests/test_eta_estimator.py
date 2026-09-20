@@ -23,7 +23,7 @@ def test_eta_weights_unequal_stages():
 
     t[0] = 13.0
     eta2 = est.update(1, 1)       # item1 stage0 took 1s
-    # Only the slow stage 2 (10s) plus stage1 (1s) remain ≈ 11s — a naive
+    # Only the slow stage 2 (10s) plus stage1 (1s) remain ≈ 11s, a naive
     # equal-stage ETA would say ~6.5s here.
     assert 10.0 <= eta2 <= 12.0
 

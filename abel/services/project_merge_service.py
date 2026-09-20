@@ -161,7 +161,7 @@ class ProjectMergeService:
         summary_rows : list[dict]
             Rows compatible with ``BehaviorAnalyticsTab._summary_rows``.
         raw_bout_rows : dict[str, list[dict]]
-            {bid: [row, ...]} — to be turned into DataFrames and merged
+            {bid: [row, ...]}, to be turned into DataFrames and merged
             into ``_raw_bouts``.
         session_label_map : dict[str, str]
             {namespaced_session_id: display_label}
@@ -257,7 +257,7 @@ class ProjectMergeService:
             if host_bid:
                 host_name = host_bid_name_map[host_bid]
                 return host_bid, host_name
-            # No match — use the external behavior as-is with tag namespace
+            # No match: use the external behavior as-is with tag namespace
             namespaced = f"{tag}::{ext_bid}"
             return namespaced, ext_name or ext_bid
 
@@ -308,7 +308,7 @@ class ProjectMergeService:
         # merged project's data is processed with *its own* saved settings.
         ext_thresholds = self._read_tr_thresholds(root)
 
-        # ── Source 1: temporal_refinement — re-apply per-project thresholds ──
+        # ── Source 1: temporal_refinement, re-apply per-project thresholds ──
         # For each behavior we prefer to re-compute bouts from the raw inference
         # traces using the external project's temporal_review_settings.json.
         # Only when no inference traces are available do we fall back to the
@@ -1096,7 +1096,7 @@ class ProjectMergeService:
                 binary = remove_short_bouts(binary, min_duration_frames=min_bout)
                 intervals = binary_trace_to_intervals(binary)
 
-                # Use tag-namespaced session id — caller must have built session_label_map
+                # Use tag-namespaced session id: caller must have built session_label_map
                 # before this call, but we only have ext_sid here; let the caller namespace
                 key = (host_bid, host_name, ext_sid)  # caller will namespace ext_sid
                 rows = result.setdefault(key, [])
@@ -1113,7 +1113,7 @@ class ProjectMergeService:
         return result
 
     # ------------------------------------------------------------------
-    # Serialisation (persist merged project list with the host project)
+    # Serialization (persist merged project list with the host project)
     # ------------------------------------------------------------------
 
     def save(self, project_root: Path) -> None:

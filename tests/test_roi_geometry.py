@@ -27,7 +27,7 @@ def test_circle_bbox_center_and_containment():
     assert g.roi_center(c) == (50.0, 50.0)
     xs = np.array([50.0, 50.0, 61.0])
     ys = np.array([50.0, 55.0, 50.0])
-    # centre inside, 5px inside, 11px outside radius
+    # center inside, 5px inside, 11px outside radius
     assert list(g.roi_contains(c, xs, ys)) == [True, True, False]
 
 

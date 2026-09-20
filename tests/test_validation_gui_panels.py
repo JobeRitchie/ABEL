@@ -14,7 +14,7 @@ lookup was wrong, so the tab just said "No figures produced yet."
 So this test builds a run directory with the *exact* filenames
 :mod:`abel.validation.runner` writes (see its plots/csvs section), feeds it to the
 real `ValidationWindow._on_finished`, and asserts each tab ends up with rendered
-thumbnails — not merely with a populated dict.
+thumbnails, not merely with a populated dict.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def qapp():
 
 
 def _png(path: Path) -> None:
-    """A real (loadable) PNG — QPixmap skips anything it cannot decode."""
+    """A real (loadable) PNG: QPixmap skips anything it cannot decode."""
     path.parent.mkdir(parents=True, exist_ok=True)
     pix = QPixmap(120, 90)
     pix.fill(QColor("#89b4fa"))
@@ -169,7 +169,7 @@ def test_tab_shows_figures_after_run(populated_window, panel_attr, tab):
 
 
 def test_every_view_of_every_panel_renders(populated_window):
-    """Switching to any view in a panel's dropdown shows figures — no dead entries."""
+    """Switching to any view in a panel's dropdown shows figures, no dead entries."""
     for attr in ("_lc_panel", "_disc_panel", "_gen_panel"):
         panel = getattr(populated_window, attr)
         combo = panel._view_combo

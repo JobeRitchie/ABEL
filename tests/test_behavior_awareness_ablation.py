@@ -1,7 +1,7 @@
 """Tests for the behavior-awareness ablation service.
 
 These validate the core comparison logic without requiring a full project
-on disk — we construct minimal DataFrames and mock file state as needed.
+on disk, we construct minimal DataFrames and mock file state as needed.
 """
 
 from __future__ import annotations
@@ -117,7 +117,7 @@ def test_verdict_inconclusive_tied() -> None:
 
 
 # ------------------------------------------------------------------
-# Peer feature column builder — empty when no peers
+# Peer feature column builder: empty when no peers
 # ------------------------------------------------------------------
 
 def test_build_peer_features_no_models_dir(tmp_path) -> None:
@@ -132,7 +132,7 @@ def test_build_peer_features_with_peer(tmp_path) -> None:
     svc = BehaviorAwarenessAblationService()
     models_root = tmp_path / "derived" / "models"
 
-    # Target model — should be excluded
+    # Target model: should be excluded
     target_dir = models_root / "behavior_model_dig"
     target_dir.mkdir(parents=True)
     target_pred = pd.DataFrame({"segment_id": ["s1", "s2"], "prediction_prob": [0.9, 0.1]})

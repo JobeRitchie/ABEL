@@ -34,6 +34,7 @@ from abel.services.pose_processing_service import PoseProcessingService
 from abel.utils.sleap_converter import is_sleap_pose_file
 from abel.ui.animal_identity_dialog import AnimalIdentityDialog
 from abel.ui.body_part_rename_dialog import BodyPartRenameDialog
+from abel.ui.filename_pattern_dialog import FilenamePatternDialog
 from abel.ui.keypoint_mapping_dialog import KeypointMappingDialog
 from abel.ui.pixel_scale_calibration_dialog import PixelScaleCalibrationDialog
 
@@ -139,6 +140,13 @@ class DataImportTab(QWidget):
         )
         reapply_subject_btn = QPushButton("Apply Parsing Settings")
         test_pattern_btn = QPushButton("Test Pattern")
+        build_pattern_btn = QPushButton("Build Pattern from Filename…")
+        build_pattern_btn.setToolTip(
+            "Highlight the subject and session in an example filename instead of\n"
+            "writing a regex; previews the result on every imported file."
+        )
+        pattern_import_btn = QPushButton("Filename Pattern…")
+        pattern_import_btn.setToolTip(build_pattern_btn.toolTip())
 
         import_video_btn.clicked.connect(self._import_videos)
         import_pose_btn.clicked.connect(self._import_pose)
@@ -155,8 +163,18 @@ class DataImportTab(QWidget):
         )
         identity_map_btn.clicked.connect(self._open_identity_map)
         self._identity_map_btn = identity_map_btn
+        scan_swaps_btn = QPushButton("Scan Swaps (appearance)")
+        scan_swaps_btn.setToolTip(
+            "Check every multi-animal session against the video: when the animals\n"
+            "differ in coat color, the pixels at each track say which is which,\n"
+            "and the scan reports the sessions whose saved corrections disagree."
+        )
+        scan_swaps_btn.clicked.connect(self._scan_identity_swaps)
+        self._scan_swaps_btn = scan_swaps_btn
         reapply_subject_btn.clicked.connect(self._apply_subject_settings)
         test_pattern_btn.clicked.connect(self._update_subject_preview)
+        build_pattern_btn.clicked.connect(self._open_filename_pattern_builder)
+        pattern_import_btn.clicked.connect(self._open_filename_pattern_builder)
 
         copy_pxmm_all_btn = QPushButton("Apply px/mm to All Sessions")
         copy_pxmm_all_btn.setToolTip(
@@ -178,12 +196,14 @@ class DataImportTab(QWidget):
             import_video_btn,
             import_pose_btn,
             auto_match_btn,
+            pattern_import_btn,
             save_manifest_btn,
             remove_session_btn,
             calibrate_scale_btn,
             keypoint_map_btn,
             rename_parts_btn,
             identity_map_btn,
+            scan_swaps_btn,
         ]))
 
         # Keypoint-consistency warning banner (hidden unless a mismatch exists).
@@ -252,6 +272,7 @@ class DataImportTab(QWidget):
         settings_form.addRow("Extracted session:", self._preview_session)
 
         settings_btn_row = QHBoxLayout()
+        settings_btn_row.addWidget(build_pattern_btn)
         settings_btn_row.addWidget(test_pattern_btn)
         settings_btn_row.addWidget(reapply_subject_btn)
         settings_btn_row.addStretch(1)
@@ -263,14 +284,14 @@ class DataImportTab(QWidget):
         )
         settings_help.setWordWrap(True)
 
-        # Project settings (num animals) — separate from filename parsing.
+        # Project settings (num animals): separate from filename parsing.
         num_animals_row = QHBoxLayout()
         num_animals_row.addWidget(QLabel("Number of animals:"))
         num_animals_row.addWidget(self._num_animals_spin)
         num_animals_row.addWidget(self._set_num_animals_btn)
         num_animals_row.addStretch(1)
         project_help = QLabel(
-            "Animals tracked per session. Use 2 for a two-mouse dominance session; "
+            "Animals tracked per session. Use 2 for a two-mouse session; "
             "1 for single-animal. Saved to the project immediately."
         )
         project_help.setWordWrap(True)
@@ -403,7 +424,7 @@ class DataImportTab(QWidget):
                 f"{len(sleap_paths)} SLEAP prediction file(s) (.slp) were selected.\n\n"
                 "ABEL reads DeepLabCut-format pose files. Convert these to a "
                 "compatible DeepLabCut .h5 now?\n\n"
-                "Your originals are left untouched — a matching '<name>.sleap.h5' "
+                "Your originals are left untouched: a matching '<name>.sleap.h5' "
                 "is written next to each and imported in its place.",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
@@ -475,7 +496,7 @@ class DataImportTab(QWidget):
         file_sets, error = self._run_blocking(
             "Auto Matching",
             "Scanning imported videos and pose files and linking sessions…\n"
-            "Please wait — reading from the source folders (slow over a network drive).",
+            "Please wait: reading from the source folders (slow over a network drive).",
             _work,
         )
         if error is not None:
@@ -493,6 +514,14 @@ class DataImportTab(QWidget):
             f"Manifest updated: {len(self._manifest.videos)} videos, "
             f"{len(self._manifest.poses)} pose files, {len(linked)} linked sessions."
         )
+        unpaired_videos = len(self._manifest.videos) - len({s.video_asset_id for s in linked})
+        unpaired_poses = len(self._manifest.poses) - len({s.pose_asset_id for s in linked})
+        if unpaired_videos or unpaired_poses:
+            self._append_log(
+                f"Unpaired: {unpaired_videos} video(s), {unpaired_poses} pose file(s). "
+                "If their names differ beyond tracker suffixes, click “Filename Pattern…” "
+                "and highlight the subject and session so they can pair on those."
+            )
         missing_scale = sum(
             1 for session in linked
             if self._import_service.pixels_per_mm_for_session(self._manifest, session.session_id) is None
@@ -646,6 +675,25 @@ class DataImportTab(QWidget):
         self._preview_subject.setText(subject or "(no match)")
         self._preview_session.setText(session or "(no match)")
 
+    def _open_filename_pattern_builder(self) -> None:
+        videos = [Path(v.source_path) for v in self._manifest.videos] or list(self._video_paths)
+        poses = [Path(p.source_path) for p in self._manifest.poses] or list(self._pose_paths)
+        dlg = FilenamePatternDialog(
+            self._import_service, videos, poses, self._subject_settings_from_ui(), parent=self
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.result_settings is None:
+            return
+        self._set_subject_settings_ui(dlg.result_settings)
+        self._append_log(
+            "Filename pattern set: subject: "
+            f"{dlg.result_settings.subject_regex}  session: "
+            f"{dlg.result_settings.session_regex or '(none)'}"
+        )
+        if self._manifest.videos or self._manifest.poses:
+            self._apply_subject_settings()
+        if self._video_paths and self._pose_paths:
+            self._build_manifest()
+
     def _apply_subject_settings(self) -> None:
         settings = self._subject_settings_from_ui()
         self._update_subject_preview()
@@ -716,7 +764,7 @@ class DataImportTab(QWidget):
         local event loop until the worker signals completion, so the dialog keeps
         painting and the window stays responsive instead of "(Not Responding)".
 
-        ``work`` must be self-contained (no Qt widget access) — only its return
+        ``work`` must be self-contained (no Qt widget access), only its return
         value crosses back; do all GUI updates in the caller after this returns.
         """
         import threading
@@ -725,7 +773,7 @@ class DataImportTab(QWidget):
 
         progress = QProgressDialog(
             message,
-            None,  # no cancel button — these tasks aren't safely interruptible
+            None,  # no cancel button: these tasks aren't safely interruptible
             0,
             0,  # min == max == 0 → indeterminate "busy" bar
             self,
@@ -918,7 +966,7 @@ class DataImportTab(QWidget):
             explainer=(
                 "Map each keypoint the project expects to the matching keypoint "
                 "in your imported pose files. Keypoints with the same name need no "
-                "change. Suggestions are auto-filled — review and correct them."
+                "change. Suggestions are auto-filled, review and correct them."
             ),
             parent=self,
         )
@@ -961,12 +1009,12 @@ class DataImportTab(QWidget):
         # The rename map shares config/keypoint_aliases.json with Keypoint
         # Mapping (both are {source_name: target_name}).  Preserve any alias
         # entries for parts not shown here, and replace the rest with the user's
-        # choices — dropping parts they reset back to their original name.
+        # choices: dropping parts they reset back to their original name.
         merged = {k: v for k, v in existing.items() if k not in set(found)}
         merged.update(renames)
 
         if merged == existing:
-            self._append_log("Body-part names unchanged — nothing to update.")
+            self._append_log("Body-part names unchanged: nothing to update.")
             return
 
         from abel.storage.file_store import write_json
@@ -988,7 +1036,7 @@ class DataImportTab(QWidget):
         fp = self._project_root / "derived" / "pose_features" / "frame_pose.parquet"
         if fp.exists():
             self._append_log(
-                "Pose features already exist under the old names — re-run feature "
+                "Pose features already exist under the old names, re-run feature "
                 "extraction so the renames take effect everywhere."
             )
         self._check_keypoint_consistency()
@@ -1032,7 +1080,12 @@ class DataImportTab(QWidget):
         return None
 
     def _open_identity_map(self) -> None:
-        """Visual identity assignment + swap correction for one session."""
+        """Visual identity assignment + swap correction, one session at a time.
+
+        The dialog's Previous/Next Session buttons step to the neighboring
+        multi-animal session instead of closing for good, so a project can be
+        mapped in one pass rather than a select-open-close cycle per session.
+        """
         if not self._manifest.linked_sessions:
             QMessageBox.information(self, "No Sessions", "Import and link sessions first.")
             return
@@ -1040,19 +1093,39 @@ class DataImportTab(QWidget):
         if session is None:
             return
 
+        sessions = self._multi_animal_sessions()
+        ids = [s.session_id for s in sessions]
+        index = ids.index(session.session_id) if session.session_id in ids else 0
+        while True:
+            delta = self._run_identity_dialog(sessions, index)
+            if not delta:
+                return
+            index = max(0, min(len(sessions) - 1, index + delta))
+            self._select_session_row(sessions[index].session_id)
+
+    def _run_identity_dialog(self, sessions: list, index: int) -> int:
+        """Open the identity dialog for ``sessions[index]``.
+
+        Returns the session step the user asked for (-1/+1), or 0 when they
+        finished, canceled, or the session could not be opened.
+        """
+        session = sessions[index]
         pose_path = self._import_service.pose_path_for_session(self._manifest, session.session_id)
         if not pose_path:
             QMessageBox.warning(self, "No Pose File", "Could not resolve this session's pose file.")
-            return
+            return 0
 
-        # Load cleaned multi-animal pose (raw identities — corrections are applied
-        # live inside the dialog for preview, then persisted for extraction).
+        # Load cleaned multi-animal pose (raw identities, corrections are applied
+        # live inside the dialog for preview, then persisted for extraction).  The
+        # project's smoothing settings go in so the preview shows the same tracks
+        # feature extraction will see.
         try:
-            multi = PoseProcessingService().load_and_clean_multi(pose_path)
+            multi = PoseProcessingService().load_and_clean_multi(
+                pose_path, getattr(self._manifest, "smoothing_settings", None)
+            )
         except Exception as exc:
             QMessageBox.warning(self, "Pose Load Failed", f"Could not read pose file:\n{exc}")
-            return
-        swap_info = PoseProcessingService.detect_identity_swaps(multi)
+            return 0
 
         video_path = self._import_service.video_path_for_session(self._manifest, session.session_id)
         provider, cap = self._make_frame_provider(video_path)
@@ -1064,9 +1137,12 @@ class DataImportTab(QWidget):
                 frame_provider=provider,
                 n_frames=multi.n_frames,
                 default_frame=default_frame,
-                swap_frames=swap_info.get("frames", []),
+                fps=self._session_fps(session),
+                video_path=video_path,
                 current_map=dict(getattr(session, "individual_subject_map", {}) or {}),
                 current_corrections=list(getattr(session, "identity_corrections", []) or []),
+                session_index=index,
+                session_count=len(sessions),
                 parent=self,
             )
             accepted = dlg.exec() == QDialog.DialogCode.Accepted
@@ -1074,26 +1150,269 @@ class DataImportTab(QWidget):
             if cap is not None:
                 cap.release()
         if not accepted:
-            return
+            return 0
 
+        old_map = dict(getattr(session, "individual_subject_map", {}) or {})
+        old_corrections = list(getattr(session, "identity_corrections", []) or [])
         self._import_service.update_session_individual_map(
             self._manifest, session.session_id, dlg.result_map
         )
         self._import_service.update_session_identity_corrections(
             self._manifest, session.session_id, dlg.result_corrections
         )
-        # Identity/track changes invalidate any cached features for this session.
+        self._offer_label_remap(session, old_map, old_corrections)
+        # Identity/track changes invalidate this session's cached features,
+        # and only this session's, so fixing one subject does not cost a
+        # project-wide re-extraction.
         if self._project_root:
             from abel.services.feature_prep_service import FeaturePrepService
-            FeaturePrepService.invalidate_caches(self._project_root)
+            FeaturePrepService.invalidate_sessions(
+                self._project_root, [session.session_id]
+            )
         ident = ", ".join(f"{k}→{v}" for k, v in dlg.result_map.items())
         self._append_log(
             f"Session {session.session_id}: identities [{ident}]; "
             f"{len(dlg.result_corrections)} swap correction(s). "
-            "Re-run feature extraction to apply."
+            "Re-extract this session in Pose Features (Select sessions "
+            "needing extraction) to apply: other sessions keep their caches."
         )
+        # Clips were cropped and captioned per animal, so ones made before this
+        # change still show the old assignment.
+        if self._project_root:
+            clip_dir = self._project_root / "derived" / "clips" / str(session.session_id)
+            if clip_dir.exists() and any(clip_dir.iterdir()):
+                self._append_log(
+                    f"  Existing review clips for {session.session_id} were built under "
+                    "the old identities: re-extract this session's clips so the "
+                    "overlays match."
+                )
         self._save_manifest(silent=True)
         self._populate_table(self._manifest)
+        return int(getattr(dlg, "nav_delta", 0) or 0)
+
+    def _scan_identity_swaps(self) -> None:
+        """Check every multi-animal session's identities against the video."""
+        if not self._manifest or not self._multi_animal_sessions():
+            QMessageBox.information(
+                self, "No Multi-Animal Sessions",
+                "No imported pose file contains multiple tracked individuals.",
+            )
+            return
+        from PySide6.QtWidgets import QProgressDialog  # noqa: PLC0415
+
+        from abel.services.appearance_identity_service import (  # noqa: PLC0415
+            probe_project_appearance,
+            scan_sessions,
+        )
+        from abel.ui.swap_scan_dialog import SwapScanDialog  # noqa: PLC0415
+
+        # Ask the cheap question first: a same-coat pair cannot be identified
+        # from pixels at all, and finding that out should not cost a full pass
+        # over every video.
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            probe = probe_project_appearance(
+                self._manifest, self._import_service, PoseProcessingService()
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._append_log(f"Appearance check: {probe['message']}")
+        if probe["verdict"] == "unusable":
+            QMessageBox.information(self, "Animals look alike", probe["message"])
+            return
+        answer = QMessageBox.question(
+            self, "Scan all sessions?",
+            probe["message"] + "\n\nScan every multi-animal session now? "
+            "This reads each video once (a couple of seconds per session).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        sessions = self._multi_animal_sessions()
+        progress = QProgressDialog(
+            "Checking sessions against their video…", "Cancel", 0, len(sessions), self
+        )
+        progress.setWindowTitle("Appearance swap scan")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        cancel_flag = [False]
+        progress.canceled.connect(lambda: cancel_flag.__setitem__(0, True))
+
+        def _progress(done: int, total: int, label: str) -> None:
+            progress.setMaximum(max(1, total))
+            progress.setValue(done)
+            if label:
+                progress.setLabelText(f"Checking {label} ({done + 1}/{total})…")
+            QApplication.processEvents()
+
+        rows = scan_sessions(
+            self._manifest, self._import_service, PoseProcessingService(),
+            [s.session_id for s in sessions],
+            progress_cb=_progress, cancel_flag=cancel_flag,
+        )
+        progress.close()
+        if not rows:
+            self._append_log("Swap scan canceled before any session was checked.")
+            return
+
+        dlg = SwapScanDialog(rows, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.selected_rows:
+            self._append_log(
+                f"Swap scan: checked {len(rows)} session(s); no corrections applied."
+            )
+            return
+        self._apply_scanned_corrections(dlg.selected_rows, remap_labels=dlg.remap_labels)
+
+    def _apply_scanned_corrections(self, rows: list, *, remap_labels: bool) -> None:
+        """Save the scan's corrections, move affected labels, drop stale caches."""
+        from abel.services.feature_prep_service import FeaturePrepService  # noqa: PLC0415
+        from abel.services.identity_remap_service import (  # noqa: PLC0415
+            apply_identity_remap,
+            label_segment_ids_for_session,
+            plan_identity_remap,
+        )
+
+        touched: list[str] = []
+        moved_labels = 0
+        straddling = 0
+        for row in rows:
+            session = next(
+                (s for s in self._manifest.linked_sessions
+                 if s.session_id == row.get("session_id")),
+                None,
+            )
+            if session is None:
+                continue
+            old_corrections = list(getattr(session, "identity_corrections", []) or [])
+            self._import_service.update_session_identity_corrections(
+                self._manifest, session.session_id, list(row.get("corrections") or [])
+            )
+            if remap_labels and self._project_root:
+                segs = label_segment_ids_for_session(self._project_root, session.session_id)
+                if segs:
+                    plan = plan_identity_remap(
+                        session_id=session.session_id,
+                        individuals=list(session.individuals or []),
+                        subject_key=(getattr(session, "subject_key", None)
+                                     or getattr(session, "subject_id", None)
+                                     or session.session_id),
+                        old_map=dict(session.individual_subject_map or {}),
+                        new_map=dict(session.individual_subject_map or {}),
+                        old_corrections=old_corrections,
+                        new_corrections=list(session.identity_corrections or []),
+                        segment_ids=segs,
+                    )
+                    if plan:
+                        moved_labels += apply_identity_remap(self._project_root, plan)["labels"]
+                        straddling += len(plan.straddling)
+            touched.append(str(session.session_id))
+
+        if not touched:
+            return
+        if self._project_root:
+            FeaturePrepService.invalidate_sessions(self._project_root, touched)
+        self._save_manifest(silent=True)
+        self._populate_table(self._manifest)
+        self._append_log(
+            f"Swap scan: applied corrections to {len(touched)} session(s)"
+            + (f", moved {moved_labels} label(s)" if moved_labels else "")
+            + (f" ({straddling} of them cover a correction frame and contain both "
+               "animals: re-review those clips)" if straddling else "")
+            + ". Re-extract them in Pose Features (Select Needing Extraction)."
+        )
+
+    def _offer_label_remap(self, session, old_map: dict, old_corrections: list) -> None:
+        """Keep already-committed labels on the same animal after an identity change.
+
+        Labels are keyed ``seg_{animal_id}_{session}_{start}_{end}``, the same key
+        the per-animal feature rows use.  Renaming an individual or adding a swap
+        correction moves which physical animal owns that key, so without a remap
+        every label after the correction frame would describe the other mouse.
+        """
+        if not self._project_root:
+            return
+        from abel.services.identity_remap_service import (  # noqa: PLC0415
+            apply_identity_remap,
+            label_segment_ids_for_session,
+            plan_identity_remap,
+        )
+
+        segs = label_segment_ids_for_session(self._project_root, session.session_id)
+        if not segs:
+            return
+        plan = plan_identity_remap(
+            session_id=session.session_id,
+            individuals=list(session.individuals or []),
+            subject_key=(getattr(session, "subject_key", None)
+                         or getattr(session, "subject_id", None)
+                         or session.session_id),
+            old_map=old_map,
+            new_map=dict(session.individual_subject_map or {}),
+            old_corrections=old_corrections,
+            new_corrections=list(session.identity_corrections or []),
+            segment_ids=segs,
+        )
+        if not plan:
+            return
+
+        straddle = (
+            f"\n\n{len(plan.straddling)} of them cover a correction frame, so they "
+            "contain both animals: re-review those clips."
+            if plan.straddling else ""
+        )
+        choice = QMessageBox.question(
+            self,
+            "Move existing labels with the identities?",
+            f"{plan.n_changed} of this session's {plan.n_labels} committed label(s) "
+            "were assigned under the previous identities.\n\nMove them onto the "
+            "animal they actually describe? (Leaving them puts them on the other "
+            f"animal's data.){straddle}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            self._append_log(
+                f"Session {session.session_id}: {plan.n_changed} label(s) left on their "
+                "old animal ids: they now describe the other animal."
+            )
+            return
+        counts = apply_identity_remap(self._project_root, plan)
+        self._append_log(
+            f"Session {session.session_id}: remapped {counts['labels']} reviewer label(s)"
+            f" and {counts['soundboard']} soundboard payload(s) to the corrected identities."
+        )
+
+    def _session_fps(self, session) -> float:
+        """Frame rate for time readouts: the linked video's, else the project default."""
+        try:
+            asset = next(
+                (v for v in self._manifest.videos if v.asset_id == session.video_asset_id),
+                None,
+            )
+            if asset is not None and getattr(asset, "fps", None):
+                return float(asset.fps)
+        except Exception:
+            pass
+        if self._project_root:
+            from abel.storage.file_store import read_yaml  # noqa: PLC0415
+            cfg = read_yaml(self._project_root / "project.yaml", {}) or {}
+            try:
+                return float(cfg.get("default_fps") or 30.0)
+            except Exception:
+                pass
+        return 30.0
+
+    def _select_session_row(self, session_id: str) -> None:
+        """Highlight ``session_id`` in the table so it tracks the open dialog."""
+        table = self.session_table
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item is not None and item.text() == session_id:
+                table.selectRow(row)
+                table.scrollToItem(item)
+                return
 
     @staticmethod
     def _make_frame_provider(video_path):
@@ -1285,7 +1604,7 @@ class DataImportTab(QWidget):
             self._run_copy(auto=True)
 
     def _copy_files_to_project(self) -> None:
-        """Manual button handler — copy referenced files into raw/."""
+        """Manual button handler: copy referenced files into raw/."""
         if not self._project_root:
             QMessageBox.warning(self, "No Project", "Load a project first.")
             return
@@ -1317,7 +1636,7 @@ class DataImportTab(QWidget):
                 )
                 vc = result.get("videos_copied", 0)
                 pc = result.get("poses_copied", 0)
-                summary = f"Copy complete — {vc} videos, {pc} poses copied."
+                summary = f"Copy complete: {vc} videos, {pc} poses copied."
                 progress_sig.emit(summary)
                 log_sig.emit(summary)
             except Exception as exc:
@@ -1399,7 +1718,7 @@ class DataImportTab(QWidget):
                     ambiguous.append(name)
 
         if matched:
-            # Save directly — bypass _save_manifest to avoid triggering auto-copy.
+            # Save directly: bypass _save_manifest to avoid triggering auto-copy.
             self._import_service.save_manifest(self._project_root, self._manifest)
             # The relocated files are new data, so any features cached from the
             # old files are stale. Invalidate them so extraction rebuilds from
@@ -1422,7 +1741,7 @@ class DataImportTab(QWidget):
             if kind == "pose":
                 msg += (
                     " Cleared any in-project copies so the new pose files are now "
-                    "active — re-run feature extraction to apply them."
+                    "active: re-run feature extraction to apply them."
                 )
             self._append_log(msg)
         else:

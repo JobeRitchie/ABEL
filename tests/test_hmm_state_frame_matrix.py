@@ -42,7 +42,7 @@ def test_covered_frames_carry_the_state_and_gaps_stay_nan():
 
     assert len(arr) == 13, "runs to the last covered frame inclusive"
     assert np.array_equal(arr[0:6], np.zeros(6)), "0.0-0.5 s is state 0"
-    assert np.all(np.isnan(arr[6:10])), "the stretch between state bouts is unmodelled"
+    assert np.all(np.isnan(arr[6:10])), "the stretch between state bouts is unmodeled"
     assert np.array_equal(arr[10:13], np.full(3, 2.0)), "1.0-1.2 s is state 2"
 
 
@@ -84,7 +84,7 @@ def test_recording_length_pads_past_the_last_bout():
     )
     arr = mat["s1"]
     assert len(arr) == 60, "the column stops where the recording stops"
-    assert np.all(np.isnan(arr[3:])), "unobserved behaviour is not a state"
+    assert np.all(np.isnan(arr[3:])), "unobserved behavior is not a state"
 
 
 def test_a_bout_running_past_the_recorded_end_is_not_truncated():
@@ -109,7 +109,7 @@ def test_zero_fps_is_refused_rather_than_silently_wrong():
 
 
 # ---------------------------------------------------------------------------
-# The "no state" code: an explicit number for the unmodelled stretches
+# The "no state" code: an explicit number for the unmodeled stretches
 # ---------------------------------------------------------------------------
 
 def test_no_state_value_fills_the_gaps_and_leaves_states_alone():

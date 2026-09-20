@@ -27,7 +27,7 @@ MAP_FILENAME = "direct_use_keypoint_map.json"
 # for the Direct Use pipeline to consume.
 ALIASES_FILENAME = "keypoint_aliases.json"
 
-# Token canonicalisation for similarity scoring.  Anatomical synonyms collapse
+# Token canonicalization for similarity scoring.  Anatomical synonyms collapse
 # to a shared token so e.g. ``center_body`` and ``back_mid`` match.
 _TOKEN_SYNONYMS: dict[str, str] = {
     "body": "trunk",
@@ -46,7 +46,7 @@ _TOKEN_SYNONYMS: dict[str, str] = {
 
 
 def _canonical_tokens(name: str) -> frozenset[str]:
-    """Split a (normalized) keypoint name into canonicalised tokens."""
+    """Split a (normalized) keypoint name into canonicalized tokens."""
     norm = normalize_bodypart_name(name)
     tokens = [t for t in norm.replace("-", "_").split("_") if t]
     return frozenset(_TOKEN_SYNONYMS.get(t, t) for t in tokens)

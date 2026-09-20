@@ -3,7 +3,7 @@
 A validation *session* is the setup a run was made from: which projects were
 loaded, which behaviors were checked/unchecked, and every display rename the
 user applied to a project or a behavior.  None of that lives in any ABEL
-project — it is cross-project, it is the thing a reviewer asks about six months
+project, it is cross-project, it is the thing a reviewer asks about six months
 later ("what exactly went into figure 3?"), and until now it evaporated when the
 window closed.
 
@@ -54,7 +54,7 @@ def sessions_root() -> Path:
 
 
 def slugify(name: str) -> str:
-    """Folder-safe stem for a session name ('Manuscript — main' → 'manuscript-main')."""
+    """Folder-safe stem for a session name ('Manuscript, main' → 'manuscript-main')."""
     slug = re.sub(r"[^a-z0-9]+", "-", str(name).strip().lower()).strip("-")
     return slug or "session"
 
@@ -126,7 +126,7 @@ class SessionRecord:
         ``keep_entries`` carries forward projects that could not be loaded this
         time (an unmounted drive, typically).  Without it, re-saving a session
         that was reloaded while a drive was offline would quietly erase those
-        projects from the record — losing the setup, not just the access.
+        projects from the record, losing the setup, not just the access.
         """
         refs = list(projects.values()) if isinstance(projects, dict) else list(projects)
         entries: list[ProjectEntry] = []
@@ -216,7 +216,7 @@ class SessionRecord:
 
         def _unavailable(entry: ProjectEntry, why: str) -> None:
             unavailable.append(entry)
-            missing_projects.append(f"{entry.project_id} — {why} ({entry.root})")
+            missing_projects.append(f"{entry.project_id}, {why} ({entry.root})")
 
         for entry in self.projects:
             root = Path(entry.root)
@@ -225,11 +225,11 @@ class SessionRecord:
                 continue
             try:
                 proj = ProjectRef.load(root)
-            except Exception:  # noqa: BLE001 — an unreadable project is a report, not a crash
+            except Exception:  # noqa: BLE001, an unreadable project is a report, not a crash
                 _unavailable(entry, "could not be read")
                 continue
             if not proj.is_valid():
-                # Reachable but no training set — the same bar Add Project(s) applies.
+                # Reachable but no training set: the same bar Add Project(s) applies.
                 _unavailable(entry, "no derived/training_sets/training_set.parquet")
                 continue
 
@@ -245,7 +245,7 @@ class SessionRecord:
                 if beh.checked:
                     chosen.add(beh.behavior_id)
             if proj.project_id in refs:
-                # project_id is the key every figure groups by — two projects under
+                # project_id is the key every figure groups by: two projects under
                 # one id would merge their results into a single bar.
                 _unavailable(entry, f"name '{proj.project_id}' collides with another project")
                 continue
@@ -256,7 +256,7 @@ class SessionRecord:
 
     # ── human-readable mirror ──
     def to_markdown(self) -> str:
-        lines = [f"# Validation session — {self.name}", ""]
+        lines = [f"# Validation session: {self.name}", ""]
         lines.append(f"- Created: {self.created_at}")
         lines.append(f"- Last saved: {self.updated_at}")
         if self.holdout:
@@ -290,14 +290,14 @@ class RestoreResult:
     selected: dict[str, set[str]]
     missing_projects: list[str] = field(default_factory=list)
     missing_behaviors: list[str] = field(default_factory=list)
-    # Saved entries that could not be loaded — pass back into SessionRecord.capture
+    # Saved entries that could not be loaded: pass back into SessionRecord.capture
     # as ``keep_entries`` so re-saving does not erase them.
     unavailable: list[ProjectEntry] = field(default_factory=list)
 
 
 @dataclass
 class SessionInfo:
-    """Listing entry — enough to populate a picker without loading everything."""
+    """Listing entry: enough to populate a picker without loading everything."""
 
     name: str
     slug: str
@@ -356,7 +356,7 @@ class SessionStore:
         for path in sorted(self.root.glob(f"*/{SESSION_FILE}")):
             try:
                 raw = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001 — a corrupt session must not hide the rest
+            except Exception:  # noqa: BLE001, a corrupt session must not hide the rest
                 continue
             projects = raw.get("projects", []) or []
             n_beh = sum(
@@ -377,7 +377,7 @@ class SessionStore:
         return out
 
     def delete(self, name: str) -> None:
-        """Remove the session file only — never its runs (those are results)."""
+        """Remove the session file only: never its runs (those are results)."""
         self.session_path(name).unlink(missing_ok=True)
         (self.session_dir(name) / "SETUP.md").unlink(missing_ok=True)
 

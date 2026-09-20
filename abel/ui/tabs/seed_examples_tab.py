@@ -1,7 +1,7 @@
-"""Seed Examples tab — annotate short behavior bouts directly on video.
+"""Seed Examples tab: annotate short behavior bouts directly on video.
 
 Video playback uses OpenCV frame-by-frame rendering (degrades gracefully when
-OpenCV is not installed — the frame-number fields remain usable without preview).
+OpenCV is not installed, the frame-number fields remain usable without preview).
 """
 
 from __future__ import annotations
@@ -376,7 +376,7 @@ class SeedExamplesTab(QWidget):
         add_btn = QPushButton("＋ Add Seed")
         add_btn.clicked.connect(self._add_seed)
 
-        self._assume_neg_btn = QPushButton("🔄 Assume All Non-Positive Frames = Negative")
+        self._assume_neg_btn = QPushButton("Assume All Non-Positive Frames = Negative")
         self._assume_neg_btn.setCheckable(True)
         self._assume_neg_btn.setToolTip(
             "When enabled, every frame NOT covered by a positive seed is treated as\n"
@@ -425,7 +425,7 @@ class SeedExamplesTab(QWidget):
         splitter.hide()
         self._splitter = splitter
 
-        # Tab-level keyboard shortcuts — active whenever this tab is visible,
+        # Tab-level keyboard shortcuts: active whenever this tab is visible,
         # regardless of which child widget has focus.
         QShortcut(QKeySequence(Qt.Key.Key_Space), self).activated.connect(
             self._player.toggle_play
@@ -575,7 +575,7 @@ class SeedExamplesTab(QWidget):
         orphaned = self._orphaned_session_ids()
         if orphaned:
             n = sum(1 for s in self._seeds.seeds if s.session_id in orphaned)
-            self._relink_btn.setText(f"\u26a0  {n} seeds have missing sessions \u2014 click to relink")
+            self._relink_btn.setText(f"\u26a0  {n} seeds have missing sessions, click to relink")
             self._relink_btn.show()
         else:
             self._relink_btn.hide()
@@ -632,7 +632,7 @@ class SeedExamplesTab(QWidget):
                 "<b>Seeds found with session IDs no longer in the import manifest.</b><br>"
                 "This happens when videos are re-imported (new random session IDs are generated).<br><br>"
                 + auto_note +
-                "<b>The following could not be matched automatically — please choose:</b>"
+                "<b>The following could not be matched automatically, please choose:</b>"
             )
             header.setWordWrap(True)
             header.setTextFormat(Qt.TextFormat.RichText)
@@ -699,7 +699,7 @@ class SeedExamplesTab(QWidget):
                 if s.session_id == self._selected_session_id()
             ]
             if current_session_seeds:
-                return  # Already on a session with seeds — nothing to do
+                return  # Already on a session with seeds: nothing to do
         # Find the first combo item whose session_id has at least one seed
         session_ids_with_seeds = {s.session_id for s in self._seeds.seeds}
         for i in range(self._session_combo.count()):
@@ -862,7 +862,7 @@ class SeedExamplesTab(QWidget):
                 (v for v in self._manifest.videos if v.asset_id == s.video_asset_id), None
             )
             fname = Path(video.source_path).name if video else s.session_id
-            label = f"{s.subject_id} — {fname}" if s.subject_id else fname
+            label = f"{s.subject_id}, {fname}" if s.subject_id else fname
             options.append((label, s.session_id))
 
         if not options:

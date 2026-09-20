@@ -1,4 +1,4 @@
-"""Model Refinement — import labeled examples from other ABEL projects.
+"""Model Refinement: import labeled examples from other ABEL projects.
 
 Refining a model means giving it more labeled examples to learn from.  This
 service pulls labeled segments (their *features* + the reviewer's *label*) out
@@ -8,18 +8,18 @@ more diverse dataset.
 
 What is and isn't imported
 --------------------------
-* Imported: the per-segment feature rows and their behaviour labels — the
+* Imported: the per-segment feature rows and their behavior labels, the
   source project's *entire* labeled set, read straight from its assembled
   training set (``training_set.parquet``).  These are exactly what a model
   trains on.  Sources that were reviewed but never had a training set built
   fall back to the Review-tab label log (``reviewer_labels.parquet``).
 * Also registered for review: each imported segment is surfaced in the Review
   tab as a *reviewed*, source-tagged entry, and its clip video is copied into
-  this project so it can be played back here.  The model never sees the clip —
+  this project so it can be played back here.  The model never sees the clip,
   this is purely so a human can see and audit what was imported and where it
   came from.
 
-Hard constraint — feature-schema compatibility
+Hard constraint, feature-schema compatibility
 ----------------------------------------------
 Two projects only produce comparable feature columns when they share the same
 pose keypoint scheme (and ROI layout).  Different keypoints generate different
@@ -39,17 +39,17 @@ or, failing that, an auto-suggested keypoint mapping (see ``keypoint_mapping``).
 Only the keypoint *tokens* inside column names are rewritten, so two
 differently-named-but-identical schemes line up and import cleanly.
 
-Behaviour identity
+Behavior identity
 ------------------
-Behaviours are matched across projects by *name* (case-insensitive), mirroring
+Behaviors are matched across projects by *name* (case-insensitive), mirroring
 ``ProjectMergeService``.  ``no_behavior`` maps to ``no_behavior``.  Source
-behaviours with no host match are reported and skipped.
+behaviors with no host match are reported and skipped.
 
 Name remapping
 --------------
-Different labs name the same behaviour differently — one project's "Dip" is
+Different labs name the same behavior differently, one project's "Dip" is
 another's "Head Dip".  A per-host *alias table* (``config/behavior_aliases.json``)
-maps a source behaviour *name* to the host behaviour *name* it should be treated
+maps a source behavior *name* to the host behavior *name* it should be treated
 as, so otherwise-unmatched examples can still be imported.  The Model Refinement
 tab edits this table through a helper dialog that auto-suggests likely matches.
 """
@@ -88,9 +88,10 @@ _NON_FEATURE_COLS = frozenset({
     "segment_id", "label", "label_source", "reviewer_confidence",
     "animal_id", "session_id", "start_frame", "end_frame",
     "overlap_allowed",
+    "pose_present_frac", "partner_present_frac",
 })
 
-# Labels that are not behaviour UUIDs but are still valid training targets.
+# Labels that are not behavior UUIDs but are still valid training targets.
 _PASSTHROUGH_LABELS = frozenset({"no_behavior"})
 
 # Minimum fraction of host feature columns that must exist in the source
@@ -100,7 +101,7 @@ COMPAT_THRESHOLD = 0.95
 
 @dataclass
 class BehaviorMapping:
-    """How one source behaviour maps onto the host project."""
+    """How one source behavior maps onto the host project."""
 
     source_behavior_id: str
     source_name: str
@@ -120,7 +121,7 @@ class CompatibilityDiagnostics:
 
     Schema compatibility (column names line up) does not guarantee the feature
     *values* mean the same thing across projects.  These metrics flag the
-    upstream differences — calibration, pose model, extraction settings — and
+    upstream differences, calibration, pose model, extraction settings, and
     the net distribution shift they produce, so the user can judge whether
     merging is scientifically sound, not just mechanically allowed.
     """
@@ -162,7 +163,7 @@ class CoverageDiagnosis:
     models_total: int = 0
     worst_coverage: float = 1.0      # lowest per-model coverage (0..1)
     missing_total: int = 0           # distinct host-aligned columns missing
-    # (group label, count) sorted by count desc — e.g. ("Video / optical-flow", 228)
+    # (group label, count) sorted by count desc, e.g. ("Video / optical-flow", 228)
     missing_groups: list[tuple[str, int]] = field(default_factory=list)
     sample_missing: list[str] = field(default_factory=list)  # a few example names
     causes: list[str] = field(default_factory=list)          # likely reasons
@@ -185,7 +186,7 @@ class ImportRecord:
     source_root: str = ""
     imported_rows: int = 0
     review_registered: int = 0
-    behaviors: dict[str, int] = field(default_factory=dict)  # host behaviour name -> count
+    behaviors: dict[str, int] = field(default_factory=dict)  # host behavior name -> count
     imported_at: str = ""
 
 
@@ -203,7 +204,7 @@ class RefinementPreview:
     coverage: float = 0.0
     behavior_mappings: list[BehaviorMapping] = field(default_factory=list)
     total_labeled: int = 0
-    importable_labeled: int = 0  # labels that map to a host behaviour
+    importable_labeled: int = 0  # labels that map to a host behavior
     keypoint_renames: dict[str, str] = field(default_factory=dict)  # source_kp -> host_kp
     diagnostics: CompatibilityDiagnostics | None = None
 
@@ -216,17 +217,17 @@ class RefinementPreview:
         return [m for m in self.behavior_mappings if not m.matched and m.example_count]
 
 
-# Sentinel host-behaviour decisions for model import (vs. an explicit host id).
+# Sentinel host-behavior decisions for model import (vs. an explicit host id).
 AUTO_CREATE_BEHAVIOR = "__auto_create__"
 SKIP_BEHAVIOR = "__skip__"
 
 
 @dataclass
 class SourceModel:
-    """A trained behaviour model discovered in a source project."""
+    """A trained behavior model discovered in a source project."""
 
     model_dir: str           # directory name under derived/models
-    behavior_id: str         # source behaviour id the model predicts
+    behavior_id: str         # source behavior id the model predicts
     behavior_name: str
     feature_columns: list[str] = field(default_factory=list)
 
@@ -237,21 +238,21 @@ class SourceModel:
 
 @dataclass
 class ModelImportItem:
-    """Per-model compatibility + behaviour-mapping result in a preview."""
+    """Per-model compatibility + behavior-mapping result in a preview."""
 
     model: SourceModel
     coverage: float                 # fraction of the model's feature cols the host has
     missing_features: int
-    host_behavior_id: str = ""      # "" when the behaviour is unmatched
+    host_behavior_id: str = ""      # "" when the behavior is unmatched
     host_behavior_name: str = ""
     matched_by_alias: bool = False
     compatible: bool = False        # host covers (nearly) all required features
-    # Model feature columns (host-aligned) the host doesn't have — the concrete
+    # Model feature columns (host-aligned) the host doesn't have, the concrete
     # gap behind a sub-threshold coverage.  Used by the coverage diagnosis.
     # Excludes legacy pair-order columns, which are not a real gap.
     missing_columns: list[str] = field(default_factory=list)
     # Distance columns the model names under the opposite keypoint ordering to
-    # the one this host emits (dist_A_to_B vs dist_B_to_A — the same symmetric
+    # the one this host emits (dist_A_to_B vs dist_B_to_A, the same symmetric
     # measurement).  Not missing data; NaN-filled at score time, and excluded
     # from coverage.  See ModelRefinementService._legacy_pair_order_cols.
     legacy_pair_columns: list[str] = field(default_factory=list)
@@ -288,10 +289,10 @@ class ModelImportPreview:
 
 @dataclass
 class BaselineBehaviorRow:
-    """One source behaviour in a baseline-import detection summary.
+    """One source behavior in a baseline-import detection summary.
 
     Combines the example side (labeled clips/feature rows) and the model side
-    (trained model) for a single source behaviour, plus how it maps onto the host.
+    (trained model) for a single source behavior, plus how it maps onto the host.
     """
 
     source_behavior_id: str
@@ -300,7 +301,7 @@ class BaselineBehaviorRow:
     has_model: bool = False
     model_coverage: float = 0.0     # 0..1 (0 when no model)
     model_compatible: bool = False
-    matched_host_id: str = ""       # "" when no existing host behaviour matches
+    matched_host_id: str = ""       # "" when no existing host behavior matches
     matched_host_name: str = ""
 
     @property
@@ -360,9 +361,9 @@ class ModelRefinementService:
     ) -> RefinementPreview:
         """Inspect a source project without modifying anything.
 
-        ``name_overrides`` maps a source behaviour *name* (case-insensitive) to
-        the host behaviour *name* it should be imported as, letting differently
-        named-but-identical behaviours match.  When omitted, the host project's
+        ``name_overrides`` maps a source behavior *name* (case-insensitive) to
+        the host behavior *name* it should be imported as, letting differently
+        named-but-identical behaviors match.  When omitted, the host project's
         saved alias table is used.
 
         When ``compute_diagnostics`` is set, attaches a
@@ -386,7 +387,7 @@ class ModelRefinementService:
         source_features = self._source_feature_cols(source_root)
         if source_features is None:
             pv.reason = (
-                f"Source project '{tag}' has no segment_features.parquet — "
+                f"Source project '{tag}' has no segment_features.parquet, "
                 "it has not been processed/labeled."
             )
             return pv
@@ -420,7 +421,7 @@ class ModelRefinementService:
             except Exception:  # diagnostics are advisory; never block on them
                 logger.exception("Failed to compute refinement diagnostics")
 
-        # Behaviour mapping + per-behaviour example counts.
+        # Behavior mapping + per-behavior example counts.
         source_behaviors = self._read_behaviors(source_root)
         host_name_to_id = {
             name.lower(): bid for bid, name in self._read_behaviors(host_root).items()
@@ -464,7 +465,7 @@ class ModelRefinementService:
         if importable == 0:
             pv.compatible = False
             pv.reason = (
-                f"None of '{tag}'s labeled behaviours match a behaviour in "
+                f"None of '{tag}'s labeled behaviors match a behavior in "
                 "this project (matched by name)."
             )
             return pv
@@ -484,14 +485,14 @@ class ModelRefinementService:
 
         Re-validates compatibility via ``preview`` first.  ``name_overrides``
         (source name -> host name aliases) is applied to remap differently
-        named behaviours; when omitted the host's saved alias table is used.
+        named behaviors; when omitted the host's saved alias table is used.
 
-        ``behavior_decisions`` (source behaviour id -> host id /
+        ``behavior_decisions`` (source behavior id -> host id /
         ``AUTO_CREATE_BEHAVIOR`` / ``SKIP_BEHAVIOR``) lets a baseline import seed a
-        project that has no matching behaviours yet: behaviours chosen for
+        project that has no matching behaviors yet: behaviors chosen for
         auto-create are added from the source definition, and only the
         feature-schema half of compatibility is enforced (a brand-new host has no
-        behaviours to match by name).  When omitted, behaviour identity is matched
+        behaviors to match by name).  When omitted, behavior identity is matched
         by name/alias exactly as before.
 
         Returns a result dict with ``status`` and, on success, the number of
@@ -504,7 +505,7 @@ class ModelRefinementService:
             compute_diagnostics=False,
         )
         if behavior_decisions:
-            # The decision set supplies behaviour identity, so only the feature
+            # The decision set supplies behavior identity, so only the feature
             # schema needs to line up here (the importable-by-name gate inside
             # ``preview`` would otherwise block a not-yet-labeled host).
             schema_ok = pv.host_feature_count > 0 and pv.coverage >= COMPAT_THRESHOLD
@@ -516,8 +517,8 @@ class ModelRefinementService:
 
         tag = pv.tag
 
-        # Auto-create any host behaviours the baseline import chose to add as new,
-        # so the training set's labels resolve to defined behaviours downstream.
+        # Auto-create any host behaviors the baseline import chose to add as new,
+        # so the training set's labels resolve to defined behaviors downstream.
         if behavior_decisions:
             for src_bid, decision in behavior_decisions.items():
                 if decision == AUTO_CREATE_BEHAVIOR:
@@ -570,7 +571,7 @@ class ModelRefinementService:
 
         # Surface the imported examples in the Review tab as reviewed, source-
         # tagged entries (copying their clips so they're viewable here).  Advisory
-        # — a failure here must not undo the training-set merge above.
+        #, a failure here must not undo the training-set merge above.
         review_registered = 0
         try:
             review_registered = self._register_review_examples(
@@ -582,7 +583,7 @@ class ModelRefinementService:
         # Persist a manifest record so this import is listed (and removable)
         # across sessions in the Model Refinement tab.  With a decision set the
         # name/alias-based ``matched_behaviors`` doesn't capture auto-created /
-        # remapped imports, so count the rows actually written per host behaviour.
+        # remapped imports, so count the rows actually written per host behavior.
         if behavior_decisions:
             host_id_to_name = {bid: name for bid, name in self._read_behaviors(host_root).items()}
             counts = (
@@ -796,9 +797,9 @@ class ModelRefinementService:
         """Return ``(merged, label_to_host)`` for the source's importable labels.
 
         ``merged`` is the source's per-segment features (renamed onto the host
-        keypoint scheme) carrying each labeled segment's behaviour label, keeping
-        only labels that map to a host behaviour.  ``label_to_host`` maps each
-        source label to the host behaviour id it imports as.
+        keypoint scheme) carrying each labeled segment's behavior label, keeping
+        only labels that map to a host behavior.  ``label_to_host`` maps each
+        source label to the host behavior id it imports as.
 
         Features and labels come from the source's assembled training set when it
         exists: that one file already pairs every labeled segment with its
@@ -833,7 +834,7 @@ class ModelRefinementService:
         if feat_path == self._source_training_path(source_root) and "label" in source_features.columns:
             # Training-set rows already pair features with their label; take the
             # label/confidence off each row directly (no separate-table join, so
-            # every labeled segment is covered — not just the review log).
+            # every labeled segment is covered: not just the review log).
             merged = source_features.copy()
             merged["review_label"] = merged["label"].astype(str)
             if "reviewer_confidence" in merged.columns:
@@ -866,7 +867,7 @@ class ModelRefinementService:
         For each importable segment: copy its clip from the source project into
         this project, add an external candidate (carrying ``source=tag`` and the
         copied clip path), and record an accept decision so it shows as reviewed.
-        Idempotent per source — prior registrations for ``tag`` are cleared first.
+        Idempotent per source, prior registrations for ``tag`` are cleared first.
         """
         clip_index = self._index_source_clips(source_root)
         host_clips_root = host_root / "derived" / "clips"
@@ -1014,7 +1015,7 @@ class ModelRefinementService:
         """Best ``{source_kp: host_kp}`` map to align the source onto the host.
 
         Considers the host's saved Direct Use map and an auto-suggested mapping,
-        and picks whichever maximises feature-column overlap with the host.  The
+        and picks whichever maximizes feature-column overlap with the host.  The
         empty (no-op) map is always a candidate, so remapping can never *reduce*
         overlap below what the raw column names already give.
         """
@@ -1176,8 +1177,8 @@ class ModelRefinementService:
     def _behavior_model_cfg(root: Path) -> dict[str, Any]:
         """Feature-extraction settings that define what a feature column means.
 
-        Reads ``project.yaml`` — the live config the extraction pipeline runs
-        from — preferentially over the secondary ``config/experiment.yaml``,
+        Reads ``project.yaml``, the live config the extraction pipeline runs
+        from, preferentially over the secondary ``config/experiment.yaml``,
         which can hold a stale ``behavior_model`` copy that the Features-tab
         checkboxes don't keep in sync (e.g. ``use_video_features`` /
         ``segment_stride_frames``).  ``use_video_features`` is taken from the
@@ -1200,7 +1201,7 @@ class ModelRefinementService:
         bm = project.get("behavior_model") or experiment.get("behavior_model") or {}
         cfg = dict(bm) if isinstance(bm, dict) else {}
         # The Features-tab "Include video-derived features" checkbox persists to
-        # project.yaml's feature_extraction block; honour it over any stale
+        # project.yaml's feature_extraction block; honor it over any stale
         # behavior_model copy so the comparison reflects the real extraction.
         fx = project.get("feature_extraction") or {}
         if isinstance(fx, dict):
@@ -1221,7 +1222,7 @@ class ModelRefinementService:
         out: list[str] = []
         for key in cls._DIAG_CFG_KEYS:
             # A key only one side records (a project older than the setting)
-            # tells us nothing about how it extracted features — same "don't cry
+            # tells us nothing about how it extracted features, same "don't cry
             # wolf" rule the whole comparison is skipped under.
             if key not in host_cfg or key not in source_cfg:
                 continue
@@ -1302,8 +1303,8 @@ class ModelRefinementService:
         Returns ``{model_col: equivalent_host_col}``.  Distance is symmetric, so
         ``dist_nose_to_left_ear`` and ``dist_left_ear_to_nose`` measure the same
         thing; only the naming convention changed when the extractor began
-        canonicalising pair order.  The host is therefore *not* missing this
-        measurement — it is simply spelled the other way round — so these must
+        canonicalizing pair order.  The host is therefore *not* missing this
+        measurement, it is simply spelled the other way round, so these must
         not count against feature coverage.
 
         They are still filled with **NaN**, never 0.0, at score time.  In the
@@ -1329,7 +1330,7 @@ class ModelRefinementService:
         """One labeled row per segment as ``[segment_id, review_label, confidence]``.
 
         Prefers the source's assembled training set
-        (``derived/training_sets/training_set.parquet``) — the project's full
+        (``derived/training_sets/training_set.parquet``), the project's full
         labeled set, i.e. every reviewer/seed/feedback example its own models
         train on.  Falls back to the Review-tab decision log
         (``derived/review_labels/reviewer_labels.parquet``) for sources reviewed
@@ -1415,21 +1416,21 @@ class ModelRefinementService:
 
         Matching order: exact name (case-insensitive), then a manual name
         alias from ``name_overrides`` (source name -> host name).  Returns
-        ("", "", False) when there is no host behaviour the label maps to.
+        ("", "", False) when there is no host behavior the label maps to.
         """
         name_overrides = name_overrides or {}
         label = str(raw_label).strip()
         if label in _PASSTHROUGH_LABELS:
             # no_behavior is a universal id shared by every project.
             return label, "No Behavior", False
-        # Behaviour UUID → name → host id by name.
+        # Behavior UUID → name → host id by name.
         source_name = source_behaviors.get(label, "")
         if not source_name:
             return "", "", False
         host_bid = host_name_to_id.get(source_name.lower(), "")
         if host_bid:
             return host_bid, source_name, False
-        # Manual remap: source behaviour name → host behaviour name.
+        # Manual remap: source behavior name → host behavior name.
         override_name = name_overrides.get(source_name.lower(), "")
         if override_name:
             host_bid = host_name_to_id.get(override_name.lower(), "")
@@ -1445,10 +1446,10 @@ class ModelRefinementService:
         name_overrides: dict[str, str] | None,
         behavior_decisions: dict[str, str] | None,
     ) -> str:
-        """Resolve a source label to the host behaviour id it imports as ("" = drop).
+        """Resolve a source label to the host behavior id it imports as ("" = drop).
 
-        Pure (no side effects): an explicit per-behaviour decision wins, with
-        ``AUTO_CREATE_BEHAVIOR`` resolving to the *source* behaviour id (the id the
+        Pure (no side effects): an explicit per-behavior decision wins, with
+        ``AUTO_CREATE_BEHAVIOR`` resolving to the *source* behavior id (the id the
         definition is created under by :meth:`_auto_create_behavior`) and
         ``SKIP_BEHAVIOR`` dropping the label.  With no decision it falls back to
         the existing name/alias match, so the examples-only flow is unchanged.
@@ -1486,7 +1487,7 @@ class ModelRefinementService:
         return host_cols
 
     # ------------------------------------------------------------------
-    # Behaviour name remapping
+    # Behavior name remapping
     # ------------------------------------------------------------------
 
     def list_host_behaviors(self, host_root: Path) -> list[tuple[str, str]]:
@@ -1505,7 +1506,7 @@ class ModelRefinementService:
 
     @staticmethod
     def suggest_host_match(source_name: str, host_names: list[str]) -> str:
-        """Best-guess host behaviour name for ``source_name`` (or "").
+        """Best-guess host behavior name for ``source_name`` (or "").
 
         Uses substring containment ("Dip" ⊂ "Head Dip"), shared word tokens,
         and overall string similarity.  Returns "" when nothing is close.
@@ -1568,12 +1569,12 @@ class ModelRefinementService:
         return p
 
     # ------------------------------------------------------------------
-    # Model import — apply another project's trained models in this project
+    # Model import: apply another project's trained models in this project
     # ------------------------------------------------------------------
     #
     # Unlike example import (which adds labeled rows to the training set), this
-    # copies a source project's trained behaviour models into the host so they
-    # can score the host's *already-extracted* features — no re-extraction, no
+    # copies a source project's trained behavior models into the host so they
+    # can score the host's *already-extracted* features, no re-extraction, no
     # new project.  The same feature-schema / keypoint-rename compatibility used
     # for examples gates it; the model's feature column names are realigned onto
     # the host scheme so it runs natively here.
@@ -1615,7 +1616,7 @@ class ModelRefinementService:
             return []
 
     def list_source_models(self, source_root: Path) -> list[SourceModel]:
-        """Trained behaviour models in a source project (``no_behavior`` excluded)."""
+        """Trained behavior models in a source project (``no_behavior`` excluded)."""
         out: list[SourceModel] = []
         behaviors = self._read_behaviors(source_root)
         mdir = self._models_dir(source_root)
@@ -1647,8 +1648,8 @@ class ModelRefinementService:
         """Inspect which source models can run in the host, without copying.
 
         Reports per-model feature coverage (after aligning the model's keypoint
-        scheme onto the host's) and how each model's behaviour maps onto a host
-        behaviour.  ``model_dirs`` limits the preview to specific source model
+        scheme onto the host's) and how each model's behavior maps onto a host
+        behavior.  ``model_dirs`` limits the preview to specific source model
         directories; when omitted, every trained model is considered.
         """
         tag = source_root.name
@@ -1682,7 +1683,7 @@ class ModelRefinementService:
             col_rename = self._rename_cols(m.feature_columns, kp_rename) if kp_rename else {}
             renamed = [col_rename.get(c, c) for c in m.feature_columns]
             # A distance the host emits under the opposite pair ordering is a
-            # naming difference, not a missing measurement — keep it out of the
+            # naming difference, not a missing measurement, keep it out of the
             # coverage ratio so an extractor-era convention change cannot block
             # an otherwise-compatible model.
             legacy_pairs = self._legacy_pair_order_cols(renamed, host_features)
@@ -1720,7 +1721,7 @@ class ModelRefinementService:
 
         return pv
 
-    # Ordered (label, token-substrings) — a missing column is attributed to the
+    # Ordered (label, token-substrings), a missing column is attributed to the
     # first family whose token it contains, so put the most specific first.
     _MISSING_FEATURE_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ("Video / optical-flow context", (
@@ -1832,12 +1833,12 @@ class ModelRefinementService:
                 "re-extract: " + cfg_text + "."
             )
         diag.fixes.append(
-            "After re-extracting, re-open this Import Baseline dialog — model "
+            "After re-extracting, re-open this Import Baseline dialog, model "
             "coverage should reach ~100% and the models will import."
         )
         if only_geom:
             diag.fixes.append(
-                "If coverage is still low, the projects use different keypoints — "
+                "If coverage is still low, the projects use different keypoints, "
                 "check the keypoint mapping (Direct Use / keypoint map) so the "
                 "source columns realign onto this project's scheme."
             )
@@ -1857,10 +1858,10 @@ class ModelRefinementService:
     ) -> dict[str, Any]:
         """Copy selected source models into the host project.
 
-        ``behavior_decisions`` maps each source behaviour id to the host
-        behaviour id it should predict as, or one of ``AUTO_CREATE_BEHAVIOR``
-        (add the source behaviour definition to this project) /
-        ``SKIP_BEHAVIOR``.  When a behaviour isn't listed, it falls back to the
+        ``behavior_decisions`` maps each source behavior id to the host
+        behavior id it should predict as, or one of ``AUTO_CREATE_BEHAVIOR``
+        (add the source behavior definition to this project) /
+        ``SKIP_BEHAVIOR``.  When a behavior isn't listed, it falls back to the
         name/alias match, and to auto-create if still unmatched.
 
         Each copied model is namespaced (so it never clobbers the host's own
@@ -1884,14 +1885,14 @@ class ModelRefinementService:
                 continue
             decision = decisions.get(m.behavior_id) or item.host_behavior_id or AUTO_CREATE_BEHAVIOR
             if decision == SKIP_BEHAVIOR:
-                skipped.append({"model_dir": m.model_dir, "reason": "behaviour skipped"})
+                skipped.append({"model_dir": m.model_dir, "reason": "behavior skipped"})
                 continue
             if decision == AUTO_CREATE_BEHAVIOR:
                 host_bid = self._auto_create_behavior(host_root, source_root, m.behavior_id)
             else:
                 host_bid = decision
             if not host_bid:
-                skipped.append({"model_dir": m.model_dir, "reason": "no behaviour mapping"})
+                skipped.append({"model_dir": m.model_dir, "reason": "no behavior mapping"})
                 continue
             new_dir = self._copy_and_rewrite_model(
                 host_root, source_root, m, host_bid, pv.tag, pv.keypoint_renames,
@@ -1927,11 +1928,11 @@ class ModelRefinementService:
     def _auto_create_behavior(
         self, host_root: Path, source_root: Path, source_behavior_id: str,
     ) -> str:
-        """Copy the source project's behaviour definition into the host verbatim.
+        """Copy the source project's behavior definition into the host verbatim.
 
-        Preserves the source behaviour id so the imported model's target lines
+        Preserves the source behavior id so the imported model's target lines
         up, and uses the source naming scheme for the new definition.  No-op
-        (returns the id) if the host already defines that behaviour id.
+        (returns the id) if the host already defines that behavior id.
         """
         import yaml  # noqa: PLC0415
 
@@ -1975,7 +1976,7 @@ class ModelRefinementService:
 
         ``legacy_pair_cols`` are distance columns the model names under the
         opposite keypoint ordering to the one this project emits.  They are
-        recorded on the model card purely as provenance — so it is legible *why*
+        recorded on the model card purely as provenance, so it is legible *why*
         a model with differently-spelled features imported cleanly.  Scoring does
         not read them back: ``align_model_feature_columns`` re-derives the
         mapping from the model's feature names against the data's columns.
@@ -2024,13 +2025,13 @@ class ModelRefinementService:
                 logger.debug("Failed rewriting model_card for %s", new_name, exc_info=True)
 
         # Rewrite the model pickle so it is self-consistent with THIS project:
-        #   * label_map — remap the source behaviour id to the host behaviour id.
-        #     Scorers resolve which probability column is "the behaviour" from
+        #   * label_map: remap the source behavior id to the host behavior id.
+        #     Scorers resolve which probability column is "the behavior" from
         #     label_map (see resolve_target_class_index); leaving the *source*
         #     project's id here means an id match fails at score time and the
         #     wrong class can be selected. run_settings/model_card are already
-        #     remapped above — the pickle must agree with them.
-        #   * feature_cols — apply keypoint renames when the schemes differ
+        #     remapped above: the pickle must agree with them.
+        #   * feature_cols: apply keypoint renames when the schemes differ
         #     (distance pair-order differences are handled by the score-time
         #     aligner and need nothing here).
         # Always unpickle: the label_map remap is needed for every import, not
@@ -2063,7 +2064,7 @@ class ModelRefinementService:
                 "correctly against this project.", new_name,
             )
 
-        # Drop predictions scored on the *source* project's segments — they are
+        # Drop predictions scored on the *source* project's segments, they are
         # meaningless here and would otherwise masquerade as host results until
         # the model is re-run.
         for stale in (
@@ -2107,15 +2108,15 @@ class ModelRefinementService:
         )
 
     def repair_imported_label_maps(self, host_root: Path) -> dict[str, Any]:
-        """Backfill the host behaviour id into already-imported models' label_maps.
+        """Backfill the host behavior id into already-imported models' label_maps.
 
         Models imported before the label_map remap fix kept the *source* project's
-        behaviour id as their positive class.  Because scorers resolve the target
+        behavior id as their positive class.  Because scorers resolve the target
         class from label_map, that id mismatch made both active-learning inference
         and dense temporal refinement select the wrong probability column.  This
         rewrites each imported model's ``label_map`` (and ``feature_cols`` labels
         are left untouched) so the single non-``no_behavior`` class carries the
-        host behaviour id recorded in ``model_imports.json``.  Idempotent.
+        host behavior id recorded in ``model_imports.json``.  Idempotent.
         """
         import pickle  # noqa: PLC0415
 
@@ -2167,7 +2168,7 @@ class ModelRefinementService:
     def remove_model_import(self, host_root: Path, tag: str) -> dict[str, Any]:
         """Delete a source's imported model directories and forget them.
 
-        Auto-created behaviour definitions are left in place (other things may
+        Auto-created behavior definitions are left in place (other things may
         now reference them); only the copied model directories are removed.
         """
         keep: list[dict[str, Any]] = []
@@ -2188,21 +2189,21 @@ class ModelRefinementService:
         return {"status": "success", "tag": tag, "removed_models": removed}
 
     # ------------------------------------------------------------------
-    # Baseline import — seed a new project from another project's whole basis
+    # Baseline import: seed a new project from another project's whole basis
     # ------------------------------------------------------------------
     #
     # Unlike example import (training rows only) or model import (models only),
     # this brings over a source project's *clips + labeled feature rows + trained
-    # models* together, governed by one per-behaviour decision set, so a project
+    # models* together, governed by one per-behavior decision set, so a project
     # that has extracted features but not yet run active learning can either run
     # the imported models immediately or fold the imported clips/features into its
     # own training pool and train/refine.
 
     def _host_is_new(self, host_root: Path) -> bool:
-        """True when the host has no training set, no behaviours, and no models.
+        """True when the host has no training set, no behaviors, and no models.
 
-        Such a project has (at most) extracted features — the baseline-import
-        target — so the summary can tell the user they're seeding a fresh project
+        Such a project has (at most) extracted features, the baseline-import
+        target, so the summary can tell the user they're seeding a fresh project
         rather than refining an existing one.
         """
         if self._source_training_path(host_root).exists():
@@ -2225,9 +2226,9 @@ class ModelRefinementService:
     ) -> BaselinePreview:
         """Detection summary for importing ``source_root`` as a baseline.
 
-        Composes the example preview (feature-schema coverage, per-behaviour
+        Composes the example preview (feature-schema coverage, per-behavior
         labeled counts, diagnostics) and the model preview (per-model coverage),
-        and reports whether the host is new vs already has matching behaviours so
+        and reports whether the host is new vs already has matching behaviors so
         the UI can warn and require an explicit Accept before importing.
         """
         if name_overrides is None:
@@ -2304,7 +2305,7 @@ class ModelRefinementService:
     ) -> dict[str, Any]:
         """Import a source project's clips + labeled rows + models as a baseline.
 
-        ``behavior_decisions`` (source behaviour id -> host id /
+        ``behavior_decisions`` (source behavior id -> host id /
         ``AUTO_CREATE_BEHAVIOR`` / ``SKIP_BEHAVIOR``) governs both halves at once.
         Best-effort: a failure on one half does not abort the other.  Returns a
         combined summary.
@@ -2320,7 +2321,7 @@ class ModelRefinementService:
             behavior_decisions=decisions,
         )
 
-        # 2. Trained models for the same non-skipped, compatible behaviours.
+        # 2. Trained models for the same non-skipped, compatible behaviors.
         mpv = self.preview_model_import(
             host_root, source_root, name_overrides=name_overrides,
             compute_diagnostics=False,

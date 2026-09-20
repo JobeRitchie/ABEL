@@ -1,7 +1,7 @@
 """Data model for the validation platform.
 
 A *ValidationRun* spans ``N projects × M behaviors × K analyses``.  The atomic
-record is a :class:`CellResult` — one ``(project, behavior, analysis, config,
+record is a :class:`CellResult`, one ``(project, behavior, analysis, config,
 n_clips, seed)`` evaluation.  All cells flatten into a single tidy
 ``cells.parquet`` table (see :mod:`abel.validation.aggregate`) that every
 dashboard and plot groups over.
@@ -29,13 +29,13 @@ class ProjectRef:
     name: str
     root: Path
     # The project's own name (project.yaml / folder) at load time.  Never changes, so
-    # a rename can always be shown as "was: X" and reset.  NOT a disk locator — `root`
-    # is the only path — which is what makes renaming project_id safe (see rename()).
+    # a rename can always be shown as "was: X" and reset.  NOT a disk locator, `root`
+    # is the only path: which is what makes renaming project_id safe (see rename()).
     source_name: str = ""
     classifier_type: str = "xgboost"
     # Hyperparameters the project set for its classifier. The product passes these
     # into every TrainingConfig it builds, so the validation engine has to as well
-    # — otherwise it silently measures a differently-parameterized model than the
+    #, otherwise it silently measures a differently-parameterized model than the
     # one the project ships.
     classifier_params: dict[str, Any] = field(default_factory=dict)
     calibration_method: str = "sigmoid"
@@ -50,8 +50,8 @@ class ProjectRef:
     # Three training knobs the Active Learning tab persists into project.yaml's
     # ``behavior_model`` block. The product read them; this engine did not, so a
     # project that tuned any of them was validated under a configuration it does not
-    # ship. None of the eight manuscript projects has any of these keys — all sit at
-    # the defaults below — so nothing published was affected, but the trap was live
+    # ship. None of the eight manuscript projects has any of these keys, all sit at
+    # the defaults below: so nothing published was affected, but the trap was live
     # for the next project to touch one. (Project-wide feature exclusions from the
     # Feature Audit are a *separate* mechanism living in
     # config/feature_exclusions.json, which the trainer already reads off disk; the
@@ -63,7 +63,7 @@ class ProjectRef:
     # *length* is deliberately not read from config: ``segment_window_frames``
     # defaults to 60 but real projects set it from their own clip duration
     # (most use ~0.5 s), so the honest number is measured from the labeled rows
-    # themselves — see :func:`abel.validation.holdout.median_clip_frames`.
+    # themselves: see :func:`abel.validation.holdout.median_clip_frames`.
     fps: float = 30.0
     behavior_names: dict[str, str] = field(default_factory=dict)  # behavior_id -> name on disk
     # behavior_id -> user rename set on the Projects tab.  Display-only: it never
@@ -108,7 +108,7 @@ class ProjectRef:
             root=root,
             classifier_type=str(bm.get("classifier_type", "xgboost")),
             # Mirrors BehaviorModelConfig.classifier_params, whose default is
-            # {"tree_method": "hist"} — not an empty dict.
+            # {"tree_method": "hist"}, not an empty dict.
             classifier_params=dict(bm.get("classifier_params")
                                    or {"tree_method": "hist"}),
             calibration_method=str(bm.get("calibration_method", "sigmoid")),
@@ -141,7 +141,7 @@ class ProjectRef:
         has), and it is what every figure titles itself with and what output filenames
         are stemmed from.  Rewriting it is therefore what makes the new name appear in
         the figures, tables and exports without threading a display name through ~20
-        plot call sites — and the project on disk is untouched either way.
+        plot call sites, and the project on disk is untouched either way.
 
         Callers holding the project in a dict keyed by ``project_id`` must re-key.
         """
@@ -161,7 +161,7 @@ class ProjectRef:
         return alias or self.behavior_names.get(bid, bid)
 
     def behavior_disk_name(self, behavior_id: str) -> str:
-        """The name as written in ``behavior_definitions.yaml`` — never the rename.
+        """The name as written in ``behavior_definitions.yaml``, never the rename.
 
         Trained-model directories and per-behavior refinement settings are keyed
         by this on disk, so resolving them must NOT follow a rename or renaming a
@@ -355,7 +355,7 @@ class ConfigEvalResult:
     elapsed_sec_fit: float = 0.0
     elapsed_sec_total: float = 0.0
     degenerate: bool = False
-    # The fit predicted one class for effectively everything (MCC <= 0) — see
+    # The fit predicted one class for effectively everything (MCC <= 0), see
     # :func:`metrics.is_degenerate_fit`.  Distinct from ``degenerate``, which is the
     # trainer's own single-class-validation flag: this one is about the *model*
     # collapsing, that one about the *data* being unscoreable.
@@ -389,7 +389,7 @@ class ConfigEvalResult:
 
 @dataclass
 class CellResult:
-    """One atom of a ValidationRun — serialized into ``cells.parquet``."""
+    """One atom of a ValidationRun: serialized into ``cells.parquet``."""
 
     project_id: str
     project_name: str
@@ -400,7 +400,7 @@ class CellResult:
     n_clips: int             # positive training clips (−1 = "all"/not-applicable)
     seed: int
 
-    # Target-class (behavior-vs-rest) metrics — see the note on ConfigEvalResult
+    # Target-class (behavior-vs-rest) metrics: see the note on ConfigEvalResult
     # for why these are not the trainer's macro averages.
     precision: float = float("nan")
     recall: float = float("nan")

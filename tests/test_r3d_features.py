@@ -1,7 +1,7 @@
 """R3D appearance features: modality classification, gating, and crop geometry.
 
 These are the invariants that decide whether the feature family behaves like a
-*video* feature everywhere it is consumed — the ablation arms, the validation
+*video* feature everywhere it is consumed, the ablation arms, the validation
 suite, and the benchmark harness all key off the column name.
 """
 
@@ -73,7 +73,7 @@ def test_enabled_by_default():
 
 def test_crop_geometry_tracks_the_animal():
     n = 50
-    # Animal walks across the frame; two keypoints 40 px either side of centre.
+    # Animal walks across the frame; two keypoints 40 px either side of center.
     cx = np.linspace(100.0, 500.0, n)
     cy = np.full(n, 250.0)
     pose = SimpleNamespace(
@@ -89,7 +89,7 @@ def test_crop_geometry_tracks_the_animal():
 
 
 def test_crop_geometry_survives_untracked_frames():
-    """Dropped tracking must carry the last known centre, not collapse to (0, 0)."""
+    """Dropped tracking must carry the last known center, not collapse to (0, 0)."""
     cx = np.array([np.nan, 200.0, np.nan, 300.0, np.nan])
     cy = np.array([np.nan, 150.0, np.nan, 160.0, np.nan])
     pose = SimpleNamespace(
@@ -347,7 +347,7 @@ def _dense_fixture(tmp_path):
 
 
 def test_dense_anchors_survive_a_round_trip(tmp_path):
-    """Dense anchors are reusable across runs — that is the whole point."""
+    """Dense anchors are reusable across runs: that is the whole point."""
     svc, _video, _pose, sig, anchors, emb = _dense_fixture(tmp_path)
     svc._store_dense_anchors(tmp_path, "s1", 15, sig, anchors, emb, lambda _m: None)
 

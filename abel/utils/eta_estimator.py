@@ -1,8 +1,8 @@
 """ETA for a multi-item × multi-stage job whose stages have unequal cost.
 
 A retrain-all run executes the same ordered *stages* for each *item* (behavior).
-The stages have very different wall-clock costs — loading labels is near-instant
-while evaluation reads parquet and cross-validates — so a naive "fraction of
+The stages have very different wall-clock costs, loading labels is near-instant
+while evaluation reads parquet and cross-validates, so a naive "fraction of
 stages completed" ETA runs ahead of (or behind) real time and oscillates on
 every stage boundary.
 
@@ -40,7 +40,7 @@ def blend_whole_run_eta(
     only "drift-free" while the workload is unchanged: after the dataset grows
     (e.g. new videos → more segments to score) the per-behavior mean can lag real
     time by *multiples*, and a plain ``frac``-weighted blend then keeps the ETA
-    pinned near the stale-low anchor for most of the run — the classic
+    pinned near the stale-low anchor for most of the run, the classic
     "underestimates the whole run" symptom. Once the live estimator has calibrated
     it reflects this run/dataset's actual pace, so we hand it the majority of the
     weight immediately (``≥0.8``) instead of waiting for ``frac`` to climb. History
@@ -50,7 +50,7 @@ def blend_whole_run_eta(
     if hist_total is None or hist_total <= 0.0:
         return max(0.0, live_remaining)
     if hist_total <= elapsed:
-        # Reality has already disproved the anchor — this run has run longer than
+        # Reality has already disproved the anchor: this run has run longer than
         # the whole historical total. Keeping any weight on it drags the blended
         # total below the time already spent, which reads as "ETA 0 s" while the
         # run carries on working. Only the live estimate says anything now.
@@ -58,7 +58,7 @@ def blend_whole_run_eta(
     f = min(1.0, max(0.0, frac))
     live_total = elapsed + max(0.0, live_remaining)
     # Uncalibrated: original frac ramp (trust history while live still swings).
-    # Calibrated: live is trustworthy now — give it ≥0.8 weight so a stale
+    # Calibrated: live is trustworthy now, give it ≥0.8 weight so a stale
     # historical anchor cannot suppress it, still ramping to fully-live by the end.
     w_live = max(f, 0.8) if live_calibrated else f
     blended_total = (1.0 - w_live) * hist_total + w_live * live_total
@@ -68,8 +68,8 @@ def blend_whole_run_eta(
 class StageEtaEstimator:
     """Learn per-stage durations and estimate remaining time.
 
-    Usage: call :meth:`update` once when *entering* each ``(item, stage)`` —
-    item in ``[0, n_items)``, stage in ``[0, stages_per_item)`` — and use the
+    Usage: call :meth:`update` once when *entering* each ``(item, stage)``,
+    item in ``[0, n_items)``, stage in ``[0, stages_per_item)``, and use the
     returned seconds as the ETA.  ``stages_per_item`` is the count emitted as
     ``maximum`` by the inner task (5 or 6).
     """
@@ -158,7 +158,7 @@ class StageEtaEstimator:
         show a "calculating" placeholder rather than a misleading number.
 
         A stage's duration is only booked when the run *crosses into the next*
-        stage, so a single item yields at most ``stages - 1`` measured stages —
+        stage, so a single item yields at most ``stages - 1`` measured stages,
         the final stage isn't timed until the following item begins (and for a
         one-item run, never).  Requiring the full ``stages`` samples therefore
         keeps single-item and just-finished-first-item runs stuck on
@@ -176,7 +176,7 @@ class StageEtaEstimator:
 
         # The entry timestamp must only move when the stage actually changes.
         # Refreshing it on a repeat call at the same stage (which any caller that
-        # emits several progress messages within one stage does — representation
+        # emits several progress messages within one stage does, representation
         # messages, per-session R3D lines, ensemble fits) meant a long stage was
         # only ever booked as the gap since its LAST message, so slow stages were
         # learned as near-instant and the ETA badly underestimated the run.
@@ -188,7 +188,7 @@ class StageEtaEstimator:
                 self._record(self._last_key, key, now - self._last_ts)
             self._last_key = key
             self._last_ts = now
-        # key < last_key: monotonic guard — never move the marker backwards.
+        # key < last_key: monotonic guard, never move the marker backwards.
         # key == last_key: keep the original stage-entry timestamp.
 
         fallback = self._overall_avg()

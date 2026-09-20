@@ -3,7 +3,7 @@
 The transform-based z-scoring allocated a full n_rows x n_features float64
 frame per statistic and died with an 11.4 GiB MemoryError on a 9.4M-frame
 project.  These tests pin the replacement to the semantics of the original
-implementation — including the NaN, zero-variance and single-row edge cases —
+implementation, including the NaN, zero-variance and single-row edge cases,
 and cover the float32 downcast the large-table path relies on.
 """
 

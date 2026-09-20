@@ -1,4 +1,4 @@
-"""Feature audit service — detect bodyparts, identify dead features, and recommend exclusions."""
+"""Feature audit service: detect bodyparts, identify dead features, and recommend exclusions."""
 
 from __future__ import annotations
 
@@ -230,7 +230,10 @@ class FeatureAuditService:
         logger.info("Feature audit reading features from %s", ts_path)
         df = pd.read_parquet(ts_path)
         meta_cols = {"segment_id", "label", "label_source", "animal_id", "session_id",
-                     "start_frame", "end_frame", "reviewer_confidence"}
+                     "start_frame", "end_frame", "reviewer_confidence",
+                     # Bookkeeping, not signal: auditing it reports the presence
+                     # flag as a near-constant "dead feature".
+                     "pose_present_frac", "partner_present_frac"}
         numeric_cols = [
             c for c in df.columns
             if c not in meta_cols and pd.api.types.is_numeric_dtype(df[c])

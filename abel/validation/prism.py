@@ -3,8 +3,8 @@
 The analysis CSVs elsewhere in this package are **tidy** (one row per observation,
 with key columns like ``project`` / ``behavior`` / ``config``).  That is the right
 shape for pandas and for archiving, and the wrong shape for Prism: Prism has no
-pivot-on-import.  It ingests a rectangular block — first column = row titles, one
-column per dataset, consecutive columns = side-by-side replicate subcolumns — and
+pivot-on-import.  It ingests a rectangular block, first column = row titles, one
+column per dataset, consecutive columns = side-by-side replicate subcolumns, and
 a tidy file forces the user to hand-pivot in Excel before they can paste anything.
 
 So this module emits, alongside the tidy CSVs, one **pre-pivoted** file per intended
@@ -45,7 +45,7 @@ def _sig(x, n: int = _SIGFIGS):
 
     Values with |x| < 1e-9 (e.g. CI half-widths of ~1e-17 that are numerically
     zero) become 0.0 so they stop rendering as scientific-notation noise. Genuine
-    small values (a ~1e-5 importance) are kept — Prism reads them fine.
+    small values (a ~1e-5 importance) are kept, Prism reads them fine.
     """
     try:
         xf = float(x)
@@ -81,7 +81,7 @@ def _clean(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sig_keep_small(x, n: int = _SIGFIGS):
-    """:func:`_sig` without the dust collapse — for columns where small is real."""
+    """:func:`_sig` without the dust collapse, for columns where small is real."""
     try:
         xf = float(x)
     except (TypeError, ValueError):
@@ -93,19 +93,19 @@ def _sig_keep_small(x, n: int = _SIGFIGS):
 
 # ── ASCII-only export text ──────────────────────────────────────────────────
 # Prism and Excel on Windows import CSV using the ANSI code page (cp1252), not
-# UTF-8, unless the file opens with a BOM.  A UTF-8 "≥" then arrives as "â‰¥" —
+# UTF-8, unless the file opens with a BOM.  A UTF-8 "≥" then arrives as "â‰¥",
 # so a header like "F1≥0.70:1" lands in the user's data table as mojibake.
 #
-# Two independent defences, because either alone leaves a hole:
+# Two independent defenses, because either alone leaves a hole:
 #   1. Transliterate the symbols *we* choose into ASCII (below).  Nothing here
 #      carries meaning its ASCII spelling doesn't.
-#   2. Write with a BOM (``utf-8-sig``).  Covers the text we do NOT control —
+#   2. Write with a BOM (``utf-8-sig``).  Covers the text we do NOT control,
 #      a project or behavior name the user typed with an accent or a µ.
 #
 # This is deliberately scoped to the CSV/TXT export boundary.  Plot labels keep
 # their Unicode (Δ, κ, ×): a PNG renders them correctly and they read better.
 # Each replacement is the same width in "spaces already around it" terms as the
-# glyph it replaces, so substitution never disturbs the surrounding layout — the
+# glyph it replaces, so substitution never disturbs the surrounding layout, the
 # README strings are indented, multi-line, and must survive this untouched.
 _ASCII_MAP = {
     "≥": ">=",   # effort-to-quality target labels -> "F1 >= 0.70"
@@ -137,8 +137,8 @@ def _ascii(s):
     Whitespace is left exactly as found: this also runs over multi-line README
     text, where collapsing runs of spaces would destroy the indentation.
 
-    Anything still outside ASCII after the mapping — an accent in a behavior name
-    the *user* typed — is deliberately kept.  The BOM written by :func:`_write`
+    Anything still outside ASCII after the mapping, an accent in a behavior name
+    the *user* typed, is deliberately kept.  The BOM written by :func:`_write`
     carries it correctly; this map only spells out the symbols this package
     itself introduces.
     """
@@ -218,7 +218,7 @@ def _replicate_block(out: pd.DataFrame, name: str, seeds_by_x: dict, xs: list,
 
 
 def _seed_cols(df: pd.DataFrame, prefix: str) -> list[str]:
-    """Seed columns for ``prefix``, ordered by seed number (not lexically —
+    """Seed columns for ``prefix``, ordered by seed number (not lexically,
     ``seed10`` must not sort between ``seed1`` and ``seed2``)."""
     pat = re.compile(rf"^{re.escape(prefix)}(\d+)$")
     hits = [(int(m.group(1)), c) for c in df.columns if (m := pat.match(str(c)))]
@@ -229,7 +229,7 @@ def _drop_empty(df: pd.DataFrame) -> pd.DataFrame:
     """Drop all-NaN data columns, always keeping column 0 (the row titles).
 
     An all-NaN column pastes into Prism as a phantom dataset: it occupies a slot,
-    claims a colour, and shows up in the legend with nothing plotted.  These arise
+    claims a color, and shows up in the legend with nothing plotted.  These arise
     wherever a writer reindexes onto a globally-collected label list (a config one
     project never built, a metric that was not computed).
     """
@@ -260,7 +260,7 @@ def write_text(path: Path, text: str) -> Path:
 def prism_kappa(gen_df: pd.DataFrame) -> pd.DataFrame:
     """Column table: one row per behavior, κ (and the human ceiling, if measured).
 
-    The ``human_ceiling_kappa`` column is dropped when it is empty for every row —
+    The ``human_ceiling_kappa`` column is dropped when it is empty for every row,
     an all-NaN column in Prism silently becomes an empty dataset that still occupies
     a slot in the graph and the legend.
     """
@@ -270,7 +270,7 @@ def prism_kappa(gen_df: pd.DataFrame) -> pd.DataFrame:
         "Cohen's kappa": pd.to_numeric(gen_df["cohen_kappa"], errors="coerce"),
         "F1": pd.to_numeric(gen_df["f1"], errors="coerce"),
     })
-    # ``.get`` returns None when the column is absent, and to_numeric(None) raises —
+    # ``.get`` returns None when the column is absent, and to_numeric(None) raises,
     # which the export's error guard swallows, taking the whole panel with it.
     raw = gen_df["human_ceiling_kappa"] if "human_ceiling_kappa" in gen_df.columns \
         else None
@@ -288,7 +288,7 @@ def prism_video_value(vv_df: pd.DataFrame) -> pd.DataFrame:
 
     Emitting only ``f1_no_video`` / ``f1_with_video`` means the user can plot the
     two means but cannot reproduce the paired t-test the asterisks come from.  The
-    seed columns are laid out consecutively — off₁…offₙ, on₁…onₙ — which is exactly
+    seed columns are laid out consecutively, off₁…offₙ, on₁…onₙ, which is exactly
     the order Prism assigns to side-by-side subcolumns on paste.
     """
     df = vv_df[vv_df.get("error").isna() | (vv_df.get("error") == "")] \
@@ -307,7 +307,7 @@ def prism_video_value(vv_df: pd.DataFrame) -> pd.DataFrame:
             out[f"+Video:{i}"] = pd.to_numeric(df[c], errors="coerce").to_numpy()
     else:
         # Older exports dropped the seeds. Fall back to the means so the file is
-        # still pasteable, but it can only be plotted — not re-tested.
+        # still pasteable, but it can only be plotted, not re-tested.
         out["Pose only (mean)"] = pd.to_numeric(df["f1_no_video"],
                                                 errors="coerce").to_numpy()
         out["+Video (mean)"] = pd.to_numeric(df["f1_with_video"],
@@ -319,7 +319,7 @@ def prism_video_gain(vv_df: pd.DataFrame) -> pd.DataFrame:
     """Column table: the video ΔF1 per behavior, sorted, with its own error bar.
 
     The paired table above is what you re-run the test from; this is the panel the
-    figure actually draws — one bar per behavior, ascending, so the reader sees the
+    figure actually draws, one bar per behavior, ascending, so the reader sees the
     distribution of the effect rather than two adjacent means.  SD is recovered
     from the stored CI half-width (see :func:`sd_from_ci95`); the exact p and the
     significance flag ride along so the asterisks are not retyped by hand.
@@ -340,8 +340,8 @@ def prism_video_gain(vv_df: pd.DataFrame) -> pd.DataFrame:
                pd.to_numeric(df.get("gain_ci95"), errors="coerce").to_numpy(),
                n.to_numpy())
     verdict = df["verdict"].astype(str).to_numpy() if "verdict" in df.columns         else np.full(len(df), "improved")
-    # Split the bar heights into one dataset per verdict so Prism colours the
-    # series rather than the user recolouring every bar by hand.  Each behavior
+    # Split the bar heights into one dataset per verdict so Prism colors the
+    # series rather than the user recoloring every bar by hand.  Each behavior
     # appears in exactly one dataset; the others are blank on that row.
     _VERDICTS = (("Improved (BH q<0.05)", "improved"),
                  ("Not significant", "ns"),
@@ -411,13 +411,13 @@ def prism_rarity_vs_performance(rarity_df: pd.DataFrame,
     """XY Mean/SD/N: deployment prevalence (X) against every headline metric (Y).
 
     X is the percent of session time the behavior occupies, measured from dense
-    bout detections over whole sessions — set the X axis to log scale, which is
+    bout detections over whole sessions, set the X axis to log scale, which is
     where two orders of magnitude of rarity become readable.
 
     The join is on (project, behavior), never on behavior name alone: the same
     name in two assays is two different behaviors with two different prevalences,
     and joining on the name would cross-multiply them.  Behaviors missing from
-    either side are dropped rather than zero-filled — an unmeasured prevalence is
+    either side are dropped rather than zero-filled, an unmeasured prevalence is
     not a prevalence of zero, and at the rare end that lie would land on the
     exact points the panel exists to show.
     """
@@ -459,7 +459,7 @@ def prism_rarity_vs_performance(rarity_df: pd.DataFrame,
     out["n sessions"] = pd.to_numeric(j.get("n_sessions"), errors="coerce").to_numpy()
     if "source" in j.columns:
         out["Prevalence source"] = j["source"].astype(str).to_numpy()
-    # A behavior silently missing from a scatter is invisible — the reader counts
+    # A behavior silently missing from a scatter is invisible, the reader counts
     # points and believes it is the whole set. Carried out so INDEX.txt can name it.
     out.attrs["dropped"] = dropped
     return out
@@ -469,7 +469,7 @@ def prism_metric_by_assay(metrics_df: pd.DataFrame,
                           metric: str = "cohen_kappa") -> pd.DataFrame:
     """Ragged Column table: one column per assay, one observation per behavior.
 
-    The compact per-assay view — paste it and Prism runs the one-way ANOVA /
+    The compact per-assay view, paste it and Prism runs the one-way ANOVA /
     Kruskal-Wallis across assays directly.  Columns are ragged by construction
     (assays have different behavior counts); the short ones are blank-padded,
     which Prism reads as missing rather than as zero.
@@ -494,7 +494,7 @@ def prism_metric_by_assay(metrics_df: pd.DataFrame,
 
 
 def prism_ablation(abl_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{clip_budget: grouped table}`` — rows = behaviors, columns = configs.
+    """``{clip_budget: grouped table}``, rows = behaviors, columns = configs.
 
     The tidy ablation CSV crosses **four** factors (project × behavior × clip budget
     × config).  A Prism grouped table holds two (row groups × datasets), so this
@@ -531,7 +531,7 @@ def prism_ablation(abl_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 
 def prism_ablation_gain_matrix(abl_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{clip_budget: matrix}`` — the ablation heatmap, ready to paste as a Prism
+    """``{clip_budget: matrix}``, the ablation heatmap, ready to paste as a Prism
     heatmap. Rows = ``project · behavior`` (row titles), columns = enhancement,
     cells = ΔF1 over the pose-only baseline. One matrix per clip budget.
 
@@ -554,7 +554,7 @@ def prism_ablation_gain_matrix(abl_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 
 def prism_ablation_gain(abl_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{clip_budget: grouped table}`` of ΔF1 vs. baseline — rows = behaviors,
+    """``{clip_budget: grouped table}`` of ΔF1 vs. baseline, rows = behaviors,
     columns = enhancement, each followed by its exact p.
 
     One file per clip budget.  The previous single-frame version carried both
@@ -594,7 +594,7 @@ def prism_ablation_gain_seeds(abl_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """``{clip_budget: grouped table}`` of **paired per-seed** ΔF1 vs. baseline.
 
     ``f1_seed{i}(config) - f1_seed{i}(baseline)`` within each project·behavior·
-    budget — the same seed, so the same subsample and the same split.  This is the
+    budget, the same seed, so the same subsample and the same split.  This is the
     one ablation table that lets Prism run the test itself (Analyze -> t tests ->
     One sample t test vs 0) instead of reading a pre-computed p.
     """
@@ -651,7 +651,7 @@ def prism_project_accuracy(acc_df: pd.DataFrame) -> pd.DataFrame:
 def prism_training_speed(speed_df: pd.DataFrame) -> pd.DataFrame:
     """Column table: training seconds per project.
 
-    Returns empty when every project reports 0 s — that means the run's cells
+    Returns empty when every project reports 0 s, that means the run's cells
     carried no timing (e.g. only rare-discovery ran), and a bar chart of zeros
     would read as "training is instant" rather than "not measured".
     """
@@ -671,7 +671,7 @@ def prism_training_speed(speed_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prism_throughput(bench_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{stage: table}`` — the three stages carry different units and cannot share
+    """``{stage: table}``, the three stages carry different units and cannot share
     a Prism table (``extract``/``infer`` are ×real-time; ``train`` is seconds)."""
     tables: dict[str, pd.DataFrame] = {}
     ok = bench_df[bench_df.get("error").isna() | (bench_df.get("error") == "")] \
@@ -691,7 +691,7 @@ def prism_throughput(bench_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
     trn = ok[ok["stage"] == "train"]
     if not trn.empty:
-        # Grouped table: projects as columns, behaviors as the rows within them —
+        # Grouped table: projects as columns, behaviors as the rows within them,
         # a ragged block (projects have different behaviors), which Prism reads as
         # unequal-n groups.
         wide = trn.pivot_table(index="detail", columns="project_id", values="seconds",
@@ -705,7 +705,7 @@ def prism_throughput(bench_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 
 
 def prism_review_effort(effort_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{name: table}`` — per-clip time and total effort, which don't share units.
+    """``{name: table}``, per-clip time and total effort, which don't share units.
 
     ``per_clip`` is a Column table (one row per project, seconds) for the "how long
     does one clip take" bar; ``hours`` is a Grouped table pairing each project's
@@ -758,7 +758,7 @@ _AL_METRICS = (("f1_mean", "f1_ci", "prism_al_curve_f1.csv"),
 
 def prism_al_curves(al_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """``{filename: wide XY table}``. Shared X = clips reviewed; one dataset per
-    project·behavior·strategy — one file each for F1, PR-AUC, positives found.
+    project·behavior·strategy, one file each for F1, PR-AUC, positives found.
 
     F1 and PR-AUC ship as ``:Mean``/``:SD``/``:N`` triples (Prism XY, "Enter and
     plot error values" -> Mean, SD, N).  The per-seed values do not survive into
@@ -796,7 +796,7 @@ def prism_al_curves(al_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 def prism_calibration(rel_df: pd.DataFrame) -> pd.DataFrame:
     """Paired-XY: each project·behavior gets a (confidence, accuracy) column pair
     so every reliability curve pastes as its own Prism XY dataset. Series have
-    differing bin counts; ``concat(axis=1)`` pads the short ones with NaN — the
+    differing bin counts; ``concat(axis=1)`` pads the short ones with NaN, the
     ragged block Prism expects for unequal-length XY datasets."""
     blocks = []
     for (proj, beh), g in rel_df.groupby(["project", "behavior"], sort=False):
@@ -813,7 +813,7 @@ def prism_calibration(rel_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prism_time_budget_agreement(tb_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{filename: table}`` — the agreement statistics and the Bland-Altman bias.
+    """``{filename: table}``, the agreement statistics and the Bland-Altman bias.
 
     Two files because the units don't mix: correlation coefficients on one axis,
     prevalence differences on another.  ``median_labeled_coverage`` rides along
@@ -865,7 +865,7 @@ def prism_feature_roles(memb_df: pd.DataFrame) -> pd.DataFrame:
     """Grouped table (unequal n): one column per dominant modality, each behavior's
     over-pose ΔF1 in its own group.
 
-    Ragged by construction — a behavior belongs to exactly one modality — which is
+    Ragged by construction, a behavior belongs to exactly one modality, which is
     what a Prism grouped table with unequal group sizes expects.  Paste and run
     Analyze -> Nonparametric -> Kruskal-Wallis to reproduce the reported test.
     """
@@ -905,7 +905,7 @@ def prism_feature_roles_bars(bars_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def prism_time_budget(tb_df: pd.DataFrame) -> pd.DataFrame:
-    """Paired-XY: per behavior, a (true, pred) prevalence column pair — points are
+    """Paired-XY: per behavior, a (true, pred) prevalence column pair, points are
     sessions. Paste as XY, plot the identity line, report the correlation in Prism."""
     blocks = []
     for (proj, beh), g in tb_df.groupby(["project", "behavior"], sort=False):
@@ -947,7 +947,7 @@ _DISC_METRICS = (("roc_auc", "prism_discrimination_roc_auc.csv"),
 
 
 def prism_discrimination(disc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{filename: table}`` — rows = project·pair, columns = feature-set label.
+    """``{filename: table}``, rows = project·pair, columns = feature-set label.
     For error_reduction the pose-only baseline column (0 by definition) is dropped."""
     df = disc_df.copy()
     df["__pair"] = df["project"].astype(str) + " · " + df["pair"].astype(str)
@@ -969,9 +969,9 @@ def prism_discrimination(disc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
 # ── Discrimination: the pooled landscape + volcano, as Prism scatters ────────
 #
 # The two figures in `plots.discrimination_landscape` are scatters where each point
-# carries several variables at once (an x, a y, a categorical colour, a categorical
-# shape, a size).  That is Prism's **Multiple variables** table — rows are
-# observations, columns are variables — not the pre-pivoted Grouped layout the rest
+# carries several variables at once (an x, a y, a categorical color, a categorical
+# shape, a size).  That is Prism's **Multiple variables** table, rows are
+# observations, columns are variables, not the pre-pivoted Grouped layout the rest
 # of this module emits, so these two writers deliberately stay long.
 #
 # No ci95 column is exported here: Prism has no input format for a CI half-width
@@ -993,7 +993,7 @@ def _neg_log10_p(p) -> np.ndarray:
 
 
 def _significant_flag(df: pd.DataFrame) -> np.ndarray:
-    """1/0 rather than TRUE/FALSE — Prism groups and plots on numbers, not text."""
+    """1/0 rather than TRUE/FALSE: Prism groups and plots on numbers, not text."""
     return df["significant"].astype(str).str.lower().eq("true").astype(int).to_numpy()
 
 
@@ -1001,7 +1001,7 @@ def prism_discrimination_landscape(disc_df: pd.DataFrame) -> pd.DataFrame:
     """Multiple-variables table for the landscape panel: one row per behavior pair.
 
     ``PoseOnlyError`` (x) vs ``ErrorRemoved`` (y), grouped by ``BestFamily`` for
-    colour and ``Assay`` for symbol.  ``HeldOutClips`` is there to drive Prism's
+    color and ``Assay`` for symbol.  ``HeldOutClips`` is there to drive Prism's
     variable point size.
     """
     if "best_family" not in disc_df.columns or "pose_only_auc" not in disc_df.columns:
@@ -1033,7 +1033,7 @@ def prism_discrimination_volcano(disc_df: pd.DataFrame) -> pd.DataFrame:
     """Multiple-variables table for the volcano: one row per pair x feature family.
 
     Every add-on family is kept (the pose-only baseline has no gain of its own), so
-    a pair rescued by two families appears twice — which is the point of the panel.
+    a pair rescued by two families appears twice, which is the point of the panel.
     """
     needed = {"p_value", "error_reduction", "feature_set"}
     if not needed.issubset(disc_df.columns):
@@ -1062,7 +1062,7 @@ def prism_discrimination_seeds(seed_df: pd.DataFrame) -> pd.DataFrame:
     """Grouped table: rows = pair, one replicate block of held-out ROC-AUC per family.
 
     The tables above are summaries; this is the raw material behind them, so Prism
-    can run the paired test itself instead of taking our ``PValue`` on trust — the
+    can run the paired test itself instead of taking our ``PValue`` on trust, the
     rule this module follows wherever the per-seed values survived.
     """
     if seed_df is None or seed_df.empty:
@@ -1093,7 +1093,7 @@ def prism_accuracy_by_behavior(beh_df: pd.DataFrame) -> pd.DataFrame:
     Two fixes over a plain rename: the project and behavior are merged into the
     single row-title column Prism allows, and the CI half-width is converted to
     the SD Prism actually plots.  Pasting a ``f1_ci`` column into an SD subcolumn
-    overstates every error bar by ``t(n)/sqrt(n)`` — at 3 seeds, 2.5x.
+    overstates every error bar by ``t(n)/sqrt(n)``, at 3 seeds, 2.5x.
     """
     out = pd.DataFrame({
         "Behavior": [_row_title(p, b) for p, b in
@@ -1110,7 +1110,7 @@ _LC_METRICS = (("f1_mean", "f1_ci", "prism_learning_curve_f1.csv"),
 
 
 def prism_learning_curves(lc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """``{filename: wide XY table}`` — shared X = clips labeled, one dataset per
+    """``{filename: wide XY table}``, shared X = clips labeled, one dataset per
     project·behavior as a ``:Mean``/``:SD``/``:N`` triple.
 
     The per-seed fits live in ``cells.parquet``, not in the points frame, so the
@@ -1121,7 +1121,7 @@ def prism_learning_curves(lc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     df["__col"] = [_row_title(p, b) for p, b in
                    zip(df["project_id"], df["behavior_name"])]
     # The pooled "Average across N behaviors" curve is the headline line; Prism
-    # colours datasets in paste order, so it must come first.
+    # colors datasets in paste order, so it must come first.
     is_avg = df["behavior_name"].astype(str).str.startswith("Average across")
     names = (list(dict.fromkeys(df.loc[is_avg, "__col"]))
              + list(dict.fromkeys(df.loc[~is_avg, "__col"])))
@@ -1162,9 +1162,9 @@ _LC_ERROR_METRICS = (
 def prism_learning_curve_errors(lc_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """``{filename: wide XY table}`` for the held-out error-rate curves.
 
-    Same shape as :func:`prism_learning_curves` — shared X = clips labeled, one
+    Same shape as :func:`prism_learning_curves`, shared X = clips labeled, one
     ``:Mean``/``:SD``/``:N`` dataset per project·behavior with the across-behavior
-    average first — but the Y is the confusion **rate** (percent of the held-out
+    average first, but the Y is the confusion **rate** (percent of the held-out
     set): one file for false alarms (FP %), one for misses (FN %).  SD is rebuilt
     from the same 95% CI columns, so these bars match the F1/PR-AUC export.
     """
@@ -1218,8 +1218,8 @@ def prism_learning_curve_knee(knee_df: pd.DataFrame) -> pd.DataFrame:
     """Column table: the saturation point (knee) and max F1 per behavior, with the
     bootstrap interval on both.
 
-    Neither statistic has a standard error — the knee is a discrete argmin over the
-    clip schedule and the ceiling is a max over the mean curve — so the variability
+    Neither statistic has a standard error, the knee is a discrete argmin over the
+    clip schedule and the ceiling is a max over the mean curve, so the variability
     is a percentile interval from resampling seeds
     (:func:`learning_curve.bootstrap_knee_ci`), carried here as **both** absolute
     bounds and +/- deltas.  The deltas exist because Prism's asymmetric error format
@@ -1263,7 +1263,7 @@ def prism_confusion(conf_df: pd.DataFrame) -> pd.DataFrame:
 
     Column order is Found / Missed / False alarm so a stacked bar built straight
     from columns 1-3 reads left-to-right as agreement then the two error types.
-    True negatives come last and are meant to be left out of the plot — under this
+    True negatives come last and are meant to be left out of the plot, under this
     imbalance they would flatten every other segment (see
     :func:`abel.validation.plots.confusion_counts_by_behavior`).
     """
@@ -1314,14 +1314,14 @@ Notes
 def _guard(errors: list[str], label: str):
     """Isolate one table's build+write so a single bad pivot cannot sink the rest.
 
-    Every export block runs inside ``with _guard(errors, "<name>"):`` — an
+    Every export block runs inside ``with _guard(errors, "<name>"):``, an
     exception is recorded and the export moves on to the next table, instead of
     aborting the whole run's Prism output (which is how a run "stops short" of
     exporting what it needs).  Skipped tables are listed at the end of the README.
     """
     try:
         yield
-    except Exception as exc:  # noqa: BLE001 — one table's failure must not cascade
+    except Exception as exc:  # noqa: BLE001, one table's failure must not cascade
         errors.append(f"{label}: {type(exc).__name__}: {exc}")
 
 
@@ -1330,13 +1330,13 @@ def _guard(errors: list[str], label: str):
 # ``write_all`` below is exhaustive on purpose: it is the archive, and on a
 # multi-project run it emits several hundred files (one per project, per behavior,
 # per feature family).  That is the right thing for a table you have to go looking
-# for and the wrong thing for the ten you plot every time — nobody should have to
+# for and the wrong thing for the ten you plot every time, nobody should have to
 # work out which of 354 filenames is the headline curve.
 #
 # So the panels behind the manuscript figure are ALSO written, once, under
 # ``prism/FIGURES/`` with names that say which panel they are.  Each is a single
 # pre-pivoted block: paste it into a Prism table of the stated type and it draws.
-# Nothing here is a new computation — every table is the same builder ``write_all``
+# Nothing here is a new computation: every table is the same builder ``write_all``
 # uses, so the curated copy and the archive copy can never disagree.
 
 def _pooled_lc_panel(lc_df: pd.DataFrame) -> pd.DataFrame:
@@ -1349,7 +1349,7 @@ def _pooled_lc_panel(lc_df: pd.DataFrame) -> pd.DataFrame:
     The N column is the **behavior** count, not ``n_seeds``.  It used to be n_seeds
     summed across surviving behaviors (215 at the left edge falling to 140 at the
     right), which a reader had to divide by the seed count to recover the "28 of 43
-    behaviors" that actually matters — a disclosure in the wrong units is not a
+    behaviors" that actually matters, a disclosure in the wrong units is not a
     disclosure.  A separate explicit column carries the composition so the attrition
     is legible without arithmetic.
     """
@@ -1370,7 +1370,7 @@ def _pooled_lc_panel(lc_df: pd.DataFrame) -> pd.DataFrame:
         _mean_sd_n(out, label, a[metric].to_numpy(),
                    a[ci_col].to_numpy() if ci_col in a.columns else None,
                    a[n_col].to_numpy() if n_col in a.columns else None)
-    # Composition and health, plainly named — a plateau read off the F1 column is
+    # Composition and health, plainly named, a plateau read off the F1 column is
     # only a plateau if these hold still across the same rows.
     for src, label in (("n_behaviors", "n behaviors contributing"),
                        ("mcc_mean", "MCC"),
@@ -1447,7 +1447,7 @@ _PANEL_NOTES: dict[str, tuple[str, str]] = {
     "fig3_discrimination_volcano.csv": (
         "Multiple variables / Volcano",
         "One row per behavior pair x feature family. Plot ErrorRemoved (X) vs "
-        "NegLog10P (Y), coloured by FeatureFamily. A pair rescued by two families "
+        "NegLog10P (Y), colored by FeatureFamily. A pair rescued by two families "
         "appears once per family, so do not count rows as pairs."),
     "fig3_generalization_kappa.csv": (
         "Column",
@@ -1473,7 +1473,7 @@ _PANEL_NOTES: dict[str, tuple[str, str]] = {
         "deltas, so Prism draws the error bar and re-runs the test from the raw "
         "replicates (Analyze -> t tests -> One sample t test vs 0). Each behavior "
         "appears in exactly one of the three datasets, which is what gives the "
-        "two-colour bar chart. Everything from 'Video improvement (dF1):Mean' "
+        "two-color bar chart. Everything from 'Video improvement (dF1):Mean' "
         "rightwards is REFERENCE ONLY -- do not paste it into the Prism table: "
         "the mean, the SD, the exact paired p and the BH q across the whole "
         "behavior family. Quote the q, not the raw p -- these are ~45 "
@@ -1588,7 +1588,7 @@ def write_figure_panels(out_dir: Path, **frames) -> list[Path]:
                     ("p_sign_flip", "PValue (cluster sign-flip)"),
                     ("median_error_reduction", "Median error reduction"),
                     ("n_improved", "n pairs improved"),
-                    # Headroom-selection exposure — see pooled_gain_by_pair.
+                    # Headroom-selection exposure: see pooled_gain_by_pair.
                     ("n_pairs_excluded", "n pairs excluded (below headroom)"),
                     ("mean_gain_excluded", "Mean dAUC of excluded pairs"),
                     ("frac_near_cutoff", "Frac kept pairs near cutoff"),
@@ -1789,7 +1789,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
                               out_dir / "prism_calibration_reliability.csv"))
         sections.append(
             "prism_calibration_reliability.csv\n    Table: XY. Paired confidence/\n"
-            "    accuracy columns per series — the reliability diagram.\n")
+            "    accuracy columns per series: the reliability diagram.\n")
 
     if time_budget_df is not None and not time_budget_df.empty:
       with _guard(errors, "time_budget"):
@@ -1829,7 +1829,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             sections.append(
                 "prism_discrimination_landscape.csv\n    Table: Multiple variables.\n"
                 "    One row per behavior pair. Plot PoseOnlyError (X, log scale) vs\n"
-                "    ErrorRemoved (Y); colour by BestFamily, symbol by Assay, size by\n"
+                "    ErrorRemoved (Y); color by BestFamily, symbol by Assay, size by\n"
                 "    HeldOutClips. Significant is 1/0.\n")
 
         vol = prism_discrimination_volcano(discrimination_df)
@@ -1838,7 +1838,7 @@ def write_all(out_dir: Path, *, gen_df: pd.DataFrame | None = None,
             sections.append(
                 "prism_discrimination_volcano.csv\n    Table: Multiple variables.\n"
                 "    One row per pair x feature family. Plot ErrorRemoved (X) vs\n"
-                "    NegLog10P (Y); colour by FeatureFamily. A pair rescued by two\n"
+                "    NegLog10P (Y); color by FeatureFamily. A pair rescued by two\n"
                 "    families appears once per family.\n")
 
     if discrimination_seeds_df is not None and not discrimination_seeds_df.empty:

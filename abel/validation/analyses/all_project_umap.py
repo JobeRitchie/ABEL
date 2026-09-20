@@ -1,20 +1,20 @@
-"""All-project UMAP — one embedding holding every labeled clip from every project.
+"""All-project UMAP: one embedding holding every labeled clip from every project.
 
 The other analyses ask "how well is behavior *X* in project *P* detected?".  This
 one asks the map question instead: **laid side by side in one feature space, where
 do all the assays' behaviors sit relative to each other?**  Every labeled clip in
-every selected project becomes one point; the reducer places it; the figure colours
+every selected project becomes one point; the reducer places it; the figure colors
 it by behavior (or by project) and labels the clusters.
 
 Three things make that honest rather than decorative, and each is a setting rather
 than a hidden default:
 
-**One feature space, chosen explicitly.**  Projects do not share a column set —
+**One feature space, chosen explicitly.**  Projects do not share a column set,
 across the eight manuscript projects the union is 5172 columns and the intersection
 1282 (all 512 R3D dims included).  ``feature_space="shared"`` embeds on the
 intersection, so every point is described by the same measurements and a cluster
 cannot be an artifact of a column only one project has.  ``"union"`` keeps every
-column and fills the gaps, which is faster to set up and much easier to misread —
+column and fills the gaps, which is faster to set up and much easier to misread,
 a project-shaped blob is then guaranteed.  Shared is the default for that reason.
 
 **Project identity is a confound, and it is measured.**  A map where the clusters
@@ -22,7 +22,7 @@ are the projects has told you about cameras and arenas, not behavior.  Every run
 therefore reports behavior *and* project structure side by side (silhouette + kNN
 purity, in the feature space and in the embedding), so the figure is never read
 without the number that says whether it is a behavior map or a project map.
-``per_project_zscore`` is the knob that trades one for the other: it centres each
+``per_project_zscore`` is the knob that trades one for the other: it centers each
 project's features on that project's own mean, which removes rig offsets and also
 removes any real between-assay difference.
 
@@ -33,7 +33,7 @@ does this: groups are keyed ``"<project> · <behavior>"`` unless
 ``pool_behaviors_by_name`` is switched on deliberately.
 
 Rendering lives in :mod:`abel.validation.umap_plot` and reads the saved
-``embedding.parquet``, so restyling a figure — label distance, colours, hulls —
+``embedding.parquet``, so restyling a figure, label distance, colors, hulls,
 never re-runs the reducer.
 """
 
@@ -90,24 +90,24 @@ class EmbeddingSettings:
 
     # ── Which rows enter the map ──
     #: Include the ``no_behavior`` background class.  Off by default: it is the
-    #: largest and least interesting group and it swamps the colour legend, but
+    #: largest and least interesting group and it swamps the color legend, but
     #: turning it on is the only way to see whether a behavior is actually
     #: separable from "nothing in particular" rather than just from other behaviors.
     include_no_behavior: bool = False
     #: Cap on rows contributed per (project, behavior).  Without it the map is
-    #: dominated by whichever assay labelled the most, and UMAP's local structure
+    #: dominated by whichever assay labeled the most, and UMAP's local structure
     #: follows density.  0 = no cap.
     max_rows_per_behavior: int = 1500
     #: Global row cap applied after the per-behavior cap (0 = none).  UMAP is
     #: roughly O(n log n); ~50k rows on ~1300 features takes a few minutes.
     max_rows_total: int = 50000
-    #: Drop any (project, behavior) with fewer than this many rows — a 3-point
+    #: Drop any (project, behavior) with fewer than this many rows, a 3-point
     #: cluster gets a label and a hull and means nothing.
     min_rows_per_behavior: int = 20
     #: Keep only rows at or above this reviewer confidence (0 = keep all).  The
-    #: held-out analyses use 1.0; a map usually wants everything that was labelled.
+    #: held-out analyses use 1.0; a map usually wants everything that was labeled.
     min_confidence: float = 0.0
-    #: Drop ``imported:*`` rows — clips copied in from another project.  Leaving
+    #: Drop ``imported:*`` rows, clips copied in from another project.  Leaving
     #: them in double-counts the same clip under two project names.
     exclude_imported: bool = True
     #: Drop ``temporal_feedback`` rows (reviewer FP/FN corrections).  These are
@@ -122,18 +122,18 @@ class EmbeddingSettings:
     use_context: bool = False
     use_video: bool = True
     #: OFF by default, unlike everywhere else in the suite. R3D is 512 columns of
-    #: raw-pixel appearance, so it encodes the rig — lighting, camera angle, arena,
-    #: bedding — and after z-scoring it outvotes the ~430 pose/kinematic columns.
+    #: raw-pixel appearance, so it encodes the rig, lighting, camera angle, arena,
+    #: bedding, and after z-scoring it outvotes the ~430 pose/kinematic columns.
     #: Measured across the eight manuscript projects it takes kNN project purity
-    #: from 0.58 to 0.97 (chance 0.13) and collapses cross-assay neighbour mixing
-    #: from ~50% of neighbours to 1.4%: the map becomes eight islands, one per
+    #: from 0.58 to 0.97 (chance 0.13) and collapses cross-assay neighbor mixing
+    #: from ~50% of neighbors to 1.4%: the map becomes eight islands, one per
     #: camera. Switch it on only to ask a question about appearance itself.
     use_r3d: bool = False
     use_social: bool = False
     #: ``shared`` = intersect columns across all projects (comparable, the default).
     #: ``union`` = keep every column and fill what a project lacks (see nan_policy).
     feature_space: str = "shared"
-    #: Drop columns that never vary across the pooled rows — they cost distance
+    #: Drop columns that never vary across the pooled rows, they cost distance
     #: computation and contribute nothing.
     drop_zero_variance: bool = True
     #: Drop rows whose entire R3D block is zero.  Two known paths write all-zero
@@ -154,7 +154,7 @@ class EmbeddingSettings:
     #: ``minmax`` · ``none``.  Never leave this at ``none`` with mixed units.
     scaler: str = "zscore"
     #: Standardize *within each project* before pooling.  Removes per-rig offsets
-    #: (lighting, camera height, arena scale) — and removes real between-assay
+    #: (lighting, camera height, arena scale), and removes real between-assay
     #: differences with them.  Check the project-structure QC numbers both ways.
     per_project_zscore: bool = False
     #: PCA pre-reduction before the reducer (0 = off).  50 is the conventional
@@ -168,10 +168,10 @@ class EmbeddingSettings:
     #: fallbacks so the tab still produces a map on a machine without umap-learn;
     #: neither preserves global structure the way UMAP claims to.
     reducer: str = "umap"
-    #: Size of the local neighbourhood. Low (5-15) = fine local detail, fragmented
+    #: Size of the local neighborhood. Low (5-15) = fine local detail, fragmented
     #: clusters. High (50-200) = global structure, blobs merge. This is the single
     #: most consequential UMAP setting. 60 measured best here: it maximizes the
-    #: share of neighbours that both cross projects and share a behavior (0.137,
+    #: share of neighbors that both cross projects and share a behavior (0.137,
     #: vs 0.118 at 15 and 0.132 at 120), which is the quantity an all-project map
     #: exists to show.
     n_neighbors: int = 60
@@ -185,13 +185,13 @@ class EmbeddingSettings:
     #: 2 for a figure. 3 only if you plan to export coordinates for something else.
     n_components: int = 2
     #: ``euclidean`` after z-scoring is standard. ``cosine`` ignores overall
-    #: magnitude — often better when R3D embeddings dominate the column count.
+    #: magnitude, often better when R3D embeddings dominate the column count.
     #: ``correlation`` and ``manhattan`` are also accepted.
     metric: str = "euclidean"
     #: Fuzzy-union vs fuzzy-intersection of the local simplicial sets (1.0 = pure
     #: union). Below 1.0 breaks weakly-connected regions apart.
     set_op_mix_ratio: float = 1.0
-    #: How many neighbours are assumed fully connected. Raise (2-4) if a
+    #: How many neighbors are assumed fully connected. Raise (2-4) if a
     #: high-dimensional feature space shatters into speckle.
     local_connectivity: float = 1.0
     #: Weight on negative samples during layout. Higher = more empty space between
@@ -211,12 +211,12 @@ class EmbeddingSettings:
     #: Fixes the layout across runs. UMAP disables its parallelism when set, so
     #: clearing it (-1) is faster but no longer reproducible.
     random_state: int = 42
-    #: t-SNE only: effective neighbourhood size (5-50).
+    #: t-SNE only: effective neighborhood size (5-50).
     tsne_perplexity: float = 30.0
 
     # ── Grouping ──
     #: Off (default): groups are ``"<project> · <behavior>"``, so an EPM Rear and
-    #: an open-field Rear stay separate — the convention the rest of the suite
+    #: an open-field Rear stay separate, the convention the rest of the suite
     #: enforces. On: same-named behaviors merge into one group across projects.
     pool_behaviors_by_name: bool = False
     #: Raw behavior name → pooled name, applied before the assay prefix. Lets
@@ -321,10 +321,10 @@ def resolve_feature_columns(
 def canonical_name_map(names: "Iterable[str]") -> dict[str, str]:
     """Raw behavior name -> one canonical spelling, matched case-insensitively.
 
-    Projects are labelled by different people at different times, so the same act
+    Projects are labeled by different people at different times, so the same act
     reaches this module as ``"Wet Dog Shake"`` in one project and ``"Wet dog shake"``
-    in another.  Treated as distinct they are two behaviors: they get two colours in
-    every figure, two legend entries, and — worse — the cross-assay conservation
+    in another.  Treated as distinct they are two behaviors: they get two colors in
+    every figure, two legend entries, and, worse, the cross-assay conservation
     analysis drops them entirely, because that requires one name to appear in two or
     more assays.  A rare behavior scored in exactly two projects is precisely the
     case a spelling difference silently deletes.
@@ -372,7 +372,7 @@ def collect_rows(
     Returns ``(frame, warnings)``.  The frame carries the feature columns plus the
     metadata every downstream step needs (group key, project, behavior, session,
     animal, segment).  Columns a project lacks arrive as NaN and are handled later
-    by ``nan_policy`` — that is the whole cost of ``feature_space="union"``.
+    by ``nan_policy``, that is the whole cost of ``feature_space="union"``.
     """
     warnings: list[str] = []
     rng = np.random.default_rng(int(s.sample_seed))
@@ -386,7 +386,7 @@ def collect_rows(
         if not bids:
             continue
         if not project.training_set_path.exists():
-            warnings.append(f"{project.project_id}: no training_set.parquet — skipped.")
+            warnings.append(f"{project.project_id}: no training_set.parquet, skipped.")
             continue
 
         available = _schema_columns(project.training_set_path)
@@ -395,7 +395,7 @@ def collect_rows(
         try:
             df = pd.read_parquet(project.training_set_path, columns=read_cols)
         except Exception as exc:  # noqa: BLE001
-            warnings.append(f"{project.project_id}: unreadable ({exc}) — skipped.")
+            warnings.append(f"{project.project_id}: unreadable ({exc}), skipped.")
             continue
         if df.empty:
             continue
@@ -432,7 +432,7 @@ def collect_rows(
                         else project.behavior_label(str(bid)))
                 warnings.append(
                     f"{project.project_id} · {name}: {len(idx)} rows "
-                    f"(< min {s.min_rows_per_behavior}) — dropped.")
+                    f"(< min {s.min_rows_per_behavior}), dropped.")
                 continue
             cap = int(s.max_rows_per_behavior)
             if cap and len(idx) > cap:
@@ -533,7 +533,7 @@ def prepare_matrix(
     """Pooled frame → the numeric matrix the reducer sees.
 
     Returns ``(X, kept_columns, notes)``.  Every reshaping decision that could
-    change the map is recorded in ``notes`` and reaches the run's summary — the
+    change the map is recorded in ``notes`` and reaches the run's summary, the
     silent version of this function is how a figure ends up meaning something
     other than what its caption says.
 
@@ -559,7 +559,7 @@ def prepare_matrix(
 
     # Measured BEFORE the fill, because after it every cell looks like data.
     # Under ``union`` a column a project lacks is NaN for *every one of that
-    # project's rows*, so the fill writes one constant there — and the pattern of
+    # project's rows*, so the fill writes one constant there, and the pattern of
     # which columns are constant is a near-perfect project barcode. Measured on
     # eight manuscript projects this alone put kNN project purity at 0.75-0.99
     # against a 0.13 chance floor, i.e. it manufactures exactly the project
@@ -572,7 +572,7 @@ def prepare_matrix(
     cols = list(X.columns)
     if frac_imputed > 0.02:
         notes.append(
-            f"{100 * frac_imputed:.1f}% OF THE MATRIX WAS IMPUTED, not measured — "
+            f"{100 * frac_imputed:.1f}% OF THE MATRIX WAS IMPUTED, not measured, "
             f"a project that lacks a column gets one constant value in it, so the "
             f"pattern of imputed columns identifies the project. Expect the map to "
             f"cluster by project for that reason alone."
@@ -580,14 +580,14 @@ def prepare_matrix(
                if s.feature_space != "shared" else
                "  You are already on 'shared', so this is sporadic per-row "
                "missingness (an untracked frame), not a whole column a project "
-               "lacks — far less dangerous, but check it is not concentrated in "
+               "lacks: far less dangerous, but check it is not concentrated in "
                "one project."))
     if s.per_project_zscore and frac_imputed > 0.02:
         notes.append(
             "Per-project standardization on an imputed matrix makes that worse, not "
             "better: an imputed column is constant within its project, so it "
             "standardizes to exactly zero there while the projects that have it "
-            "spread — sharpening the barcode. Measured: project purity 0.75 → 0.99.")
+            "spread: sharpening the barcode. Measured: project purity 0.75 → 0.99.")
 
     if s.drop_zero_variance:
         var = X.var(axis=0, numeric_only=True)
@@ -612,7 +612,7 @@ def prepare_matrix(
             sd[sd == 0] = 1.0
             arr[m] = (block - block.mean(axis=0)) / sd
         notes.append(
-            "Standardized within each project before pooling — rig offsets removed, "
+            "Standardized within each project before pooling, rig offsets removed, "
             "and any genuine between-assay difference with them.")
 
     arr = _scale(arr, s.scaler)
@@ -654,7 +654,7 @@ def reduce_matrix(
             import umap  # noqa: PLC0415
         except ImportError:
             warnings.append(
-                "umap-learn is not installed — fell back to PCA, which shows only "
+                "umap-learn is not installed: fell back to PCA, which shows only "
                 "linear structure. Install it with:  pip install umap-learn")
             want = "pca"
         else:
@@ -713,11 +713,11 @@ def structure_metrics(
 
     Four numbers, reported for both the feature space and the embedding:
 
-    * ``silhouette_behavior`` / ``silhouette_project`` — separation of each
-      labelling, in [-1, 1].  A project silhouette approaching the behavior one
+    * ``silhouette_behavior`` / ``silhouette_project``: separation of each
+      labeling, in [-1, 1].  A project silhouette approaching the behavior one
       means the clusters are assays, not acts.
-    * ``knn_purity_behavior`` / ``knn_purity_project`` — of a point's *k* nearest
-      neighbours, the fraction sharing its label.  Project purity has a floor at
+    * ``knn_purity_behavior`` / ``knn_purity_project``: of a point's *k* nearest
+      neighbors, the fraction sharing its label.  Project purity has a floor at
       ``knn_purity_project_chance`` (the probability two random points share a
       project); well-mixed projects sit near that floor, an unmixed map near 1.0.
 
@@ -746,7 +746,7 @@ def structure_metrics(
                 if len(np.unique(lab[idx])) > 1:
                     out[f"silhouette_{name}_{space}"] = float(
                         silhouette_score(M[idx], lab[idx]))
-            except Exception:  # noqa: BLE001 — a QC number must never sink a run
+            except Exception:  # noqa: BLE001, a QC number must never sink a run
                 pass
 
         try:
@@ -783,7 +783,7 @@ def build_all_project_umap(
     *,
     progress_cb: Callable[[str, float], None] | None = None,
 ) -> EmbeddingResult:
-    """Assemble, scale, reduce and QC — everything up to (not including) drawing."""
+    """Assemble, scale, reduce and QC, everything up to (not including) drawing."""
     if progress_cb:
         progress_cb("Resolving the shared feature space…", 0.02)
     feature_cols, per_project = resolve_feature_columns(projects, settings)
@@ -830,14 +830,14 @@ def build_all_project_umap(
     )
 
 
-# ── Persistence — the embed-once / restyle-many contract ────────────────────
+# ── Persistence: the embed-once / restyle-many contract ────────────────────
 
 
 def save_embedding(result: EmbeddingResult, out_dir: Path) -> dict[str, Path]:
     """Write the coordinates, their settings and their QC to ``out_dir``.
 
     ``embedding.parquet`` is the only file the renderer needs, so a saved run can
-    be restyled months later — or in another session — without the projects being
+    be restyled months later, or in another session, without the projects being
     mounted.  The settings and feature list travel with it because a map whose
     provenance is lost is not evidence of anything.
     """
@@ -882,7 +882,7 @@ def load_embedding(path: Path) -> tuple[pd.DataFrame, dict]:
     """Read back a saved embedding.  Accepts the run folder or the parquet itself.
 
     Returns ``(frame, meta)`` where ``meta`` is the contents of ``qc.json`` (empty
-    if it is missing — an embedding is still renderable without its provenance,
+    if it is missing, an embedding is still renderable without its provenance,
     just less trustworthy).
     """
     import json  # noqa: PLC0415
@@ -914,13 +914,13 @@ def qc_summary(result: EmbeddingResult) -> str:
     if imp > 0.02:
         lines.append(
             f"WARNING: {100 * imp:.1f}% of the feature matrix was imputed, which "
-            f"identifies the project on its own — switch the feature space to "
+            f"identifies the project on its own, switch the feature space to "
             f"'shared' before reading anything into the clustering below.")
     sb = q.get("silhouette_behavior_feat")
     sp = q.get("silhouette_project_feat")
     if sb is not None and sp is not None:
         verdict = ("behavior structure dominates" if sb > sp else
-                   "PROJECT identity dominates — the clusters are largely assays, "
+                   "PROJECT identity dominates: the clusters are largely assays, "
                    "not acts")
         lines.append(
             f"Feature-space silhouette: behavior {sb:+.3f} vs project {sp:+.3f} "

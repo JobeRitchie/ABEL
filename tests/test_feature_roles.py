@@ -85,7 +85,7 @@ def test_improvement_is_gain_for_added_features_and_zero_for_baseline():
     # Video cluster (Approach): its video gain 0.12.
     assert by_mod.loc["Video (flow / appearance)", "mean_improvement_over_pose"] == \
         pytest.approx(0.12)
-    # Pose & kinematics clusters are baseline — exactly 0 over pose-only.
+    # Pose & kinematics clusters are baseline: exactly 0 over pose-only.
     assert by_mod.loc["Pose geometry", "mean_improvement_over_pose"] == 0.0
     assert by_mod.loc["Kinematics", "mean_improvement_over_pose"] == 0.0
     # Bars are ranked by descending improvement.

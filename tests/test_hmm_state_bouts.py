@@ -1,7 +1,7 @@
 """HMM state bouts: decoding, merging, frame recovery, latency and export.
 
 The HMM is fitted over the *bout index*, so its decoded states carry no clock.
-Everything here guards the step that puts the clock back on — an off-by-one in
+Everything here guards the step that puts the clock back on, an off-by-one in
 that mapping would silently attribute every state to the wrong stretch of the
 session, and nothing downstream (ethogram, latency, TRACY workbook) could
 detect it.
@@ -133,7 +133,7 @@ def test_state_bout_summary_fractions_use_covered_time():
 
 
 # ---------------------------------------------------------------------------
-# Frame recovery — what TRACY reads
+# Frame recovery: what TRACY reads
 # ---------------------------------------------------------------------------
 
 def test_frames_round_trip_exactly_and_cover_every_state():
@@ -147,7 +147,7 @@ def test_frames_round_trip_exactly_and_cover_every_state():
 
 
 def test_frame_offsets_undo_the_analysis_prechop():
-    """Exports must be in raw video frames — the numbering TRACY aligns on."""
+    """Exports must be in raw video frames: the numbering TRACY aligns on."""
     spans = _spans([(0.0, 1.0, 0)])
     bouts = merge_state_bouts(spans)
     plain = state_bouts_to_frames(bouts, FPS, 1)["s1"][default_state_label(0)]
@@ -219,7 +219,7 @@ def test_a_stricter_dwell_floor_never_reports_an_earlier_entry():
 
 
 # ---------------------------------------------------------------------------
-# Export — must be the same workbook shape TRACY already reads
+# Export: must be the same workbook shape TRACY already reads
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
@@ -365,7 +365,7 @@ def test_state_boutframes_honours_an_explicit_output_directory(tmp_path: Path, p
 
 
 # ---------------------------------------------------------------------------
-# Persistence — the fit is cached so it is not re-run every session
+# Persistence: the fit is cached so it is not re-run every session
 # ---------------------------------------------------------------------------
 
 def _fake_result() -> dict:

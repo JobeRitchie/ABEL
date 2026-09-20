@@ -4,11 +4,11 @@ Fear Conditioning Redo was imported with a whole-stem subject regex, so every
 session became its own subject (``m1_cond1``, ``m1_ext`` …).  Re-applying the
 default regex merges them into real subjects (``m1``).  That rename must keep:
 
-* segment/clip ids — extraction keys them by the frozen ``subject_key``;
-* Analytics factors, session order and prechop — re-keyed on manifest save and
+* segment/clip ids: extraction keys them by the frozen ``subject_key``;
+* Analytics factors, session order and prechop: re-keyed on manifest save and
   on load (anchors);
-* per-subject ROIs — re-keyed on manifest save;
-* subject-level CV grouping — resolved to the *current* subject name.
+* per-subject ROIs: re-keyed on manifest save;
+* subject-level CV grouping: resolved to the *current* subject name.
 """
 
 from __future__ import annotations

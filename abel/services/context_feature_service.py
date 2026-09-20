@@ -15,20 +15,22 @@ import pandas as pd
 
 from abel.services.pose_processing_service import PoseData, PoseProcessingService
 from abel.services.provenance_service import ProvenanceService
-from abel.services.roi_service import ROIService
+from abel.services.roi_service import DEFAULT_BG_VAR_THRESHOLD, ROIService
 from abel.storage.file_store import read_json, write_json
 from abel.utils import roi_geometry
 
 
 # threading is retained for the gpu_flow_lock parameter used in frame-chunk
-# processing.  The module-level write lock that previously serialised session
-# writes has been removed in favour of per-session parquet files.
+# processing.  Session writes need no lock of their own: each session writes
+# its own parquet file.
 logger = logging.getLogger("abel")
 
 # Background-subtraction settings for the local surface-motion features.  The
-# Smoothing Preview imports these so its trace is computed the same way.
+# Smoothing Preview imports these so its trace is computed the same way.  The
+# variance threshold is only the default: each project may override it
+# (ROIService.bg_var_threshold, "BG subtraction sensitivity" in the UI).
 MOG2_HISTORY = 200
-MOG2_VAR_THRESHOLD = 16
+MOG2_VAR_THRESHOLD = DEFAULT_BG_VAR_THRESHOLD
 MOG2_WARMUP_FRAMES = 50
 
 # Semantic role → ordered list of token-sets.  A body-part name is split on
@@ -75,7 +77,7 @@ class ContextFeatureConfig:
     flow_temporal_stride: int = 10  # compute optical flow every Nth frame; 1 = every frame, 10 = every 10th (interpolate between)
     # Optical flow is the dominant cost of context extraction (~73% on a 640x480
     # session).  The flow features are mean magnitude / direction over small
-    # patches — inherently low-frequency — so computing flow at reduced spatial
+    # patches: inherently low-frequency: so computing flow at reduced spatial
     # resolution and fewer LK iterations preserves the *information* (Pearson
     # corr ~0.97 vs full-res on real footage) for a ~4x flow speedup.  The flow
     # field is upsampled back to working resolution internally, so downstream
@@ -86,7 +88,7 @@ class ContextFeatureConfig:
     """Emit shape-aware ROI features (inside flag, signed edge distance, nearest
     corner, normalized axial/lateral position) for every configured ROI.
 
-    The plain distance-to-centre features collapse each zone to a single point,
+    The plain distance-to-center features collapse each zone to a single point,
     which throws away everything about *where inside* a large or elongated zone
     the animal is.  Disable only to reproduce pre-0.8 feature sets exactly."""
 
@@ -214,9 +216,9 @@ class ContextFeatureService:
 
     @staticmethod
     def _local_crop(frame: np.ndarray, x: float, y: float, radius: int) -> np.ndarray:
-        """Fixed 2r × 2r window centred on (x, y), edge-replicated past the border.
+        """Fixed 2r × 2r window centered on (x, y), edge-replicated past the border.
 
-        The size never changes: OpenCV's MOG2 re-initialises whenever its input
+        The size never changes: OpenCV's MOG2 re-initializes whenever its input
         size changes and the next frame then reads as 100% foreground, so a
         window clipped at the frame edge (or collapsed on a missing keypoint)
         used to inject spurious full-energy frames for wall-hugging animals.
@@ -318,7 +320,7 @@ class ContextFeatureService:
         return roi_geometry.scale_roi(roi, inv)
 
     # Body points the advanced ROI features are computed for.  Mirrors the
-    # points already used by the distance-to-centre features.
+    # points already used by the distance-to-center features.
     _ROI_POINTS = ("nose", "forepaw_centroid", "body_centroid")
 
     @classmethod
@@ -336,7 +338,7 @@ class ContextFeatureService:
         several zones get the same treatment for each.  When the ROI is absent
         or degenerate the columns are still emitted, all-NaN (except the inside
         flag, which is 0.0), so the merged feature matrix keeps a constant
-        column set across sessions — the same contract the ``roi_N_present``
+        column set across sessions, the same contract the ``roi_N_present``
         indicator already relies on.
 
         Distances are scaled to mm by *dist_scale*; axial/lateral positions are
@@ -470,6 +472,7 @@ class ContextFeatureService:
         config: ContextFeatureConfig,
         extra_rois: "list[dict] | None" = None,
         mog2_warmup_frames: int = MOG2_WARMUP_FRAMES,
+        mog2_var_threshold: int = MOG2_VAR_THRESHOLD,
         _cv2_cuda_algo: "Any | None" = None,
     ) -> dict[str, list]:
         """Process a contiguous range of video frames, returning per-column value lists.
@@ -515,10 +518,10 @@ class ContextFeatureService:
                 )
 
             fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=mog2_var_threshold, detectShadows=False
             )
             nose_fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=mog2_var_threshold, detectShadows=False
             )
             _inv_ds = 1.0 / ds if ds > 1 else 1.0
             _scaled_extra_rois: list[dict] = [
@@ -805,6 +808,7 @@ class ContextFeatureService:
         config: ContextFeatureConfig,
         extra_rois: "list[dict] | None" = None,
         mog2_warmup_frames: int = MOG2_WARMUP_FRAMES,
+        mog2_var_threshold: int = MOG2_VAR_THRESHOLD,
         gpu_flow_lock: "threading.Lock | None" = None,
         gpu_batch_size: int = 0,
         gpu_lock_timeout: float = 120.0,
@@ -855,10 +859,10 @@ class ContextFeatureService:
                 )
 
             fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=mog2_var_threshold, detectShadows=False
             )
             nose_fg_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False
+                history=MOG2_HISTORY, varThreshold=mog2_var_threshold, detectShadows=False
             )
             _inv_ds = 1.0 / ds if ds > 1 else 1.0
             _scaled_extra_rois: list[dict] = [
@@ -917,7 +921,7 @@ class ContextFeatureService:
             for batch_off in range(0, total_frames, SUB_BATCH):
                 batch_n = min(SUB_BATCH, total_frames - batch_off)
 
-                # Phase 1 — read frames ────────────────────────────────────────
+                # Phase 1: read frames ────────────────────────────────────────
                 gray_frames: list[np.ndarray] = []
                 for _ in range(batch_n):
                     ok, frame = cap.read()
@@ -928,7 +932,7 @@ class ContextFeatureService:
                 if actual_n == 0:
                     break
 
-                # Phase 2 — cheap per-frame CPU work ───────────────────────────
+                # Phase 2: cheap per-frame CPU work ───────────────────────────
                 for i in range(actual_n):
                     fi = frame_start + batch_off + i
                     gray = gray_frames[i]
@@ -1019,7 +1023,7 @@ class ContextFeatureService:
                         float(np.mean(np.asarray(diff, dtype=np.float32)) / 255.0)
                     )
 
-                # Phase 3 — GPU optical flow at anchor positions only
+                # Phase 3: GPU optical flow at anchor positions only
                 # Select one frame every temporal_stride steps as an anchor.
                 # Each anchor is paired with its *immediate* predecessor
                 # (1-frame gap), keeping inter-frame displacement small enough
@@ -1094,7 +1098,7 @@ class ContextFeatureService:
                     if _lock_acquired and gpu_flow_lock is not None:
                         gpu_flow_lock.release()
 
-                # Phase 4 — extract flow-patch features ────────────────────────
+                # Phase 4: extract flow-patch features ────────────────────────
                 # Extract features at strided positions.
                 _s_mag_paw_l: list[float] = []
                 _s_mag_paw_r: list[float] = []
@@ -1237,7 +1241,7 @@ class ContextFeatureService:
         it can match the per-individual pose table). ``roi_subject_id`` selects
         which subject's ROIs to resolve (the arena ROI is shared per session, so
         this is usually the session subject, not the individual). ``save=False``
-        returns the frame table without writing — used by
+        returns the frame table without writing, used by
         :meth:`compute_frame_context_multi` to combine individuals into one file.
 
         Parameters
@@ -1259,7 +1263,7 @@ class ContextFeatureService:
         config = config or ContextFeatureConfig()
 
         try:
-            import cv2  # noqa: F401 — validate availability before heavy work
+            import cv2  # noqa: F401, validate availability before heavy work
         except Exception as exc:
             raise ImportError("opencv-python is required for ContextFeatureService") from exc
 
@@ -1279,7 +1283,7 @@ class ContextFeatureService:
         target_rois = self._rois.resolve_target_rois(project_root, _roi_key)
         # How many ROI slots this project defines.  Captured *before* the
         # day-label exclusion below empties the list, so that excluded sessions
-        # still emit the same ROI columns (all-NaN) as every other session —
+        # still emit the same ROI columns (all-NaN) as every other session,
         # the merged feature matrix must have a constant column set.
         roi_slots = len(target_rois)
         # Apply day-label ROI exclusions (e.g. Acclimation sessions have no object present)
@@ -1364,7 +1368,7 @@ class ContextFeatureService:
                     self._warned_external_drive_pairs.add(_pair)
                     _io_msg = (
                         f"Video is on drive {_vid_drive.upper()} while project is on "
-                        f"{_proj_drive.upper()} — reading from an external or network "
+                        f"{_proj_drive.upper()}, reading from an external or network "
                         "drive can be the main bottleneck. Copy videos to the project "
                         "raw/videos/ folder and re-import for much faster processing."
                     )
@@ -1386,7 +1390,7 @@ class ContextFeatureService:
                 ds_w = _vid_w // config.downsample_factor
                 ds_h = _vid_h // config.downsample_factor
                 _ds_msg = (
-                    f"Detected {_vid_w}×{_vid_h} — downsampling {config.downsample_factor}× "
+                    f"Detected {_vid_w}×{_vid_h}, downsampling {config.downsample_factor}× "
                     f"to {ds_w}×{ds_h} for optical flow"
                 )
             else:
@@ -1411,6 +1415,7 @@ class ContextFeatureService:
             local_radius=local_radius,
             config=config,
             extra_rois=target_rois[1:],
+            mog2_var_threshold=self._rois.bg_var_threshold(project_root),
         )
 
         # Select chunk processor based on detected backend.
@@ -1433,7 +1438,7 @@ class ContextFeatureService:
         # ordered_results[i] holds the dict returned by chunk i.
         ordered_results: list[dict[str, list]] = [{}] * n_chunks
 
-        # Always use the executor — even max_workers=1 will queue the chunks
+        # Always use the executor: even max_workers=1 will queue the chunks
         # sequentially and fire a progress callback after every one of them,
         # giving live updates throughout the entire optical-flow loop.
         def _make_chunk_runner(start_f: int, end_f: int, chunk_idx: int):
@@ -1526,7 +1531,7 @@ class ContextFeatureService:
                 # ── Nose-area surface motion (wide crop, MOG2 background model) ──
                 # Parallel to body-centroid local_surface features but centered
                 # on the nose.  Captures substrate disruption at the point of
-                # contact — especially useful for overhead cameras where paw
+                # contact: especially useful for overhead cameras where paw
                 # keypoints are absent.
                 "nose_surface_motion_energy": np.asarray(nose_surface_energy_vals[:n]),
                 "nose_surface_motion_variance": np.asarray(nose_surface_var_vals[:n]),
@@ -1539,7 +1544,7 @@ class ContextFeatureService:
                 # ── ROI presence indicators ──────────────────────────────────────
                 # Binary flag (1.0 = ROI configured for this session, 0.0 = absent).
                 # Lets the model distinguish "no object present (acclimation)"
-                # from "far from object (test day)" — which XGBoost cannot infer
+                # from "far from object (test day)": which XGBoost cannot infer
                 # from NaN alone when distance features are missing.
                 "roi_1_present": np.full(n, 1.0 if has_target else 0.0),
                 # ── Target-zone optical flow (NaN when no target configured) ─────
@@ -1563,14 +1568,14 @@ class ContextFeatureService:
             }
         )
 
-        # ── Symmetric roi_1 aliases — mirrors the roi_N naming for extra zones ─
+        # ── Symmetric roi_1 aliases: mirrors the roi_N naming for extra zones ─
         df["nose_to_roi_1_dist"] = df["nose_to_target_dist"]
         df["forepaw_centroid_to_roi_1_dist"] = df["forepaw_centroid_to_target_dist"]
         df["body_centroid_to_roi_1_dist"] = df["body_centroid_to_target_dist"]
         df["head_angle_to_roi_1"] = df["head_angle_to_target"]
         df["body_angle_to_roi_1"] = df["body_angle_to_target"]
         df["flow_mag_near_roi_1"] = df["flow_mag_near_target"]
-        # Extra-ROI optical flow columns — one per ROI 2, 3, …
+        # Extra-ROI optical flow columns: one per ROI 2, 3, …
         for _ei, _ef_list in enumerate(_extra_flow_lists):
             _roi_idx = _ei + 2
             df[f"flow_mag_near_roi_{_roi_idx}"] = (
@@ -1606,7 +1611,7 @@ class ContextFeatureService:
             )
 
         # ── Advanced (shape-aware) ROI features, for every configured ROI ────
-        # Distance-to-centre alone collapses each zone to a point; these add
+        # Distance-to-center alone collapses each zone to a point; these add
         # where *inside* the zone the animal is (inside flag, signed distance to
         # the boundary, nearest corner, normalized position along the zone's
         # long/short axes).  Driven off `target_rois` so any number of ROIs is

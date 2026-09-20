@@ -14,7 +14,7 @@ REM Launcher log. Normally this is launcher_last.log, but if a FIRST ABEL
 REM instance is still running its launcher window keeps that file locked (it is
 REM piping the app's output there). Writing to a locked file fails with
 REM "The process cannot access the file because it is being used by another
-REM process." and — because the final launch line also redirects here — cmd
+REM process." and, because the final launch line also redirects here, cmd
 REM would skip starting the app entirely. So if the canonical log is locked,
 REM fall back to a unique per-launch log and let this second instance start.
 REM A failed redirect does NOT set errorlevel, but a redirect failure inside a

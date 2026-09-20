@@ -2,8 +2,8 @@
 
 R3D-18 is its own user-facing toggle (Features tab → "R3D appearance embeddings"),
 sitting *under* ``use_video_features``: it runs a pretrained 3-D CNN over a
-pose-centred crop of every segment and appends 512 dense dimensions to the feature
-table.  That is by far the most expensive feature family ABEL computes — it wants a
+pose-centered crop of every segment and appends 512 dense dimensions to the feature
+table.  That is by far the most expensive feature family ABEL computes, it wants a
 GPU, it caches per session under ``derived/r3d_features/``, and it needs the video
 to still be reachable.  So it deserves the question the toggle implies: *given
 everything else ABEL already extracts, what does the embedding add?*
@@ -13,20 +13,20 @@ The suite's existing ablation deliberately does **not** answer this.  Its
 way on purpose, so its numbers stay comparable with runs made before the embedding
 existed.  This module is the separate, explicit test.
 
-**Primary comparison (always run) — the toggle, exactly.**
+**Primary comparison (always run), the toggle, exactly.**
     ``full_no_r3d`` vs ``full_with_r3d``: every feature ABEL would use for this
     project (pose + kinematics + context/ROI + handcrafted video ± social), once
     without the ``r3d_*`` columns and once with them.  Same held-out split, same
     training pool, paired per seed.  The ΔF1 *is* what flipping the toggle buys.
 
-**Decomposition (optional) — is R3D redundant with optical flow, or complementary?**
+**Decomposition (optional), is R3D redundant with optical flow, or complementary?**
     A positive primary delta says the embedding adds something; it does not say
     whether it is doing the *same* job as the handcrafted video features or a
     different one.  Three extra arms settle it, all over the same pose baseline:
 
-    * ``pose_only``        — pose + kinematics (+ context, + social), no pixels at all
-    * ``pose_handcrafted`` — that, plus optical flow / surface motion only
-    * ``pose_r3d``         — that, plus the R3D embedding only
+    * ``pose_only``       : pose + kinematics (+ context, + social), no pixels at all
+    * ``pose_handcrafted``: that, plus optical flow / surface motion only
+    * ``pose_r3d``        : that, plus the R3D embedding only
 
     If ``pose_r3d`` ≈ ``pose_handcrafted`` and the primary delta is ~0, the two are
     redundant and the toggle buys nothing but runtime.  If ``pose_r3d`` beats
@@ -63,7 +63,7 @@ from abel.validation import features, holdout, subsample
 from abel.validation.datamodel import ProjectRef
 from abel.validation.engine import run_one_config
 
-# Arm names — stable, they are CSV column stems and plot keys.
+# Arm names: stable, they are CSV column stems and plot keys.
 ARM_NO_R3D = "full_no_r3d"
 ARM_WITH_R3D = "full_with_r3d"
 ARM_POSE_ONLY = "pose_only"
@@ -94,7 +94,7 @@ class R3DValueResult:
     n_seeds: int = 0
     n_pos_holdout: int = 0
 
-    # Feature counts per arm — the cost side of the ledger (R3D adds 512 columns).
+    # Feature counts per arm: the cost side of the ledger (R3D adds 512 columns).
     n_features_no_r3d: int = 0
     n_features_with_r3d: int = 0
     n_r3d_cols: int = 0
@@ -109,7 +109,7 @@ class R3DValueResult:
     precision_with_r3d: float = float("nan")
     recall_no_r3d: float = float("nan")
     recall_with_r3d: float = float("nan")
-    # Held-out error counts (mean across seeds) — what the gain costs/saves in clips.
+    # Held-out error counts (mean across seeds): what the gain costs/saves in clips.
     fp_no_r3d: float = float("nan")
     fp_with_r3d: float = float("nan")
     fn_no_r3d: float = float("nan")
@@ -134,7 +134,7 @@ class R3DValueResult:
         """Flat CSV row, with the per-seed F1 of both primary arms retained.
 
         The paired test must be reproducible from the CSV alone (Prism, R, a
-        reviewer) — a mean, a CI half-width and a significance boolean are not
+        reviewer), a mean, a CI half-width and a significance boolean are not
         enough to re-run it.
         """
         d = asdict(self)
@@ -172,7 +172,7 @@ def _arm_columns(pool: pd.DataFrame, *, has_social: bool,
                  has_context: bool) -> dict[str, list[str]]:
     """Feature columns for every arm, from one pool.
 
-    ``include_r3d`` is passed explicitly on every arm here — that is what switches
+    ``include_r3d`` is passed explicitly on every arm here, that is what switches
     :func:`features.select_feature_cols` out of its default "R3D rides with video"
     mode and into the split the whole module exists to make.
     """
@@ -215,7 +215,7 @@ def run_r3d_value(
     if not r3d_cols:
         # Not an error the user should chase in the log: it just means this project
         # was extracted with the toggle off, or predates it.
-        res.error = ("no r3d_* columns in this project's features — re-extract with "
+        res.error = ("no r3d_* columns in this project's features: re-extract with "
                      "'R3D appearance embeddings' enabled to compare")
         return res
 
@@ -338,11 +338,11 @@ def results_to_frame(results: list[R3DValueResult]) -> pd.DataFrame:
 
 
 def summarize(results: list[R3DValueResult]) -> str:
-    """Human-readable verdict — the text the GUI status line and the CLI both show.
+    """Human-readable verdict: the text the GUI status line and the CLI both show.
 
     Deliberately ASCII: this string is ``print``-ed by :func:`main`, and a Windows
     console on cp1252 raises ``UnicodeEncodeError`` on a literal delta.  The figures
-    are free to use one — matplotlib is not writing to a terminal.
+    are free to use one, matplotlib is not writing to a terminal.
     """
     usable = [r for r in results if not r.error and np.isfinite(r.gain)]
     if not usable:
@@ -353,7 +353,7 @@ def summarize(results: list[R3DValueResult]) -> str:
     head = (f"{len(usable)} comparison(s): R3D helps significantly in {len(wins)}, "
             f"hurts in {len(losses)}, mean dF1 {mean_gain:+.3f}.")
     if not wins and not losses:
-        head += ("  No behavior's CI excludes zero — on this evidence the embedding "
+        head += ("  No behavior's CI excludes zero: on this evidence the embedding "
                  "is not paying for its extraction cost.")
     return head
 
@@ -362,7 +362,7 @@ def summarize(results: list[R3DValueResult]) -> str:
 
 
 def plot_r3d_value(results: list[R3DValueResult], save_path: Path) -> Path:
-    """Paired dumbbells — F1 with the R3D toggle off → on, per (project, behavior).
+    """Paired dumbbells: F1 with the R3D toggle off → on, per (project, behavior).
 
     Left panel is the pairing itself (the design's whole point); right panel is the
     paired gain with its 95% CI across seeds, which is what the significance claim
@@ -416,7 +416,7 @@ def plot_r3d_value(results: list[R3DValueResult], save_path: Path) -> Path:
     ax1.set_title("Paired: R3D embeddings off → on", fontsize=10, loc="left")
     # Open a blank band below the last row for the legend.  Letting it default into
     # "lower left" drops it straight on top of the bottom behavior's dumbbell as soon
-    # as the run has only a handful of behaviors — which is the common case here,
+    # as the run has only a handful of behaviors: which is the common case here,
     # since you point this analysis at the few behaviors you suspect need pixels.
     ax1.set_ylim(-1.25, n - 0.45)
     ax1.legend(loc="lower left", fontsize=8, frameon=False, ncol=2)
@@ -450,7 +450,7 @@ def plot_r3d_value(results: list[R3DValueResult], save_path: Path) -> Path:
         ax2.set_xlim(min(lo_e, 0.0) - 0.34 * rng, max(hi_e, 0.0) + 0.34 * rng)
 
     n_cols = usable[0].n_r3d_cols if usable else 0
-    fig.suptitle(f"Value of the R3D appearance embedding ({n_cols} dims) — "
+    fig.suptitle(f"Value of the R3D appearance embedding ({n_cols} dims), "
                  "paired, same split & training pool",
                  fontsize=11.5, y=0.995)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
@@ -516,7 +516,7 @@ def plot_r3d_decomposition(results: list[R3DValueResult], save_path: Path) -> Pa
     ax.legend(loc="lower right", fontsize=8, frameon=False, ncol=2)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax.set_title("R3D vs. handcrafted video — are they redundant?",
+    ax.set_title("R3D vs. handcrafted video, are they redundant?",
                  fontsize=11.5, loc="left")
     fig.tight_layout()
     fig.savefig(save_path, dpi=200, bbox_inches="tight")

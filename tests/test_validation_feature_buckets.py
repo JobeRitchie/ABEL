@@ -1,7 +1,7 @@
 """The feature-family taxonomy, pinned against the columns the pipeline really emits.
 
-Every name below was taken from the services that write them — pose_processing_service
-(frame_pose), context_feature_service (context_features) and the social features — not
+Every name below was taken from the services that write them, pose_processing_service
+(frame_pose), context_feature_service (context_features) and the social features, not
 invented. The ablation's credibility rests entirely on this mapping: a pixel- or
 environment-derived column that lands in POSE silently hands the "pose only" baseline
 information the animal's body never carried, which is how the context/ROI leak
@@ -43,16 +43,16 @@ VIDEO_COLS = [
     "local_surface_motion_energy", "local_surface_motion_variance", "local_surface_change_rate",
     "nose_surface_motion_energy", "nose_surface_motion_variance", "nose_surface_change_rate",
     # Frame-differencing on a tight crop around the nose tip. These matched no key at
-    # all and fell through to the POSE default — pixel signal inside the pose baseline.
+    # all and fell through to the POSE default: pixel signal inside the pose baseline.
     "nose_local_change_rate", "nose_local_variance",
     # ROI-anchored optical flow. Still optical flow: it exists only because a camera
     # saw pixels move, and it dies with the video. The ROI says where it was sampled,
-    # not what it measures — so "video off" must drop it.
+    # not what it measures: so "video off" must drop it.
     "flow_mag_near_target", "flow_mag_near_roi_1", "flow_mag_near_roi_2",
 ]
 
 # ── The environment, strictly its geometry: ROI distances, angles, presence ─
-# Nothing pixel-derived belongs here — these are all computable from pose + the ROI
+# Nothing pixel-derived belongs here: these are all computable from pose + the ROI
 # definition alone, with no camera. (The ROI-anchored *flow* columns are VIDEO.)
 CONTEXT_COLS = [
     "roi_1_present", "roi_2_present",
@@ -98,7 +98,7 @@ def test_pose_baseline_excludes_every_pixel_and_environment_column() -> None:
 
     ``is_pose_feature`` is what selects the "pose only" columns, so a single video or
     context column answering True here silently credits the environment (or the
-    camera) to pose — and the pairs that most need interrogating get reported as
+    camera) to pose, and the pairs that most need interrogating get reported as
     trivially solved.
     """
     leaked = [c for c in VIDEO_COLS + CONTEXT_COLS + SOCIAL_COLS if is_pose_feature(c)]

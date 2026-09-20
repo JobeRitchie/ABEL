@@ -1,19 +1,19 @@
-"""Held-out subject/session selection — replaces any separate "gold" dataset.
+"""Held-out subject/session selection: replaces any separate "gold" dataset.
 
 Validation holds out a subset of subjects/sessions from training and evaluates
 on *their already-reviewed/accepted clips* (the ground truth ABEL's pipeline
 already produces).  The held-out evaluation set is filtered to **high-confidence
-clips only** so we score against clean labels — never the model's own uncertain
+clips only** so we score against clean labels, never the model's own uncertain
 candidates.  This filter applies ONLY to the held-out set; the training pool
 keeps all its labels so learning-curve subsampling reflects real labeling effort.
 
-Two filters here exist to defend the group-holdout guarantee against behaviour
+Two filters here exist to defend the group-holdout guarantee against behavior
 *inside* the shipped trainer, and removing them silently reintroduces leakage:
 
 **Refine-only rows must not reach the holdout frame.**  ``train_and_evaluate``
 deliberately moves ``temporal_feedback`` (reviewer FP/FN corrections) and
 ``imported:*`` (other projects') rows OUT of the validation split and INTO
-training — correct for the product, since those labels exist to *correct* the
+training, correct for the product, since those labels exist to *correct* the
 model rather than to grade it.  But it does that *after* a ``precomputed_split``
 is applied, so any such row we hand it inside the holdout frame becomes a
 **training row belonging to a held-out session**.  Measured on real projects,
@@ -25,7 +25,7 @@ this; this module did not.)
 
 **Imported rows must not silently pad the training pool.**  ``TrainingConfig
 .include_imported`` is only consumed by ``_load_training_frame``, which
-``train_and_evaluate`` never calls — so the engine's ``include_imported=False``
+``train_and_evaluate`` never calls, so the engine's ``include_imported=False``
 was a no-op and 51% of DG_FearConditioning's pool was clips imported from another
 project, counted by ``n_pos_train`` as this project's labeling effort.  We enforce
 the intent here instead.
@@ -58,7 +58,7 @@ def median_clip_frames(project: ProjectRef,
     at 30 fps), so trusting the config default overstates the unit by ~4x.  The
     labeled rows carry their own frame bounds, so measure them.
 
-    Returns NaN when the training set is missing or carries no frame bounds —
+    Returns NaN when the training set is missing or carries no frame bounds,
     callers must fall back to naming the unit without a duration rather than
     inventing one.
     """
@@ -74,7 +74,7 @@ def median_clip_frames(project: ProjectRef,
                 - pd.to_numeric(df["start_frame"], errors="coerce") + 1).dropna()
         span = span[span > 0]
         return float(span.median()) if len(span) else float("nan")
-    except Exception:  # noqa: BLE001 — a label for a figure must never sink a run
+    except Exception:  # noqa: BLE001, a label for a figure must never sink a run
         return float("nan")
 
 
@@ -82,7 +82,7 @@ def clip_unit_label(frames: float, fps: float) -> str:
     """Human phrase for the evaluated unit, e.g. ``"labeled clips (~0.5 s)"``.
 
     Degrades to the bare unit when the length could not be measured, because a
-    guessed duration is worse than none — it is the number a reader would quote.
+    guessed duration is worse than none, it is the number a reader would quote.
     """
     if not np.isfinite(frames) or frames <= 0:
         return "labeled clips"
@@ -136,7 +136,7 @@ class HoldoutSplit:
     n_imported_dropped: int = 0
     excluded_imported: bool = True
     # Holdout groups left with nothing to score after filtering (they were made
-    # entirely of refine-only rows) — advertising them as "held out" would be a lie.
+    # entirely of refine-only rows): advertising them as "held out" would be a lie.
     unevaluable_groups: list[str] = field(default_factory=list)
 
     def manifest(self, project: ProjectRef) -> dict:
@@ -224,7 +224,7 @@ def split(
 
     # ── Defend the group guarantee against the trainer's refine-only reshuffle ──
     # Any temporal_feedback / imported row left in the holdout frame is silently
-    # moved INTO training by train_and_evaluate — i.e. a held-out session's rows
+    # moved INTO training by train_and_evaluate: i.e. a held-out session's rows
     # would train the model. They cannot be scored either, so drop them outright:
     # a held-out session must contribute nothing at all.
     refine = is_refine_only(holdout)

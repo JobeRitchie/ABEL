@@ -3,12 +3,12 @@
 **Read this before citing any number from this module.**
 
 For each held-out ``(session, animal)`` unit it compares, model vs. reviewer, the
-**prevalence of a behavior among that unit's reviewed segments** — and, only where
+**prevalence of a behavior among that unit's reviewed segments**, and, only where
 the labeling is dense enough to support it, the **bout count**.  Agreement is
-summarised with the measures behavior-scoring validations report: Pearson r, Lin's
+summarized with the measures behavior-scoring validations report: Pearson r, Lin's
 concordance CCC, R², and Bland-Altman bias with 95% limits of agreement (see
 :mod:`abel.validation.metrics`).  It is a pure post-hoc computation on the
-retained generalization predictions — no extra training.
+retained generalization predictions, no extra training.
 
 What this is NOT
 ----------------
@@ -17,7 +17,7 @@ This is **not a time budget**, and it must never be labeled "% time freezing" or
 reviewer actually looked at, and those are sparse: on DG_FearConditioning the
 labeled segments cover a **median 1.5%** of each session's frame extent (min
 0.55%).  They are also active-learning selected, so they are a *biased* sample
-enriched for positives — not a uniform one.  A fraction computed over them
+enriched for positives, not a uniform one.  A fraction computed over them
 therefore answers "of the clips we reviewed in this session, what share were
 freezing?", which is a per-session accuracy/prevalence measure, not the
 biological quantity a stopwatch would produce.
@@ -27,7 +27,7 @@ reader can see exactly how thin that sample is.
 
 Getting the real time budget would require running dense inference over *all*
 frames of the held-out sessions with the held-out model (the product's temporal
-refinement pass), which this module deliberately does not do — the deploy-model
+refinement pass), which this module deliberately does not do, the deploy-model
 traces already on disk are trained on all data and would leak.
 
 Why bout counts are gated
@@ -67,7 +67,7 @@ class TimeBudgetResult:
     n_units: int = 0                       # held-out (session, animal) units compared
 
     # Per-unit paired series. ``prevalence`` = share of the unit's REVIEWED
-    # segments in the behavior (NOT share of session time — see module docstring).
+    # segments in the behavior (NOT share of session time, see module docstring).
     true_prevalence: list[float] = field(default_factory=list)
     pred_prevalence: list[float] = field(default_factory=list)
     true_bouts: list[float] = field(default_factory=list)   # NaN where not contiguous
@@ -90,7 +90,7 @@ class TimeBudgetResult:
     bout_pearson_r: float = float("nan")
     bout_ccc: float = float("nan")
 
-    # Median labeled-frame coverage across units — the "how much of the session did
+    # Median labeled-frame coverage across units: the "how much of the session did
     # we actually look at" caveat that must travel with every number above.
     median_coverage: float = float("nan")
 
@@ -98,14 +98,14 @@ class TimeBudgetResult:
 
     @property
     def loa_width(self) -> float:
-        """Width of the 95% limits of agreement — the per-unit usability number."""
+        """Width of the 95% limits of agreement: the per-unit usability number."""
         if not (np.isfinite(self.prev_loa_lower) and np.isfinite(self.prev_loa_upper)):
             return float("nan")
         return float(self.prev_loa_upper - self.prev_loa_lower)
 
 
 def _bout_count(pos: np.ndarray, contiguous: bool) -> float:
-    """Runs of consecutive positive segments — NaN unless the rows are contiguous.
+    """Runs of consecutive positive segments: NaN unless the rows are contiguous.
 
     Only meaningful when adjacent rows are adjacent in time; see the module
     docstring for why that is usually false.

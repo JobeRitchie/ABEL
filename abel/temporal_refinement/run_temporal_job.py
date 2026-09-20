@@ -16,7 +16,7 @@ def _print_line(message: str) -> None:
 
 
 def _run_train(args: argparse.Namespace) -> int:
-    """Legacy train entry point — returns immediately (training removed)."""
+    """Legacy train entry point: returns immediately (training removed)."""
     result = {"status": "skipped", "reason": "training_removed"}
     print("RESULT_JSON:" + json.dumps(result), flush=True)
     return 0
@@ -42,7 +42,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run temporal refinement jobs in a subprocess")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    train = sub.add_parser("train", help="(Legacy) temporal training — no-op")
+    train = sub.add_parser("train", help="(Legacy) temporal training: no-op")
     train.add_argument("--project-root", required=True)
     train.add_argument("--concept-id", required=True)
     train.add_argument("--config-json", required=True)

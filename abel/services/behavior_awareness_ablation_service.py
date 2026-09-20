@@ -2,11 +2,11 @@
 
 Runs three lightweight tests on the current project data:
 
-1. **Candidate ranking quality** — does cross-behavior competition scoring
+1. **Candidate ranking quality**: does cross-behavior competition scoring
    surface better candidates (higher rank for user-accepted segments)?
-2. **Temporal refinement quality** — does mutual inhibition improve
+2. **Temporal refinement quality**: does mutual inhibition improve
    frame-level classification metrics on the validation set?
-3. **Model feature ablation** — does augmenting training features with
+3. **Model feature ablation**: does augmenting training features with
    peer-behavior prediction scores improve cross-validated model quality?
 
 All tests are non-destructive and do not modify project artifacts.
@@ -35,19 +35,19 @@ class AblationResult:
     verdict: str = "inconclusive"
     summary: str = ""
 
-    # Test 1 — candidate ranking
+    # Test 1: candidate ranking
     candidate_test_ran: bool = False
     candidate_mrr_aware: float = float("nan")
     candidate_mrr_unaware: float = float("nan")
     candidate_detail: str = ""
 
-    # Test 2 — temporal refinement (mutual inhibition)
+    # Test 2: temporal refinement (mutual inhibition)
     temporal_test_ran: bool = False
     temporal_f1_aware: float = float("nan")
     temporal_f1_unaware: float = float("nan")
     temporal_detail: str = ""
 
-    # Test 3 — model feature ablation
+    # Test 3: model feature ablation
     model_test_ran: bool = False
     model_f1_aware: float = float("nan")
     model_f1_unaware: float = float("nan")
@@ -155,7 +155,7 @@ class BehaviorAwarenessAblationService:
         return result
 
     # ------------------------------------------------------------------
-    # Test 1 — Candidate ranking quality
+    # Test 1: Candidate ranking quality
     # ------------------------------------------------------------------
 
     def _test_candidate_ranking(
@@ -167,7 +167,7 @@ class BehaviorAwarenessAblationService:
     ) -> None:
         labels_path = project_root / "derived" / "review_labels" / "reviewer_labels.parquet"
         if not labels_path.exists():
-            result.warnings.append("No reviewer labels found — skipping candidate ranking test.")
+            result.warnings.append("No reviewer labels found: skipping candidate ranking test.")
             return
 
         labels = pd.read_parquet(labels_path)
@@ -190,12 +190,12 @@ class BehaviorAwarenessAblationService:
         # Load prediction + peer scores
         resolved = self._resolve_model_dir(project_root, target_behavior)
         if resolved is None:
-            result.warnings.append("No segment predictions found — skipping candidate ranking test.")
+            result.warnings.append("No segment predictions found: skipping candidate ranking test.")
             return
         model_version, model_dir = resolved
         pred_path = model_dir / "segment_predictions.parquet"
         if not pred_path.exists():
-            result.warnings.append("No segment predictions found — skipping candidate ranking test.")
+            result.warnings.append("No segment predictions found: skipping candidate ranking test.")
             return
 
         preds = pd.read_parquet(pred_path)
@@ -207,7 +207,7 @@ class BehaviorAwarenessAblationService:
         # Compute peer competition scores
         peer_max = self._compute_peer_max_prob(project_root, model_version, merged["segment_id"])
 
-        # Ranking A: behavior-aware (predicted prob penalised by peer competition)
+        # Ranking A: behavior-aware (predicted prob penalized by peer competition)
         merged["aware_score"] = merged["prediction_prob"].to_numpy(dtype=float) - 0.5 * peer_max
         # Ranking B: behavior-unaware (predicted prob only)
         merged["unaware_score"] = merged["prediction_prob"].to_numpy(dtype=float)
@@ -224,7 +224,7 @@ class BehaviorAwarenessAblationService:
         result.candidate_mrr_unaware = mrr_unaware
         winner = "behavior-aware" if mrr_aware > mrr_unaware else "behavior-unaware"
         result.candidate_detail = (
-            f"Candidate ranking — MRR (behavior-aware): {mrr_aware:.3f}, "
+            f"Candidate ranking: MRR (behavior-aware): {mrr_aware:.3f}, "
             f"MRR (behavior-unaware): {mrr_unaware:.3f}. "
             f"Winner: {winner}."
         )
@@ -288,7 +288,7 @@ class BehaviorAwarenessAblationService:
         return np.where(np.isnan(result), 0.0, result)
 
     # ------------------------------------------------------------------
-    # Test 2 — Temporal refinement (mutual inhibition)
+    # Test 2: Temporal refinement (mutual inhibition)
     # ------------------------------------------------------------------
 
     def _test_temporal_inhibition(
@@ -303,12 +303,12 @@ class BehaviorAwarenessAblationService:
         # Load validation predictions (frame-level or segment-level)
         resolved = self._resolve_model_dir(project_root, target_behavior)
         if resolved is None:
-            result.warnings.append("No validation predictions — skipping temporal test.")
+            result.warnings.append("No validation predictions: skipping temporal test.")
             return
         model_version, model_dir = resolved
         val_path = model_dir / "validation_predictions.parquet"
         if not val_path.exists():
-            result.warnings.append("No validation predictions — skipping temporal test.")
+            result.warnings.append("No validation predictions: skipping temporal test.")
             return
 
         val_df = pd.read_parquet(val_path)
@@ -355,7 +355,7 @@ class BehaviorAwarenessAblationService:
         if unique_true == {0, 1}:
             f1_aware = float(f1_score(y_true, y_pred_inhibited, average="macro", zero_division=0))
         else:
-            # Multi-class — inhibition test doesn't apply cleanly
+            # Multi-class: inhibition test doesn't apply cleanly
             result.warnings.append(
                 "Multi-class validation set detected; temporal inhibition test uses binary simplification."
             )
@@ -371,14 +371,14 @@ class BehaviorAwarenessAblationService:
         result.temporal_f1_unaware = f1_unaware
         winner = "behavior-aware (inhibition)" if f1_aware > f1_unaware else "behavior-unaware (no inhibition)"
         result.temporal_detail = (
-            f"Temporal refinement — F1 with inhibition: {f1_aware:.3f}, "
+            f"Temporal refinement: F1 with inhibition: {f1_aware:.3f}, "
             f"F1 without inhibition: {f1_unaware:.3f}. "
             f"Winner: {winner}."
         )
         _log(result.temporal_detail)
 
     # ------------------------------------------------------------------
-    # Test 3 — Model feature ablation (peer features in training)
+    # Test 3: Model feature ablation (peer features in training)
     # ------------------------------------------------------------------
 
     def _test_model_feature_ablation(
@@ -399,7 +399,7 @@ class BehaviorAwarenessAblationService:
 
         train_path = project_root / "derived" / "training_sets" / "training_set.parquet"
         if not train_path.exists():
-            result.warnings.append("No training set — skipping model feature ablation.")
+            result.warnings.append("No training set: skipping model feature ablation.")
             return
 
         df = pd.read_parquet(train_path)
@@ -428,7 +428,7 @@ class BehaviorAwarenessAblationService:
         y = np.asarray([label_to_idx[str(lbl)] for lbl in df["label"]], dtype=int)
 
         if len(set(y)) < 2:
-            result.warnings.append("Only one class in training set — cannot cross-validate.")
+            result.warnings.append("Only one class in training set: cannot cross-validate.")
             return
 
         # Base feature columns
@@ -444,7 +444,7 @@ class BehaviorAwarenessAblationService:
 
         if peer_features.empty:
             result.warnings.append(
-                "No peer behavior models with predictions found — "
+                "No peer behavior models with predictions found, "
                 "model ablation test cannot compare (requires 2+ trained behaviors)."
             )
             return
@@ -554,7 +554,7 @@ class BehaviorAwarenessAblationService:
         f1_delta = mean_f1_aug - mean_f1_base
         winner = "behavior-aware (peer features)" if f1_delta > 0 else "behavior-unaware (base features)"
         result.model_detail = (
-            f"Model ablation ({n_folds}-fold CV) — "
+            f"Model ablation ({n_folds}-fold CV), "
             f"base F1: {mean_f1_base:.3f}, augmented F1: {mean_f1_aug:.3f} "
             f"(Δ={f1_delta:+.3f}{sig_note}); "
             f"base PR-AUC: {mean_prauc_base:.3f}, augmented PR-AUC: {mean_prauc_aug:.3f}. "
@@ -636,7 +636,7 @@ class BehaviorAwarenessAblationService:
                 scores_unaware += 1
                 lines.append("✗ Candidate ranking: behavior-unaware is better")
             else:
-                lines.append("— Candidate ranking: tied")
+                lines.append("- Candidate ranking: tied")
             lines.append(f"  {result.candidate_detail}")
             lines.append("")
 
@@ -649,7 +649,7 @@ class BehaviorAwarenessAblationService:
                 scores_unaware += 1
                 lines.append("✗ Temporal refinement: mutual inhibition hurts")
             else:
-                lines.append("— Temporal refinement: tied")
+                lines.append("- Temporal refinement: tied")
             lines.append(f"  {result.temporal_detail}")
             lines.append("")
 
@@ -662,7 +662,7 @@ class BehaviorAwarenessAblationService:
                 scores_unaware += 1
                 lines.append("✗ Model features: peer-behavior features hurt model")
             else:
-                lines.append("— Model features: tied")
+                lines.append("- Model features: tied")
             lines.append(f"  {result.model_detail}")
             lines.append("")
 

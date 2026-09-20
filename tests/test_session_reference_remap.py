@@ -98,7 +98,7 @@ def test_removing_the_only_session_for_a_recording_prunes_its_review_work(
     """Deleting a recording outright prunes its now-orphaned review work.
 
     There is nothing to re-point onto (the recording has left the project), and a
-    duplicate is re-pointed *before* this — see
+    duplicate is re-pointed *before* this, see
     :func:`test_removing_a_duplicate_session_repoints_its_review_work`. Left in
     place, the decisions/labels would linger in the review queue forever as a raw
     ``session_<hex>`` code with no subject and no extracted clip.
@@ -127,7 +127,7 @@ def test_removing_the_only_session_for_a_recording_prunes_its_review_work(
 def test_removing_a_session_keeps_review_work_for_the_sessions_that_remain(
     service: ImportService, tmp_path: Path
 ) -> None:
-    """Pruning is scoped to the removed session — a co-existing session is untouched."""
+    """Pruning is scoped to the removed session: a co-existing session is untouched."""
     video_a = VideoAsset(asset_id="vid_a", source_path=str(tmp_path / "raw" / "videos" / "A.mp4"))
     video_b = VideoAsset(asset_id="vid_b", source_path=str(tmp_path / "raw" / "videos" / "B.mp4"))
     pose = PoseAsset(asset_id="pose_1", source_path=str(tmp_path / "raw" / "pose" / "p.csv"), format="csv")

@@ -1,6 +1,6 @@
 """Re-render abel_logo.png from the Illustrator original.
 
-The .ai file is PDF-backed, so PyMuPDF rasterizes it directly — including the
+The .ai file is PDF-backed, so PyMuPDF rasterizes it directly, including the
 soft-masked gradient sphere, which a plain SVG export drops. Needs PyMuPDF,
 which is not a runtime dependency:
 
@@ -39,7 +39,7 @@ def main() -> None:
     pixmap = doc[0].get_pixmap(dpi=RENDER_DPI, alpha=True)
     art = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGBA")
 
-    # Trim the page down to the artwork, then centre it on a square canvas so
+    # Trim the page down to the artwork, then center it on a square canvas so
     # the icon sizes stay aspect-correct.
     art = art.crop(art.getchannel("A").getbbox())
     canvas_side = int(round(max(art.size) / (1.0 - MARGIN)))

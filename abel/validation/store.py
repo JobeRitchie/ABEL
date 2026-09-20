@@ -2,7 +2,7 @@
 
 Results live under a root chosen by the caller (NOT inside any one project's
 ``derived/``) because a run spans many projects.  That root is normally a saved
-session's ``runs/`` folder in the validation workspace — see
+session's ``runs/`` folder in the validation workspace, see
 :mod:`abel.validation.workspace`::
 
     <session>/runs/run_<timestamp>/

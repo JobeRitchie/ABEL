@@ -36,7 +36,7 @@ class SmokeTestReport:
         passed = sum(1 for r in self.results if r.passed)
         total = len(self.results)
         lines.append(f"{'=' * 60}")
-        lines.append(f"  SMOKE TEST REPORT — {passed}/{total} passed")
+        lines.append(f"  SMOKE TEST REPORT: {passed}/{total} passed")
         lines.append(f"{'=' * 60}")
         for r in self.results:
             icon = "PASS" if r.passed else "FAIL"
@@ -106,7 +106,7 @@ class SmokeTestService:
         ver = np.version.version
         return SmokeTestResult(
             name="", passed=ok,
-            detail=f"numpy {ver} — mean/std on (1000, 20) array",
+            detail=f"numpy {ver}, mean/std on (1000, 20) array",
         )
 
     @staticmethod
@@ -117,7 +117,7 @@ class SmokeTestService:
         ok = len(df) == 500 and "a" in df.columns
         return SmokeTestResult(
             name="", passed=ok,
-            detail=f"pandas {pd.__version__} — created 500-row DataFrame",
+            detail=f"pandas {pd.__version__}, created 500-row DataFrame",
         )
 
     @staticmethod
@@ -137,7 +137,7 @@ class SmokeTestService:
         ok = gray.shape == (64, 64) and gray.dtype == np.uint8
         return SmokeTestResult(
             name="", passed=ok,
-            detail=f"OpenCV {cv2.__version__} — BGR→gray on 64×64 synthetic frame",
+            detail=f"OpenCV {cv2.__version__}, BGR→gray on 64×64 synthetic frame",
         )
 
     @staticmethod
@@ -163,7 +163,7 @@ class SmokeTestService:
         ok = bool(flow.shape == (h, w, 2) and mean_mag > 0)
         return SmokeTestResult(
             name="", passed=ok,
-            detail=f"CPU Farneback {h}×{w} — mean magnitude {mean_mag:.3f}",
+            detail=f"CPU Farneback {h}×{w}, mean magnitude {mean_mag:.3f}",
         )
 
     @staticmethod
@@ -179,9 +179,9 @@ class SmokeTestService:
         if has_cuda:
             name = torch.cuda.get_device_name(0)
             mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            detail = f"torch {torch.__version__} — {name} ({mem:.1f} GB)"
+            detail = f"torch {torch.__version__}, {name} ({mem:.1f} GB)"
         else:
-            detail = f"torch {torch.__version__} — CUDA not available (CPU only)"
+            detail = f"torch {torch.__version__}, CUDA not available (CPU only)"
         return SmokeTestResult(name="", passed=has_cuda, detail=detail)
 
     @staticmethod
@@ -201,7 +201,7 @@ class SmokeTestService:
         if not gpu_available():
             return SmokeTestResult(
                 name="", passed=False,
-                detail="GPU not available — skipping windowed feature test",
+                detail="GPU not available: skipping windowed feature test",
             )
 
         n_frames = 5000
@@ -245,7 +245,7 @@ class SmokeTestService:
         if backend not in ("torch", "cv2_cuda"):
             return SmokeTestResult(
                 name="", passed=False,
-                detail=f"Flow backend is '{backend}' — no GPU path available",
+                detail=f"Flow backend is '{backend}', no GPU path available",
             )
 
         h, w = 240, 320

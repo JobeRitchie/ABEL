@@ -1,8 +1,8 @@
 """Tests for the rare-behavior discovery analysis (clip hunting).
 
-Covers the pure logic — ranking, discovery curves, effort-to-N, cross-validation
+Covers the pure logic, ranking, discovery curves, effort-to-N, cross-validation
 bookkeeping, the essence/UMAP rankers on separable synthetic data, and the
-Prism/tidy exporters — without training models or reading a project from disk
+Prism/tidy exporters, without training models or reading a project from disk
 (the end-to-end training + metric passes are exercised by the validation run).
 """
 
@@ -138,14 +138,14 @@ def test_essence_feature_frame_uses_shipped_features_not_clip_metrics():
     """Essence's substrate is the pool's shipped features, indexed by segment_id.
 
     Drops meta columns, all-NaN / constant columns, and columns too sparse to
-    anchor a criterion — but keeps the real feature columns (incl. oscillation).
+    anchor a criterion, but keeps the real feature columns (incl. oscillation).
     """
     pool = pd.DataFrame({
         "segment_id": ["a", "b", "c", "d"],
         "session_id": ["s"] * 4,
         "label": ["wds", "x", "x", "x"],
-        "nose_oscillation_power_mean": [1.0, 2.0, 3.0, 4.0],   # real feature — kept
-        "head_angular_velocity_std": [0.1, 0.2, 0.3, 0.4],     # real feature — kept
+        "nose_oscillation_power_mean": [1.0, 2.0, 3.0, 4.0],   # real feature: kept
+        "head_angular_velocity_std": [0.1, 0.2, 0.3, 0.4],     # real feature: kept
         "dead_all_nan": [np.nan] * 4,                          # dropped
         "constant": [5.0, 5.0, 5.0, 5.0],                      # dropped (no spread)
         "too_sparse": [1.0, np.nan, np.nan, np.nan],           # dropped (<50% finite)
@@ -174,7 +174,7 @@ def test_essence_background_folds_in_repeated_hard_negatives():
 def test_essence_ranked_order_is_a_continuous_ranking():
     """Essence ranks the whole pool; it does not gate on the criteria AND-box.
 
-    The box discarded 50–96% of a behaviour's real instances when used as a filter,
+    The box discarded 50–96% of a behavior's real instances when used as a filter,
     so a poor fit must be ordered late, never excluded.
     """
     metrics, is_pos = _separable_metrics(n_pos=40, n_neg=400)
@@ -234,7 +234,7 @@ def test_umap_discovery_beats_frozen_centroid_on_elongated_manifold():
     # Positives lie along an elongated manifold; seeds sit only at one end.  A
     # frozen single centroid ranks the far positives behind off-manifold negatives,
     # but re-lassoing (drifting the centroid as positives confirm) walks the whole
-    # manifold — the compounding a frozen ranker cannot do.
+    # manifold: the compounding a frozen ranker cannot do.
     rng = np.random.default_rng(2)
     xs = np.linspace(0, 8, 40)
     pos = np.column_stack([xs, np.zeros(40)]) + rng.normal(0, 0.1, (40, 2))
@@ -304,7 +304,7 @@ def test_effort_to_threshold_finds_first_reaching_checkpoint():
 
 
 def _quality_trajs():
-    """AL climbs to good F1/PR-AUC fast; random lags — two identical seeds each."""
+    """AL climbs to good F1/PR-AUC fast; random lags, two identical seeds each."""
     al = [(20, 2, 0.30, 0.40), (45, 6, 0.60, 0.70),
           (70, 12, 0.85, 0.90), (95, 18, 0.90, 0.95)]
     rnd = [(20, 2, 0.20, 0.30), (45, 4, 0.35, 0.45),
@@ -374,11 +374,11 @@ def test_whole_video_minutes_from_segment_extents(tmp_path):
     assert abs(rd.whole_video_minutes(proj) - 15.0) < 1e-6
 
 
-# ── auto-target: which behaviour is the rare one in this project? ──────────
+# ── auto-target: which behavior is the rare one in this project? ──────────
 
 
 def _project_with_bouts(root: Path, per_behavior_frames: dict[str, int]) -> ProjectRef:
-    """A project whose dense bout detections give each behaviour a known prevalence."""
+    """A project whose dense bout detections give each behavior a known prevalence."""
     reps = root / "derived" / "representations"
     reps.mkdir(parents=True, exist_ok=True)
     pd.DataFrame({"session_id": ["s1", "s2"],
@@ -405,7 +405,7 @@ def test_rank_behaviors_by_rarity_orders_rarest_first(tmp_path):
 
 
 def test_rank_behaviors_by_rarity_drops_excluded_and_undetected(tmp_path):
-    """A behaviour with no bouts file is absent, not ranked 'rarest' at zero."""
+    """A behavior with no bouts file is absent, not ranked 'rarest' at zero."""
     proj = _project_with_bouts(tmp_path, {"rear": 900})     # no wds bouts file
     assert [b for b, _n, _v in rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])] == ["rear"]
     assert rd.rank_behaviors_by_rarity(
@@ -413,7 +413,7 @@ def test_rank_behaviors_by_rarity_drops_excluded_and_undetected(tmp_path):
 
 
 def _add_traces(root: Path, per_frame: dict[str, int], *, sessions=("s1",)) -> None:
-    """A competitive temporal-refinement run: per-frame winner + per-behaviour probs."""
+    """A competitive temporal-refinement run: per-frame winner + per-behavior probs."""
     inf = root / "derived" / "temporal_refinement" / "target_behavior" / "inference_x"
     (inf / "probability_traces").mkdir(parents=True, exist_ok=True)
     (inf.parent / "latest.json").write_text(
@@ -437,7 +437,7 @@ def test_bouts_are_preferred_over_dense_traces(tmp_path):
     share of the competition, not of session time, and uncomparable across
     projects (measured: HomeCage Dig 43.1 % from traces vs 33.0 % from bouts, and
     all eight manuscript projects summing to exactly 100.0 %).  Bouts are
-    thresholded, so frames may belong to no behaviour.
+    thresholded, so frames may belong to no behavior.
     """
     proj = _project_with_bouts(tmp_path, {"wds": 30, "rear": 900})
     _add_traces(tmp_path, {"wds": 10, "rear": 90})
@@ -450,12 +450,12 @@ def test_traces_used_when_bouts_lose_per_behavior_identity(tmp_path):
     """The original fear-conditioning regression, guarded without trace preference.
 
     That run's bouts were all stamped ``behavior_id = "target_behavior"``, so no
-    ``<id>_bouts.parquet`` existed and reading them ranked freezing — 49 % of
-    frames — as the rarest behaviour.  With no per-behaviour bout files,
+    ``<id>_bouts.parquet`` existed and reading them ranked freezing, 49 % of
+    frames, as the rarest behavior.  With no per-behavior bout files,
     :func:`_bout_prevalence_table` finds nothing and the traces are used, so the
     bouts-first order does not reintroduce the bug.
     """
-    proj = _project_with_bouts(tmp_path, {})        # run wrote no per-behaviour bouts
+    proj = _project_with_bouts(tmp_path, {})        # run wrote no per-behavior bouts
     _add_traces(tmp_path, {"wds": 10, "rear": 90})
     assert rd.prevalence_source(proj, ["wds", "rear"]) == rd.PREVALENCE_SOURCE_TRACES
     ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])
@@ -465,13 +465,13 @@ def test_traces_used_when_bouts_lose_per_behavior_identity(tmp_path):
 
 
 def test_single_behavior_traces_are_rejected(tmp_path):
-    """``predicted_behavior`` is an argmax — one behaviour wins 100 % of frames.
+    """``predicted_behavior`` is an argmax: one behavior wins 100 % of frames.
 
     A non-competitive run must fall through to the bout detections rather than
-    report the lone behaviour as occupying the whole session.
+    report the lone behavior as occupying the whole session.
     """
     proj = _project_with_bouts(tmp_path, {"wds": 30, "rear": 900})
-    _add_traces(tmp_path, {"wds": 100})          # single-behaviour inference
+    _add_traces(tmp_path, {"wds": 100})          # single-behavior inference
     assert rd.prevalence_source(proj, ["wds", "rear"]) == rd.PREVALENCE_SOURCE_BOUTS
     ranking = rd.rank_behaviors_by_rarity(proj, ["wds", "rear"])
     assert [bid for bid, _n, _v in ranking] == ["wds", "rear"]
@@ -482,8 +482,8 @@ def test_session_gated_behavior_is_not_a_hunt_target(tmp_path):
     """Rare-because-impossible is not rare-because-hard.
 
     ``shock`` is abundant in a third of sessions and structurally absent from the
-    rest (no shock delivered), so its project-wide mean looks rarest — but hunting
-    it measures finding the shock *sessions*, not rare-behaviour discovery.  ``wds``
+    rest (no shock delivered), so its project-wide mean looks rarest, but hunting
+    it measures finding the shock *sessions*, not rare-behavior discovery.  ``wds``
     is uniformly rare and is the real target.
     """
     sessions = [f"s{i}" for i in range(12)]
@@ -497,7 +497,7 @@ def test_session_gated_behavior_is_not_a_hunt_target(tmp_path):
     (inf.parent / "latest.json").write_text(
         json.dumps({"inference_dir": str(inf)}), encoding="utf-8")
     for i, sid in enumerate(sessions):
-        # shock: 3% of frames in a third of sessions, none in the rest — so its
+        # shock: 3% of frames in a third of sessions, none in the rest, so its
         # project-wide mean (1%) lands BELOW uniformly-rare wds (2%), while its
         # level where it can occur (3%) is higher.
         n_shock = 30 if i % 3 == 0 else 0
@@ -517,7 +517,7 @@ def test_session_gated_behavior_is_not_a_hunt_target(tmp_path):
 
 
 def test_uniformly_rare_behavior_survives_the_gate(tmp_path):
-    """The guard must not eat a genuinely rare behaviour that occurs everywhere."""
+    """The guard must not eat a genuinely rare behavior that occurs everywhere."""
     sessions = [f"s{i}" for i in range(12)]
     proj = _project_with_bouts(tmp_path, {})
     (tmp_path / "derived" / "representations").mkdir(parents=True, exist_ok=True)
@@ -543,7 +543,7 @@ def test_rank_behaviors_by_rarity_ignores_empty_bouts_file(tmp_path):
 
     Regression: fear conditioning shipped a zero-row ``Freeze_bouts.parquet``, so
     freezing averaged a time fraction of exactly 0.0 and won the rarity ranking
-    outright — while being that project's single most abundant behaviour.
+    outright, while being that project's single most abundant behavior.
     """
     proj = _project_with_bouts(tmp_path, {"wds": 30, "rear": 900})
     empty = pd.DataFrame({"session_id": [], "start_frame": [], "duration_frames": []})
@@ -553,11 +553,11 @@ def test_rank_behaviors_by_rarity_ignores_empty_bouts_file(tmp_path):
 
 
 def test_prevalence_averages_only_over_run_covered_sessions(tmp_path):
-    """Sessions no deployment run touched are not sessions with zero behaviour.
+    """Sessions no deployment run touched are not sessions with zero behavior.
 
-    Zero-filling every pool session penalised whichever behaviour happened to be
-    deployed over fewer of them — a property of when the run was launched, not of
-    rarity.  Here both behaviours run on s1 only, so adding an untouched s2 to the
+    Zero-filling every pool session penalized whichever behavior happened to be
+    deployed over fewer of them, a property of when the run was launched, not of
+    rarity.  Here both behaviors run on s1 only, so adding an untouched s2 to the
     pool must not change their prevalence at all.
     """
     proj = _project_with_bouts(tmp_path, {})
@@ -570,13 +570,13 @@ def test_prevalence_averages_only_over_run_covered_sessions(tmp_path):
                       "duration_frames": [frames]}).to_parquet(
             bouts / f"{bid}_bouts.parquet")
     ranking = dict((n, v) for _b, n, v in rd.rank_behaviors_by_rarity(proj, ["wds", "rear"]))
-    # Measured on s1 alone — NOT halved by the untouched s2.
+    # Measured on s1 alone: NOT halved by the untouched s2.
     assert ranking["Wet dog shake"] == pytest.approx(90 / 9000)
     assert ranking["Rear"] == pytest.approx(900 / 9000)
 
 
 def test_stale_eval_bouts_fall_back_to_label_prevalence(tmp_path):
-    """A handful of eval-split bouts is not a deployment read-out — use labels.
+    """A handful of eval-split bouts is not a deployment read-out, use labels.
 
     Fear conditioning's ``behavior_bouts/`` held 133 bouts across 69 sessions
     (0.08 % of frames), written by the *evaluation* pipeline rather than a
@@ -626,7 +626,7 @@ def _project_with_bouts_and_labels(root: Path, per_behavior_frames: dict[str, in
 
 def test_preflight_blocks_a_behavior_with_too_few_examples(tmp_path):
     # Wet dog shake is by far the rarest, but only 6 clips of it were ever
-    # confirmed — fewer than the 8 exemplars the definition would consume.
+    # confirmed: fewer than the 8 exemplars the definition would consume.
     proj = _project_with_bouts_and_labels(
         tmp_path, {"wds": 30, "rear": 900}, {"wds": 6, "rear": 200})
     pf = rd.preflight_project(proj, ["wds", "rear"], n_seed_pos=8)
@@ -634,7 +634,7 @@ def test_preflight_blocks_a_behavior_with_too_few_examples(tmp_path):
     assert wds.behavior_name == "Wet dog shake" and wds.rank == 1
     assert wds.status == rd.PREFLIGHT_BLOCKED
     assert "Label more" in wds.note
-    # The hunt falls back to the next-rarest behaviour that IS runnable.
+    # The hunt falls back to the next-rarest behavior that IS runnable.
     assert pf.target is rear
     assert "Wet dog shake" not in pf.blocked_note()[:20]  # names the problem first
     assert "Falling back to Rear" in pf.blocked_note()
@@ -650,7 +650,7 @@ def test_preflight_warns_when_evidence_is_thin_but_runnable(tmp_path):
     # fewer than the smallest effort target, so the bars would be empty.
     assert 2 <= wds.n_held_out < 10
     assert wds.status == rd.PREFLIGHT_WARN
-    assert pf.target is wds                 # still the behaviour we'd hunt
+    assert pf.target is wds                 # still the behavior we'd hunt
     assert pf.blocked_note() == ""          # nothing is blocked
 
 
@@ -712,7 +712,7 @@ def test_combined_effort_target_is_reached_by_every_arm_in_every_project(tmp_pat
     # so 10 is the only target the bars can compare every arm at.
     assert rd.combined_effort_target(results) == 10
     # If one project's random arm never reaches 10 either, there is no honest
-    # shared target left — better none than a silently unpaired comparison.
+    # shared target left: better none than a silently unpaired comparison.
     results[1].curves[rd.STRATEGY_RANDOM].effort_to_n[10] = float("nan")
     assert rd.combined_effort_target(results) is None
 
@@ -849,7 +849,7 @@ def test_write_prism_emits_quality_tables(tmp_path):
 
 
 def test_disabled_strategy_note_names_the_arm_and_the_reason(tmp_path):
-    """An absent line reads as "we tested it and it did nothing" — say otherwise.
+    """An absent line reads as "we tested it and it did nothing", say otherwise.
 
     This is the HomeCage failure: the Essence Miner arm was disabled because the
     pose drive was unmounted, and the figure showed three arms with no hint that
@@ -913,7 +913,7 @@ def test_coverage_refuses_when_sessions_were_never_extracted():
 
 
 def test_coverage_warns_on_off_grid_ids_but_still_runs():
-    """Off-grid clip ids cap coverage but are benign — warn, don't refuse."""
+    """Off-grid clip ids cap coverage but are benign: warn, don't refuse."""
     pool = np.array(_ids("aaaa", list(range(0, 300, 15))))
     on_grid = _ids("aaaa", [0, 15, 30, 45, 60, 75, 90, 105, 120, 135, 150, 165, 180, 195, 210, 225, 240, 255])
     off_grid = _ids("aaaa", [7, 22])                      # not on the stride grid

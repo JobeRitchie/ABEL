@@ -7,7 +7,7 @@ matters most: a column populated for some sessions and all-NaN (or all-zero)
 for the rest pools to a perfectly healthy-looking feature, while the sessions
 missing it get scored off a constant input.
 
-That has bitten this project repeatedly and always the same way — an ROI drawn
+That has bitten this project repeatedly and always the same way, an ROI drawn
 for one cohort but not another, an R3D backfill that zero-filled the sessions it
 could not decode, two spellings of a distance column splitting one feature into
 two half-populated ones.  In every case the model still returns a probability,
@@ -37,13 +37,15 @@ from abel.services.roi_service import is_roi_column
 _SAMPLE_ROWS = 2000
 
 # How many columns must go constant together before that counts as a fill rather
-# than a rare event.  Fills arrive by whole feature family — 512 R3D dimensions,
-# hundreds of ROI columns — so anything in the low tens separates the two cleanly.
+# than a rare event.  Fills arrive by whole feature family, 512 R3D dimensions,
+# hundreds of ROI columns: so anything in the low tens separates the two cleanly.
 _MIN_CONSTANT_GROUP = 8
 
 _NON_FEATURE_COLS = frozenset({
     "segment_id", "start_frame", "end_frame", "frame", "animal_id",
     "session_id", "subject_id", "label", "behavior_id", "chunk_index",
+    "pose_present", "partner_present",
+    "pose_present_frac", "partner_present_frac",
 })
 
 
@@ -80,7 +82,7 @@ class CoverageSplit:
             f"{len(self.columns)} {self.family} feature(s) are {self.reason} for "
             f"{len(self.sessions_absent)} of "
             f"{len(self.sessions_absent) + len(self.sessions_present)} session(s) "
-            f"but populated for the rest — e.g. {cols}.\n"
+            f"but populated for the rest, e.g. {cols}.\n"
             f"    Affected sessions: {sess}"
         )
 
@@ -122,7 +124,7 @@ def audit_session_coverage(
     """Report feature columns whose availability splits across sessions.
 
     *frames_by_session* maps session id to that session's feature rows.  Pass
-    *columns* to restrict the audit to the features a consumer actually uses —
+    *columns* to restrict the audit to the features a consumer actually uses,
     a column no model reads is not worth reporting on.
 
     A column is "absent" for a session when it is entirely NaN there, or
@@ -174,7 +176,7 @@ def audit_session_coverage(
             absent = mask[:, j]
             if not absent.any():
                 continue
-            # "Present" means genuinely varying somewhere — a column that is
+            # "Present" means genuinely varying somewhere: a column that is
             # all-NaN in one session and constant in the rest never counts as
             # populated, and belongs to the uniformly-dead case.
             present = ~nan_mask[:, j] & ~const_mask[:, j]
@@ -183,12 +185,12 @@ def audit_session_coverage(
             key = (reason, tuple(s for s, a in zip(sessions, absent) if a))
             groups.setdefault(key, []).append(col)
 
-    # A rare-event feature — an occupancy flag for a zone the animal never
-    # entered — is legitimately constant for a whole session, and on the z-scored
+    # A rare-event feature: an occupancy flag for a zone the animal never
+    # entered: is legitimately constant for a whole session, and on the z-scored
     # representation cache it is not distinguishable from a zero-fill by its
     # values alone.  What separates them is breadth: a fill takes out an entire
     # feature family at once (512 R3D dimensions, hundreds of ROI columns), while
-    # a rare event goes flat in isolation.  All-NaN needs no such guard — nothing
+    # a rare event goes flat in isolation.  All-NaN needs no such guard, nothing
     # legitimately blanks a column for one session only.
     groups = {
         key: cols_in_group for key, cols_in_group in groups.items()

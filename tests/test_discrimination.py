@@ -101,7 +101,7 @@ def test_feature_ladder_gates_on_available_families():
         p2, has_social=False, has_video=False, has_context=False)]
     assert names2 == ["pose_only"]
 
-    # Context is its own rung — never folded into the pose baseline.
+    # Context is its own rung: never folded into the pose baseline.
     names3 = [s.name for s in disc.build_feature_sets(
         p, has_social=False, has_video=True, has_context=True)]
     assert names3 == ["pose_only", "pose_context", "pose_video", "all_features"]
@@ -115,8 +115,8 @@ def test_feature_ladder_gates_on_available_families():
 def test_pose_baseline_excludes_environment_features():
     """The 'pose-only' baseline must be the ANIMAL, not the arena.
 
-    Regression test for the bug that made "Sniff Novel vs Sniff Familiar" — the
-    same motor act at two different objects — score AUC 1.000 from "pose alone":
+    Regression test for the bug that made "Sniff Novel vs Sniff Familiar", the
+    same motor act at two different objects, score AUC 1.000 from "pose alone":
     a single ``body_centroid_to_roi_2_dist`` column was sitting inside the pose
     baseline. True pose scores 0.71 on that pair; the environment carries it.
     """

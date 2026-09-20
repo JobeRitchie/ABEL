@@ -4,8 +4,8 @@ The point of the posterior measure is that Viterbi occupancy is a *thresholded*
 readout: entering a state for one or two bouts costs two transition penalties,
 so a subject who performed a rare behavior a handful of times can report exactly
 0.000 occupancy in that behavior's state.  These tests pin the shape and the
-normalisation of the soft measure, the fallback when it is unavailable, and the
-behaviour that motivated it.
+normalization of the soft measure, the fallback when it is unavailable, and the
+behavior that motivated it.
 """
 
 from __future__ import annotations

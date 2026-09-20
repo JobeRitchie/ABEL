@@ -4,15 +4,15 @@ Measures the three stages a user actually waits on, per project, on one
 representative session, and normalizes each by the video's real duration so the
 numbers compare across datasets and machines:
 
-1. **Feature extraction / session** — pose cleaning + pose features + (optional)
+1. **Feature extraction / session**: pose cleaning + pose features + (optional)
    video/context features + windowed representation.  Timed by running ABEL's real
    ``FeaturePrepService.prepare`` on one session with the cache disabled.  Runs in
    an isolated temp copy of the project's config, so it never overwrites the
    project's own feature caches.
-2. **Model training (given features)** — time to fit one behavior classifier once
+2. **Model training (given features)**: time to fit one behavior classifier once
    the features exist.  Reuses the validation engine's real ``train_and_evaluate``
    fit; nothing is written to the project.
-3. **Dense inference / video** — running the trained model(s) over every window of
+3. **Dense inference / video**: running the trained model(s) over every window of
    a new session via ABEL's real ``TemporalRefinementService`` dense inference.
 
 Every stage is optional and independently selectable, so a machine that can't run
@@ -27,7 +27,7 @@ Run it on whatever projects you like::
 Writes ``benchmark.csv`` (tidy, paste-ready) + ``benchmark.png`` (grouped bars).
 
 NOTE: the *inference* stage re-runs dense temporal inference for the chosen
-session on the real project (idempotent — it recomputes that session's traces from
+session on the real project (idempotent, it recomputes that session's traces from
 the unchanged models/config).  Pass ``--stages extract train`` to skip it.
 """
 
@@ -137,7 +137,7 @@ class StageTiming:
 
         ``breakdown`` holds a JSON object; a nested document inside one cell of a
         spreadsheet is unusable in Excel/Prism, so it is expanded into real
-        ``breakdown_<substage>_sec`` columns.  ``x_realtime`` is dropped — it is
+        ``breakdown_<substage>_sec`` columns.  ``x_realtime`` is dropped, it is
         just ``1 / faster_than_realtime``, and shipping both invites a reader to
         plot the wrong one.
         """
@@ -371,8 +371,8 @@ def plot_benchmark(results: list[StageTiming], save_path: Path) -> Path:
 
     All three panels are keyed on the *project*, so they read across as one row.
     Training is timed per behavior, which used to put ~36 unrotated tick labels in
-    the middle panel (illegible, and not comparable to its neighbours); it is now
-    summarised per project as a bar of the mean fit time with every behavior's
+    the middle panel (illegible, and not comparable to its neighbors); it is now
+    summarized per project as a bar of the mean fit time with every behavior's
     individual time overlaid as a dot, so the spread is still visible.
     """
     import matplotlib

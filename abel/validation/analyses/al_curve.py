@@ -1,4 +1,4 @@
-"""Active learning vs. random clip selection — does uncertainty sampling win?
+"""Active learning vs. random clip selection, does uncertainty sampling win?
 
 The headline efficiency experiment.  Both strategies start from the *same* small
 random seed set (per seed), evaluate on the *same* fixed high-confidence held-out
@@ -7,12 +7,12 @@ acquisition rule:
 
 - **random**: add a random batch of pool clips (group-aware shuffle).
 - **active_learning**: train, score the *remaining pool*, and add the
-  top-ranked clips — the realistic ABEL loop.  The ranking mirrors ABEL's shipped
+  top-ranked clips, the realistic ABEL loop.  The ranking mirrors ABEL's shipped
   candidate generation, whose ``candidate_score`` is the model's predicted
   probability of the target behavior (``candidate_service._rank_segments``: it
   surfaces *likely instances* for the human to confirm, not boundary-ambiguous
   windows).  A ``"uncertainty"`` acquisition (|p−0.5| small) is also selectable
-  for comparison; on rare classes it underperforms — the known cold-start
+  for comparison; on rare classes it underperforms, the known cold-start
   failure of naive uncertainty sampling.
 
 The x-axis is **total clips reviewed** (real human labeling effort), so the win
@@ -129,7 +129,7 @@ def _acquisition_order(p_tar: np.ndarray, acquisition: str) -> np.ndarray:
     """Rank remaining-pool clips for acquisition (best first).
 
     ``probability`` (default, ABEL-faithful): highest predicted target probability
-    first — surfaces likely positives, matching ``candidate_score = prediction_prob``.
+    first, surfaces likely positives, matching ``candidate_score = prediction_prob``.
     ``uncertainty``: boundary-uncertain (|p−0.5| small) first.
     """
     if acquisition == "uncertainty":
@@ -162,17 +162,16 @@ def _run_strategy(
         ti = None
         res = None
         err = ""
-        # The confusion counts behind this cell's F1. They used to be computed here,
-        # used, and thrown away, leaving the cell's tp/fp/fn/tn at their structural
-        # zeros — indistinguishable in cells.parquet from a fit that genuinely got
-        # nothing right, and enough to corrupt any consumer that sums counts across
-        # analyses. They are now carried out with the F1 they produced.
+        # The confusion counts behind this cell's F1, carried out alongside it.
+        # Left at their structural zeros they make a real fit indistinguishable in
+        # cells.parquet from one that got nothing right, and corrupt any consumer
+        # that sums counts across analyses.
         tp = fp = fn = tn = 0
         try:
             res = _fit(trainer, project, behavior, sub, holdout, seed)
             pr = float(res.metrics.get("pr_auc", float("nan")))
             ti = res.target_idx
-            # Target-class F1, not the trainer's macro average — the whole point
+            # Target-class F1, not the trainer's macro average, the whole point
             # of this curve is how fast the model learns the *behavior*, and the
             # macro number floors near 0.50 no matter how badly it does at that
             # (see engine.target_class_prf).
@@ -184,9 +183,9 @@ def _run_strategy(
                 fn = int(np.sum((_t == 1) & (_p == 0)))
                 tn = int(np.sum((_t == 0) & (_p == 0)))
                 f1 = target_class_prf(tp, fp, fn)[2]
-        except Exception as exc:  # noqa: BLE001 — early tiny sets can be degenerate
+        except Exception as exc:  # noqa: BLE001, early tiny sets can be degenerate
             err = f"{type(exc).__name__}: {exc}"
-        log(f"{behavior_name}: {strategy} seed {seed} — {len(idx)} clips ({n_pos} pos) F1={f1:.3f}")
+        log(f"{behavior_name}: {strategy} seed {seed}, {len(idx)} clips ({n_pos} pos) F1={f1:.3f}")
 
         traj.append((len(idx), n_pos, f1, pr))
         scored = (tp + fp + fn + tn) > 0

@@ -3,7 +3,7 @@ source checkboxes the dialog shows.
 
 Stale keys in ``_source_filter_enabled`` (sources whose candidates were cleared
 or extracted away) previously left the button reading e.g. "(4/5)" while the
-dialog only listed 4 source types — "5 things to filter but only 4 options".
+dialog only listed 4 source types, "5 things to filter but only 4 options".
 ``_sync_source_filter_button`` prunes the dict to the currently-present source
 types so the count stays honest.
 """
@@ -68,11 +68,11 @@ def test_sync_count_matches_present_sources() -> None:
             "uncertainty": True,
             "umap_selection": False,
             "diversity": True,
-            "hard_negative": True,  # stale — no candidate uses it
+            "hard_negative": True,  # stale: no candidate uses it
         },
     )
 
     ClipExtractionTab._sync_source_filter_button(fake)
 
-    # 2 of 3 present sources enabled — the stale 4th key is gone.
+    # 2 of 3 present sources enabled: the stale 4th key is gone.
     assert fake._filter_sources_btn.text == "Filter Sources (2/3)"

@@ -1,8 +1,8 @@
 """Tests for the all-project embedding and its label placement.
 
-Covers the parts that decide what the figure *means* — feature-space resolution,
+Covers the parts that decide what the figure *means*, feature-space resolution,
 row filtering, the R3D zero-block guard, assay scoping, the behavior-vs-project QC
-— and the label geometry, which is the tab's whole reason to exist.  The reducer
+and the label geometry, which is the tab's whole reason to exist.  The reducer
 itself is not retested here; ``reducer="pca"`` stands in so the tests stay fast
 and do not depend on umap-learn being installed.
 """
@@ -515,7 +515,7 @@ def test_glow_pass_renders(tmp_path, two_projects):
 def test_behavior_names_fold_case_and_whitespace(tmp_path):
     """'Wet Dog Shake' and 'Wet dog shake' are one behavior, not two.
 
-    Two spellings meant two colours, two legend entries, and silent removal from
+    Two spellings meant two colors, two legend entries, and silent removal from
     the cross-assay conservation analysis, which needs one name in >= 2 assays.
     """
     a = _write_project(tmp_path / "A", name="A",

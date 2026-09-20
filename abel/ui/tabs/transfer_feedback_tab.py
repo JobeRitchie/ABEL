@@ -1,4 +1,4 @@
-"""Transfer Feedback subtab — judge how well a Direct Use run transferred.
+"""Transfer Feedback subtab: judge how well a Direct Use run transferred.
 
 Shows a per-subject health score with red flags and a population summary, so
 the user can spot subjects whose results look untrustworthy and deep-dive on
@@ -230,7 +230,7 @@ class TransferFeedbackTab(QWidget):
 
     def _populate(self, report) -> None:
         pop = report.population
-        trace_note = "" if report.has_traces else "  (no probability traces — confidence checks skipped)"
+        trace_note = "" if report.has_traces else "  (no probability traces: confidence checks skipped)"
         self._pop_lbl.setText(
             f"{pop.get('n_subjects', 0)} subjects  ·  "
             f"<span style='color:#EF5350'>{pop.get('n_poor', 0)} poor</span>  ·  "
@@ -267,7 +267,7 @@ class TransferFeedbackTab(QWidget):
         lines: list[str] = []
         color = _CAT_COLOR.get(s.category, "#B0BEC5")
         lines.append(
-            f"<b style='font-size:13px'>{s.subject}</b> — "
+            f"<b style='font-size:13px'>{s.subject}</b>, "
             f"<span style='color:{color}'>{s.category}</span> "
             f"(health {s.health_score:.0f}/100)"
         )
@@ -278,7 +278,7 @@ class TransferFeedbackTab(QWidget):
             for f in s.flags:
                 lines.append(f"&nbsp;&nbsp;⚠ {f}")
         else:
-            lines.append("<br>No red flags — looks consistent with the rest of the run.")
+            lines.append("<br>No red flags: looks consistent with the rest of the run.")
 
         c = s.confidence
         if c:

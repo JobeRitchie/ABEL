@@ -1,6 +1,6 @@
 """Export a finished run as a self-contained, hand-it-to-someone folder.
 
-A run directory is organised for the *code* — one subfolder per analysis, plus
+A run directory is organised for the *code*, one subfolder per analysis, plus
 holdout manifests, a parquet substrate and intermediate arrays.  That is the
 wrong shape for a person who wants "the figures and the data".  This flattens it
 into::
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pandas as pd
 
-# Copied through verbatim at the top level — provenance and the full dump.
+# Copied through verbatim at the top level: provenance and the full dump.
 _ROOT_FILES = ("run_manifest.json", "cells.parquet", "report.html",
                "summary_report.html", "ABEL_validation_report.pdf", "FINDINGS.md")
 

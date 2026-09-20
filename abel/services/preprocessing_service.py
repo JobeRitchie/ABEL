@@ -2,7 +2,7 @@
 
 Extracts video clips for a *specific* list of candidate windows selected by
 Candidate Generation.  Video is decoded only for the windows
-that scored above threshold — not for every possible window in the recording.
+that scored above threshold, not for every possible window in the recording.
 
 Pipeline position:
     Pose Features → Behavior Representations → Candidate Generation
@@ -257,15 +257,24 @@ class ClipExtractionService:
 
 
     @staticmethod
-    def build_individual_overlays(pose_svc, pose_path, settings=None, individual_subject_map=None):
+    def build_individual_overlays(
+        pose_svc, pose_path, settings=None, individual_subject_map=None,
+        identity_corrections=None,
+    ):
         """Build per-animal overlay dicts for a pose file: ``{name, color(BGR), cx, cy}``.
 
         Colors come from the shared palette (same as the identity dialog). ``name``
-        uses the session's identity map when available, else the track id. Returns
-        ``None`` for single-animal files (nothing to disambiguate) or on any error.
+        uses the session's identity map when available, else the track id. Any
+        ``identity_corrections`` are applied first, so a clip's labels follow the
+        same identities the features were extracted under, without them a
+        corrected session keeps showing the tracker's swap on every clip.
+        Returns ``None`` for single-animal files (nothing to disambiguate) or on
+        any error.
         """
         try:
-            multi = pose_svc.load_and_clean_multi(pose_path, settings)
+            multi = pose_svc.load_and_clean_multi(
+                pose_path, settings, identity_corrections=identity_corrections,
+            )
         except Exception:
             return None
         per = getattr(multi, "per_individual", {}) or {}
@@ -455,7 +464,7 @@ class ClipExtractionService:
 
             result.warnings.append(
 
-                "OpenCV not installed â€” frame range manifest written but no video files extracted."
+                "OpenCV not installed. The frame range manifest was written but no video files were extracted."
 
             )
 
@@ -501,7 +510,7 @@ class ClipExtractionService:
 
                 if cancel_flag and cancel_flag[0]:
 
-                    result.warnings.append("Cancelled by user.")
+                    result.warnings.append("Canceled by user.")
 
                     break
 
@@ -746,6 +755,60 @@ class ClipExtractionService:
 
 
     @staticmethod
+    def _all_animals_box(
+        individual_overlays, start_frame: int, end_frame: int,
+        margin: int, vid_w: int, vid_h: int,
+    ):
+        """``(x1, y1, x2, y2)`` holding every animal across the clip, or None.
+
+        Returns None for single-animal clips (nothing to widen for) and when no
+        animal has a usable position in the window.  The box is square so a
+        square output size does not stretch it, and never smaller than the crop
+        the preset would have produced on its own.
+        """
+        import numpy as np  # noqa: PLC0415
+
+        if not individual_overlays or len(individual_overlays) < 2:
+            return None
+        xs: list[float] = []
+        ys: list[float] = []
+        for ov in individual_overlays:
+            ocx, ocy = ov.get("cx"), ov.get("cy")
+            if ocx is None or ocy is None:
+                continue
+            n = min(len(ocx), len(ocy))
+            if n <= 0:
+                continue
+            lo = min(max(0, int(start_frame)), n - 1)
+            hi = min(max(lo, int(end_frame)), n - 1)
+            seg_x = np.asarray(ocx[lo:hi + 1], dtype=float)
+            seg_y = np.asarray(ocy[lo:hi + 1], dtype=float)
+            ok = np.isfinite(seg_x) & np.isfinite(seg_y)
+            if not ok.any():
+                continue
+            xs.extend(seg_x[ok].tolist())
+            ys.extend(seg_y[ok].tolist())
+        if not xs:
+            return None
+
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        # Half-span plus the preset's own margin, so the animals are not flush
+        # against the clip edges.
+        half = max((max(xs) - min(xs)) / 2.0, (max(ys) - min(ys)) / 2.0) + float(margin)
+        half = max(half, float(margin))
+        half = min(half, min(vid_w, vid_h) / 2.0)
+        cx = min(max(cx, half), vid_w - half)
+        cy = min(max(cy, half), vid_h - half)
+        x1 = max(0, int(round(cx - half)))
+        y1 = max(0, int(round(cy - half)))
+        x2 = min(vid_w, int(round(cx + half)))
+        y2 = min(vid_h, int(round(cy + half)))
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return None
+        return x1, y1, x2, y2
+
+    @staticmethod
 
     def _write_clip(
 
@@ -777,8 +840,8 @@ class ClipExtractionService:
 
         """Write a single video clip cropped around (cx, cy). Returns error string or None.
 
-        With ``static_center`` (default) the crop stays fixed on ``(cx, cy)`` — which
-        callers pass as the clip-mean centroid — so the view does not jitter when the
+        With ``static_center`` (default) the crop stays fixed on ``(cx, cy)``, which
+        callers pass as the clip-mean centroid, so the view does not jitter when the
         per-frame centroid is noisy. ``individual_overlays`` draws a colored dot per
         animal plus a legend so reviewers can tell the animals apart.
         """
@@ -821,6 +884,8 @@ class ClipExtractionService:
 
         vid_h, vid_w = probe.shape[:2]
 
+        full_frame = bool(getattr(preset, "full_frame", False))
+
         m = ClipExtractionService._scaled_crop_margin(
 
             preset.crop_margin_px,
@@ -833,9 +898,15 @@ class ClipExtractionService:
 
         )
 
-        out_w = preset.resize_width if preset.resize_width > 0 else (m * 2)
-
-        out_h = preset.resize_height if preset.resize_height > 0 else (m * 2)
+        if full_frame:
+            # Keep the arena's proportions: a square output would stretch a
+            # widescreen cage, and the reviewer is here to judge where the animal
+            # is, not a distorted version of it.
+            out_w = preset.resize_width if preset.resize_width > 0 else vid_w
+            out_h = max(2, int(round(out_w * vid_h / float(vid_w))) // 2 * 2)
+        else:
+            out_w = preset.resize_width if preset.resize_width > 0 else (m * 2)
+            out_h = preset.resize_height if preset.resize_height > 0 else (m * 2)
 
         out_fps = preset.output_fps if preset.output_fps > 0 else 30.0
 
@@ -851,8 +922,16 @@ class ClipExtractionService:
 
 
 
+        group_box = None
+        if not full_frame and getattr(preset, "include_all_animals", True):
+            group_box = ClipExtractionService._all_animals_box(
+                individual_overlays, start_frame, end_frame, m, vid_w, vid_h,
+            )
+
         use_dynamic_center = (
             not static_center
+            and not full_frame
+            and group_box is None  # a box sized to hold every animal must not pan
             and pose_centroid_x is not None
             and pose_centroid_y is not None
         )
@@ -873,13 +952,18 @@ class ClipExtractionService:
 
 
 
-        x1 = max(0, int(cx - m))
+        if full_frame:
+            x1, y1, x2, y2 = 0, 0, vid_w, vid_h
+        elif group_box is not None:
+            x1, y1, x2, y2 = group_box
+        else:
+            x1 = max(0, int(cx - m))
 
-        y1 = max(0, int(cy - m))
+            y1 = max(0, int(cy - m))
 
-        x2 = min(vid_w, int(cx + m))
+            x2 = min(vid_w, int(cx + m))
 
-        y2 = min(vid_h, int(cy + m))
+            y2 = min(vid_h, int(cy + m))
 
 
 
@@ -1007,13 +1091,38 @@ class ClipExtractionService:
                             cv2.circle(crop, (px, py), dot_r + 1, (0, 0, 0), -1, cv2.LINE_AA)
                             cv2.circle(crop, (px, py), dot_r, color, -1, cv2.LINE_AA)
 
+                    # The legend is a margin note, not part of the picture: size
+                    # it against the frame so long track names can't swallow the
+                    # arena on a small full-frame clip (a fixed scale that suits
+                    # a tight crop covered a third of the width there).
                     lfont = cv2.FONT_HERSHEY_SIMPLEX
-                    lscale = max(0.35, min(0.55, out_w / 420.0))
-                    row_h = max(14, int(18 * lscale / 0.4))
-                    sw = max(8, row_h - 6)
+                    names = [str(ov.get("name", "")) for ov in individual_overlays]
+                    unit_w = max(
+                        1, max((cv2.getTextSize(n, lfont, 1.0, 1)[0][0] for n in names), default=1)
+                    )
+                    lscale = max(0.22, min(
+                        0.5,
+                        (out_w * 0.22) / float(unit_w),       # text width budget
+                        (out_h * 0.05) / 22.0,                # row height budget
+                    ))
+                    (_uw, text_h), _ubl = cv2.getTextSize("Ag", lfont, lscale, 1)
+                    row_h = text_h + 6
+                    sw = max(5, text_h)
                     lpad = 4
+                    text_budget = max(16.0, out_w * 0.22)
+
+                    def _fit(label: str) -> str:
+                        """Trim a name that is still too wide at the floor scale."""
+                        if cv2.getTextSize(label, lfont, lscale, 1)[0][0] <= text_budget:
+                            return label
+                        for cut in range(len(label) - 1, 0, -1):
+                            short = label[:cut] + ".."
+                            if cv2.getTextSize(short, lfont, lscale, 1)[0][0] <= text_budget:
+                                return short
+                        return label[:1]
+
                     for i, ov in enumerate(individual_overlays):
-                        name = str(ov.get("name", ""))
+                        name = _fit(str(ov.get("name", "")))
                         color = ov.get("color", (0, 0, 255))
                         (tw, _th), _bl = cv2.getTextSize(name, lfont, lscale, 1)
                         total_w = sw + 4 + tw
@@ -1218,6 +1327,59 @@ class ClipExtractionService:
 # ---------------------------------------------------------------------------
 
 
+def regenerate_clips_for_sessions(
+    project_root: Path,
+    session_ids: "list[str] | set[str]",
+    progress_callback: "Callable[[int, int], None] | None" = None,
+    cancel_flag: "list[bool] | None" = None,
+) -> dict:
+    """Rebuild the clips a session already has, after its features were re-extracted.
+
+    A session whose tracking was corrected gets new features but keeps the clips
+    that were cut under the old tracking, same filenames, old overlays and old
+    crop boxes, which is exactly the kind of mismatch that makes a reviewer
+    distrust what they are looking at.  This re-cuts every window that currently
+    has a clip for those sessions, leaving other sessions' clips untouched.
+
+    Returns the same summary shape as :func:`regenerate_clips_for_windows`.
+    """
+    from abel.services.candidate_service import CandidateGenerationService
+
+    sids = {str(s) for s in (session_ids or []) if str(s)}
+    summary: dict = {"extracted": 0, "requested": 0, "session_ids": [], "warnings": []}
+    if not sids:
+        return summary
+
+    clip_svc = ClipExtractionService()
+    clip_svc.set_project(project_root)
+    existing = clip_svc.load_manifest()
+    have_clips = {
+        str(c.clip_id) for c in (existing.clips if existing is not None else [])
+        if str(c.session_id) in sids
+    }
+    if not have_clips:
+        summary["warnings"].append(
+            "No existing clips for these sessions: nothing to refresh."
+        )
+        return summary
+
+    candidates = CandidateGenerationService()
+    candidates.set_project(project_root)
+    windows = [
+        w for w in candidates.load_candidates()
+        if str(w.session_id) in sids and str(w.window_id) in have_clips
+    ]
+    if not windows:
+        summary["warnings"].append(
+            f"{len(have_clips)} clip(s) exist for these sessions but their candidate "
+            "windows are no longer in the candidate store: regenerate candidates first."
+        )
+        return summary
+    return regenerate_clips_for_windows(
+        project_root, windows, progress_callback=progress_callback, cancel_flag=cancel_flag,
+    )
+
+
 def regenerate_clips_for_windows(
     project_root: Path,
     windows: "list[CandidateWindow]",
@@ -1253,7 +1415,7 @@ def regenerate_clips_for_windows(
 
     manifest = imports.load_manifest(project_root)
     if manifest is None:
-        summary["warnings"].append("Import manifest not found — run Data Import first.")
+        summary["warnings"].append("Import manifest not found: run Data Import first.")
         return summary
 
     # Extraction settings mirror the Clip Extraction tab so regenerated clips
@@ -1274,11 +1436,19 @@ def regenerate_clips_for_windows(
     preset = next((p for p in presets if p.preset_id == preset_id), None)
     if preset is None:
         preset = presets[0]
+    # Regenerated clips must match the ones the Preprocessing tab writes, so the
+    # crop area and full-frame choice come from the same saved UI settings.
+    overrides: dict = {}
     crop_area_percent = float(ui.get("crop_area_percent", 0.0) or 0.0)
     if crop_area_percent > 0:
-        crop_area_scale = max(0.5, min(10.0, crop_area_percent / 100.0))
+        overrides["crop_area_scale"] = max(0.5, min(10.0, crop_area_percent / 100.0))
+    if "full_frame" in ui:
+        overrides["full_frame"] = bool(ui.get("full_frame"))
+    if "include_all_animals" in ui:
+        overrides["include_all_animals"] = bool(ui.get("include_all_animals"))
+    if overrides:
         preset = PreprocessingPreset.model_validate(
-            preset.model_dump(mode="python") | {"crop_area_scale": crop_area_scale}
+            preset.model_dump(mode="python") | overrides
         )
 
     # Group requested windows by canonical session id, applying before/after
@@ -1334,7 +1504,7 @@ def regenerate_clips_for_windows(
 
     for sid, sess_windows in session_plan.items():
         if cancel_flag and cancel_flag[0]:
-            summary["warnings"].append("Cancelled by user.")
+            summary["warnings"].append("Canceled by user.")
             break
 
         video_path = imports.video_path_for_session(manifest, sid)
@@ -1367,6 +1537,7 @@ def regenerate_clips_for_windows(
             individual_overlays = ClipExtractionService.build_individual_overlays(
                 pose_processing, pose_path,
                 getattr(manifest, "smoothing_settings", None), _imap,
+                list(getattr(_sess, "identity_corrections", None) or []) if _sess else None,
             )
 
         cfg = ClipExtractionConfig(
@@ -1430,7 +1601,7 @@ def regenerate_clips_for_windows(
 
 # ---------------------------------------------------------------------------
 
-# Backwards-compatibility alias â€” remove once Phase 3 tabs are wired
+# Backwards-compatibility alias. Remove once Phase 3 tabs are wired
 
 # ---------------------------------------------------------------------------
 

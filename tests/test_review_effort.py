@@ -2,7 +2,7 @@
 
 Covers the gap classification, the reviewer-channel split, the per-project and
 pooled statistics, the volume denominators and the tidy/Prism exporters, against
-synthetic decision logs written to a temp project — no real project, no training.
+synthetic decision logs written to a temp project, no real project, no training.
 """
 
 from __future__ import annotations
@@ -248,7 +248,7 @@ def test_volume_ratios_pool_only_over_projects_with_measurable_video():
     assert pooled["active_hours"] == pytest.approx(2.0)      # both projects
     assert pooled["video_active_hours"] == pytest.approx(1.0)  # only the measured one
     assert pooled["video_hours"] == pytest.approx(20.0)
-    # 1 h of review against 20 h of footage — not 2 h, which would read as 2x worse.
+    # 1 h of review against 20 h of footage: not 2 h, which would read as 2x worse.
     assert pooled["review_hours_per_video_hour"] == pytest.approx(0.05)
     assert pooled["saving_factor_1x"] == pytest.approx(20.0)
 

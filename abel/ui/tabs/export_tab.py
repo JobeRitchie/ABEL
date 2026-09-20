@@ -404,7 +404,7 @@ class ExportTab(QWidget):
         self._set_export_buttons_enabled(False)
         self._progress.setRange(0, 0)
         self._progress.setFormat("Working...")
-        self._status.setText("Exporting Word behavior matrix...")
+        self._status.setText("Exporting Word behavior matrix…")
 
         filename = self._docx_filename.text().strip() or "behavior_presence.docx"
 
@@ -420,7 +420,7 @@ class ExportTab(QWidget):
 
     def _pick_boutframe_behaviors(self) -> None:
         """Open a dialog to choose which behaviors to include in boutframe exports."""
-        # Use behavior definitions directly — avoids heavy I/O on the main thread.
+        # Use behavior definitions directly: avoids heavy I/O on the main thread.
         behavior_defs = self._behavior_service.behaviors if self._behavior_service else []
         available = sorted(b.name for b in behavior_defs if b.is_active)
         if not available:
@@ -484,7 +484,7 @@ class ExportTab(QWidget):
         self._set_export_buttons_enabled(False)
         self._progress.setRange(0, 0)
         self._progress.setFormat("Working...")
-        self._status.setText("Exporting boutframes workbook...")
+        self._status.setText("Exporting boutframes workbook…")
 
         worker = TaskWorker(
             self._service.export_boutframes_xlsx,
@@ -557,7 +557,7 @@ class ExportTab(QWidget):
         self._set_export_buttons_enabled(False)
         self._progress.setRange(0, 0)
         self._progress.setFormat("Working...")
-        self._status.setText("Exporting TRACY position files...")
+        self._status.setText("Exporting TRACY position files…")
 
         worker = TaskWorker(
             self._service.export_abel_position_csv,
@@ -624,7 +624,7 @@ class ExportTab(QWidget):
         dlg.exec()
 
     def _pick_behaviors(self) -> list[str] | None:
-        """Show a dialog to choose which behaviors to annotate. Returns selected names, or None if cancelled."""
+        """Show a dialog to choose which behaviors to annotate. Returns selected names, or None if canceled."""
         behavior_defs = self._behavior_service.behaviors if self._behavior_service else []
         active_names = [b.name for b in behavior_defs if b.is_active]
 
@@ -678,7 +678,7 @@ class ExportTab(QWidget):
         title: str = "Select Sessions to Export",
         prompt: str = "Choose which sessions to include in labeled video export:",
     ) -> list[str] | None:
-        """Show a dialog to choose which sessions to export. Returns selected session IDs, or None if cancelled."""
+        """Show a dialog to choose which sessions to export. Returns selected session IDs, or None if canceled."""
         sessions = self._service.list_available_sessions()
         if not sessions:
             return []
@@ -755,8 +755,8 @@ class ExportTab(QWidget):
         layout.addWidget(QLabel("Choose the video overlay style:"))
 
         combo = QComboBox()
-        combo.addItem("Basic – active behavior label", "basic")
-        combo.addItem("Advanced – live probabilities & cumulative durations", "advanced")
+        combo.addItem("Basic: active behavior label", "basic")
+        combo.addItem("Advanced: live probabilities & cumulative durations", "advanced")
         layout.addWidget(combo)
 
         btns = QDialogButtonBox(
@@ -779,13 +779,13 @@ class ExportTab(QWidget):
 
         session_filter = self._pick_subjects()
         if session_filter is None:
-            return  # User cancelled
+            return  # User canceled
         behavior_filter = self._pick_behaviors()
         if behavior_filter is None:
-            return  # User cancelled
+            return  # User canceled
         overlay_mode = self._pick_overlay_mode()
         if overlay_mode is None:
-            return  # User cancelled
+            return  # User canceled
 
         candidates, decisions = self._load_inputs()
         self._exporting_labeled_videos = True
@@ -801,7 +801,7 @@ class ExportTab(QWidget):
         self._progress.setRange(0, 1)
         self._progress.setValue(0)
         self._progress.setFormat("Starting...")
-        self._status.setText("Exporting labeled tracking videos...")
+        self._status.setText("Exporting labeled tracking videos…")
         self._export_log.clear()
         self._append_export_log(
             "Starting labeled video export "

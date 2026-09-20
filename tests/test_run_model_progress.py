@@ -8,8 +8,8 @@ Three defects this locks in, all observed on a real 3-chamber-social run:
 * Any stage that emitted several progress messages was mis-measured: the
   estimator refreshed its stage-entry timestamp on every repeat call, so a
   four-minute stage was booked as the gap since its last message.
-* Assembling the training set — enrichment plus the R3D backfill, measured at
-  148 s for 1292 segments — reported nothing at all, so the UI sat on
+* Assembling the training set: enrichment plus the R3D backfill, measured at
+  148 s for 1292 segments, reported nothing at all, so the UI sat on
   "Built representations for …" with no sign of life.
 """
 

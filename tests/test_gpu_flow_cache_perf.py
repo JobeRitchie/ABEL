@@ -1,4 +1,4 @@
-"""P3: GPU optical-flow allocator churn fix — parity + speedup.
+"""P3: GPU optical-flow allocator churn fix, parity + speedup.
 
 The flow batch functions previously called ``torch.cuda.empty_cache()`` after
 *every* sub-batch (success path included), which returns all cached blocks to the
@@ -87,5 +87,5 @@ def test_no_percall_empty_cache_is_faster():
         gof.compute_flow_pairs_gpu(prev, curr, gpu_batch_size=8)
         torch.cuda.synchronize()
     elapsed = time.perf_counter() - t0
-    # Loose upper bound — just guards against a gross regression on tiny frames.
+    # Loose upper bound: just guards against a gross regression on tiny frames.
     assert elapsed < 30.0

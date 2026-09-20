@@ -34,7 +34,7 @@ def load_behavior_names(project_root: str | Path) -> dict[str, str]:
 def apply_behavior_names(
     df: pd.DataFrame, names: dict[str, str],
 ) -> pd.DataFrame:
-    """Replace behaviour IDs with short names in a DataFrame's Behavior column."""
+    """Replace behavior IDs with short names in a DataFrame's Behavior column."""
     if "Behavior" in df.columns and names:
         df = df.copy()
         df["Behavior"] = df["Behavior"].map(lambda b: names.get(b, b))

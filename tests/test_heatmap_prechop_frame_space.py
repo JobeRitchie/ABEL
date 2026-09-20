@@ -3,18 +3,18 @@
 Bug (found on the Sarah_nsf_ABEL project): the Analytics tab rebases
 ``_raw_bouts`` to the per-subject analysis prechop, so frame 0 becomes test
 onset and latency/time-bin metrics are measured from there.  Pose arrays are
-never rebased — they stay indexed by raw video frame.  The Spatial Heatmap and
+never rebased, they stay indexed by raw video frame.  The Spatial Heatmap and
 Density Analysis views looked bout positions up in the pose using the rebased
 frames, so every plotted coordinate came from 1000-4160 frames (33-139 s on
-that project) before the behaviour actually happened.  Every behaviour then
+that project) before the behavior actually happened.  Every behavior then
 smeared into the same generic arena-occupancy map: Eat, which happens only at
-the centre food pellet, scattered across the whole arena.
+the center food pellet, scattered across the whole arena.
 
 Worse, those views also re-applied ``_apply_prechop_to_bout_df(rebase=False)``
 to the already-rebased frames, clamping starts up to the offset a second time
 and silently dropping bouts.
 
-The fix is ``_unrebase_bout_df_to_video_frames``, which adds the offset back —
+The fix is ``_unrebase_bout_df_to_video_frames``, which adds the offset back,
 the same ``+ pre`` correction ``_bout_velocity_records`` already applied.
 """
 
@@ -57,7 +57,7 @@ def test_unrebase_restores_raw_video_frames() -> None:
     out = _unrebase(host, df)
     assert out["start_frame"].tolist() == [1500, 4660]
     assert out["end_frame"].tolist() == [1560, 4750]
-    # Durations are unchanged — only the origin moves.
+    # Durations are unchanged: only the origin moves.
     assert (out["end_frame"] - out["start_frame"]).tolist() == [60, 90]
 
 

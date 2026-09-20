@@ -1,9 +1,9 @@
 """The distance/ROI rows must survive a round-trip through their disk cache.
 
-Those two pseudo-behaviors are derived from pose files, which the behaviour
+Those two pseudo-behaviors are derived from pose files, which the behavior
 analytics cache never stored, so every refresh re-read every pose file on the UI
 thread -- about 7 s of frozen window on a 69-session project, even when the
-behaviour rows themselves came straight from cache.  They now have their own
+behavior rows themselves came straight from cache.  They now have their own
 cache, and these tests pin the two properties that make it safe: a faithful
 round-trip (NaN latency included, since JSON has no NaN literal) and a
 fingerprint that misses whenever an input changes.
@@ -31,7 +31,7 @@ def _make_host(project_root: Path) -> SimpleNamespace:
 
 ROWS = [
     {"session_id": "s1", "subject": "M01", "behavior_id": "__distance__",
-     "behavior": "Distance travelled", "n_bouts": 0.0, "time_spent_s": 0.0,
+     "behavior": "Distance traveled", "n_bouts": 0.0, "time_spent_s": 0.0,
      "mean_bout_s": 0.0, "latency_s": float("nan"), "distance_cm": 1234.5},
     {"session_id": "s1", "subject": "M01", "behavior_id": "__roi_1__",
      "behavior": "Time in ROI 1", "n_bouts": 4.0, "time_spent_s": 31.25,

@@ -4,10 +4,10 @@ A freehand trace arrives as one sample per ~2 canvas pixels of mouse travel, so
 storing it verbatim put hundreds to thousands of vertices per zone per subject
 into ``config/environment_rois.yaml``.  That file is parsed several times per
 subject switch, so a project drawn by hand went from a 10 KB config to megabytes
-and from a 125 ms switch to tens of seconds — while rectangle projects, which is
+and from a 125 ms switch to tens of seconds, while rectangle projects, which is
 everything drawn before, stayed fast and hid the problem.
 
-Three defences, one test group each: decimate the trace at capture, cache the
+Three defenses, one test group each: decimate the trace at capture, cache the
 parse so repeated loads are free, and compact the files already written.
 """
 
@@ -67,7 +67,7 @@ def test_simplify_freehand_drops_most_of_a_dense_trace():
 
 
 def test_simplify_freehand_keeps_the_outline_where_it_was():
-    """Decimation is a storage win, not a redraw — the shape must not move."""
+    """Decimation is a storage win, not a redraw, the shape must not move."""
     pts = _traced_circle(900)
     out = roi_geometry.simplify_freehand(pts)
     before = roi_geometry.normalize_roi({"shape": "polygon", "points": pts})

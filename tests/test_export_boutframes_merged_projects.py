@@ -101,7 +101,7 @@ def test_boutframes_export_includes_merged_project_subjects(tmp_path: Path) -> N
     wb = load_workbook(out.output_path)
     sheets = [name for name in wb.sheetnames if name != "_bout_counts"]
     assert "HostMouse" in sheets
-    # "StudyB/ExtMouse" — the forward slash is not legal in an Excel sheet title.
+    # "StudyB/ExtMouse": the forward slash is not legal in an Excel sheet title.
     assert "StudyB_ExtMouse" in sheets
 
     ext_rows = list(wb["StudyB_ExtMouse"].iter_rows(values_only=True))

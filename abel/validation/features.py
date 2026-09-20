@@ -1,36 +1,36 @@
-"""Feature-family taxonomy — the single source of truth for every ablation.
+"""Feature-family taxonomy: the single source of truth for every ablation.
 
 Four families are separated so each can be ablated on its own:
 
-* **pose** — the animal's own body: pose geometry and kinematics, derived purely
+* **pose**: the animal's own body: pose geometry and kinematics, derived purely
   from the tracked skeleton. This is the ablation *baseline*.
-* **context** — the *environment*, and strictly its **geometry**: ROI/zone occupancy,
+* **context**: the *environment*, and strictly its **geometry**: ROI/zone occupancy,
   distances and angles to objects/targets, ROI presence flags, arena walls and corners
   (``roi_*_present``, ``*_to_roi_*``, ``*_to_target_dist``, ``*_angle_to_*``,
   ``zone``/``arena``/``wall``/``corner``…).  These survive with pose alone; no camera
   is needed to compute them once the ROI is known.
-* **video** — pixel-derived signal from ``context_feature_service`` (optical flow,
-  surface/substrate motion, R3D embeddings) — *including* the ROI-anchored flow
+* **video**: pixel-derived signal from ``context_feature_service`` (optical flow,
+  surface/substrate motion, R3D embeddings), *including* the ROI-anchored flow
   columns (``flow_mag_near_target``, ``flow_mag_near_roi_N``).  Those are optical
   flow: they exist only because a camera saw pixels move, and they die with the video.
   The ROI only says *where* the flow was sampled.  Bucketing them as context would let
   a "video off" ablation quietly keep reading pixels.
-* **social** — inter-animal interaction features (``social_*``): distance to the
+* **social**: inter-animal interaction features (``social_*``): distance to the
   nearest animal, approach velocity, heading alignment, contact state.
 
 **Why context MUST be its own family (learned the hard way).** It used to be folded
-into "pose", so the ablation baseline labelled "Pose only" was silently handed the
+into "pose", so the ablation baseline labeled "Pose only" was silently handed the
 environment. On a novel-object project that is catastrophic: *Sniff Novel* vs
 *Sniff Familiar* are the same motor act differing only in which object the animal
 is at, and a single ``body_centroid_to_roi_2_dist`` column separates them at
-AUC 0.999 on its own. The "pose-only" baseline scored **1.000** on that pair —
+AUC 0.999 on its own. The "pose-only" baseline scored **1.000** on that pair,
 while true pose (ROI removed) scores **0.66**. Every gain the environment was
 producing was being credited to pose, and the pairs that most needed interrogating
 were reported as trivially solved.
 
 The classifier is shared with :mod:`abel.validation.analyses.behaviorscape` (which
 re-exports it) so the ablation bars and the behaviorscape modality bands can never
-disagree about what a feature *is* — they did, and that divergence is what hid the
+disagree about what a feature *is*, they did, and that divergence is what hid the
 bug: behaviorscape already had a ``context`` modality that the ablation did not.
 """
 
@@ -59,12 +59,12 @@ MODALITY_ORDER = [
 # and embedded words don't cause misclassification.
 _VIDEO_KEYS = (
     "flow", "surface", "r3d", "optical", "video", "pixel", "texture",
-    # "local" — in this codebase a ``local`` column is always a pixel-neighbourhood
+    # "local": in this codebase a ``local`` column is always a pixel-neighborhood
     # statistic from ContextFeatureService's frame pipeline, never a pose quantity:
     # local_surface_*, flow_entropy_local, and (the reason this key exists)
     # nose_local_change_rate / nose_local_variance, which are frame-differencing on a
     # tight crop around the nose tip.  Without it those two matched no key at all and
-    # fell through to the POSE default — putting pixel-derived signal inside the
+    # fell through to the POSE default: putting pixel-derived signal inside the
     # "pose only" ablation baseline, the exact bug the module docstring describes for
     # context.
     "local",
@@ -80,7 +80,7 @@ _CONTEXT_SUBSTR_KEYS = ("target", "occup")
 def classify_modality(feature: str) -> str:
     """Map a feature column name to one of the five data modalities."""
     name = str(feature).lower()
-    # Social carries an unambiguous prefix and must be caught first —
+    # Social carries an unambiguous prefix and must be caught first,
     # ``social_approach_velocity_*`` would otherwise read as kinematics.
     if name.startswith("social_"):
         return MODALITY_SOCIAL
@@ -89,12 +89,12 @@ def classify_modality(feature: str) -> str:
     def _has(keys: tuple[str, ...]) -> bool:
         return any(k in tok for tok in tokens for k in keys)
 
-    # Video BEFORE context: ``flow_mag_near_roi_2`` is optical flow — it exists only
+    # Video BEFORE context: ``flow_mag_near_roi_2`` is optical flow, it exists only
     # because a camera saw pixels move, and it dies with the video the way every other
     # flow column does.  The ROI merely says *where* the flow was sampled; it does not
     # make the measurement an environment descriptor.  So the "is video worth it?"
     # ablation must own it, and dropping video must drop it.  Only the *geometric* ROI
-    # columns — distances, angles, presence — describe the environment, and none of
+    # columns: distances, angles, presence, describe the environment, and none of
     # them carries a video token, so this ordering moves the flow columns and nothing
     # else.
     if _has(_VIDEO_KEYS):
@@ -156,7 +156,7 @@ def video_only_cols(df: pd.DataFrame) -> list[str]:
 
 #: Column prefix of the R3D-18 appearance embedding.  Canonical definition lives in
 #: :mod:`abel.services.r3d_feature_service`; duplicated here as a bare string so the
-#: taxonomy — imported by every analysis — does not drag in that module's pose/import
+#: taxonomy, imported by every analysis, does not drag in that module's pose/import
 #: service dependencies just to test a prefix.
 R3D_PREFIX = "r3d_"
 
@@ -179,7 +179,7 @@ def r3d_only_cols(df: pd.DataFrame) -> list[str]:
 
 
 def handcrafted_video_cols(df: pd.DataFrame) -> list[str]:
-    """Video features that are *not* R3D — optical flow, surface/substrate motion.
+    """Video features that are *not* R3D: optical flow, surface/substrate motion.
 
     The named, interpretable half of the video family: what ABEL computed from
     pixels before the learned embedding existed.
@@ -202,7 +202,7 @@ def informative_cols(df: pd.DataFrame, cols: list[str]) -> list[str]:
     A column that is constant (or entirely NaN) carries no signal: a tree model
     never splits on it, so adding it produces a bit-identical fit.  That matters
     for gating an ablation rung, because "present but constant" and "absent" are
-    the same experiment.  The case in the wild is a project with no ROI defined —
+    the same experiment.  The case in the wild is a project with no ROI defined,
     its environment/ROI columns exist and are all zero, so a "+ Environment /
     ROI" bar there is not a measurement of "context does not help", it is the
     absence of a measurement, and pooling it as a zero dilutes the rung's mean
@@ -229,14 +229,14 @@ def select_feature_cols(
     """Pose baseline plus the requested add-on families, in a stable order.
 
     ``include_r3d`` defaults to ``None`` = "R3D rides along with ``include_video``",
-    which is the historical behaviour every existing analysis depends on: the
+    which is the historical behavior every existing analysis depends on: the
     ablation's "+ Video features" bar and the discrimination "+ Video" set stay a
     single video lump, so their numbers remain comparable with runs made before the
     embedding shipped.  That path also keeps the *original column order* rather than
     re-grouping handcrafted-then-R3D, since column order breaks ties in XGBoost's
     split search and a reordering alone would perturb old results.
 
-    Pass ``True``/``False`` explicitly only to isolate the family — see
+    Pass ``True``/``False`` explicitly only to isolate the family, see
     :mod:`abel.validation.r3d_value`, which is the one analysis that does.
     """
     cols = pose_only_cols(df)
@@ -256,7 +256,7 @@ def select_feature_cols(
 
 
 def family_counts(df: pd.DataFrame) -> dict[str, int]:
-    """How many columns each family contributes — for run manifests / sanity checks."""
+    """How many columns each family contributes: for run manifests / sanity checks."""
     counts = {m: 0 for m in MODALITY_ORDER}
     for c in numeric_feature_cols(df):
         counts[classify_modality(c)] = counts.get(classify_modality(c), 0) + 1

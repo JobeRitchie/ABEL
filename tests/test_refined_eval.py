@@ -3,7 +3,7 @@
 Covers the refinement math, per-behavior settings resolution, held-out metric
 computation (including the label-polarity trap where the target is encoded as
 class 0), and the "no held-out probability -> None" contract that makes the
-Validation tab show "—" for models trained before the column existed.
+Validation tab show "-" for models trained before the column existed.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def test_bout_counts_collapse_window_boundary_slop() -> None:
     # One real bout spans windows 2..6; the model fires a hair wide (windows 1..7)
     # plus one isolated stray window far away. Window-level scoring would rack up
     # false positives on the boundary/stray windows, but bout matching sees one
-    # correct detection (+1 TP) and one stray bout (+1 FP) — no phantom FN.
+    # correct detection (+1 TP) and one stray bout (+1 FP), no phantom FN.
     n = 12
     starts = np.arange(0, n * 10, 10)
     ends = starts + 9
@@ -123,7 +123,7 @@ def test_refinement_does_not_bridge_unobserved_gaps() -> None:
     """A wide unlabeled gap must not be interpolated into a predicted bout.
 
     Two confidently-positive windows sit ~500 frames apart with nothing observed
-    between them — the shape of a held-out labeled subset. Interpolating across
+    between them, the shape of a held-out labeled subset. Interpolating across
     that gap used to raise the whole span above the onset threshold, inventing a
     detection on frames the model never scored.
     """
@@ -262,7 +262,7 @@ def test_missing_prob_column_returns_none(tmp_path: Path) -> None:
 
 
 def test_target_encoded_as_zero_is_oriented_correctly(tmp_path: Path) -> None:
-    # Positive class (target) is encoded as 0 — the Approach case. Probability is
+    # Positive class (target) is encoded as 0: the Approach case. Probability is
     # P(target); it is HIGH for true positives (label_true==0). If the engine
     # wrongly assumed positive==1 every metric would collapse.
     label_true = [0] * 30 + [1] * 90            # 30 target, 90 negative
@@ -283,7 +283,7 @@ def test_target_encoded_as_zero_is_oriented_correctly(tmp_path: Path) -> None:
 
 
 def test_refined_recovers_positives_when_onset_below_half(tmp_path: Path) -> None:
-    # Probabilities for true positives sit at 0.4 — argmax@0.5 misses them all,
+    # Probabilities for true positives sit at 0.4, argmax@0.5 misses them all,
     # but a tuned onset threshold of 0.3 recovers them. Demonstrates the value of
     # reporting refined metrics for imbalanced behaviors.
     label_true = [0] * 40 + [1] * 80

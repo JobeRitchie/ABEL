@@ -1,10 +1,10 @@
-"""Tests for baseline import — seed a feature-extracted-but-untrained project
+"""Tests for baseline import: seed a feature-extracted-but-untrained project
 with another project's clips + labeled feature rows + trained models.
 
 Covers the key scenario the feature targets: a host that has extracted features
 (``segment_features.parquet``) but has NOT run active learning (no
-``training_set.parquet``, no behaviours, no models), and the partial-overlap edge
-case where the host already has some — but not all — of the source's behaviours.
+``training_set.parquet``, no behaviors, no models), and the partial-overlap edge
+case where the host already has some, but not all, of the source's behaviors.
 """
 
 from __future__ import annotations
@@ -100,7 +100,7 @@ def _make_source(tmp_path: Path, name: str = "DONOR") -> Path:
 
 
 def _make_untrained_host(tmp_path: Path, behaviors: list[dict] | None = None) -> Path:
-    """Host with extracted features only — no training set, no models."""
+    """Host with extracted features only: no training set, no models."""
     root = tmp_path / "host"
     _write_behaviors(root, behaviors or [{"behavior_id": "no_behavior", "name": "No Behavior"}])
     rep = root / "derived" / "representations"
@@ -123,7 +123,7 @@ def test_preview_baseline_detects_new_project(tmp_path: Path) -> None:
     assert set(by_name) == {"Walk", "Rear"}  # no_behavior excluded
     assert by_name["Walk"].example_count == 2 and by_name["Rear"].example_count == 2
     assert by_name["Walk"].has_model and by_name["Walk"].model_compatible
-    # Nothing matches an existing host behaviour → all "new".
+    # Nothing matches an existing host behavior → all "new".
     assert all(r.status == "new" for r in pv.rows)
     assert pv.model_count == 2
 
@@ -145,7 +145,7 @@ def test_import_baseline_seeds_training_set_and_models(tmp_path: Path) -> None:
     assert "label" in ts.columns
     labels = set(ts["label"].astype(str))
     assert {"src-walk", "src-rear", "no_behavior"} <= labels
-    # Behaviours auto-created in the host.
+    # Behaviors auto-created in the host.
     host_ids = {
         b["behavior_id"]
         for b in yaml.safe_load((host / "config" / "behavior_definitions.yaml").read_text())["behaviors"]
@@ -167,13 +167,13 @@ def test_import_baseline_partial_overlap_and_skip(tmp_path: Path) -> None:
     svc = ModelRefinementService()
 
     pv = svc.preview_baseline(host, src)
-    assert pv.host_is_new is False  # has a real behaviour already
+    assert pv.host_is_new is False  # has a real behavior already
     by_name = {r.source_name: r for r in pv.rows}
     assert by_name["Walk"].status == "matched"
     assert by_name["Walk"].matched_host_id == "host-walk"
     assert by_name["Rear"].status == "new"
 
-    # Map Walk onto the existing host behaviour; skip Rear entirely.
+    # Map Walk onto the existing host behavior; skip Rear entirely.
     res = svc.import_baseline(host, src, behavior_decisions={
         "src-walk": "host-walk",
         "src-rear": SKIP_BEHAVIOR,
@@ -182,8 +182,8 @@ def test_import_baseline_partial_overlap_and_skip(tmp_path: Path) -> None:
 
     ts = pd.read_parquet(host / "derived" / "training_sets" / "training_set.parquet")
     labels = set(ts["label"].astype(str))
-    assert "host-walk" in labels      # Walk examples mapped onto existing behaviour
-    assert "src-rear" not in labels   # Rear skipped — no examples
+    assert "host-walk" in labels      # Walk examples mapped onto existing behavior
+    assert "src-rear" not in labels   # Rear skipped: no examples
     # Only Walk's model imported; Rear skipped.
     imported_targets = {m["behavior_id"] for m in res["imported_models"]}
     assert imported_targets == {"host-walk"}

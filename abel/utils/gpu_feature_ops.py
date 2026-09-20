@@ -34,11 +34,11 @@ def _is_roi_spatial_col(col: str) -> bool:
     """Return True for columns that capture distance or angle relative to an ROI or target zone.
 
     Matches:
-      * ``*_to_target_dist``  / ``*_to_roi_N_dist``   — Euclidean distance columns
-      * ``*_angle_to_target`` / ``*_angle_to_roi_N``  — heading-angle columns
+      * ``*_to_target_dist``  / ``*_to_roi_N_dist``  : Euclidean distance columns
+      * ``*_angle_to_target`` / ``*_angle_to_roi_N`` : heading-angle columns
 
     These are the columns for which start-to-end delta and linear trend
-    statistics are meaningful (e.g. approach vs retreat behaviour).
+    statistics are meaningful (e.g. approach vs retreat behavior).
     """
     return (
         col.endswith("_to_target_dist")
@@ -53,14 +53,14 @@ def _is_posture_delta_col(col: str) -> bool:
 
     Covers two families produced by the robustness feature extractors:
 
-      * Angle columns — ``joint_angle_*`` (spine/limb flexion etc.),
+      * Angle columns: ``joint_angle_*`` (spine/limb flexion etc.),
         ``head_direction_angle``, ``head_angular_velocity`` is excluded (already a
         rate), ``body_orientation``, ``head_pitch`` and ``spine_curvature*``.
-      * Proximity columns — pairwise inter-keypoint distances ``dist_<a>_to_<b>``
+      * Proximity columns: pairwise inter-keypoint distances ``dist_<a>_to_<b>``
         and their body-length-normalized variants ``dist_<a>_to_<b>_norm``.
 
     These are the columns for which a clip-wise ``_delta`` / ``_trend`` captures
-    how posture evolves across the window — signal that mean/std aggregates
+    how posture evolves across the window, signal that mean/std aggregates
     discard.  ROI/target columns are handled separately by
     :func:`_is_roi_spatial_col` and are excluded here to avoid duplicate columns.
     """
@@ -116,10 +116,10 @@ def gpu_available() -> bool:
             )
         else:
             logger.info(
-                "PyTorch found but CUDA not available — using vectorised CPU path."
+                "PyTorch found but CUDA not available: using vectorised CPU path."
             )
     except ImportError:
-        logger.info("PyTorch not installed — using vectorised CPU path.")
+        logger.info("PyTorch not installed: using vectorised CPU path.")
     return _TORCH_CUDA_OK
 
 
@@ -137,7 +137,7 @@ def _windowed_stats_gpu(
 
     device = torch.device("cuda")
 
-    # Probe CUDA health with a tiny allocation first — catches driver-level
+    # Probe CUDA health with a tiny allocation first, catches driver-level
     # errors that would otherwise surface as uncatchable access violations
     # when transferring the real (larger) payload.
     _probe = torch.zeros(1, device=device)
@@ -193,7 +193,7 @@ def _windowed_stats_gpu(
 
 
 # ---------------------------------------------------------------------------
-# CPU path (vectorised NumPy — no Python window loop)
+# CPU path (vectorised NumPy: no Python window loop)
 # ---------------------------------------------------------------------------
 
 def _windowed_stats_cpu(
@@ -233,7 +233,7 @@ def _windowed_stats_cpu(
 
     # np.percentile returns float64 even for a float32 input, so p10/p90 would
     # otherwise re-widen the block the caller deliberately kept narrow.  Every
-    # statistic is normalised to float32 here so the CPU and GPU paths agree.
+    # statistic is normalized to float32 here so the CPU and GPU paths agree.
     for _k, _v in out.items():
         if _v.dtype != np.float32:
             out[_k] = _v.astype(np.float32, copy=False)
@@ -320,6 +320,7 @@ def build_segment_df_fast(
     stride: int,
     include_periodicity: bool = True,
     include_posture_deltas: bool = False,
+    presence_cols: "list[str] | None" = None,
 ) -> "pd.DataFrame":
     """Build a segment-summary DataFrame for one (animal, session) group.
 
@@ -328,8 +329,14 @@ def build_segment_df_fast(
 
     When *include_posture_deltas* is True, angle and proximity columns (see
     :func:`_is_posture_delta_col`) additionally receive clip-wise ``_delta`` and
-    ``_trend`` statistics — the same directional-change features always computed
+    ``_trend`` statistics, the same directional-change features always computed
     for ROI/target columns.
+
+    *presence_cols* names 0/1 bookkeeping columns (``pose_present``,
+    ``partner_present``) that are summarized as a plain per-window fraction
+    (``<col>_frac``) rather than as features.  They carry no z-scoring and no
+    seven-statistic expansion; downstream code uses them to drop or flag
+    windows where the animal was not in the arena.
     """
     import pandas as pd
 
@@ -350,7 +357,7 @@ def build_segment_df_fast(
         return pd.DataFrame()
 
     frames = work["frame"].to_numpy(dtype=int)
-    # Read straight to float32 — the summary runs in float32 anyway, and the
+    # Read straight to float32: the summary runs in float32 anyway, and the
     # float64 intermediate is a full extra copy of the group's feature block.
     data = work[feature_cols].to_numpy(dtype=np.float32)
 
@@ -378,6 +385,17 @@ def build_segment_df_fast(
         "animal_id": [str(animal_id)] * n_windows,
         "session_id": [str(session_id)] * n_windows,
     }
+
+    # ── Presence fractions (metadata, never features) ───────────────────────
+    for col in presence_cols or []:
+        if col not in work.columns:
+            continue
+        vals = work[col].to_numpy(dtype=np.float64)
+        # Cumulative sums give every window's mean in one pass, without
+        # materialising a (n_windows, window_size) view per column.
+        csum = np.concatenate(([0.0], np.cumsum(vals)))
+        win_sum = csum[window_starts + window_size] - csum[window_starts]
+        result[f"{col}_frac"] = (win_sum / float(window_size)).astype(np.float32, copy=False)
 
     # Build feature columns directly from the vectorised stat arrays
     stat_names = ["mean", "std", "median", "max", "p10", "p90", "energy"]

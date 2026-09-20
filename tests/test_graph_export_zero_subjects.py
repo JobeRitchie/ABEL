@@ -27,7 +27,7 @@ BIN_SECONDS = 30
 
 
 def _binned_rows() -> pd.DataFrame:
-    """`_bin_bouts()`-shaped output — only M01/M02 ever performed the behavior."""
+    """`_bin_bouts()`-shaped output: only M01/M02 ever performed the behavior."""
     return pd.DataFrame([
         {"session_label": "M01", "behavior_id": "b1", "behavior": "Rear",
          "time_bin_s": 0, "n_bouts": 2.0, "duration_s": 4.0, "distance_cm": 0.0,
@@ -42,7 +42,7 @@ def _binned_rows() -> pd.DataFrame:
 
 
 def _summary_rows() -> list[dict]:
-    """`_filtered_rows()`-shaped output — no row at all for the zero subject."""
+    """`_filtered_rows()`-shaped output: no row at all for the zero subject."""
     return [
         {"session_id": "s1", "subject": "M01", "session_label": "M01",
          "behavior_id": "b1", "behavior": "Rear", "n_bouts": 3.0,
@@ -177,7 +177,7 @@ def test_group_timecourse_counts_zero_subject():
     first_bin = data[data["time_bin_s"] == 0].iloc[0]
     assert first_bin["N"] == 3
     assert first_bin["Bout Count"] == pytest.approx((2.0 + 4.0 + 0.0) / 3)
-    # M02 has no bout in the second bin either — it must still count as zero.
+    # M02 has no bout in the second bin either: it must still count as zero.
     second_bin = data[data["time_bin_s"] == 30].iloc[0]
     assert second_bin["N"] == 3
     assert second_bin["Bout Count"] == pytest.approx((1.0 + 0.0 + 0.0) / 3)

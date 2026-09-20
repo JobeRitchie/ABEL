@@ -1,8 +1,8 @@
 """Per-project, cross-run-type timing profile for calibrated ETAs.
 
 Records the wall-clock cost of each broad pipeline *phase* (Preparing, Training,
-Scoring, Evaluating, Benchmarking, …) observed in ANY run — single or batch,
-retrain / pipeline / run-model — so a later run of any kind can seed its ETA
+Scoring, Evaluating, Benchmarking, …) observed in ANY run, single or batch,
+retrain / pipeline / run-model, so a later run of any kind can seed its ETA
 from real prior measurements instead of starting blind. Phases are the shared
 vocabulary across run types, so time learned while *scoring* in a retrain run
 informs the scoring estimate of a pipeline run and vice-versa.
@@ -14,8 +14,8 @@ is counted once, and a rarely-seen phase drags its mean around. The reconstructe
 "one behavior = sum of phase means" therefore drifts badly from reality (measured
 on real data: phase-sum ≈ 103 s vs an actual 84 s run). To represent WHOLE-RUN
 time accurately we also record the true end-to-end wall time of each completed
-run, normalised to seconds-per-behavior and keyed by *run kind* (whole-run totals
-are NOT comparable across kinds — a scoring-only run-model pass is far cheaper per
+run, normalized to seconds-per-behavior and keyed by *run kind* (whole-run totals
+are NOT comparable across kinds, a scoring-only run-model pass is far cheaper per
 behavior than a full pipeline). This measured total is the primary ETA anchor;
 the per-phase means remain for the live within-run shape and as a fallback.
 

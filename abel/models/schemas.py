@@ -44,7 +44,7 @@ class InvariantFeatureConfig(BaseModel):
 
     enable_egocentric_kinematics: bool = True
     """Replace per-keypoint absolute velocity_x/velocity_y with forward/lateral velocity
-    in the body-centred reference frame (tail-base origin, nose→tail forward axis).
+    in the body-centered reference frame (tail-base origin, nose→tail forward axis).
     Makes velocity direction features invariant to camera orientation and animal heading.
     Speed and acceleration magnitudes are unaffected."""
 
@@ -69,7 +69,7 @@ class InvariantFeatureConfig(BaseModel):
 
     enable_spine_curvature: bool = True
     """Compute spine curvature from midline keypoints (nose, spine/back points,
-    body centre, tail base).  Useful for rearing, grooming, and escape behaviors.
+    body center, tail base).  Useful for rearing, grooming, and escape behaviors.
     Needs at least three midline keypoints; with fewer, no column is emitted, so
     it is safe to leave enabled.  Enabled by default."""
 
@@ -81,7 +81,7 @@ class InvariantFeatureConfig(BaseModel):
     column set (``social_*_nearest`` = nearest other, ``social_*_mean`` = averaged
     over others) so the schema is independent of the number of animals.  Has no
     effect on single-animal projects (no other animals to compare against), so it
-    is safe to leave enabled — extraction gates it on ``len(animals) > 1``.
+    is safe to leave enabled, extraction gates it on ``len(animals) > 1``.
     Enabled by default."""
 
     enable_clipwise_deltas: bool = True
@@ -92,13 +92,13 @@ class InvariantFeatureConfig(BaseModel):
     column (pairwise distances, including body-length-normalized variants) two extra
     statistics are emitted per window:
 
-      * ``*_delta`` : last-frame minus first-frame value — the signed net change
+      * ``*_delta`` : last-frame minus first-frame value, the signed net change
         in that angle/proximity across the clip.
       * ``*_trend`` : slope of the least-squares linear fit (units per frame), a
         more noise-robust measure of the same directional change.
 
     These capture how posture *evolves* across a clip (e.g. an animal extending
-    from a crouch, or two body parts drawing together) — information that
+    from a crouch, or two body parts drawing together), information that
     mean/std aggregates discard.  Unlike the other robustness options these are
     computed during segment windowing, not per-frame, so they require the
     relevant base columns (relative geometry / joint angles / head direction) to
@@ -110,7 +110,7 @@ class InvariantFeatureConfig(BaseModel):
 
         Reads ``behavior_model.invariant_features`` from
         ``<project_root>/config/experiment.yaml``.  Missing file or keys fall
-        back to field defaults.  Never raises — returns defaults on any error.
+        back to field defaults.  Never raises, returns defaults on any error.
         """
         from abel.storage.file_store import read_yaml  # noqa: PLC0415
 
@@ -153,7 +153,18 @@ class PoseSmoothingSettings(BaseModel):
     """Maximum consecutive missing frames to interpolate across."""
 
     smoothing_window: int = 5
-    """Odd number of frames for centred rolling-average smoothing (1 = no smoothing)."""
+    """Odd number of frames for centered rolling-average smoothing (1 = no smoothing)."""
+
+    absence_max_fill_frames: int = 30
+    """Longest run of undetected frames still filled with the nearest known pose.
+
+    Anything longer is treated as the animal being *absent* and left as NaN
+    rather than being back-filled with its first (or last) detected pose.  This
+    is what keeps an animal that enters the arena part-way through a session
+    from appearing as a frozen phantom sitting at its entry point from frame 0
+   , a phantom that also fabricates social contact for the animals that were
+    already there.  0 disables the bound (fill everything, the pre-0.22 behavior).
+    """
 
 
 class BehaviorModelConfig(BaseModel):
@@ -164,7 +175,7 @@ class BehaviorModelConfig(BaseModel):
     """When True, multiple behaviors can be assigned to the same frame window."""
     use_video_features: bool = True
     """When True, video-derived features (optical flow, motion, R3D appearance) are included.
-    When False, only pose-derived features are used — faster, but blind to local
+    When False, only pose-derived features are used, faster, but blind to local
     micro-motion (e.g. grooming paw movement over the face), which makes spatially
     stationary behaviors like freezing and grooming hard to tell apart."""
     use_r3d_features: bool = True
@@ -172,13 +183,13 @@ class BehaviorModelConfig(BaseModel):
     before training and added to the feature set as a *video* feature family.
     Requires torch/torchvision plus a reachable video and pose for each session;
     sessions that can't be resolved are simply left without the columns.
-    Gated by ``use_video_features`` — pixel features off means these are off too."""
+    Gated by ``use_video_features``, pixel features off means these are off too."""
     advanced_roi_features: bool = True
     """When True, every ROI contributes shape-aware features (inside flag, signed
     distance to the boundary, nearest-corner distance, normalized axial/lateral
-    position within the zone) in addition to distance/angle to its centre.
-    Centre-only features cannot express *where inside* a large or elongated zone
-    the animal is — for a whole EPM open arm the centre sits at the maze hub."""
+    position within the zone) in addition to distance/angle to its center.
+    Center-only features cannot express *where inside* a large or elongated zone
+    the animal is, for a whole EPM open arm the center sits at the maze hub."""
     segment_window_frames: int = 60
     segment_stride_frames: int = 15
     hard_negative_sampling_ratio: float = 0.3
@@ -311,9 +322,9 @@ class LinkedSession(BaseModel):
     subject_key: str | None = None
     """Frozen identity token for this session's derived data: the ``animal_id`` of
     its frame/segment tables and the subject part of its segment and clip ids
-    (``seg_{subject_key}_{session_id}_…``).  Fixed when the session is created —
-    from its subject name then, or its session id when unnamed — and never
-    changed by a rename, so relabelling a subject cannot orphan the labels,
+    (``seg_{subject_key}_{session_id}_…``).  Fixed when the session is created,
+    from its subject name then, or its session id when unnamed, and never
+    changed by a rename, so relabeling a subject cannot orphan the labels,
     clips and features already keyed by those ids.  ``subject_id`` is the
     display name everything else (analytics, ROIs, LOSO folds) groups by."""
     session_type: str | None = None
@@ -392,7 +403,7 @@ class SeedExample(BaseModel):
     (default) means the sole animal in a single-animal session, or all animals."""
     partner_animal_id: str | None = None
     """For social behaviors: the other animal involved. None for solo behaviors
-    (default) — single-animal seeds are unaffected."""
+    (default), single-animal seeds are unaffected."""
     social_role: Literal["none", "actor", "recipient", "mutual"] = "none"
     """Role of ``animal_id`` in a social behavior; ``none`` for solo (default)."""
     label_type: str = "positive"
@@ -431,12 +442,40 @@ class CandidateWindow(BaseModel):
     start_frame: int
     end_frame: int
     behavior_id: str | None = None
+    """Primary nominating behavior: the first entry of :attr:`behavior_ids`.
+
+    Kept for back-compat with queues written before multi-behavior nomination.
+    """
+    behavior_ids: list[str] = Field(default_factory=list)
+    """Every behavior whose model nominated this window.
+
+    One uncertain window is typically selected by several one-vs-rest models in
+    a batch run (Retrain All / Pipeline All). The queue is keyed by segment id so
+    a single clip serves them all, so the nominations must accumulate here,
+    storing only one ``behavior_id`` made later behaviors in the loop silently
+    overwrite earlier ones, hiding whole behaviors from the review queue.
+    """
     motif_score: float = 0.0
     seed_similarity_score: float = 0.0
     total_score: float = 0.0
     clip_path: str | None = None
     source: str = ""
     selection_reason: str = ""
+
+    @model_validator(mode="after")
+    def _sync_behavior_ids(self) -> "CandidateWindow":
+        """Keep ``behavior_id`` and ``behavior_ids`` consistent both ways.
+
+        Reading an old queue (``behavior_id`` only) backfills the list; building
+        from a list leaves ``behavior_id`` as its first entry.
+        """
+        ids = [str(b).strip() for b in (self.behavior_ids or []) if str(b).strip()]
+        primary = str(self.behavior_id or "").strip()
+        if primary and primary not in ids:
+            ids.insert(0, primary)
+        object.__setattr__(self, "behavior_ids", ids)
+        object.__setattr__(self, "behavior_id", ids[0] if ids else None)
+        return self
 
 
 class ArtifactProvenance(BaseModel):
@@ -466,6 +505,9 @@ class CandidateSegment(BaseModel):
     prediction_prob: float
     uncertainty_score: float
     behavior_id: str | None = None
+    behavior_ids: list[str] = Field(default_factory=list)
+    """Every behavior whose model nominated this segment (see
+    :class:`CandidateWindow`).  Empty on queues written before batch merging."""
     pose_features: dict[str, float] = Field(default_factory=dict)
     context_features: dict[str, float] = Field(default_factory=dict)
     score_components: dict[str, float] = Field(default_factory=dict)
@@ -529,6 +571,21 @@ class PreprocessingPreset(BaseModel):
     crop_margin_px: int = 80
     crop_area_scale: float = 1.25
     adaptive_crop: bool = True
+    include_all_animals: bool = True
+    """Widen the crop so every tracked animal stays in view.
+
+    A crop centered on one animal cuts the others out of the clip, which makes a
+    social interaction impossible to score.  With this on (the default), a
+    multi-animal session's crop box covers all animals over the clip window, and
+    is never tighter than the normal crop.  Ignored for single-animal sessions
+    and when ``full_frame`` is set."""
+    full_frame: bool = False
+    """Write the whole video frame instead of a crop around the animal.
+
+    Cropping is what makes a clip readable for one animal, but it hides where
+    that animal is in the arena and what the other animals are doing.  With this
+    on, the clip keeps the full field of view (aspect ratio preserved) and the
+    crop settings are ignored."""
     likelihood_threshold: float = 0.2
     interpolate_dropouts: bool = True
     smoothing_window: int = 5
@@ -650,7 +707,7 @@ ValidationCategory = Literal[
 class ValidationSettings(BaseModel):
     """User-tunable parameters for assembling a validation quiz.
 
-    Proportions are relative weights; they are normalised when the test is
+    Proportions are relative weights; they are normalized when the test is
     assembled so they do not need to sum to exactly 1.0.
     """
 

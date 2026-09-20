@@ -1,10 +1,10 @@
-"""The ``No Behavior`` label is a reserved identity, not an editable behaviour.
+"""The ``No Behavior`` label is a reserved identity, not an editable behavior.
 
-A user renamed the built-in "No Behavior" to "Freezing" and added a new behaviour
-called "No Behavior".  Because ``no_behavior`` is the universal negative class —
+A user renamed the built-in "No Behavior" to "Freezing" and added a new behavior
+called "No Behavior".  Because ``no_behavior`` is the universal negative class,
 training collapses alternate labels onto it, temporal refinement skips it in the
-competition, exports drop it — the renamed behaviour was silently read as
-"nothing happened", which is how it surfaced in temporal review as a behaviour
+competition, exports drop it, the renamed behavior was silently read as
+"nothing happened", which is how it surfaced in temporal review as a behavior
 that was really freezing.
 
 These tests pin both halves of the fix: the guard that makes the identity
@@ -65,7 +65,7 @@ def test_builtin_no_behavior_stays_cosmetically_editable(tmp_path: Path) -> None
     assert reloaded.name == "No Behavior"
 
 
-@pytest.mark.parametrize("name", ["No Behavior", "no_behavior", "no behaviour", "NoBehavior"])
+@pytest.mark.parametrize("name", ["No Behavior", "no_behavior", "no behavior", "NoBehavior"])
 def test_second_no_behavior_cannot_be_added(tmp_path: Path, name: str) -> None:
     svc = _service(tmp_path)
     with pytest.raises(ReservedBehaviorError):
@@ -103,7 +103,7 @@ SYSTEM_NEGATIVE = "seg_feedback_s1_300_359"
 
 def _broken_project(tmp_path: Path) -> tuple[Path, str]:
     """A project where ``no_behavior`` is bound to "Freezing" and a new
-    "No Behavior" behaviour holds the real negatives."""
+    "No Behavior" behavior holds the real negatives."""
     root = tmp_path / "proj"
     negative_id = str(uuid.uuid4())
     rear_id = str(uuid.uuid4())
@@ -217,7 +217,7 @@ def test_repair_swaps_the_identities_and_carries_the_work(tmp_path: Path) -> Non
     assert svc.get(NO_BEHAVIOR_ID).name == "No Behavior"
     assert svc.get(negative_id) is None
 
-    # Reviewer labels follow the behaviour, including inside a pipe-joined label…
+    # Reviewer labels follow the behavior, including inside a pipe-joined label…
     labels = pd.read_parquet(root / "derived" / "review_labels" / "reviewer_labels.parquet")
     by_seg = dict(zip(labels["segment_id"], labels["review_label"]))
     assert by_seg[FREEZING_LABELS[0]] == new_id
@@ -257,9 +257,9 @@ def test_repair_retires_contaminated_models_into_a_backup(tmp_path: Path) -> Non
 
     assert "behavior_model_Freezing" in report.retired_models
     assert not (root / "derived" / "models" / "behavior_model_Freezing").exists()
-    # An unrelated behaviour's model is untouched.
+    # An unrelated behavior's model is untouched.
     assert (root / "derived" / "models" / "behavior_model_Rear").exists()
-    # The stale per-behaviour refinement artifacts are retired too.
+    # The stale per-behavior refinement artifacts are retired too.
     assert not (root / "derived" / "temporal_refinement" / NO_BEHAVIOR_ID).exists()
 
     backup = Path(report.backup_dir)
@@ -297,7 +297,7 @@ def test_repair_is_idempotent(tmp_path: Path) -> None:
 
 def test_duplicate_no_behavior_merges_into_the_builtin(tmp_path: Path) -> None:
     """The other half of the mistake: the built-in kept its name, but a second
-    behaviour named "No Behavior" was added anyway."""
+    behavior named "No Behavior" was added anyway."""
     root = tmp_path / "proj"
     dup_id = str(uuid.uuid4())
     write_yaml(root / "config" / "behavior_definitions.yaml", {"behaviors": [
@@ -387,7 +387,7 @@ def test_tab_surfaces_the_conflict_banner(_app, tmp_path: Path) -> None:
 
 
 def test_resaving_an_unchanged_definition_never_raises(tmp_path: Path) -> None:
-    """Dialogs that re-save every definition (e.g. the analytics colour picker)
+    """Dialogs that re-save every definition (e.g. the analytics color picker)
     must keep working in a project that already has the conflict."""
     root, negative_id = _broken_project(tmp_path)
     svc = BehaviorService()
@@ -399,5 +399,5 @@ def test_resaving_an_unchanged_definition_never_raises(tmp_path: Path) -> None:
     svc.set_project(root)
     assert svc.get(NO_BEHAVIOR_ID).name == "Freezing"
     assert svc.get(negative_id).color == "#010203"
-    # The conflict is still reported — the repair, not the guard, is what fixes it.
+    # The conflict is still reported: the repair, not the guard, is what fixes it.
     assert svc.no_behavior_conflict() is not None

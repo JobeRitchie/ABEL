@@ -38,7 +38,7 @@ def threshold_probabilities(
     """Convert probabilities to a binary trace using a single threshold.
 
     A frame is positive when its (smoothed) probability is at or above
-    ``onset_thresh``. This is the only gate in the pipeline — bouts are defined
+    ``onset_thresh``. This is the only gate in the pipeline, bouts are defined
     by the threshold, min-bout, and merge-gap flags from the Temporal Review tab.
     """
     x = np.asarray(prob_trace, dtype=np.float32)

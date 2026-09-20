@@ -1,4 +1,4 @@
-"""Comprehensive Review Tab for candidate clip evaluation.
+"""Review tab for candidate clip evaluation.
 
 Displays candidate clips with:
 - Video playback with frame stepping
@@ -17,6 +17,7 @@ Pipeline position:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -118,7 +119,7 @@ class _ReviewListRow:
 # Seed examples are shown as read-only reviewed rows under this id prefix.
 SEED_ROW_PREFIX = "seed_"
 SEED_READ_ONLY_MSG = (
-    "Seed examples are labelled in Active Learning → Seeds and train the model "
+    "Seed examples are labeled in Active Learning → Seeds and train the model "
     "directly from there.\n\nThey are listed here so you can watch them alongside "
     "your reviewed clips; edit or delete them in the Seeds tab."
 )
@@ -210,12 +211,27 @@ class CandidateVideoPlayer(QWidget):
         self._speed_combo.setToolTip("Playback speed multiplier")
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
 
+        # Review clips are small re-encodes of the source video (a full-frame
+        # clip fits the whole arena into the preset's clip width, so it looks
+        # soft). Say so next to the frame counter, or people read the preview's
+        # softness as damage to their recordings.
+        self._res_label = QLabel("")
+        self._res_label.setStyleSheet("font-size: 10px; color: #78909C;")
+        self._res_label.setToolTip(
+            "Review clips are downsampled preview copies written at the extraction "
+            "preset's clip size: full-frame clips fit the entire arena into that "
+            "width, so they look softer than a cropped clip.\n\nYour source videos "
+            "are never modified, and pose tracking, features and model training all "
+            "read the original full-resolution video, not these clips."
+        )
+
         ctrl = QHBoxLayout()
         ctrl.addWidget(self._prev_btn)
         ctrl.addWidget(self._play_btn)
         ctrl.addWidget(self._next_btn)
         ctrl.addWidget(self._slider, 1)
         ctrl.addWidget(self._frame_label)
+        ctrl.addWidget(self._res_label)
         ctrl.addWidget(self._loop_chk)
         ctrl.addWidget(self._speed_combo)
         ctrl.addWidget(self._keypoints_chk)
@@ -244,6 +260,11 @@ class CandidateVideoPlayer(QWidget):
         self._cap = cap
         self._n_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
         self._fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        cw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        ch = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        self._res_label.setText(
+            f"preview {cw}×{ch}, source video unchanged" if cw and ch else ""
+        )
         self._slider.setMaximum(self._n_frames - 1)
         self._set_controls_enabled(True)
         self.seek(0)
@@ -261,6 +282,7 @@ class CandidateVideoPlayer(QWidget):
         self._slider.setMaximum(0)
         self._display.setText("No clip loaded")
         self._frame_label.setText("Frame: 0 / 0")
+        self._res_label.setText("")
         self._set_controls_enabled(False)
         self.clear_pose_overlay()
 
@@ -466,7 +488,7 @@ class _BulkAssignDialog(QDialog):
         header.setStyleSheet("font-weight: 600;")
         layout.addWidget(header)
         hint = QLabel(
-            "Co-occurring mode — select one or more behaviors."
+            "Co-occurring mode: select one or more behaviors."
             if allow_multi
             else "Select one behavior."
         )
@@ -517,7 +539,7 @@ class _BulkAssignDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 class ReviewTab(QWidget):
-    """Comprehensive review interface for candidate clip evaluation."""
+    """Review interface for candidate clip evaluation."""
 
     # Friendly labels for the CandidateWindow.source provenance field, shown in
     # the "Source" column. Anything not listed falls back to a title-cased form of
@@ -554,6 +576,10 @@ class ReviewTab(QWidget):
         self._project_root: Path | None = None
         self._all_candidates = []
         self._visible_candidates = []
+        # {session_id}/{filename} of every file under derived/clips, lower-cased.
+        # None means "not built yet"; _refresh_candidates drops it so each
+        # refresh sees clips added or pruned since the last one.
+        self._clip_index: set[str] | None = None
         self._decision_by_clip_id: dict[str, ReviewDecision] = {}
         # Seed examples keyed by their review-row id (SEED_ROW_PREFIX + seed_id).
         self._seed_by_row_id: dict[str, SeedExample] = {}
@@ -591,7 +617,7 @@ class ReviewTab(QWidget):
         self._al_fp_behavior_map: dict[str, list[str]] = {}
         self._al_fn_behavior_map: dict[str, list[str]] = {}
         # Segments whose latest reviewer label was written AFTER the model predictions were
-        # generated — i.e., they have already been re-reviewed in this FP/FN context.
+        # generated: i.e., they have already been re-reviewed in this FP/FN context.
         # Populated from timestamps on every _apply_filter call; persistent across restarts.
         self._al_post_pred_reviewed_ids: set[str] = set()
 
@@ -601,7 +627,7 @@ class ReviewTab(QWidget):
 
         # Arrow-key guard: track whether the user has explicitly interacted with
         # any decision/label control for the current clip.  Only save on navigation
-        # when this is True so unvisited clips are never accidentally labelled.
+        # when this is True so unvisited clips are never accidentally labeled.
         self._review_dirty: bool = False
         self._loading_candidate: bool = False
 
@@ -656,7 +682,7 @@ class ReviewTab(QWidget):
         self._reviewed_with_clips_btn.toggled.connect(self._apply_filter)
         panel_layout.addWidget(self._reviewed_with_clips_btn)
 
-        self._soundboard_btn = QPushButton("🎹 Behavior Soundboard")
+        self._soundboard_btn = QPushButton("Behavior Soundboard")
         self._soundboard_btn.setToolTip(
             "Open a pop-out window with one button per behavior for labeling the "
             "current clip. Arrow keys / Space / Enter still work while it's focused."
@@ -693,9 +719,9 @@ class ReviewTab(QWidget):
         self._show_al_fp_fn_btn.setChecked(False)
         self._show_al_fp_fn_btn.setToolTip(
             "Show active-learning candidates that are likely mislabeled:\n"
-            "  • FP (False Positive) — you previously labeled this segment as negative,\n"
+            "  • FP (False Positive): you previously labeled this segment as negative,\n"
             "    but the model still scores it high (hard negative).\n"
-            "  • FN (False Negative) — you previously labeled this segment as a positive\n"
+            "  • FN (False Negative): you previously labeled this segment as a positive\n"
             "    behavior, but the current model now gives it low probability.\n\n"
             "Only segments with prior human labels qualify. Unreviewed low-confidence\n"
             "candidates are NOT shown here."
@@ -807,7 +833,7 @@ class ReviewTab(QWidget):
         _bulk_hdr.setStyleSheet("font-size: 11px; font-weight: 600; color: #78909C;")
         actions_box.addWidget(_bulk_hdr)
 
-        # Row 1 — decisions applied to the selected rows.
+        # Row 1: decisions applied to the selected rows.
         self._accept_selected_btn = QPushButton("Accept")
         self._accept_selected_btn.setToolTip("Mark selected candidate rows as Accepted")
         self._accept_selected_btn.setStyleSheet(
@@ -837,7 +863,7 @@ class ReviewTab(QWidget):
         _row1.addWidget(_expand(self._remove_selected_btn))
         actions_box.addLayout(_row1)
 
-        # Row 2 — assign/relabel and cleanup grouped under pop-up menus.
+        # Row 2: assign/relabel and cleanup grouped under pop-up menus.
         self._assign_menu_btn = QToolButton()
         self._assign_menu_btn.setText("Assign / Relabel")
         self._assign_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -868,6 +894,15 @@ class ReviewTab(QWidget):
         )
         _act_bulk_assign.triggered.connect(self._bulk_assign_behavior)
         _assign_menu.addAction(_act_bulk_assign)
+        _assign_menu.addSeparator()
+        _act_clear_labels = QAction("Clear labels from selected", self._assign_menu_btn)
+        _act_clear_labels.setToolTip(
+            "Erase the decision and reviewer labels saved for the selected clips, "
+            "putting them back in the queue as unreviewed.\n"
+            "Clip files and the candidates themselves are kept."
+        )
+        _act_clear_labels.triggered.connect(self._clear_labels_selected)
+        _assign_menu.addAction(_act_clear_labels)
         _assign_menu.setToolTipsVisible(True)
         self._assign_menu_btn.setMenu(_assign_menu)
 
@@ -913,7 +948,7 @@ class ReviewTab(QWidget):
         _row2.addWidget(_expand(self._cleanup_menu_btn))
         actions_box.addLayout(_row2)
 
-        # Row 3 — clip regeneration + outlier analysis.  These stay as real
+        # Row 3: clip regeneration + outlier analysis.  These stay as real
         # buttons because their label doubles as a live progress indicator.
         self._regenerate_clips_btn = QPushButton("Regenerate Missing Clips")
         self._regenerate_clips_btn.setToolTip(
@@ -929,7 +964,7 @@ class ReviewTab(QWidget):
         self._flag_outliers_btn = QPushButton("Flag Outliers (Dissimilarity)")
         self._flag_outliers_btn.setToolTip(
             "Compute dissimilarity scores for accepted clips of the currently filtered behavior.\n"
-            "Outlier clips are highlighted in orange — they may warrant re-review."
+            "Outlier clips are highlighted in orange: they may warrant re-review."
         )
         self._flag_outliers_btn.setStyleSheet(
             "background-color: #5C6BC0; color: white; font-weight: 600; padding: 4px;"
@@ -942,7 +977,7 @@ class ReviewTab(QWidget):
         _row3.addWidget(_expand(self._flag_outliers_btn))
         actions_box.addLayout(_row3)
 
-        # Row 4 — Targeted Clip Mining (construction owned elsewhere; only the
+        # Row 4: Targeted Clip Mining (construction owned elsewhere; only the
         # container it is added to changed here).
         self._clip_mining_btn = QPushButton("Targeted Clip Mining…")
         self._clip_mining_btn.setToolTip(
@@ -972,6 +1007,25 @@ class ReviewTab(QWidget):
         self._score_label = QLabel("Score: N/A")
         self._clip_label = QLabel("Clip: N/A")
         self._clip_label.setWordWrap(True)
+
+        # Saved labels for this clip, one tag per subject (with →/⇄ for social
+        # direction). The "Review label" combo below can only hold one behavior
+        # for the whole clip, so without this a two-mouse clip labeled
+        # "Attack track_1 → track_0" + "Rear track_0" looked like a single
+        # "Attack". Always visible, unlike the co-occurring "Active labels"
+        # strip, which is gated on allow_co_occurring_behaviors.
+        self._saved_labels_title = QLabel("Saved labels (per subject):")
+        self._saved_labels_title.setStyleSheet("font-weight: 600; font-size: 11px; margin-top: 4px;")
+        self._saved_labels_display = QLabel("None")
+        self._saved_labels_display.setWordWrap(True)
+        self._saved_labels_display.setTextFormat(Qt.TextFormat.RichText)
+        self._saved_labels_display.setToolTip(
+            "Every behavior committed for this clip, keyed to the subject that "
+            "performed it. → = directed social (actor → recipient); "
+            "⇄ = mutual social (both animals). Per-subject labels come from "
+            "the soundboard; the Review label combo below sets one behavior for "
+            "the whole clip."
+        )
 
         self._start_frame_spin = QSpinBox()
         self._start_frame_spin.setMinimum(0)
@@ -1096,6 +1150,8 @@ class ReviewTab(QWidget):
         _meta_row.addStretch(1)
         right_layout.addLayout(_meta_row)
         right_layout.addWidget(self._clip_label)
+        right_layout.addWidget(self._saved_labels_title)
+        right_layout.addWidget(self._saved_labels_display)
 
         # Decision + Confidence on a single row.
         _decision_row = QHBoxLayout()
@@ -1105,7 +1161,13 @@ class ReviewTab(QWidget):
         _decision_row.addWidget(self._confidence_spin)
         right_layout.addLayout(_decision_row)
 
-        right_layout.addWidget(QLabel("Review label:"))
+        _label_title = QLabel("Review label (whole clip):")
+        _label_title.setToolTip(
+            "One behavior for the whole clip. For per-subject or directional "
+            "social labels, use the soundboard, its labels appear under "
+            "“Saved labels” above."
+        )
+        right_layout.addWidget(_label_title)
         right_layout.addWidget(self._label_combo)
         right_layout.addWidget(self._add_label_btn)
         right_layout.addWidget(self._pending_labels_label)
@@ -1272,6 +1334,7 @@ class ReviewTab(QWidget):
             behaviors, self._accept_with_behavior_shortcut, nav,
             on_structured=self._on_structured_label,
             on_commit=self._commit_structured_labels,
+            on_clear=self._clear_labels_for_current_clip,
         )
         self._soundboard.set_animals(self._current_clip_animals())
         self._soundboard.load_labels(self._current_structured_payload())
@@ -1289,18 +1352,23 @@ class ReviewTab(QWidget):
         """(animal_id, display_name, (r,g,b)) for the current clip's session.
 
         The first tuple element MUST be the *resolved* animal id used to key the
-        per-individual segment features — ``individual_subject_map[ind]`` when a
-        subject mapping exists, else ``f"{subject_key}:{ind}"`` — so
+        per-individual segment features, ``individual_subject_map[ind]`` when a
+        subject mapping exists, else ``f"{subject_key}:{ind}"``, so
         that committed soundboard labels (segment id ``seg_{animal_id}_…``) join
         to the correct segment rows. Using the raw individual key here would make
         every label miss the training join. Mirrors
         ``FeaturerepService._process_one`` (feature_prep_service.py).
         """
-        from abel.utils.individual_colors import color_for
         i = self._current_candidate_idx
-        if not (self._project_root and 0 <= i < len(self._visible_candidates)):
+        if not (0 <= i < len(self._visible_candidates)):
             return []
-        cand = self._visible_candidates[i]
+        return self._clip_animals_for(self._visible_candidates[i])
+
+    def _clip_animals_for(self, cand) -> "list[tuple]":
+        """``_current_clip_animals`` for an arbitrary candidate row."""
+        from abel.utils.individual_colors import color_for
+        if not self._project_root or cand is None:
+            return []
         try:
             manifest = self._imports.load_manifest(self._project_root)
         except Exception:
@@ -1352,9 +1420,9 @@ class ReviewTab(QWidget):
         identity-agnostic behavior id at training time ("a mouse is a mouse").
 
         Multiple behaviors on the *same* animal-segment are collapsed into one
-        pipe-joined :class:`ReviewerLabelRecord` (e.g. ``"grooming|rearing"``) —
+        pipe-joined :class:`ReviewerLabelRecord` (e.g. ``"grooming|rearing"``),
         the co-occurring-label convention the trainer expands into per-behavior
-        positives — rather than separate rows that would resolve to
+        positives, rather than separate rows that would resolve to
         ``ambiguous`` and be dropped. Symmetric (mutual) social behaviors are
         exhibited by both animals, so they label the partner's segment too;
         directed behaviors label only the actor. Finally the window is marked
@@ -1434,6 +1502,7 @@ class ReviewTab(QWidget):
         self._review_service.save_structured_labels(cand.window_id, normalized)
         self._update_decision_cell(self._current_candidate_idx, rec)
         self._update_summary()
+        self._update_saved_labels_display()
         logger.info("Committed %d structured label(s) for window %s", committed, cand.window_id)
 
         # Co-occurring (pipe-joined) labels are only expanded into per-behavior
@@ -1442,7 +1511,7 @@ class ReviewTab(QWidget):
         if multi_label_segments and not getattr(self, "_co_occurring_enabled", False):
             logger.warning(
                 "Committed %d segment(s) with multiple behaviors on one animal, but "
-                "'allow co-occurring behaviors' is OFF — these will not split into "
+                "'allow co-occurring behaviors' is OFF: these will not split into "
                 "per-behavior training instances. Enable it in the Behavior tab.",
                 multi_label_segments,
             )
@@ -1504,8 +1573,9 @@ class ReviewTab(QWidget):
             bdef = behavior_service.get(bid)
             name = bdef.name if bdef else (bid or "?")
             color = (getattr(bdef, "color", None) or "#4A90E2")
-            focal_nm = name_by_id.get(focal, str(focal))
-            if partner:
+            # A clip-level label (no focal animal) renders as the bare behavior.
+            focal_nm = (name_by_id.get(focal, str(focal)) if focal else "")
+            if partner and focal_nm:
                 directed = bool(bdef and str(getattr(bdef, "directionality", "none")) == "directed")
                 arrow = "→" if directed else "⇄"
                 who = f"{focal_nm} {arrow} {name_by_id.get(partner, str(partner))}"
@@ -1514,35 +1584,83 @@ class ReviewTab(QWidget):
             tags.append(cls._behavior_tag_html(name, color, who))
         return tags
 
-    def _structured_label_tags(self) -> "list[str] | None":
-        """Animal-aware tags for the current clip's committed structured labels.
+    def _saved_labels_for(self, cand) -> "list[dict]":
+        """Committed labels for ``cand`` as ``{behavior_id, focal, partner}`` dicts.
 
-        Returns ``None`` when the clip has no structured (soundboard) labels, so
-        the caller falls back to the plain behavior-only rendering. Each tag
-        names the behavior *and* the animal it applies to (with →/⇄ for directed
-        / mutual social behaviors), so a per-mouse label no longer displays as a
-        bare behavior name.
+        Prefers the soundboard's structured payload (per subject, directional).
+        Falls back to the clip-level decision's behavior label for clips scored
+        through the Review-label combo, that record holds no subject, so those
+        render without one (pipe-joined co-occurring labels split into tags).
         """
-        structured = self._current_structured_payload()
-        if not structured:
-            return None
-        name_by_id = {aid: nm for (aid, nm, _c) in self._current_clip_animals()}
-        return self._format_structured_tags(structured, name_by_id, self._behavior_service)
+        if cand is None:
+            return []
+        structured = self._review_service.get_structured_labels(cand.window_id)
+        if structured:
+            return list(structured)
+        dec = self._decision_by_clip_id.get(cand.window_id)
+        if dec is None:
+            return []
+        label = self._decision_to_review_label(
+            dec.decision, self._normalize_behavior_id(str(dec.behavior_label or "")) or ""
+        )
+        return [
+            {"behavior_id": bid.strip(), "focal_animal_id": None, "partner_animal_id": None}
+            for bid in str(label or "").split("|")
+            if bid.strip()
+        ]
 
-    def _update_pending_labels_display(self) -> None:
-        """Refresh the pending-labels tag display."""
-        # Prefer animal-aware structured labels when this clip was committed via
-        # the soundboard, so "Groom" reads e.g. "Groom · black female".
-        structured_tags = self._structured_label_tags()
-        if structured_tags:
-            self._pending_labels_display.setText("  ".join(structured_tags))
-            self._pending_labels_display.setStyleSheet(
-                "background: #263238; border: 1px solid #4CAF50; border-radius: 4px; "
+    def _update_saved_labels_display(self) -> None:
+        """Refresh the per-subject saved-label tags for the current clip."""
+        i = self._current_candidate_idx
+        cand = self._visible_candidates[i] if 0 <= i < len(self._visible_candidates) else None
+        labels = self._saved_labels_for(cand)
+        animals = self._clip_animals_for(cand) if cand is not None else []
+        name_by_id = {aid: nm for (aid, nm, _c) in animals}
+
+        if not labels:
+            hint = (
+                "None yet: label each subject from the soundboard"
+                if len(animals) > 1
+                else "None yet"
+            )
+            self._saved_labels_display.setText(
+                f'<span style="color:#78909C;">{hint}</span>'
+            )
+            self._saved_labels_display.setStyleSheet(
+                "background: #37474F; border: 1px solid #8FA6B4; border-radius: 4px; "
                 "padding: 4px 8px; font-size: 11px; min-height: 22px;"
             )
             return
+
+        tags = self._format_structured_tags(labels, name_by_id, self._behavior_service)
+        text = "  ".join(tags)
+        # A multi-animal clip carrying only a clip-level label has no subject on
+        # it: say so rather than letting one behavior stand for both mice.
+        if len(animals) > 1 and not any(lab.get("focal_animal_id") for lab in labels):
+            text += (
+                '  <span style="color:#FFB74D; font-size:10px;">'
+                "(whole clip: no per-subject labels)</span>"
+            )
+        n_subjects = len({lab.get("focal_animal_id") for lab in labels if lab.get("focal_animal_id")})
+        if n_subjects > 1:
+            text += (
+                f'  <span style="color:#78909C; font-size:10px;">'
+                f"{n_subjects} subjects labeled</span>"
+            )
+        self._saved_labels_display.setText(text)
+        self._saved_labels_display.setStyleSheet(
+            "background: #263238; border: 1px solid #4CAF50; border-radius: 4px; "
+            "padding: 4px 8px; font-size: 11px; min-height: 22px;"
+        )
+
+    def _update_pending_labels_display(self) -> None:
+        """Refresh the *pending* (not yet saved) label tag display.
+
+        Committed labels are shown animal-aware in the "Saved labels" row, so
+        this one only reflects what is queued for the next save.
+        """
         if not self._pending_labels:
-            self._pending_labels_display.setText("None — press behavior hotkeys to add labels")
+            self._pending_labels_display.setText("None: press behavior hotkeys to add labels")
             self._pending_labels_display.setStyleSheet(
                 "background: #37474F; border: 1px solid #8FA6B4; border-radius: 4px; "
                 "padding: 4px 8px; font-size: 11px; color: #78909C; min-height: 22px;"
@@ -1602,6 +1720,30 @@ class ReviewTab(QWidget):
         bid = self._normalize_behavior_id(getattr(candidate, "behavior_id", ""))
         return bid or UNASSIGNED_BEHAVIOR_ID
 
+    def _nominating_behavior_ids(self, candidate) -> "set[str]":
+        """Every behavior whose queue this window belongs to.
+
+        A batch run's one-vs-rest models nominate largely the same uncertain
+        windows and the queue keeps one row per window (so one clip serves them
+        all), so a window can sit in several behaviors' queues at once. Filtering
+        by behavior must match any nomination, not just the primary one,
+        otherwise every behavior but the last in the batch looks empty. A
+        reviewed window answers with its decision label instead.
+        """
+        decision = self._decision_by_clip_id.get(candidate.window_id)
+        if decision and decision.behavior_label:
+            return {self._normalize_behavior_id(str(decision.behavior_label)) or UNASSIGNED_BEHAVIOR_ID}
+        ids = {
+            self._normalize_behavior_id(str(b))
+            for b in (getattr(candidate, "behavior_ids", None) or [])
+            if str(b).strip()
+        }
+        ids.discard("")
+        return ids or {
+            self._normalize_behavior_id(getattr(candidate, "behavior_id", ""))
+            or UNASSIGNED_BEHAVIOR_ID
+        }
+
     def _resolve_behavior_display_name(self, behavior_id_str: str) -> str:
         """Resolve a behavior ID string (possibly pipe-separated) to display names."""
         if "|" not in behavior_id_str:
@@ -1640,6 +1782,8 @@ class ReviewTab(QWidget):
         self._register_behavior_shortcuts()
 
         self._refresh_session_order_index()
+        # Clips may have been cut or pruned since the last refresh.
+        self._clip_index = None
         self._all_candidates = self._candidate_service.load_candidates()
         decisions = self._review_service.load_decisions()
         self._decision_by_clip_id = {d.clip_id: d for d in decisions}
@@ -1682,10 +1826,13 @@ class ReviewTab(QWidget):
 
     def _refresh_behavior_filter_options(self) -> None:
         current = self._behavior_filter_combo.currentData()
+        # Every behavior a queued window was nominated under, so a behavior that
+        # shares its windows with later behaviors in a batch run still appears.
         behavior_ids = {
-            self._canonical_multi_label(self._effective_behavior_id(c))
+            self._canonical_multi_label(b)
             for c in self._all_candidates
-            if self._effective_behavior_id(c)
+            for b in self._nominating_behavior_ids(c)
+            if b
         }
         for decision in self._decision_by_clip_id.values():
             bid = self._normalize_behavior_id(str(decision.behavior_label or ""))
@@ -1710,7 +1857,7 @@ class ReviewTab(QWidget):
 
         For every behavior model that has a ``segment_predictions.parquet`` and
         ``run_settings.json``, joins predictions with the most-recent human label
-        per segment from ``reviewer_labels.parquet`` — the exact same join used
+        per segment from ``reviewer_labels.parquet``, the exact same join used
         inside ``_evaluate_if_possible`` to build the confusion matrix.
 
         - **FP**: human labeled the segment as *not* the target behavior, but the
@@ -1722,7 +1869,7 @@ class ReviewTab(QWidget):
         ``_load_candidate`` can pre-fill the label combo with the relevant behavior.
 
         ``post_pred_reviewed_ids`` contains segments whose most-recent label timestamp
-        is newer than the prediction file — i.e., already re-reviewed after the model ran.
+        is newer than the prediction file, i.e., already re-reviewed after the model ran.
         """
         if not self._project_root:
             logger.debug("_load_al_fp_fn_ids: project_root not set, returning empty")
@@ -1809,7 +1956,7 @@ class ReviewTab(QWidget):
                 logger.warning("_load_al_fp_fn_ids: error loading %s: %s", model_dir.name, exc)
                 continue
 
-            # Inner join — only segments that have both a prediction and a human label.
+            # Inner join: only segments that have both a prediction and a human label.
             merged = pred_df.merge(
                 labels_df[["segment_id", "review_label"]], on="segment_id", how="inner"
             )
@@ -1821,11 +1968,11 @@ class ReviewTab(QWidget):
             label_pred = (merged["prediction_prob"].astype(float) >= 0.5).astype(int)
 
             # Skip degenerate models. A behavior trained with no (or near-zero)
-            # positive labels collapses into an all-positive predictor — it scores
+            # positive labels collapses into an all-positive predictor, it scores
             # ~every segment >= 0.5, so every human-labeled segment becomes a
             # "false positive" against it. That floods al_all_ids with the entire
             # labeled set, which (a) pins every reviewed clip visible even with
-            # "Show reviewed" off — it stays an FP no matter how it's relabeled —
+            # "Show reviewed" off: it stays an FP no matter how it's relabeled,
             # and (b) crowds the queue so real FP/FN disagreements are lost. Such a
             # model has no ground truth to triage against, so exclude it entirely.
             n_pos_labels = int(label_true.sum())
@@ -1834,13 +1981,13 @@ class ReviewTab(QWidget):
                 logger.warning(
                     "_load_al_fp_fn_ids: skipping degenerate model %s (target=%s): "
                     "%d positive human labels, predicts positive for %.0f%% of %d "
-                    "labeled segments — excluded from FP/FN triage",
+                    "labeled segments: excluded from FP/FN triage",
                     model_dir.name, target_behavior[:8], n_pos_labels,
                     pred_pos_frac * 100.0, len(merged),
                 )
                 continue
 
-            # This model contributes real FP/FN — count its predictions toward the
+            # This model contributes real FP/FN: count its predictions toward the
             # "predictions ran at" cutoff used to detect post-run re-reviews.
             try:
                 _mtime = pred_path.stat().st_mtime
@@ -2121,7 +2268,7 @@ class ReviewTab(QWidget):
         self._finalize_mined_view()
         QMessageBox.critical(
             self, "Targeted Clip Mining",
-            "Clip extraction failed for the mined batch — see log for details.",
+            "Clip extraction failed for the mined batch: see log for details.",
         )
 
     def _finalize_mined_view(self) -> None:
@@ -2169,8 +2316,8 @@ class ReviewTab(QWidget):
         """Build the visible queue from the mined ID set, ranked by match score.
 
         The mining filter narrows the queue to the matched windows, but it still
-        honours the review-status toggles ("Show reviewed", "Reviewed + Clips
-        Only") — otherwise those controls would silently stop working for the rest
+        honors the review-status toggles ("Show reviewed", "Reviewed + Clips
+        Only"), otherwise those controls would silently stop working for the rest
         of the session once a mining batch has been loaded.
         """
         mined = self._mined_ids or set()
@@ -2188,7 +2335,7 @@ class ReviewTab(QWidget):
         elif not show_reviewed:
             rows = [c for c in rows if c.window_id not in self._decision_by_clip_id]
         have = {c.window_id for c in rows}
-        # Surface mined clips that are already reviewed (not in the live queue) —
+        # Surface mined clips that are already reviewed (not in the live queue),
         # only when reviewed rows are being shown, so the toggle stays meaningful.
         if show_reviewed:
             for wid in mined:
@@ -2221,7 +2368,7 @@ class ReviewTab(QWidget):
             # Distinguish "no matches" from "all matches hidden by the reviewed filter".
             if n_mined and not show_reviewed:
                 self._candidate_label.setText(
-                    "All mined clips are reviewed — enable 'Show reviewed' to see them"
+                    "All mined clips are reviewed: enable 'Show reviewed' to see them"
                 )
             else:
                 self._candidate_label.setText("No mined clips match")
@@ -2276,7 +2423,7 @@ class ReviewTab(QWidget):
                 if self._is_bout_review_candidate(c)
             }
 
-        # UMAP-selected clips are hand-picked for accuracy checks — always
+        # UMAP-selected clips are hand-picked for accuracy checks, always
         # keep them visible regardless of review status.
         umap_selection_ids: set[str] = {
             str(c.window_id)
@@ -2290,7 +2437,7 @@ class ReviewTab(QWidget):
                 if not clip_id or clip_id in existing_ids:
                     continue
                 rows.append(self._candidate_from_decision(decision))
-            # Seeds are human-labelled examples too, so they belong alongside
+            # Seeds are human-labeled examples too, so they belong alongside
             # the reviewed clips (read-only: they are edited in the Seeds tab).
             for row_id, seed in self._seed_by_row_id.items():
                 rows.append(
@@ -2306,7 +2453,7 @@ class ReviewTab(QWidget):
 
         # Inject any AL FP/FN segments that are not already in the list.
         # These are reviewed segments (they have labels) that may not be in
-        # the candidate queue at all — they need to be surfaced explicitly.
+        # the candidate queue at all: they need to be surfaced explicitly.
         al_all_ids = al_fp_ids | al_fn_ids
         if show_al_fp_fn and al_all_ids:
             existing_ids = {c.window_id for c in rows}
@@ -2358,7 +2505,12 @@ class ReviewTab(QWidget):
         # multiple human-assigned labels (FP rows are labeled as non-target,
         # FN rows as the target), so skip the behavior filter in that mode.
         if behavior_mode != "all" and not show_al_fp_fn:
-            rows = [c for c in rows if self._canonical_multi_label(self._effective_behavior_id(c)) == behavior_mode]
+            rows = [
+                c
+                for c in rows
+                if behavior_mode
+                in {self._canonical_multi_label(b) for b in self._nominating_behavior_ids(c)}
+            ]
         if reviewed_with_clips_only:
             rows = [
                 c
@@ -2369,7 +2521,7 @@ class ReviewTab(QWidget):
         elif not show_reviewed:
             # AL FP/FN clips stay visible until the user re-labels them; after saving
             # a new decision, _load_al_fp_fn_ids drops the clip from al_all_ids and it
-            # disappears naturally — advancing the panel like any other reviewed clip.
+            # disappears naturally: advancing the panel like any other reviewed clip.
             # Bout-review clips always stay visible when the temporal bout review
             # filter is on so the user can see what was sent over and what decision
             # has been recorded for each clip.
@@ -2385,7 +2537,7 @@ class ReviewTab(QWidget):
         if (not reviewed_with_clips_only) and (not show_missing_clips):
             if show_reviewed or show_fp_fn or show_al_fp_fn:
                 # Keep reviewed rows visible even if clip files were pruned after review.
-                # Bout-review and AL FP/FN rows may have no clip files — always keep them.
+                # Bout-review and AL FP/FN rows may have no clip files, always keep them.
                 rows = [
                     c
                     for c in rows
@@ -2440,7 +2592,7 @@ class ReviewTab(QWidget):
         start_frame = int(decision.adjusted_start_frame or 0)
         end_frame = int(decision.adjusted_end_frame or start_frame)
 
-        # Extract session_id from clip_id — handles seg_feedback_*, rand_*, and
+        # Extract session_id from clip_id: handles seg_feedback_*, rand_*, and
         # any other format that embeds session_<hex> somewhere in the ID.
         ms = re.search(r"(session_[a-f0-9]+)", clip_id)
         session_id = ms.group(1) if ms else "unknown_session"
@@ -2465,7 +2617,7 @@ class ReviewTab(QWidget):
             self._candidate_table.insertRow(row)
             subject = self._display_subject_map.get(cand.session_id, cand.session_id) or cand.session_id
             effective_bid = self._effective_behavior_id(cand)
-            bname = self._resolve_behavior_display_name(effective_bid) if effective_bid else "—"
+            bname = self._resolve_behavior_display_name(effective_bid) if effective_bid else "-"
             occ_item = QTableWidgetItem(str(self._display_occurrence.get(cand.window_id, "")))
             occ_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             score_item = QTableWidgetItem(f"{cand.total_score:.3f}")
@@ -2493,11 +2645,11 @@ class ReviewTab(QWidget):
             if seed is not None:
                 dec_text = "seed" if seed.label_type == "positive" else f"seed ({seed.label_type})"
             elif is_stale_fp_fn:
-                dec_text = "—"
+                dec_text = "-"
             elif dec:
                 dec_text = dec.decision.value
             else:
-                dec_text = "—"
+                dec_text = "-"
             self._candidate_table.setItem(row, 0, QTableWidgetItem(subject))
             self._candidate_table.setItem(row, 1, QTableWidgetItem(bname))
             self._candidate_table.setItem(row, 2, occ_item)
@@ -2520,7 +2672,7 @@ class ReviewTab(QWidget):
 
         Prefers the explicit provenance ``source`` field (mapped to a friendly
         label); falls back to the active-learning ``selection_reason`` when no
-        source was recorded — the common candidate-generation case whose windows
+        source was recorded, the common candidate-generation case whose windows
         leave ``source`` blank.
         """
         src = (getattr(candidate, "source", "") or "").strip()
@@ -2528,7 +2680,7 @@ class ReviewTab(QWidget):
         if src:
             label = self._SOURCE_DISPLAY_LABELS.get(src) or src.replace("_", " ").title()
         else:
-            label = reason or "—"
+            label = reason or "-"
         color = None
         if src == "clip_mining":
             color = QColor("#00796B")
@@ -2548,7 +2700,7 @@ class ReviewTab(QWidget):
             color = QColor("#6A1B9A")
         elif not src and reason == "exploration":
             color = QColor("#2E7D32")
-        tip = f"Source: {src or '—'}\nSelection reason: {reason or '—'}"
+        tip = f"Source: {src or '-'}\nSelection reason: {reason or '-'}"
         return label, color, tip
 
     def _rebuild_display_maps(self) -> None:
@@ -2613,7 +2765,7 @@ class ReviewTab(QWidget):
         self._apply_filter()
 
     def _dismiss_undecided_candidates(self) -> None:
-        """Remove or confirm candidates that show "—" in the Decision column.
+        """Remove or confirm candidates that show "-" in the Decision column.
 
         Handles three kinds of "undecided" entries:
 
@@ -2622,9 +2774,9 @@ class ReviewTab(QWidget):
         2. Legacy virtual temporal-feedback rows (seg_feedback_* from
            feedback_intervals.json): source intervals are pruned from disk.
         3. Stale AL FP/FN entries: they have decisions but those decisions
-           pre-date the last prediction run, so the table shows "—".
+           pre-date the last prediction run, so the table shows "-".
            Dismissing re-saves their existing decision with a fresh timestamp
-           so they transition from "—" to showing their actual decision.
+           so they transition from "-" to showing their actual decision.
 
         Clip files are not deleted.
         """
@@ -2647,10 +2799,10 @@ class ReviewTab(QWidget):
         ]
 
         # ── Case 3: stale AL FP/FN entries ─────────────────────────────────
-        # These show "—" because their label timestamp is older than the last
+        # These show "-" because their label timestamp is older than the last
         # prediction file.  Re-saving the existing decision touches the
         # timestamp, making them "post-run reviewed" so the table shows the
-        # decision rather than "—".
+        # decision rather than "-".
         al_fp_fn_active = bool(
             hasattr(self, "_show_al_fp_fn_btn") and self._show_al_fp_fn_btn.isChecked()
         )
@@ -3049,7 +3201,7 @@ class ReviewTab(QWidget):
         QMessageBox.critical(
             self,
             "Regenerate Missing Clips",
-            "Clip regeneration failed — see log for details.",
+            "Clip regeneration failed: see log for details.",
         )
 
     def _selected_visible_candidates(self) -> list:
@@ -3160,6 +3312,91 @@ class ReviewTab(QWidget):
             f"Removed {removed} candidate(s), deleted {deleted_clips} clip file(s).",
         )
 
+    def _clear_label_segment_ids(self, cand) -> set[str]:
+        """Every reviewer-label row id a clip can own.
+
+        Single-animal decisions are keyed by the window id, while soundboard
+        labels are keyed per animal-segment (``seg_{animal}_{session}_{s}_{e}``)
+       , including animals only named in the saved payload, whose individual
+        may since have been renamed out of the manifest.
+        """
+        start, end = int(cand.start_frame), int(cand.end_frame)
+        ids = {str(cand.window_id)}
+        ids.update(
+            f"seg_{aid}_{cand.session_id}_{start}_{end}"
+            for (aid, _n, _c) in self._clip_animals_for(cand)
+        )
+        for lab in self._review_service.get_structured_labels(cand.window_id):
+            for key in ("focal_animal_id", "partner_animal_id"):
+                aid = lab.get(key)
+                if aid:
+                    ids.add(f"seg_{aid}_{cand.session_id}_{start}_{end}")
+        return ids
+
+    def _clear_labels_for(self, candidates: list) -> int:
+        """Erase decisions + reviewer labels for ``candidates``; keep them queued.
+
+        Returns the number of stored rows removed (decisions plus label rows),
+        so callers can tell "nothing was saved" from "cleared".
+        """
+        if not candidates:
+            return 0
+        segment_ids: set[str] = set()
+        for cand in candidates:
+            segment_ids |= self._clear_label_segment_ids(cand)
+        removed = self._review_service.remove_segment_labels(sorted(segment_ids))
+        clip_ids = [c.window_id for c in candidates]
+        removed += self._review_service.delete_decisions(clip_ids)
+        for cid in clip_ids:
+            self._decision_by_clip_id.pop(cid, None)
+            self._structured_labels.pop(cid, None)
+        return removed
+
+    def _clear_labels_for_current_clip(self) -> int:
+        """Soundboard hook: clear the clip on screen and refresh the queue row."""
+        i = self._current_candidate_idx
+        if not (self._project_root and 0 <= i < len(self._visible_candidates)):
+            return 0
+        cand = self._visible_candidates[i]
+        if self._is_seed_row(cand):
+            QMessageBox.information(self, "Seed Examples", SEED_READ_ONLY_MSG)
+            return 0
+        removed = self._clear_labels_for([cand])
+        self._update_decision_cell(i, None)
+        self._update_summary()
+        self._refresh_soundboard_for_clip()
+        self._update_saved_labels_display()
+        logger.info("Cleared %d stored label row(s) for window %s", removed, cand.window_id)
+        return removed
+
+    def _clear_labels_selected(self) -> None:
+        """Assign/Relabel menu: clear labels from the selected candidate rows."""
+        candidates = self._selected_visible_candidates()
+        if not candidates:
+            QMessageBox.warning(self, "No Selection", "Select one or more candidate rows first.")
+            return
+        candidates = self._without_seed_rows(candidates)
+        if not candidates:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Clear Labels",
+            f"Clear every saved label and decision for {len(candidates)} clip(s)?\n\n"
+            "The clips stay in the queue as unreviewed and their video files are kept.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        removed = self._clear_labels_for(candidates)
+        self._populate_candidate_table()
+        self._update_summary()
+        self._refresh_soundboard_for_clip()
+        QMessageBox.information(
+            self, "Clear Labels",
+            f"Cleared {removed} stored row(s) from {len(candidates)} clip(s).",
+        )
+
     def _reassign_selected(self) -> None:
         candidates = self._selected_visible_candidates()
         if not candidates:
@@ -3203,7 +3440,7 @@ class ReviewTab(QWidget):
         """Assign a chosen behavior (or several, in co-occurring mode) to a batch.
 
         Scope is the explicitly-selected rows, or the entire visible queue when
-        nothing is selected — so the whole mined queue can be reclassified in one
+        nothing is selected, so the whole mined queue can be reclassified in one
         click. Persists in a single batched write.
         """
         if not self._project_root:
@@ -3293,18 +3530,110 @@ class ReviewTab(QWidget):
             self, "Bulk Assign", f"Assigned “{display}” to {len(scope)} clip(s)."
         )
 
-    def _candidate_clip_path(self, candidate) -> str | None:
-        clip_path = (candidate.clip_path or "").strip() if candidate.clip_path else ""
-        if clip_path and Path(clip_path).exists():
-            return clip_path
+    def _clips_root(self) -> Path | None:
         if not self._project_root:
             return None
-        legacy = self._project_root / "derived" / "clips" / candidate.session_id / f"{candidate.window_id}.mp4"
-        if legacy.exists():
-            return str(legacy)
+        return self._project_root / "derived" / "clips"
+
+    def _ensure_clip_index(self) -> set[str]:
+        """Every file under derived/clips, as lower-cased ``session/filename``.
+
+        One scandir pass over the clips tree, cached for the life of a refresh.
+        The alternative -- probing each candidate's path with ``exists()`` -- is
+        three stat calls per row, and an AL run persists every ranked window it
+        scored, not just the ones it cut clips for.  On a project with 250k
+        persisted windows that came to ~30 s of blocking stats per filter pass;
+        the single scan costs ~0.02 s regardless of candidate count.
+        """
+        if self._clip_index is not None:
+            return self._clip_index
+
+        index: set[str] = set()
+        clips_root = self._clips_root()
+        if clips_root is not None:
+            try:
+                with os.scandir(clips_root) as sessions:
+                    for session in sessions:
+                        if not session.is_dir():
+                            continue
+                        try:
+                            with os.scandir(session.path) as files:
+                                for clip in files:
+                                    index.add(f"{session.name}/{clip.name}".lower())
+                        except OSError:
+                            # Unreadable session folder: treat as empty rather
+                            # than failing the whole refresh.
+                            continue
+            except OSError:
+                # No clips directory yet, or the drive is offline.  An empty
+                # index says "no clips", which is what the probes concluded.
+                logger.debug("Could not scan the clips directory %s", clips_root, exc_info=True)
+
+        self._clip_index = index
+        return index
+
+    @staticmethod
+    def _clip_index_key(clip_path: str, clips_root: Path) -> str | None:
+        """``session/filename`` key for *clip_path*, or None if it sits outside
+        the clips tree.  Pure string work -- resolve() would stat, which is the
+        cost this index exists to avoid.
+        """
+        try:
+            rel = Path(os.path.normpath(clip_path)).relative_to(
+                Path(os.path.normpath(str(clips_root)))
+            )
+        except ValueError:
+            return None
+        parts = rel.parts
+        return f"{parts[0]}/{parts[1]}".lower() if len(parts) == 2 else None
+
+    def _candidate_clip_path(self, candidate, verify: bool = False) -> str | None:
+        """Resolve *candidate*'s clip file, or None when it has none.
+
+        Answers from :meth:`_ensure_clip_index` so that scanning the whole
+        candidate list stays a set lookup per row.  Pass ``verify=True`` for a
+        single candidate the user is acting on (playback): an index miss is then
+        re-checked against the filesystem, so a clip cut since the last refresh
+        is still found.  Never pass it inside a loop over all candidates -- that
+        is the per-row stat storm the index replaces.
+        """
+        clips_root = self._clips_root()
+        clip_path = (candidate.clip_path or "").strip() if candidate.clip_path else ""
+        if clips_root is None:
+            return clip_path if clip_path and Path(clip_path).exists() else None
+
+        index = self._ensure_clip_index()
+        session = str(candidate.session_id)
+        safe_name = None
+
+        if clip_path:
+            key = self._clip_index_key(clip_path, clips_root)
+            if key is not None:
+                if key in index:
+                    return clip_path
+            elif Path(clip_path).exists():
+                # Stored outside the project's clips tree, so the index cannot
+                # answer for it; one stat, and only for rows that carry a path.
+                return clip_path
+
+        if f"{session}/{candidate.window_id}.mp4".lower() in index:
+            return str(clips_root / session / f"{candidate.window_id}.mp4")
         safe_name = ClipExtractionService.clip_filename_for_id(candidate.window_id)
-        guessed = self._project_root / "derived" / "clips" / candidate.session_id / f"{safe_name}.mp4"
-        return str(guessed) if guessed.exists() else None
+        if f"{session}/{safe_name}.mp4".lower() in index:
+            return str(clips_root / session / f"{safe_name}.mp4")
+
+        if verify:
+            # The index is a snapshot; a clip extracted since it was built would
+            # otherwise read as missing for the clip the user is looking at.
+            for guess in (
+                Path(clip_path) if clip_path else None,
+                clips_root / session / f"{candidate.window_id}.mp4",
+                clips_root / session / f"{safe_name}.mp4",
+            ):
+                if guess is not None and guess.exists():
+                    self._clip_index = None  # rebuild on next bulk pass
+                    return str(guess)
+        return None
 
     def _on_table_selection_changed(self) -> None:
         selected = self._candidate_table.selectionModel().selectedRows()
@@ -3330,14 +3659,18 @@ class ReviewTab(QWidget):
         self._candidate_label.setText(f"Candidate {idx + 1} / {len(self._visible_candidates)}")
         self._id_label.setText(f"Subject: {subject}  |  Segment: {occ}")
         self._id_label.setToolTip(f"Internal segment id: {candidate.window_id}")
-        self._score_label.setText(f"Score: {candidate.total_score:.3f}  |  Subject: {subject}")
+        _animal_names = [nm for (_aid, nm, _c) in self._clip_animals_for(candidate)]
+        self._score_label.setText(
+            f"Score: {candidate.total_score:.3f}"
+            + (f"  |  In clip: {', '.join(_animal_names)}" if len(_animal_names) > 1 else "")
+        )
 
-        clip = self._candidate_clip_path(candidate)
+        clip = self._candidate_clip_path(candidate, verify=True)
         if clip:
             self._clip_label.setText(f"Clip: {clip}")
         elif self._is_seed_row(candidate):
             self._clip_label.setText(
-                "Clip: seed example (read-only) — select it and click "
+                "Clip: seed example (read-only), select it and click "
                 "Regenerate Missing Clips to watch it"
             )
         else:
@@ -3429,6 +3762,8 @@ class ReviewTab(QWidget):
                         self._pending_labels.add(bid)
             self._update_pending_labels_display()
 
+        self._update_saved_labels_display()
+
         if select_row:
             self._candidate_table.blockSignals(True)
             self._candidate_table.selectRow(idx)
@@ -3463,7 +3798,7 @@ class ReviewTab(QWidget):
         if self._is_seed_row(self._visible_candidates[self._current_candidate_idx]):
             return
         # Temporarily disable auto-advance so _save_decision does not also
-        # move the index — the caller handles navigation.
+        # move the index: the caller handles navigation.
         prev = self._autoplay_chk.isChecked()
         self._autoplay_chk.blockSignals(True)
         self._autoplay_chk.setChecked(False)
@@ -3484,8 +3819,12 @@ class ReviewTab(QWidget):
             self._label_combo.setCurrentIndex(label_idx)
         self._save_with_decision(ReviewDecisionType.ACCEPT)
 
-    def _update_decision_cell(self, row_idx: int, decision: ReviewDecision) -> None:
-        """Patch only the Decision column for the given row without rebuilding the table."""
+    def _update_decision_cell(self, row_idx: int, decision: "ReviewDecision | None") -> None:
+        """Patch only the Decision column for the given row without rebuilding the table.
+
+        ``decision`` is ``None`` when the row's labels were just cleared, which
+        shows the same em dash as a never-reviewed row.
+        """
         if row_idx < 0 or row_idx >= self._candidate_table.rowCount():
             return
         al_fp_fn_active = bool(
@@ -3499,7 +3838,7 @@ class ReviewTab(QWidget):
             and (cand.window_id in self._al_fp_ids or cand.window_id in self._al_fn_ids)
             and not post_reviewed
         )
-        dec_text = "—" if is_stale else decision.decision.value
+        dec_text = "-" if (is_stale or decision is None) else decision.decision.value
         item = self._candidate_table.item(row_idx, 7)
         if item is None:
             self._candidate_table.setItem(row_idx, 7, QTableWidgetItem(dec_text))
@@ -3561,10 +3900,11 @@ class ReviewTab(QWidget):
             self._update_pending_labels_display()
 
         # Update the Decision column in-place so the clip stays in the list.
-        # Do NOT call _apply_filter() here — the list only gets pruned when
+        # Do NOT call _apply_filter() here: the list only gets pruned when
         # the user explicitly clicks Refresh.
         self._update_decision_cell(self._current_candidate_idx, rec)
         self._update_summary()
+        self._update_saved_labels_display()
 
         # Advance to the next clip only when auto-advance is enabled.
         if self._autoplay_chk.isChecked():
@@ -3695,7 +4035,7 @@ class ReviewTab(QWidget):
             QMessageBox.information(
                 self,
                 "Not Enough Clips",
-                f"Need at least 3 accepted clips for this behavior — found {len(reviewed_clips)}.",
+                f"Need at least 3 accepted clips for this behavior, found {len(reviewed_clips)}.",
             )
             return
 
@@ -3721,7 +4061,7 @@ class ReviewTab(QWidget):
             QMessageBox.warning(self, "Dissimilarity Error", report.error)
             return
 
-        # Store scores keyed by window_id for table colouring.
+        # Store scores keyed by window_id for table coloring.
         self._dissimilarity_scores = {r.window_id: r.score for r in report.results}
 
         # Re-sort visible candidates: scored clips from most to least dissimilar,
@@ -3762,10 +4102,10 @@ class ReviewTab(QWidget):
         self._flag_outliers_btn.setEnabled(True)
         self._flag_outliers_btn.setText("Flag Outliers (Dissimilarity)")
         logger.error("Dissimilarity analysis failed:\n%s", tb)
-        QMessageBox.critical(self, "Dissimilarity Failed", "Analysis failed — see log for details.")
+        QMessageBox.critical(self, "Dissimilarity Failed", "Analysis failed: see log for details.")
 
     def _apply_dissimilarity_highlights(self) -> None:
-        """Colour table rows by dissimilarity score and update the Score column."""
+        """Color table rows by dissimilarity score and update the Score column."""
         if not self._dissimilarity_scores:
             return
         for row_idx, cand in enumerate(self._visible_candidates):
@@ -3800,7 +4140,7 @@ class ReviewTab(QWidget):
         values fall *outside* the acceptable ranges (fail the essence test), then
         sorts those to the top so they can be re-reviewed. Unlike Flag Outliers
         (Dissimilarity), the cutoffs are the explicit target ranges the reviewer
-        set — not a statistical distance.
+        set, not a statistical distance.
         """
         if not self._project_root:
             QMessageBox.warning(self, "No Project", "Load a project first.")
@@ -3912,7 +4252,7 @@ class ReviewTab(QWidget):
             QMessageBox.information(
                 self,
                 "Flag Failing Clips",
-                f"All {n_pass} judged clip(s) fall within the essence ranges — "
+                f"All {n_pass} judged clip(s) fall within the essence ranges, "
                 "nothing to flag." + no_data_note,
             )
 
@@ -3922,14 +4262,14 @@ class ReviewTab(QWidget):
         self._close_essence_progress()
         logger.error("Essence-range flagging failed:\n%s", tb)
         QMessageBox.critical(
-            self, "Flag Failing Clips", "Essence check failed — see log for details."
+            self, "Flag Failing Clips", "Essence check failed: see log for details."
         )
 
     def _apply_essence_highlights(self) -> None:
-        """Colour rows whose clips fell outside the essence ranges and add tooltips."""
+        """Color rows whose clips fell outside the essence ranges and add tooltips."""
         if not self._essence_fail_violations:
             return
-        bg = QColor(255, 152, 0, 90)  # orange — matches the dissimilarity outlier tint
+        bg = QColor(255, 152, 0, 90)  # orange: matches the dissimilarity outlier tint
         for row_idx, cand in enumerate(self._visible_candidates):
             if row_idx >= self._candidate_table.rowCount():
                 break

@@ -1,4 +1,4 @@
-"""Transfer Feedback — assess how well a Direct Use run transferred.
+"""Transfer Feedback: assess how well a Direct Use run transferred.
 
 After applying a trained model to a new project's videos (Direct Use), this
 service inspects the results and estimates how trustworthy they look, per
@@ -7,7 +7,7 @@ metrics to the base project (bout thresholds/scale differ between runs and
 would false-flag everyone); instead it relies on:
 
 * within-run population outliers (robust z / MAD across the run's subjects),
-* divergence of each subject's *relative* behaviour profile from the base
+* divergence of each subject's *relative* behavior profile from the base
   project's expected profile (shape, not magnitude),
 * threshold-independent confidence-run anomalies from the per-frame
   probability traces (stuck-high or lost-low stretches),
@@ -67,7 +67,7 @@ class TransferFeedbackReport:
 
 
 class TransferFeedbackService:
-    """Analyse a Direct Use target project for transfer quality."""
+    """Analyze a Direct Use target project for transfer quality."""
 
     # ------------------------------------------------------------------
     # Public API
@@ -92,13 +92,13 @@ class TransferFeedbackService:
         behaviors = sorted({str(r.get("behavior", "")).strip() for r in rows if r.get("behavior")})
         report.behaviors = behaviors
 
-        # Aggregate per subject × behaviour (a subject may have several sessions).
+        # Aggregate per subject × behavior (a subject may have several sessions).
         per_subject = self._aggregate(rows)
 
         # Population baselines (robust) for outlier detection.
         pop_stats = self._population_stats(per_subject, behaviors)
 
-        # Base project's expected relative profile (shape over behaviours) —
+        # Base project's expected relative profile (shape over behaviors),
         # kept for display.  The *flag* uses the within-run reference instead,
         # because a whole Direct Use run often shifts uniformly vs the base
         # (which would otherwise flag every subject).
@@ -122,7 +122,7 @@ class TransferFeedbackService:
             fb.confidence = conf_by_subject.get(subject, {})
             penalties = 0.0
 
-            # ── Flag 1: 0/1 bout for an active behaviour ─────────────
+            # ── Flag 1: 0/1 bout for an active behavior ─────────────
             for beh in behaviors:
                 m = fb.behavior_metrics.get(beh)
                 if m is None:
@@ -159,7 +159,7 @@ class TransferFeedbackService:
                 )
                 penalties += _PENALTY["lost_low"]
 
-            # ── Flag 4: behaviour-profile divergence (vs peers) ──────
+            # ── Flag 4: behavior-profile divergence (vs peers) ──────
             dist = profile_dist.get(subject, 0.0)
             fb.confidence["profile_distance"] = dist
             if base_profile:
@@ -168,7 +168,7 @@ class TransferFeedbackService:
                 )
             if abs(self._robust_z(dist, profile_stats)) >= OUTLIER_Z:
                 fb.flags.append(
-                    "Overall behaviour mix differs sharply from the other subjects "
+                    "Overall behavior mix differs sharply from the other subjects "
                     "in this run"
                 )
                 penalties += _PENALTY["profile"]
@@ -239,7 +239,7 @@ class TransferFeedbackService:
     def _population_stats(
         per_subject: dict[str, dict[str, Any]], behaviors: list[str]
     ) -> dict[str, dict[str, tuple[float, float]]]:
-        """Per behaviour, robust center+scale (median, MAD) for each metric."""
+        """Per behavior, robust center+scale (median, MAD) for each metric."""
         stats: dict[str, dict[str, tuple[float, float]]] = {}
         for beh in behaviors:
             stats[beh] = {}

@@ -1,18 +1,18 @@
 """Keep project state attached to its sessions when subjects are renamed.
 
 Subject names are display labels the Data Import tab lets the user change at any
-time — by re-applying the filename regex or by typing over a cell.  Some saved
+time, by re-applying the filename regex or by typing over a cell.  Some saved
 state is keyed by those names rather than by session id:
 
-* ``derived/analytics_groups.json`` — factor assignments and the session order
+* ``derived/analytics_groups.json``: factor assignments and the session order
   are keyed by the Analytics session label (``m1`` or ``m1 – cond1``), the
   per-subject prechop by subject name;
-* ``config/environment_rois.yaml`` — per-subject ROIs are keyed by subject name
+* ``config/environment_rois.yaml``: per-subject ROIs are keyed by subject name
   or ``subject::session_id``.
 
 :func:`propagate_subject_renames` re-keys both whenever a manifest save changes
 a subject.  The Analytics tab also holds its state in memory and may save it
-later, so that state carries *anchors* — the session ids behind every key — and
+later, so that state carries *anchors*, the session ids behind every key, and
 :func:`remap_group_state` re-keys it on load and refresh too.
 
 Segment and clip ids are protected separately: extraction writes the frozen
@@ -71,8 +71,8 @@ class SessionLabels:
 def session_labels(manifest: Any) -> SessionLabels:
     """Subject, session type and display label of every linked session.
 
-    A subject with one session is labelled by its name alone; a subject with
-    several is labelled ``"{subject} – {session type}"`` per session.
+    A subject with one session is labeled by its name alone; a subject with
+    several is labeled ``"{subject} – {session type}"`` per session.
     """
     if manifest is None:
         return SessionLabels()
@@ -87,9 +87,9 @@ def session_labels(manifest: Any) -> SessionLabels:
             subject = (video.subject_id or "").strip()
         subject = subject or sid
         subjects[sid] = subject
-        # Session type from the video filename first — the stem after the
+        # Session type from the video filename first: the stem after the
         # subject prefix, minus any DLC suffix ("m10_cond1" with subject "m10"
-        # → "cond1") — then from a "{subject}_{session type}" subject label.
+        # → "cond1"): then from a "{subject}_{session type}" subject label.
         stype = ""
         if video is not None:
             stem = Path(video.source_path).stem
@@ -123,8 +123,8 @@ def current_subjects(df: pd.DataFrame, manifest: Any) -> pd.Series:
 
     A row whose ``(animal_id, session_id)`` is a manifest session's
     ``(subject_key, session_id)`` gets that session's ``subject_id``.  Every
-    other row — multi-animal individuals, rows imported from other projects,
-    sessions no longer in the manifest — keeps its ``animal_id``.
+    other row, multi-animal individuals, rows imported from other projects,
+    sessions no longer in the manifest, keeps its ``animal_id``.
     """
     animal = df["animal_id"].astype(str)
     if manifest is None or "session_id" not in df.columns:
@@ -201,7 +201,7 @@ def remap_group_state(state: dict, labels: SessionLabels) -> list[str]:
     """Move label- and subject-keyed entries of *state* onto current keys.
 
     A key that is no longer current follows its anchored sessions to the
-    label (or subject) they have now — to several keys when a subject was
+    label (or subject) they have now, to several keys when a subject was
     split.  Entries already under a current key win over entries moved onto
     it.  A key without an anchor, or whose sessions are all gone, stays as it
     is.  Mutates *state*, re-anchors it against *labels*, and returns a note
@@ -270,7 +270,7 @@ def remap_group_state(state: dict, labels: SessionLabels) -> list[str]:
                 kept[target] = values.pop()
             else:
                 notes.append(
-                    f"Prechop for '{target}' not carried over — its sessions had "
+                    f"Prechop for '{target}' not carried over, its sessions had "
                     f"different values ({', '.join(f'{k}={v}' for k, v in by_old.items())}). "
                     "Set it again in Analytics."
                 )

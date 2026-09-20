@@ -1,4 +1,4 @@
-"""Clip extraction tab — decode clips only for selected candidates."""
+"""Clip extraction tab: decode clips only for selected candidates."""
 
 from __future__ import annotations
 
@@ -124,6 +124,33 @@ class ClipExtractionTab(QWidget):
             "100% = baseline, 125% = 25% larger area."
         )
 
+        self._all_animals_chk = QCheckBox("Keep all animals in view")
+        self._all_animals_chk.setChecked(True)
+        self._all_animals_chk.setToolTip(
+            "In multi-animal sessions, widen the crop so every tracked animal stays "
+            "in the clip: a crop centered on one animal cuts its partner out, which "
+            "makes social behavior impossible to score. No effect on single-animal "
+            "sessions."
+        )
+
+        self._full_frame_chk = QCheckBox("Full frame (no crop)")
+        self._full_frame_chk.setToolTip(
+            "Write the whole video frame instead of a crop that follows the animal. "
+            "Useful for judging where an animal is in the arena and what the other "
+            "animals are doing; the crop area setting is ignored.\n\nThe whole arena "
+            "is fitted into the preset's clip width, so full-frame clips look softer "
+            "than crops: see the note below."
+        )
+        self._full_frame_chk.toggled.connect(self._on_full_frame_toggled)
+
+        self._clip_quality_note = QLabel(
+            "Clips are downsampled preview copies for review. Your source videos are "
+            "never modified, and pose, features and training read the originals at "
+            "full resolution."
+        )
+        self._clip_quality_note.setWordWrap(True)
+        self._clip_quality_note.setStyleSheet("color: #78909C; font-size: 11px;")
+
         self._status = QLabel("No candidate windows loaded.")
         self._status.setWordWrap(True)
 
@@ -160,7 +187,7 @@ class ClipExtractionTab(QWidget):
         self._clear_btn.setToolTip(
             "Delete the rendered video clip files for the selected subject to free "
             "disk space.\n\nDoes NOT change your review labels or the candidate "
-            "queue — clips can be re-extracted at any time."
+            "queue: clips can be re-extracted at any time."
         )
         self._clear_candidates_btn = QPushButton("Clear Candidates")
         self._clear_candidates_btn.clicked.connect(self._clear_candidates)
@@ -211,6 +238,9 @@ class ClipExtractionTab(QWidget):
         form.addRow("Bottom candidates:", self._bottom_n)
         form.addRow("Median candidates:", self._median_n)
         form.addRow("Crop area:", self._crop_area_percent)
+        form.addRow("", self._all_animals_chk)
+        form.addRow("", self._full_frame_chk)
+        form.addRow("", self._clip_quality_note)
         form.addRow("Before (sec):", self._before_sec)
         form.addRow("After (sec):", self._after_sec)
 
@@ -329,6 +359,8 @@ class ClipExtractionTab(QWidget):
         self._bottom_n.setValue(0)
         self._median_n.setValue(0)
         self._crop_area_percent.setValue(125.0)
+        self._all_animals_chk.setChecked(True)
+        self._full_frame_chk.setChecked(False)
         self._before_sec.setValue(0.0)
         self._after_sec.setValue(0.0)
         self._hide_reviewed_chk.setChecked(False)
@@ -341,9 +373,16 @@ class ClipExtractionTab(QWidget):
         self._bottom_n.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._median_n.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._crop_area_percent.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
+        self._full_frame_chk.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
+        self._all_animals_chk.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._before_sec.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._after_sec.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._hide_reviewed_chk.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
+
+    def _on_full_frame_toggled(self, checked: bool) -> None:
+        """Crop settings have no effect on a full-frame clip, so gray them out."""
+        self._crop_area_percent.setEnabled(not bool(checked))
+        self._all_animals_chk.setEnabled(not bool(checked))
 
     def _on_preset_changed(self, _index: int) -> None:
         preset = self._preset_combo.currentData()
@@ -363,6 +402,8 @@ class ClipExtractionTab(QWidget):
             "bottom_candidates": int(self._bottom_n.value()),
             "median_candidates": int(self._median_n.value()),
             "crop_area_percent": float(self._crop_area_percent.value()),
+            "full_frame": bool(self._full_frame_chk.isChecked()),
+            "include_all_animals": bool(self._all_animals_chk.isChecked()),
             "before_sec": float(self._before_sec.value()),
             "after_sec": float(self._after_sec.value()),
             "hide_reviewed": bool(self._hide_reviewed_chk.isChecked()),
@@ -409,6 +450,9 @@ class ClipExtractionTab(QWidget):
             self._bottom_n.setValue(int(ui.get("bottom_candidates", 0)))
             self._median_n.setValue(int(ui.get("median_candidates", 0)))
             self._crop_area_percent.setValue(float(ui.get("crop_area_percent", 125.0)))
+            self._full_frame_chk.setChecked(bool(ui.get("full_frame", False)))
+            self._all_animals_chk.setChecked(bool(ui.get("include_all_animals", True)))
+            self._on_full_frame_toggled(self._full_frame_chk.isChecked())
             self._before_sec.setValue(float(ui.get("before_sec", 0.0)))
             self._after_sec.setValue(float(ui.get("after_sec", 0.0)))
             self._hide_reviewed_chk.setChecked(bool(ui.get("hide_reviewed", False)))
@@ -581,7 +625,7 @@ class ClipExtractionTab(QWidget):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox  # noqa: PLC0415
 
         # Prune stale keys so the dict (and the button count) matches the
-        # source types actually present now — otherwise the button could read
+        # source types actually present now: otherwise the button could read
         # "5 sources" while the dialog shows only 4 checkboxes.
         self._sync_source_filter_button()
         source_types = self._discover_source_types()
@@ -645,8 +689,8 @@ class ClipExtractionTab(QWidget):
         """Prune stale source keys and update the Filter Sources button label.
 
         The count on the button must match the number of checkboxes the dialog
-        would show — i.e. the source types actually present among the loaded
-        candidates — so we drop any keys for sources that are no longer present.
+        would show, i.e. the source types actually present among the loaded
+        candidates, so we drop any keys for sources that are no longer present.
         """
         source_types = self._discover_source_types()
         self._source_filter_enabled = {
@@ -867,7 +911,7 @@ class ClipExtractionTab(QWidget):
             local_clips: list[Any] = []
 
             if cancel_flag and cancel_flag[0]:
-                local_warnings.append("Cancelled by user.")
+                local_warnings.append("Canceled by user.")
                 _emit_progress(len(windows))
                 return sid, local_clips, local_warnings, 0
 
@@ -904,6 +948,7 @@ class ClipExtractionTab(QWidget):
                 individual_overlays = ClipExtractionService.build_individual_overlays(
                     self._pose_processing, pose_path,
                     getattr(manifest, "smoothing_settings", None), _imap,
+                    list(getattr(_sess, "identity_corrections", None) or []) if _sess else None,
                 )
 
             cfg = ClipExtractionConfig(
@@ -969,7 +1014,7 @@ class ClipExtractionTab(QWidget):
         if max_workers <= 1:
             for sid, windows in items:
                 if cancel_flag and cancel_flag[0]:
-                    warnings.append("Cancelled by user.")
+                    warnings.append("Canceled by user.")
                     break
                 sess_id, sess_clips, sess_warnings, n_clips = _process_session(sid, windows)
                 if n_clips > 0:
@@ -981,7 +1026,7 @@ class ClipExtractionTab(QWidget):
                 futures = [executor.submit(_process_session, sid, windows) for sid, windows in items]
                 for fut in cf.as_completed(futures):
                     if cancel_flag and cancel_flag[0]:
-                        warnings.append("Cancelled by user.")
+                        warnings.append("Canceled by user.")
                     sess_id, sess_clips, sess_warnings, n_clips = fut.result()
                     if n_clips > 0:
                         extracted_sessions.append(sess_id)
@@ -1089,7 +1134,7 @@ class ClipExtractionTab(QWidget):
 
         for row_idx, c in enumerate(rows):
             subject = subject_map.get(c.session_id, c.session_id) or c.session_id
-            bname = behavior_name_map.get(c.behavior_id or "", c.behavior_id or "") if c.behavior_id else "—"
+            bname = behavior_name_map.get(c.behavior_id or "", c.behavior_id or "") if c.behavior_id else "-"
 
             # Check if a clip file matching this candidate's frame range exists.
             clip_available = (
@@ -1119,7 +1164,7 @@ class ClipExtractionTab(QWidget):
             self._table.setItem(row_idx, 5, score_item)
 
             source_label = str(c.selection_reason or c.source or "").strip()
-            source_item = QTableWidgetItem(source_label if source_label else "—")
+            source_item = QTableWidgetItem(source_label if source_label else "-")
             source_item.setToolTip(source_label)
             color_hex = _SOURCE_COLORS.get(source_label)
             if color_hex:
@@ -1127,9 +1172,9 @@ class ClipExtractionTab(QWidget):
             self._table.setItem(row_idx, 6, source_item)
 
             # Use a lightweight text item instead of a full QPushButton widget.
-            # Clip playback is only needed in the Review tab — here we just
+            # Clip playback is only needed in the Review tab, here we just
             # show availability status.
-            status_text = "✓" if clip_available else "—"
+            status_text = "✓" if clip_available else "-"
             status_item = QTableWidgetItem(status_text)
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             status_item.setToolTip("Clip extracted" if clip_available else "Not extracted")
@@ -1169,7 +1214,11 @@ class ClipExtractionTab(QWidget):
 
             runtime_crop_area_scale = float(self._crop_area_percent.value()) / 100.0
             runtime_preset = PreprocessingPreset.model_validate(
-                preset.model_dump(mode="python") | {"crop_area_scale": runtime_crop_area_scale}
+                preset.model_dump(mode="python") | {
+                    "crop_area_scale": runtime_crop_area_scale,
+                    "full_frame": bool(self._full_frame_chk.isChecked()),
+                    "include_all_animals": bool(self._all_animals_chk.isChecked()),
+                }
             )
 
             subject_map = self._subject_by_session()
@@ -1243,7 +1292,8 @@ class ClipExtractionTab(QWidget):
                 f"Extracting {total_selected} clip(s) for {subject_label} "
                 f"(top={int(self._top_n.value())}, bottom={int(self._bottom_n.value())}, "
                 f"median={int(self._median_n.value())}, "
-                f"crop_area={self._crop_area_percent.value():.0f}%, "
+                f"{'full frame' if self._full_frame_chk.isChecked() else f'crop_area={self._crop_area_percent.value():.0f}%'}"
+                f"{'' if self._full_frame_chk.isChecked() or not self._all_animals_chk.isChecked() else ', all animals in view'}, "
                 f"context: -{self._before_sec.value():.2f}s / +{self._after_sec.value():.2f}s @ {source_fps:.2f} fps)..."
             )
             requested_workers = os.environ.get("ABEL_CLIP_EXTRACT_WORKERS", "").strip() or "auto"
@@ -1342,7 +1392,7 @@ class ClipExtractionTab(QWidget):
         # Safety net: if progress reaches total but finished signal never arrives,
         # recover UI state and refresh from disk so play buttons can be enabled.
         if total > 0 and done >= total and self._waiting_for_worker_finish:
-            self._status.setText("Finalizing extraction...")
+            self._status.setText("Finalizing extraction…")
             QTimer.singleShot(3000, self._recover_if_worker_stuck)
 
     def _cancel(self) -> None:
@@ -1442,7 +1492,9 @@ class ClipExtractionTab(QWidget):
         self._top_n.setEnabled(not busy)
         self._bottom_n.setEnabled(not busy)
         self._median_n.setEnabled(not busy)
-        self._crop_area_percent.setEnabled(not busy)
+        self._crop_area_percent.setEnabled(not busy and not self._full_frame_chk.isChecked())
+        self._full_frame_chk.setEnabled(not busy)
+        self._all_animals_chk.setEnabled(not busy and not self._full_frame_chk.isChecked())
         self._before_sec.setEnabled(not busy)
         self._after_sec.setEnabled(not busy)
 

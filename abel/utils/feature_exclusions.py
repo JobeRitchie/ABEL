@@ -1,15 +1,15 @@
 """Single source of truth for project-level feature exclusions.
 
-Excluded features are stored in ``config/feature_exclusions.json`` and honoured by
-**every** stage from Active Learning onward — training, inference (via the model's
-persisted feature list), UMAP, evaluation and benchmarking — so a feature the user
+Excluded features are stored in ``config/feature_exclusions.json`` and honored by
+**every** stage from Active Learning onward, training, inference (via the model's
+persisted feature list), UMAP, evaluation and benchmarking, so a feature the user
 turns off in one place stays off everywhere.
 
 The file holds two keys:
 
-- ``excluded_feature_cols`` — explicit column names (written by the Active
+- ``excluded_feature_cols``: explicit column names (written by the Active
   Learning "Configure Features" dialog and the Feature Audit tab).
-- ``disabled_feature_groups`` — coarse feature families toggled off in the
+- ``disabled_feature_groups``: coarse feature families toggled off in the
   Features tab; expanded to concrete columns via name patterns.
 
 This module centralises the read + resolution logic that previously lived only

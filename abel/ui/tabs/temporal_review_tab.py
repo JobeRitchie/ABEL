@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -77,6 +78,8 @@ class TemporalReviewTab(QWidget):
         self._subject_by_session: dict[str, str] = {}
         self._loaded_session_video_id: str | None = None
         self._trace_paths: dict[str, str] = {}
+        # session_id -> {animal_id: trace path}; empty for single-animal projects.
+        self._animal_trace_paths: dict[str, dict[str, str]] = {}
         self._trace_probability_lookup: dict[str, pd.DataFrame] = {}
         self._competition_models: dict[str, str] = {}
         self._competition_excluded: list[str] = []
@@ -174,7 +177,7 @@ class TemporalReviewTab(QWidget):
         self._send_subject_bouts_btn = QPushButton("Send Current Behavior/Subject Bouts")
         self._send_subject_bouts_btn.setToolTip(
             "Send bouts for the currently selected behavior and current subject to Clip Review "
-            "without clearing any clips already there — so you can accumulate clips from "
+            "without clearing any clips already there: so you can accumulate clips from "
             "different subjects one at a time."
         )
         self._send_subject_bouts_btn.clicked.connect(self._send_current_subject_behavior_bouts_to_clip_review)
@@ -196,20 +199,40 @@ class TemporalReviewTab(QWidget):
         preview_layout.addLayout(preview_row)
         preview_layout.addWidget(self._player)
 
-        # Row 1: behavior selector + read-only settings display
+        # Row 1: subject + behavior selectors + read-only settings display
         trace_row1 = QHBoxLayout()
+        self._trace_subject_label = QLabel("Animal:")
+        self._trace_subject = QComboBox()
+        self._trace_subject.setToolTip(
+            "Which animal's confidence to plot. Each animal in a multi-animal "
+            "session is scored separately; 'Any animal' is the per-frame maximum "
+            "across them."
+        )
+        self._trace_subject.addItem("Any animal", userData="__any__")
+        self._trace_subject.currentIndexChanged.connect(self._on_trace_subject_changed)
+        self._trace_subject_label.hide()
+        self._trace_subject.hide()
+        trace_row1.addWidget(self._trace_subject_label)
+        trace_row1.addWidget(self._trace_subject)
         trace_row1.addWidget(QLabel("Behavior:"))
         self._trace_behavior = QComboBox()
         self._trace_behavior.addItem("All behaviors", userData="__all__")
         self._trace_behavior.currentIndexChanged.connect(self._on_trace_behavior_changed)
         trace_row1.addWidget(self._trace_behavior)
+        self._trace_settings_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         trace_row1.addWidget(self._trace_settings_label, 1)
 
-        # Row 2: probability readout + FP/FN toggle buttons
+        # Row 2: probability readout + FP/FN toggle buttons.  The flow row takes
+        # the stretch: given only its minimum width it wraps every button onto
+        # its own line and eats the height the plot needs.
         trace_row2 = QHBoxLayout()
         self._selected_probability = QLabel("Selected frame probability: --")
+        self._selected_probability.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         trace_row2.addWidget(self._selected_probability)
-        trace_row2.addStretch(1)
 
         self._fp_flag_btn = QPushButton("Flag FP (click bout)")
         self._fp_flag_btn.setCheckable(True)
@@ -247,7 +270,7 @@ class TemporalReviewTab(QWidget):
             self._staged_count_label,
             self._commit_flags_btn,
             self._clear_staged_btn,
-        ]))
+        ]), 1)
 
         # -- State for interactive FP/FN flagging --
         self._fp_flag_active = False
@@ -275,7 +298,14 @@ class TemporalReviewTab(QWidget):
         self._trace_playhead = None
         self._trace_placeholder = QLabel("Probability trace will appear after loading inference artifacts.")
         self._trace_placeholder.setWordWrap(True)
+        self._trace_placeholder.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
         trace_layout.addWidget(self._trace_placeholder)
+        # Nothing above the canvas may claim the spare height: without this the
+        # three fixed rows split the group box between them and the plot is left
+        # a sliver at the bottom.
+        trace_layout.addStretch(1)
         # Defer matplotlib canvas creation until first use so that Qt DPI
         # information is available and the canvas does not trigger
         # QFont::setPointSize <= 0 warnings during app startup.
@@ -438,7 +468,7 @@ class TemporalReviewTab(QWidget):
         if checked:
             self._fn_flag_btn.setChecked(False)
             self._fp_flag_btn.setStyleSheet("background-color: #EF9A9A; font-weight: bold;")
-            self._status.setText("FP mode — click bouts to stage as false positive. Right-click staged/committed to remove. Commit when done.")
+            self._status.setText("FP mode: click bouts to stage as false positive. Right-click staged/committed to remove. Commit when done.")
         else:
             self._fp_flag_btn.setStyleSheet("")
             if not self._fn_flag_active:
@@ -450,7 +480,7 @@ class TemporalReviewTab(QWidget):
         if checked:
             self._fp_flag_btn.setChecked(False)
             self._fn_flag_btn.setStyleSheet("background-color: #90CAF9; font-weight: bold;")
-            self._status.setText("FN mode — drag on trace to stage missed regions. Right-click staged/committed to remove. Commit when done.")
+            self._status.setText("FN mode: drag on trace to stage missed regions. Right-click staged/committed to remove. Commit when done.")
         else:
             self._fn_flag_btn.setStyleSheet("")
             self._fn_drag_start = None
@@ -491,7 +521,7 @@ class TemporalReviewTab(QWidget):
         return None
 
     def _stage_fp(self, start: int, end: int) -> None:
-        """Stage a bout as FP (visual only — not persisted until commit)."""
+        """Stage a bout as FP (visual only: not persisted until commit)."""
         staged_fp, _ = self._current_staged_lists()
         if (start, end) not in staged_fp:
             staged_fp.append((start, end))
@@ -499,7 +529,7 @@ class TemporalReviewTab(QWidget):
         self._draw_staged_overlays()
 
     def _stage_fn(self, start: int, end: int) -> None:
-        """Stage a range as FN (visual only — not persisted until commit)."""
+        """Stage a range as FN (visual only: not persisted until commit)."""
         _, staged_fn = self._current_staged_lists()
         if (start, end) not in staged_fn:
             staged_fn.append((start, end))
@@ -877,8 +907,8 @@ class TemporalReviewTab(QWidget):
         """Tile FP/FN feedback intervals into non-overlapping AL-sized windows and write
         them to the reviewer label store.
 
-        False-positive windows are labelled ``"no_behavior"`` (hard negative).
-        False-negative windows are labelled with *concept_id* (positive).
+        False-positive windows are labeled ``"no_behavior"`` (hard negative).
+        False-negative windows are labeled with *concept_id* (positive).
 
         Returns the number of new label records written.
         """
@@ -961,7 +991,7 @@ class TemporalReviewTab(QWidget):
 
         self._persist_current_behavior_settings()
         self._set_refresh_busy(True)
-        self._status.setText("Applying review settings and regenerating bout outputs...")
+        self._status.setText("Applying review settings and regenerating bout outputs…")
 
         worker = TaskWorker(self._refresh_task)
         worker.kwargs["progress_cb"] = worker.signals.line_emitted.emit
@@ -1124,7 +1154,7 @@ class TemporalReviewTab(QWidget):
         behavior_combo = QComboBox(dlg)
         _trace_data = str(self._trace_behavior.currentData() or "").strip()
         if _trace_data and _trace_data != "__all__":
-            # Column names are "prob_{behavior_id}" — strip the prob_ prefix to get
+            # Column names are "prob_{behavior_id}": strip the prob_ prefix to get
             # the actual behavior ID used as concept_id.
             concept_id_fp = _trace_data.removeprefix("prob_")
             concept_name_fp = self._trace_behavior.currentText().strip() or concept_id_fp
@@ -1168,8 +1198,8 @@ class TemporalReviewTab(QWidget):
         # Determine decision type and labels:
         # - concept selected (default): REJECT for that behavior specifically.
         #   Parquet label = "no_behavior" so AL training doesn't treat it as a positive.
-        # - "no_behavior": ACCEPT with no_behavior — universal hard negative.
-        # - other behavior: ACCEPT for that behavior — was actually something else.
+        # - "no_behavior": ACCEPT with no_behavior, universal hard negative.
+        # - other behavior: ACCEPT for that behavior, was actually something else.
         if selected == concept_id_fp:
             fp_decision = ReviewDecisionType.REJECT
             fp_behavior_label = concept_id_fp   # decisions JSON: REJECT for Dig
@@ -1187,7 +1217,7 @@ class TemporalReviewTab(QWidget):
             feedback_type="false_positive",
         )
         # Write a finalized review decision so this interval is treated as
-        # already-reviewed — no additional approval needed in the review tab.
+        # already-reviewed: no additional approval needed in the review tab.
         self._write_temporal_review_decisions(
             session_id=sid, start=start, end=end,
             review_label=fp_parquet_label,
@@ -1268,7 +1298,7 @@ class TemporalReviewTab(QWidget):
             feedback_type="false_negative",
         )
         # Write a finalized review decision so this interval is treated as
-        # already-reviewed — no additional approval needed in the review tab.
+        # already-reviewed: no additional approval needed in the review tab.
         self._write_temporal_review_decisions(
             session_id=sid, start=start, end=end,
             review_label=correct_label, concept_id=concept_id,
@@ -1309,7 +1339,7 @@ class TemporalReviewTab(QWidget):
             seg_id = f"seg_feedback_{session_id}_{tile_start}_{tile_end}"
 
             _decision_behavior = behavior_label if behavior_label is not None else review_label
-            # Reviewer label (parquet) — timestamp now = after any prediction file.
+            # Reviewer label (parquet): timestamp now = after any prediction file.
             self._review_service.append_segment_label(
                 ReviewerLabelRecord(
                     segment_id=seg_id,
@@ -1319,7 +1349,7 @@ class TemporalReviewTab(QWidget):
                     notes=f"temporal:{review_label}:{concept_id}",
                 )
             )
-            # Review decision (JSON) — marks the tile as fully reviewed so it
+            # Review decision (JSON): marks the tile as fully reviewed so it
             # never surfaces as needing approval in the review tab.
             self._review_service.upsert_decision(
                 clip_id=seg_id,
@@ -1417,7 +1447,7 @@ class TemporalReviewTab(QWidget):
         Uses per-behavior probability columns and per-behavior threshold settings
         so that each behavior is evaluated independently.  Pre-computed per-behavior
         postprocess parquets are preferred when available; otherwise bouts are
-        computed on-the-fly from the behaviour-specific probability column in the
+        computed on-the-fly from the behavior-specific probability column in the
         inference trace.
 
         Parameters
@@ -1432,7 +1462,7 @@ class TemporalReviewTab(QWidget):
         candidates: list[CandidateWindow] = []
         seen_ids: set[str] = set()
 
-        # Identify all behaviours to process.
+        # Identify all behaviors to process.
         behavior_ids: list[str] = []
         for behavior in self._behaviors.behaviors:
             bid = str(behavior.behavior_id or "").strip()
@@ -1540,7 +1570,7 @@ class TemporalReviewTab(QWidget):
 
             # ── 2. Non-competition concept bouts (main dropdown = this specific
             #       behavior, single-behavior inference where "probability" is
-            #       behaviour-specific).
+            #       behavior-specific).
             if concept == bid and self._bout_paths:
                 for session_id, parquet_path_str in self._bout_paths.items():
                     if session_id in sessions_covered:
@@ -1661,7 +1691,7 @@ class TemporalReviewTab(QWidget):
             if re.search(pattern, text):
                 return label
         # Only use numeric day/session fallbacks on non-UUID strings.
-        # UUID-style IDs look like "session_7e59b632" — we skip them.
+        # UUID-style IDs look like "session_7e59b632": we skip them.
         is_uuid_like = bool(re.search(r"\b[0-9a-f]{6,}\b", text))
         if not is_uuid_like:
             m = re.search(r"\bday\s*(\d+)", text)
@@ -1780,7 +1810,7 @@ class TemporalReviewTab(QWidget):
                 mean_conf = float(np.mean(prob_arr))
                 frac_active = float(np.mean(prob_arr >= onset))
 
-                # Bout metrics — prefer pre-computed parquets, fall back to on-the-fly.
+                # Bout metrics: prefer pre-computed parquets, fall back to on-the-fly.
                 bout_df = bout_cache.get((bid, sid))
                 if (
                     bout_df is not None
@@ -1861,7 +1891,7 @@ class TemporalReviewTab(QWidget):
             densities = [r["bout_density"] for r in group_rows]
             frac_vals = [r["frac_active"] for r in group_rows]
 
-            # Absolute floor thresholds — applied independently of z-score so
+            # Absolute floor thresholds: applied independently of z-score so
             # that sessions are still flagged when the entire group has poor
             # confidence (MAD collapses to 0 and relative z-scores are all 0).
             # These values are empirically conservative for rodent-behavior models.
@@ -1947,7 +1977,7 @@ class TemporalReviewTab(QWidget):
         probability non-overlapping windows from the inference trace.
 
         These windows are returned even when the probability never crosses the
-        bout threshold — the intent is to surface the *best available evidence*
+        bout threshold, the intent is to surface the *best available evidence*
         for a behavior in sessions where the model struggled, so the user can
         label them and feed them back as supplemental training data.
 
@@ -1966,7 +1996,7 @@ class TemporalReviewTab(QWidget):
         candidates: list[CandidateWindow] = []
         seen_ids: set[str] = set()
 
-        # Load trace DataFrames — cache to avoid re-reading the same file.
+        # Load trace DataFrames: cache to avoid re-reading the same file.
         trace_cache: dict[str, pd.DataFrame | None] = {}
         for sid, tp in self._trace_paths.items():
             if tp and Path(tp).exists():
@@ -2002,7 +2032,7 @@ class TemporalReviewTab(QWidget):
 
             # Score every possible window by its mean probability, then pick
             # the top-N using a greedy non-overlapping selection so we don't
-            # return ten windows all centred on the same peak.
+            # return ten windows all centered on the same peak.
             # Use a sliding sum for efficiency.
             window_half = window_size // 2
             win_scores: list[tuple[float, int]] = []  # (score, frame_idx_start)
@@ -2052,7 +2082,7 @@ class TemporalReviewTab(QWidget):
         """Entry point for the Validation tab's Session Quality button.
 
         This tab may never have been visited, so finish its (normally deferred)
-        project load first — the inspector needs the loaded traces and bouts.
+        project load first, the inspector needs the loaded traces and bouts.
         """
         if self._project_root is not None:
             self._deferred_project_init(self._project_root)
@@ -2095,7 +2125,7 @@ class TemporalReviewTab(QWidget):
         dlg.setWindowTitle("Session Quality Inspector")
         dlg.resize(1050, 640)
 
-        # — Behavior selection —
+        #: Behavior selection,
         beh_group = QGroupBox("Behaviors to analyze")
         beh_vlayout = QVBoxLayout(beh_group)
         checkboxes: list[tuple[str, QCheckBox]] = []
@@ -2106,7 +2136,7 @@ class TemporalReviewTab(QWidget):
             checkboxes.append((bid, cb))
         beh_vlayout.addStretch()
 
-        # — Settings panel —
+        #: Settings panel,
         settings_group = QGroupBox("Outlier settings")
         settings_vlayout = QVBoxLayout(settings_group)
         z_row = QHBoxLayout()
@@ -2155,7 +2185,7 @@ class TemporalReviewTab(QWidget):
         top_panel.addWidget(settings_group)
         top_panel.addWidget(analyze_btn, 0, Qt.AlignmentFlag.AlignTop)
 
-        # — Results table —
+        #: Results table,
         COL_HEADERS = [
             "Subject", "Sess. Type", "Behavior", "Group N",
             "Max Conf", "P95 Conf", "Mean Conf",
@@ -2170,7 +2200,7 @@ class TemporalReviewTab(QWidget):
         results_table.setSortingEnabled(True)
         results_table.setAlternatingRowColors(False)
 
-        # — Legend —
+        #: Legend,
         legend_label = QLabel(
             "\u25a0 Flagged (>\u03c3 threshold)"
             "    \u25a0 Borderline (1.5\u2013threshold)"
@@ -2191,7 +2221,7 @@ class TemporalReviewTab(QWidget):
         send_clips_btn.setToolTip(
             "Extract the top-confidence clip windows for each selected row\n"
             "(or all flagged/borderline rows if nothing is selected) and\n"
-            "append them to Clip Review for supplemental labelling."
+            "append them to Clip Review for supplemental labeling."
         )
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(dlg.accept)
@@ -2213,7 +2243,7 @@ class TemporalReviewTab(QWidget):
         COLOR_FLAGGED    = QColor(255, 190, 190)   # red
         COLOR_BORDERLINE = QColor(255, 237, 150)   # yellow
         COLOR_OK         = QColor(210, 245, 210)   # green
-        COLOR_NA         = QColor(230, 230, 230)   # grey
+        COLOR_NA         = QColor(230, 230, 230)   # gray
 
         # ── Cached rows for export ────────────────────────────────────────
         _cached_rows: list[dict] = []
@@ -2269,7 +2299,7 @@ class TemporalReviewTab(QWidget):
                 mean_dur_str = (
                     f"{mean_dur:.1f} fr"
                     if isinstance(mean_dur, float) and not np.isnan(mean_dur)
-                    else "—"
+                    else "-"
                 )
                 tooltip = (
                     f"Session: {row['session_id']}\n"
@@ -2430,7 +2460,7 @@ class TemporalReviewTab(QWidget):
                 )
                 for c in candidates
             })
-            label = "Quality-check top clips – " + ", ".join(beh_names[:3])
+            label = "Quality-check top clips: " + ", ".join(beh_names[:3])
             if len(beh_names) > 3:
                 label += f" +{len(beh_names) - 3} more"
 
@@ -2510,7 +2540,7 @@ class TemporalReviewTab(QWidget):
         n_behaviors = len({c.behavior_id for c in candidates if c.behavior_id})
         self.bout_candidates_append_requested.emit(
             candidates,
-            f"Temporal bout review – {current_subject}",
+            f"Temporal bout review: {current_subject}",
         )
         self._status.setText(
             f"Appended {len(candidates)} clip window(s) for subject '{current_subject}' "
@@ -2734,6 +2764,7 @@ class TemporalReviewTab(QWidget):
         manifest_path = inference_dir / "inference_manifest.json"
         if not manifest_path.exists():
             self._trace_paths = {}
+            self._animal_trace_paths = {}
             self._competition_models = {}
             self._competition_excluded = []
             return
@@ -2741,10 +2772,15 @@ class TemporalReviewTab(QWidget):
             inf = json.loads(manifest_path.read_text(encoding="utf-8"))
         except Exception:
             self._trace_paths = {}
+            self._animal_trace_paths = {}
             self._competition_models = {}
             self._competition_excluded = []
             return
         self._trace_paths = {str(k): str(v) for k, v in (inf.get("trace_paths", {}) or {}).items()}
+        self._animal_trace_paths = {
+            str(sid): {str(a): str(pth) for a, pth in dict(by_animal or {}).items()}
+            for sid, by_animal in dict(inf.get("animal_trace_paths", {}) or {}).items()
+        }
         comp = dict(inf.get("competition") or {})
         self._competition_models = {str(k): str(v) for k, v in dict(comp.get("behavior_models", {}) or {}).items()}
         self._competition_excluded = [str(v) for v in list(comp.get("excluded_behavior_ids", []) or []) if str(v).strip()]
@@ -2951,7 +2987,7 @@ class TemporalReviewTab(QWidget):
             self._save_settings()
             self._apply_behavior_settings_to_controls()
             self._set_refresh_busy(True)
-            self._status.setText("Applying per-behavior thresholds and regenerating temporal outputs...")
+            self._status.setText("Applying per-behavior thresholds and regenerating temporal outputs…")
 
             worker = TaskWorker(self._batch_refresh_task, settings_map)
             worker.kwargs["progress_cb"] = worker.signals.line_emitted.emit
@@ -3037,7 +3073,10 @@ class TemporalReviewTab(QWidget):
             )
             return
 
-        fig = mfig.Figure(figsize=(7, 2.5), tight_layout=True)
+        # Constrained layout (not tight_layout) because it is the only one that
+        # reserves room for a legend drawn outside the axes -- which is where a
+        # 20-behavior legend has to go.
+        fig = mfig.Figure(figsize=(7, 2.5), layout="constrained")
         axes = fig.add_subplot(111)
         axes.set_title("Probability across time")
         axes.set_xlabel("Frame")
@@ -3049,8 +3088,13 @@ class TemporalReviewTab(QWidget):
         toolbar.setMovable(False)
         style_navigation_toolbar(toolbar)
 
+        # Drop the placeholder's stretch so the canvas, not empty space, gets
+        # the group box's spare height.
+        for i in reversed(range(trace_layout.count())):
+            if trace_layout.itemAt(i).spacerItem() is not None:
+                trace_layout.takeAt(i)
         trace_layout.addWidget(toolbar)
-        trace_layout.addWidget(canvas)
+        trace_layout.addWidget(canvas, 1)
 
         self._trace_canvas = canvas
         self._trace_axes = axes
@@ -3077,9 +3121,13 @@ class TemporalReviewTab(QWidget):
         sid = str(self._session.currentData() or "").strip()
         self._update_staged_ui()
         self._trace_axes.clear()
+        # A figure-level legend is not an axes artist, so clear() leaves it
+        # behind and every redraw would stack another one on top.
+        for _legend in list(getattr(self._trace_canvas.figure, "legends", []) or []):
+            _legend.remove()
         # clear() discards every artist, including the playhead line.
         self._trace_playhead = None
-        # axes.clear() removes all patches — make sure the rubber-band rect
+        # axes.clear() removes all patches, make sure the rubber-band rect
         # references are nulled out so subsequent drag attempts don't try to
         # call .remove() on already-detached patch objects.
         self._fp_drag_rect = None
@@ -3101,7 +3149,8 @@ class TemporalReviewTab(QWidget):
             self._trace_canvas.draw_idle()
             return
 
-        trace_path = Path(str(self._trace_paths.get(sid, "")).strip())
+        self._refresh_trace_subject_options(sid)
+        trace_path = Path(self._resolve_trace_path(sid))
         if not trace_path.exists():
             self._set_selected_probability(None)
             self._trace_axes.text(0.5, 0.5, "No probability trace for selected subject/session.", ha="center", va="center")
@@ -3142,24 +3191,34 @@ class TemporalReviewTab(QWidget):
         frame_plot = frame[: n_blocks * stride : stride]
 
         cfg = self._review_config()
-        _PALETTE = ["#0D47A1", "#C62828", "#2E7D32", "#EF6C00", "#6A1B9A", "#00838F", "#F57F17", "#37474F"]
         multi_cols = [c for c in prob_cols if str(c).startswith("prob_")] or [c for c in prob_cols if c == "probability"]
 
         if selected_col == "__all__":
-            # All behaviors: overlay the traces, each with its own threshold drawn
-            # in the matching colour.  Bouts stay behavior-specific and are not
-            # highlighted here.
+            # All behaviors: overlay the traces.  With a 20-behavior project the
+            # old 8-color palette repeated itself twice over, so three
+            # different behaviors were drawn in the same dark blue; colors are
+            # now generated so no two series share one, and line style cycles as
+            # a second channel.
+            colours = self._trace_palette(len(multi_cols))
+            dashes = ["-", "--", "-.", ":"]
             for i, col in enumerate(multi_cols):
-                colour = _PALETTE[i % len(_PALETTE)]
+                colour = colours[i]
                 raw = pd.to_numeric(trace_df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
                 smoothed = smooth_probabilities(raw, method=cfg.smoothing_method, window=cfg.smoothing_window)
                 y = self._maxpool_downsample(smoothed, stride)
-                self._trace_axes.plot(frame_plot, y, color=colour, linewidth=1.15,
-                                      label=self._behavior_label_from_col(col))
-                self._trace_axes.axhline(
-                    self._threshold_for_col(col, cfg),
-                    color=colour, linestyle=":", linewidth=1.0, alpha=0.75,
+                self._trace_axes.plot(
+                    frame_plot, y, color=colour, linewidth=1.15,
+                    linestyle=dashes[(i // 8) % len(dashes)] if len(multi_cols) > 8 else "-",
+                    label=self._behavior_label_from_col(col),
                 )
+                # One dotted threshold per behavior is 20 near-horizontal lines
+                # across the plot once a project has that many; keep them only
+                # while they still read as thresholds.
+                if len(multi_cols) <= 8:
+                    self._trace_axes.axhline(
+                        self._threshold_for_col(col, cfg),
+                        color=colour, linestyle=":", linewidth=1.0, alpha=0.75,
+                    )
         else:
             # Single behavior: plot its trace, threshold lines, and correct bout intervals
             col = selected_col if selected_col in trace_df.columns else ("probability" if "probability" in trace_df.columns else str(prob_cols[0]))
@@ -3180,7 +3239,7 @@ class TemporalReviewTab(QWidget):
             # Always compute bouts on-the-fly from the current UI threshold settings
             # so that highlighted bout regions are guaranteed to match the threshold
             # line shown on the plot.  Pre-computed parquet files may have been
-            # generated with different settings and must not be used here — doing so
+            # generated with different settings and must not be used here, doing so
             # was the source of sub-threshold bouts being highlighted as positive.
             bouts = pd.DataFrame()
             frame_arr = trace_df["frame"].to_numpy(dtype=int)
@@ -3255,8 +3314,61 @@ class TemporalReviewTab(QWidget):
                 _fn_labeled = True
 
         self._draw_trace_playhead()
-        self._trace_axes.legend(loc="upper right", fontsize=8)
+        self._render_trace_legend()
         self._trace_canvas.draw_idle()
+
+    @staticmethod
+    def _trace_palette(n: int) -> list[str]:
+        """``n`` visually distinct line colors.
+
+        The hand-picked eight are kept (they are what every small project has
+        always looked like); beyond that, colors are generated around the hue
+        circle so a 20-behavior project never draws two series in one color.
+        """
+        base = ["#0D47A1", "#C62828", "#2E7D32", "#EF6C00", "#6A1B9A", "#00838F", "#F57F17", "#37474F"]
+        if n <= len(base):
+            return base[:max(0, n)]
+        import colorsys  # noqa: PLC0415
+        out = list(base)
+        extra = n - len(base)
+        for i in range(extra):
+            # Golden-angle hue steps keep neighboring series far apart in hue.
+            hue = ((i * 0.618033988749895) + 0.14) % 1.0
+            light = 0.38 if i % 2 == 0 else 0.56
+            r, g, b = colorsys.hls_to_rgb(hue, light, 0.72)
+            out.append(f"#{int(r * 255):02X}{int(g * 255):02X}{int(b * 255):02X}")
+        return out
+
+    def _render_trace_legend(self) -> None:
+        """Legend beside the axes, not on top of the data.
+
+        Inside the axes an 18-entry legend covered most of the trace; placing it
+        outside keeps every series readable however many behaviors a project
+        has.
+        """
+        if self._trace_axes is None:
+            return
+        handles, labels = self._trace_axes.get_legend_handles_labels()
+        if not handles:
+            return
+        if len(handles) <= 6:
+            self._trace_axes.legend(loc="upper right", fontsize=8)
+            return
+        # Below the axes, never beside it: a 3-column legend of behavior names
+        # is wider than the plot and squeezed the trace down to a vertical
+        # sliver.  ``outside lower center`` is the one placement constrained
+        # layout reserves real space for, so the axes keep their full width.
+        ncol = min(6, max(3, (len(handles) + 3) // 4))
+        # Long labels (a behavior named after its UUID, say) run off both ends
+        # of the figure; clip them rather than lose the outer columns.
+        labels = [l if len(l) <= 22 else l[:21] + "…" for l in labels]
+        fig = self._trace_axes.figure
+        fig.legend(
+            handles, labels,
+            loc="outside lower center",
+            fontsize=7, ncol=ncol, frameon=False,
+            handlelength=1.4, labelspacing=0.3, columnspacing=1.0,
+        )
 
     def _draw_trace_playhead(self) -> None:
         """Mark the frame currently showing in the video preview on the trace."""
@@ -3357,7 +3469,7 @@ class TemporalReviewTab(QWidget):
             return "Target"
         # The project's own definition wins over the built-in name: a project made
         # before the reserved-label guard may still have "no_behavior" bound to a
-        # renamed behaviour, and showing "No Behavior" there hides which behaviour
+        # renamed behavior, and showing "No Behavior" there hides which behavior
         # the trace actually belongs to.
         for behavior in self._behaviors.behaviors:
             bid = str(behavior.behavior_id or "").strip()
@@ -3406,6 +3518,44 @@ class TemporalReviewTab(QWidget):
             if token in candidates:
                 return bid
         return None
+
+    def _resolve_trace_path(self, session_id: str) -> str:
+        """Path of the trace to plot: the selected animal's, else the session's.
+
+        The session trace is the per-frame maximum across animals, which cannot
+        say *which* subject a spike belongs to; the per-animal traces can.
+        """
+        by_animal = self._animal_trace_paths.get(session_id, {})
+        animal = str(self._trace_subject.currentData() or "__any__")
+        if animal != "__any__" and animal in by_animal:
+            return str(by_animal[animal])
+        return str(self._trace_paths.get(session_id, "")).strip()
+
+    def _refresh_trace_subject_options(self, session_id: str) -> None:
+        by_animal = self._animal_trace_paths.get(session_id, {})
+        animals = sorted(by_animal.keys())
+        # A single-animal session has nothing to choose between.
+        if len(animals) <= 1:
+            self._trace_subject_label.hide()
+            self._trace_subject.hide()
+            return
+        current = str(self._trace_subject.currentData() or "__any__")
+        wanted = ["__any__", *animals]
+        existing = [str(self._trace_subject.itemData(i)) for i in range(self._trace_subject.count())]
+        if existing != wanted:
+            self._trace_subject.blockSignals(True)
+            self._trace_subject.clear()
+            self._trace_subject.addItem("Any animal (max)", userData="__any__")
+            for animal in animals:
+                self._trace_subject.addItem(str(animal), userData=str(animal))
+            idx = self._trace_subject.findData(current)
+            self._trace_subject.setCurrentIndex(idx if idx >= 0 else 0)
+            self._trace_subject.blockSignals(False)
+        self._trace_subject_label.show()
+        self._trace_subject.show()
+
+    def _on_trace_subject_changed(self, _index: int) -> None:
+        self._refresh_probability_plot()
 
     def _refresh_trace_behavior_options(self, trace_df: pd.DataFrame) -> None:
         multi_cols = [c for c in trace_df.columns if str(c).startswith("prob_")]
@@ -3581,7 +3731,7 @@ class TemporalReviewTab(QWidget):
             self._right_drag_start = None
 
             if drag_end - drag_start < 2:
-                # Bare right-click — remove the single interval under cursor
+                # Bare right-click: remove the single interval under cursor
                 frame_idx = drag_start
                 hit = self._find_flagged_interval_at_frame(frame_idx)
                 if hit:
@@ -3591,7 +3741,7 @@ class TemporalReviewTab(QWidget):
                     else:
                         self._unflag_interval(ftype, s, e)
             else:
-                # Drag — remove all intervals overlapping [drag_start, drag_end]
+                # Drag: remove all intervals overlapping [drag_start, drag_end]
                 removed = 0
                 concept_id = self._resolve_trace_concept_id()
                 sid = str(self._session.currentData() or "").strip()
@@ -3654,14 +3804,14 @@ class TemporalReviewTab(QWidget):
             drag_end   = int(max(0, round(max(self._fp_drag_start, x_end))))
             self._fp_drag_start = None
             if drag_end - drag_start < 2:
-                # Bare click — original single-bout behaviour
+                # Bare click: original single-bout behavior
                 bout = self._find_bout_at_frame(drag_start)
                 if bout:
                     self._stage_fp(bout[0], bout[1])
                 else:
                     self._status.setText("No detected bout at this frame. Click on a green bout region.")
             else:
-                # Drag — stage every bout that overlaps the selection
+                # Drag: stage every bout that overlaps the selection
                 bouts_hit = [(s, e) for s, e in self._current_bouts
                              if s <= drag_end and e >= drag_start]
                 if bouts_hit:
@@ -3729,7 +3879,7 @@ class TemporalReviewTab(QWidget):
         """Load the session's pose and feed it to the player's keypoint overlay.
 
         The player shows the full session video, so pose rows are indexed by the
-        same absolute frame number (frame_offset=0).  Failures are non-fatal —
+        same absolute frame number (frame_offset=0).  Failures are non-fatal,
         the keypoint button simply stays inert when no pose is available.
         """
         try:
@@ -3779,7 +3929,7 @@ class TemporalReviewTab(QWidget):
             return None, "(project not loaded)"
         manifest = self._imports.load_manifest(self._project_root)
         if manifest is None:
-            return None, "(import manifest missing — re-open the project)"
+            return None, "(import manifest missing: re-open the project)"
         # Find the session entry
         session = next(
             (s for s in manifest.linked_sessions if s.session_id == session_id), None
@@ -3822,7 +3972,7 @@ class TemporalReviewTab(QWidget):
             "3. Re-add the video file from its current location using "
             "<i>Add Videos</i>.<br>"
             "4. Click <b>Link &amp; Save</b> to register the new path.<br>"
-            "5. Return here — clicking the timeline should now open the video."
+            "5. Return here: clicking the timeline should now open the video."
         )
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
         msg.exec()

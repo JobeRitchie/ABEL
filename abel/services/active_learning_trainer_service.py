@@ -40,10 +40,10 @@ class TrainingConfig:
     no_behavior_sample_weight: float = 0.0  # 0 = auto (computed from class imbalance); >0 = manual override
     allow_co_occurring_behaviors: bool = False  # expand pipe-separated labels into per-behavior rows
     adaptive_complexity: bool = False  # auto-tune n_estimators/max_depth from data; off by
-    # default — validation across 43 behaviors found no benefit (mean ΔF1 −0.005, 7/43 improved)
+    # default: validation across 43 behaviors found no benefit (mean ΔF1 −0.005, 7/43 improved)
     drop_zero_variance_features: bool = True  # remove features with zero variance before training
     # Per-run feature exclusions chosen in the Active Learning tab.  Applied at
-    # training time (segment level) — NOT baked into the representation cache —
+    # training time (segment level): NOT baked into the representation cache,
     # so toggling exclusions never forces a representation rebuild.
     excluded_feature_cols: tuple[str, ...] = ()
     enable_feature_augmentation: bool = True  # augment positive training examples with jitter + dropout
@@ -59,7 +59,7 @@ class TrainingConfig:
     deploy_refit_on_all_data: bool = True
     # Very-low-sample guard.  When the number of trainable labeled rows is below
     # this threshold, reserving a hold-out test set wastes scarce examples and
-    # yields meaningless metrics — so no rows are held out and the model trains
+    # yields meaningless metrics: so no rows are held out and the model trains
     # on ALL examples (reported metrics become in-sample, flagged in the log).
     # Never applied when the caller supplies a precomputed split.
     min_holdout_samples: int = 10
@@ -120,7 +120,7 @@ class ActiveLearningTrainerService:
         """Apply session-scope and imported include/exclude to the training rows.
 
         Imported rows carry namespaced session ids that aren't part of this
-        project's sessions, so the session-scope filter must not drop them — they
+        project's sessions, so the session-scope filter must not drop them, they
         are gated solely by ``include_imported``.  Raises ``ValueError`` if no
         rows remain after either step.
         """
@@ -162,6 +162,10 @@ class ActiveLearningTrainerService:
             "overlap_allowed_y",
             "label_true",
             "label_pred",
+            # Presence bookkeeping: how much of the window the animal was
+            # actually in the arena.  A data-quality flag, not a behavior cue.
+            "pose_present_frac",
+            "partner_present_frac",
         }
         cols = [
             c
@@ -369,7 +373,7 @@ class ActiveLearningTrainerService:
 
             return BehaviorRepresentationService._canonicalize_distance_columns(df)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Training-set distance canonicalisation skipped: %s", exc)
+            logger.warning("Training-set distance canonicalization skipped: %s", exc)
             return df
 
     def merge_and_snapshot_training_set(
@@ -390,13 +394,13 @@ class ActiveLearningTrainerService:
         else:
             merged = labeled_segments.drop_duplicates(subset=["segment_id"], keep="last")
 
-        # Symmetric pairwise distances must be canonicalised HERE, not only in
+        # Symmetric pairwise distances must be canonicalized HERE, not only in
         # the representation.  ``segment_features.parquet`` (what deployment and
         # dense inference see) is canonical-only, but a plain concat of rows from
         # different eras keeps both ``dist_a_to_b`` and ``dist_b_to_a``, each
         # half-populated with complementary NaNs.  The NaN pattern then encodes
         # *provenance* (imported/legacy vs native), and a tree model happily
-        # learns that split — at which point every deployment row looks like the
+        # learns that split: at which point every deployment row looks like the
         # stratum the model never saw positives in, and the behavior stops firing
         # entirely.  See DG_FearConditioning "Explore" (1 detection over 426k
         # windows before this, 25k after).
@@ -445,8 +449,8 @@ class ActiveLearningTrainerService:
 
         _log("Loading training set…")
         df = pd.read_parquet(train_path)
-        # Repair training sets written before canonicalisation was applied at
-        # merge time — otherwise a stale on-disk table keeps producing models
+        # Repair training sets written before canonicalization was applied at
+        # merge time: otherwise a stale on-disk table keeps producing models
         # that key on provenance-correlated NaNs (see
         # ``_canonicalize_training_distances``).
         n_cols_before = df.shape[1]
@@ -480,7 +484,7 @@ class ActiveLearningTrainerService:
                     fb_raw = read_json(fp_path, {})
                     fp_map: dict[str, list] = fb_raw.get("false_positive_intervals_by_session", {})
                     fn_map: dict[str, list] = fb_raw.get("false_negative_intervals_by_session", {})
-                    # Temporal-review feedback MUST honour the session scope. A
+                    # Temporal-review feedback MUST honor the session scope. A
                     # session the user unticked in the training selector (i.e. not
                     # in ``session_ids``) must contribute NO data to training by any
                     # path.  Without this filter the hard-negative/-positive
@@ -502,7 +506,7 @@ class ActiveLearningTrainerService:
                     if fp_map or fn_map:
                         n_relabeled = 0
                         # The FP label means "the target behavior did NOT
-                        # occur here" — NOT "no behavior occurred".  Use
+                        # occur here": NOT "no behavior occurred".  Use
                         # ``not_{target_label}`` so the label-collapse step
                         # treats it as a negative for this behavior without
                         # making claims about other behaviors.
@@ -580,7 +584,7 @@ class ActiveLearningTrainerService:
                                                     existing_ids.add(seg_id)
                                     if injected_rows:
                                         inject_df = pd.DataFrame(injected_rows)
-                                        # Align columns — only keep columns present in both
+                                        # Align columns: only keep columns present in both
                                         shared_cols = [c for c in df.columns if c in inject_df.columns]
                                         df = pd.concat(
                                             [df, inject_df[shared_cols]],
@@ -695,7 +699,7 @@ class ActiveLearningTrainerService:
             model_device_used = "cpu"
         # Training is done; everything downstream (calibration, validation inference,
         # deployment, dense inference) feeds this model CPU numpy.  Leaving the booster
-        # on cuda makes each of those copy the whole matrix host→device — ~7x slower
+        # on cuda makes each of those copy the whole matrix host→device, ~7x slower
         # than just scoring on the CPU, and the source of XGBoost's "mismatched
         # devices" warning.  See abel.utils.xgb_predict.
         xgb_predict.ensure_cpu_prediction(est)
@@ -714,8 +718,8 @@ class ActiveLearningTrainerService:
         """Pure train+evaluate core shared by ``train`` and the validation engine.
 
         Operates on an in-memory training frame.  When ``precomputed_split`` is
-        supplied the caller's (train_idx, val_idx) row positions are honoured
-        instead of the internal group split — guaranteeing held-out rows never
+        supplied the caller's (train_idx, val_idx) row positions are honored
+        instead of the internal group split, guaranteeing held-out rows never
         leak into training even across the preprocessing reordering below (the
         roles are tagged on a column that survives expansion/filtering).
         ``feature_cols_override`` intersects the engine-selected feature columns
@@ -725,8 +729,8 @@ class ActiveLearningTrainerService:
         ``precomputed_split`` may carry an optional third index array,
         ``(train_idx, val_idx, cal_idx)``, naming rows used **only** to fit the
         probability calibrator.  Without it the calibrator falls back to fitting
-        on the validation split — correct for the product (the calibrator must
-        see the model's behaviour on unseen data, and the deployed model is
+        on the validation split, correct for the product (the calibrator must
+        see the model's behavior on unseen data, and the deployed model is
         refit and CV-calibrated anyway) but *not* for measurement: whoever
         scores those same validation rows is then reading a calibrator that was
         fit on them.  Measured across 7 projects / 23 behaviors at a 50-clip
@@ -808,14 +812,14 @@ class ActiveLearningTrainerService:
 
         # ── Collapse alternate-behavior labels into negatives ─────────────
         # When training a binary classifier for target_label, any segment
-        # labeled with a *different* behaviour name (e.g. "rearing" while
+        # labeled with a *different* behavior name (e.g. "rearing" while
         # training "groom") should be treated as a negative example rather
         # than forming a spurious third class.  Remap all non-target,
         # non-negative labels to "no_behavior" so they contribute to the
         # negative pool.
         #
         # Special case: when target_label IS no_behavior, the roles are
-        # inverted — segments labeled with any specific behaviour become
+        # inverted: segments labeled with any specific behavior become
         # negatives (remapped to "has_behavior"), and no_behavior segments
         # remain as positives.
         #
@@ -837,24 +841,24 @@ class ActiveLearningTrainerService:
             drop_indices: list[int] = []
 
             if _target_is_no_behavior:
-                # ── No-behavior model: specific behaviours → negative ──
+                # ── No-behavior model: specific behaviors → negative ──
                 for i, lbl in enumerate(labels_raw):
                     lbl_clean = lbl.strip()
                     lbl_lower = lbl_clean.lower().replace("_", "").replace(" ", "")
                     if lbl_lower in _nb_tokens:
-                        # Normalise all no_behavior variants to target_label
+                        # Normalize all no_behavior variants to target_label
                         df.iat[i, df.columns.get_loc("label")] = target_label
-                        continue  # positive — keep
+                        continue  # positive: keep
                     # Co-occurring sibling: drop instead of remapping
                     if _co_exp_col is not None and df.iat[i, _co_exp_col]:
                         drop_indices.append(i)
                         continue
                     if any(lbl_clean.startswith(p) for p in _negative_prefixes):
-                        # Explicit negative (not_xxx) — collapse to has_behavior
+                        # Explicit negative (not_xxx): collapse to has_behavior
                         df.iat[i, df.columns.get_loc("label")] = "has_behavior"
                         n_remapped += 1
                         continue
-                    # Specific behaviour → negative for no_behavior model
+                    # Specific behavior → negative for no_behavior model
                     df.iat[i, df.columns.get_loc("label")] = "has_behavior"
                     n_remapped += 1
                 if n_remapped > 0:
@@ -865,12 +869,12 @@ class ActiveLearningTrainerService:
                         target_label,
                     )
             else:
-                # ── Standard model: alternate behaviours → no_behavior ──
+                # ── Standard model: alternate behaviors → no_behavior ──
                 for i, lbl in enumerate(labels_raw):
                     lbl_clean = lbl.strip()
                     lbl_lower = lbl_clean.lower().replace("_", "").replace(" ", "")
                     if lbl_clean == target_label:
-                        continue  # positive — keep as-is
+                        continue  # positive: keep as-is
                     if lbl_lower in _nb_tokens:
                         continue  # already negative
                     # Co-occurring sibling that is NOT the target: drop, don't remap
@@ -878,12 +882,12 @@ class ActiveLearningTrainerService:
                         drop_indices.append(i)
                         continue
                     if any(lbl_clean.startswith(p) for p in _negative_prefixes):
-                        # Explicit negative (not_xxx) — collapse to no_behavior
+                        # Explicit negative (not_xxx): collapse to no_behavior
                         # so the binary encoder sees exactly two classes.
                         df.iat[i, df.columns.get_loc("label")] = "no_behavior"
                         n_remapped += 1
                         continue
-                    # This is an alternate behaviour name → treat as negative
+                    # This is an alternate behavior name → treat as negative
                     df.iat[i, df.columns.get_loc("label")] = "no_behavior"
                     n_remapped += 1
                 if n_remapped > 0:
@@ -898,7 +902,7 @@ class ActiveLearningTrainerService:
                 df = df.drop(index=df.index[drop_indices]).reset_index(drop=True)
                 logger.info(
                     "Dropped %d co-occurring sibling row(s) for target '%s' "
-                    "(same clip is a positive for a different behavior — not a negative).",
+                    "(same clip is a positive for a different behavior, not a negative).",
                     len(drop_indices),
                     target_label,
                 )
@@ -946,7 +950,7 @@ class ActiveLearningTrainerService:
             if excl_path.exists():
                 excl_data = _rj(excl_path, {})
                 excl_set = set(excl_data.get("excluded_feature_cols", []))
-                # Remove managed prefixes — they are pattern markers, not column names
+                # Remove managed prefixes: they are pattern markers, not column names
                 excl_set = {e for e in excl_set if not e.startswith("__feat_group:")}
                 if excl_set:
                     before = len(feature_cols)
@@ -1087,8 +1091,8 @@ class ActiveLearningTrainerService:
         # ── Very-low-sample guard: skip the hold-out split ────────────────
         # With only a handful of labeled clips, reserving a test set wastes
         # scarce positives and yields meaningless metrics.  Train on ALL rows
-        # instead and flag the metrics as in-sample.  Honoured only for the
-        # internal split — a caller-supplied precomputed split (validation /
+        # instead and flag the metrics as in-sample.  Honored only for the
+        # internal split: a caller-supplied precomputed split (validation /
         # benchmark platform) always keeps its held-out rows.
         _no_holdout = False
         cal_idx = np.empty(0, dtype=int)
@@ -1110,7 +1114,7 @@ class ActiveLearningTrainerService:
             )
             _log(
                 f"Very low sample size ({len(df)} labeled rows): not holding out any "
-                f"examples — training on all data. Metrics are in-sample, not held-out."
+                f"examples, training on all data. Metrics are in-sample, not held-out."
             )
         else:
             train_idx, val_idx = self._split(
@@ -1120,15 +1124,15 @@ class ActiveLearningTrainerService:
             df = df.drop(columns=["_eval_split_role"])
         train_df = df.iloc[train_idx]
         val_df = df.iloc[val_idx]
-        # Dedicated calibration rows (never trained on, never scored) — empty
+        # Dedicated calibration rows (never trained on, never scored), empty
         # unless the caller supplied cal_idx.
         cal_df = df.iloc[cal_idx]
 
         # Some labels are training aids, not held-out evaluation data, and must
         # never enter the validation split or they pollute the reported metrics:
-        #   * temporal-review feedback (``temporal_feedback``) — FP/FN corrections
+        #   * temporal-review feedback (``temporal_feedback``): FP/FN corrections
         #     a reviewer commits to CORRECT the model, not to grade it;
-        #   * cross-project imported examples (``imported:*``) — they come from
+        #   * cross-project imported examples (``imported:*``), they come from
         #     OTHER projects/subjects, so scoring them here isn't a clean
         #     held-out generalization test for THIS project.
         # Both are kept in training but moved out of validation.
@@ -1138,7 +1142,7 @@ class ActiveLearningTrainerService:
             _n_refine = int(_refine_only.sum())
             if _n_refine:
                 # In no-holdout mode train_df already contains every row, so only
-                # trim them out of validation — re-adding would duplicate them.
+                # trim them out of validation: re-adding would duplicate them.
                 if not _no_holdout:
                     train_df = pd.concat([train_df, val_df.loc[_refine_only]])
                 val_df = val_df.loc[~_refine_only]
@@ -1185,7 +1189,7 @@ class ActiveLearningTrainerService:
         if cfg.adaptive_complexity and "n_estimators" not in (cfg.classifier_params or {}) and "max_depth" not in (cfg.classifier_params or {}):
             # Count positives: rows whose label matches target_label.
             # This works regardless of whether target is a specific
-            # behaviour or no_behavior.
+            # behavior or no_behavior.
             _ac_target = str(cfg.target_label or "").strip()
             n_pos = int(sum(
                 1 for lbl in train_df["label"].astype(str)
@@ -1206,7 +1210,7 @@ class ActiveLearningTrainerService:
                 adaptive_trees = 300
             params["max_depth"] = adaptive_depth
             params["n_estimators"] = adaptive_trees
-            # Also increase regularisation for small datasets
+            # Also increase regularization for small datasets
             if n_pos < 500:
                 params.setdefault("reg_alpha", 0.3)
                 params.setdefault("reg_lambda", 2.0)
@@ -1281,11 +1285,11 @@ class ActiveLearningTrainerService:
 
         _log(f"Model fit complete (device={model_device_used}).")
         clf = est
-        # Detect degenerate validation split early — needed to guard calibration.
+        # Detect degenerate validation split early: needed to guard calibration.
         _degenerate_val_early = len(set(y_val.tolist())) < 2
         # Prefer a dedicated calibration split when the caller supplied one: it
         # keeps the calibrator off the rows the run is scored on.  Falls back to
-        # the validation split (product behaviour) when absent or single-class.
+        # the validation split (product behavior) when absent or single-class.
         _cal_supplied = _use_precomputed and len(cal_idx) > 0
         _use_cal_split = len(y_cal) > 0 and len(set(y_cal.tolist())) > 1
         # A caller that supplied cal_idx is telling us it will score the
@@ -1296,7 +1300,7 @@ class ActiveLearningTrainerService:
         if _cal_unusable:
             logger.warning(
                 "Calibration split has only one class (%d row(s)); skipping "
-                "calibration — refusing to fall back to the validation split, "
+                "calibration: refusing to fall back to the validation split, "
                 "which the caller scores.",
                 len(y_cal),
             )
@@ -1316,7 +1320,7 @@ class ActiveLearningTrainerService:
                 else:
                     calibrated = CalibratedClassifierCV(estimator=est, method=method, cv="prefit")
                 # Fit the calibrator on data the model has NOT been trained on, so
-                # the sigmoid learns from its behaviour on unseen rows.  Fitting on
+                # the sigmoid learns from its behavior on unseen rows.  Fitting on
                 # training data (the original approach) made the sigmoid learn the
                 # overconfident training-time probability distribution, which then
                 # compressed moderate predictions on novel subjects toward zero.
@@ -1348,14 +1352,14 @@ class ActiveLearningTrainerService:
             pr_auc = float(average_precision_score((y_val == int(target_idx)).astype(int), probs[:, int(target_idx)]))
         cm = confusion_matrix(y_val, preds).tolist()
 
-        # Detect degenerate validation split — if the confusion matrix is 1×1,
+        # Detect degenerate validation split: if the confusion matrix is 1×1,
         # only one class is present in validation and all metrics are trivially
         # perfect/zero.  Flag this clearly so the user re-trains with a better split.
         n_classes_in_val = len(set(y_val))
         degenerate_val = n_classes_in_val < 2
         if degenerate_val:
             _log(
-                "WARNING: Validation set contains only one class — "
+                "WARNING: Validation set contains only one class, "
                 "metrics (F1, PR-AUC) are unreliable.  "
                 "Consider increasing the number of reviewed examples or "
                 "using a different split strategy."
@@ -1396,8 +1400,8 @@ class ActiveLearningTrainerService:
 
         # ── Refit the DEPLOYED model on ALL labeled rows ──────────────────
         # The metrics/split_manifest above stay honest (held-out split).  But
-        # the model we persist should learn from every labeled row — including
-        # the held-out sessions and any temporal-feedback corrections on them —
+        # the model we persist should learn from every labeled row, including
+        # the held-out sessions and any temporal-feedback corrections on them,
         # so per-mouse fixes actually reach inference.  Skipped when a caller
         # supplied a precomputed split (validation/benchmark platform needs the
         # held-out model) or when the split had no genuine hold-out.
@@ -1439,7 +1443,7 @@ class ActiveLearningTrainerService:
                 )
                 deploy_est = d_est
                 deploy_clf = d_est
-                # Calibrate via internal CV — refitting on all data leaves no
+                # Calibrate via internal CV: refitting on all data leaves no
                 # separate hold-out, so cross-validated calibration is used
                 # instead of the prefit-on-validation path.
                 if cfg.calibration_method in {"sigmoid", "isotonic"}:

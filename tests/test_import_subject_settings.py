@@ -236,3 +236,58 @@ def test_update_session_pixels_per_mm_and_lookup() -> None:
 
     service.update_session_pixels_per_mm(manifest, "session_1", None)
     assert service.pixels_per_mm_for_session(manifest, "session_1") is None
+
+
+@pytest.mark.parametrize(
+    ("video", "pose"),
+    [
+        ("COA301.mp4", "COA301.tracked.sleap.h5"),
+        ("COA301.mp4", "COA301.predictions.analysis.h5"),
+        ("M1_day1.mp4", "M1_day1_filtered.h5"),
+    ],
+)
+def test_match_key_strips_stacked_tracker_suffixes(video: str, pose: str) -> None:
+    assert ImportService._match_key(Path(video)) == ImportService._match_key(Path(pose))
+
+
+def test_auto_match_pairs_real_sleap_names_one_to_one() -> None:
+    ids = [301, 302, 303, 310, 311, 332]
+    manifest = ImportService().build_manifest(
+        [Path(f"COA{i}.mp4") for i in ids],
+        [Path(f"COA{i}.tracked.sleap.h5") for i in reversed(ids)],
+    )
+    assert len(manifest.linked_sessions) == len(ids)
+    for s in manifest.linked_sessions:
+        v = next(v for v in manifest.videos if v.asset_id == s.video_asset_id)
+        p = next(p for p in manifest.poses if p.asset_id == s.pose_asset_id)
+        assert Path(p.source_path).name.startswith(Path(v.source_path).stem + ".")
+
+
+def test_auto_match_prefix_pairs_only_when_unambiguous() -> None:
+    service = ImportService()
+    unique = service.build_manifest([Path("M1.mp4")], [Path("M1_side_camera.h5")])
+    assert [s.pairing_notes for s in unique.linked_sessions] == ["Auto-matched by filename prefix"]
+
+    ambiguous = service.build_manifest(
+        [Path("M1.mp4")], [Path("M1_day1.h5"), Path("M1_day2.h5")]
+    )
+    assert ambiguous.linked_sessions == []
+
+
+def test_merge_retries_previously_unpaired_files() -> None:
+    service = ImportService()
+    manifest = ImportManifest(
+        videos=[
+            VideoAsset(asset_id="v1", source_path="A1.mp4"),
+            VideoAsset(asset_id="v2", source_path="COA301.mp4"),
+        ],
+        poses=[
+            PoseAsset(asset_id="p1", source_path="A1DLC_resnet.h5", format="h5"),
+            PoseAsset(asset_id="p2", source_path="COA301.tracked.sleap.h5", format="h5"),
+        ],
+        linked_sessions=[LinkedSession(session_id="s1", video_asset_id="v1", pose_asset_id="p1")],
+    )
+    service.merge_new_files(manifest, [], [])
+    assert {(s.video_asset_id, s.pose_asset_id) for s in manifest.linked_sessions} == {
+        ("v1", "p1"), ("v2", "p2"),
+    }

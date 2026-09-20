@@ -33,7 +33,7 @@ def _feature_frame(segment_ids: list[str], feat_cols: list[str], sessions: list[
 
 
 def _make_host(tmp_path: Path, feat_cols: list[str]) -> Path:
-    """Host project with an existing training set + behaviour defs."""
+    """Host project with an existing training set + behavior defs."""
     root = tmp_path / "host"
     _write_behaviors(root, [
         {"behavior_id": "no_behavior", "name": "No Behavior"},
@@ -105,7 +105,7 @@ def test_preview_blocks_incompatible_schema(tmp_path: Path) -> None:
 
 def test_preview_requires_host_features(tmp_path: Path) -> None:
     # A host with neither a training set nor extracted segment features can't be
-    # a refinement/baseline target — there's no feature schema to match against.
+    # a refinement/baseline target: there's no feature schema to match against.
     root = tmp_path / "host"
     _write_behaviors(root, [{"behavior_id": "no_behavior", "name": "No Behavior"}])
     src = _make_source(tmp_path, FEATS)
@@ -128,7 +128,7 @@ def test_import_merges_namespaced_rows(tmp_path: Path) -> None:
     assert len(ts) == 5
     imported = ts[ts["label_source"] == "imported:DonorA"]
     assert len(imported) == 3
-    # Labels were remapped to host behaviour ids.
+    # Labels were remapped to host behavior ids.
     assert set(imported["label"]) == {"host-walk", "no_behavior"}
     # segment_ids are namespaced to avoid collisions.
     assert all(sid.startswith("DonorA__") for sid in imported["segment_id"])
@@ -177,7 +177,7 @@ def _make_source_with_training_set(
 
 
 def test_import_pulls_full_training_set_not_just_review_log(tmp_path: Path) -> None:
-    host = _make_host(tmp_path, FEATS)  # behaviours: No Behavior, Walk, Rear
+    host = _make_host(tmp_path, FEATS)  # behaviors: No Behavior, Walk, Rear
     src = _make_source_with_training_set(tmp_path, FEATS, name="DonorTS")
     svc = ModelRefinementService()
 
@@ -191,13 +191,13 @@ def test_import_pulls_full_training_set_not_just_review_log(tmp_path: Path) -> N
 
     result = svc.import_examples(host, src)
     assert result["status"] == "success", result.get("error")
-    # 5 imported is impossible from the 1-row review log — proves the training
+    # 5 imported is impossible from the 1-row review log, proves the training
     # set is the label source now.
     assert result["imported_rows"] == 5
     ts = pd.read_parquet(host / "derived" / "training_sets" / "training_set.parquet")
     imported = ts[ts["label_source"] == "imported:DonorTS"]
     assert len(imported) == 5
-    # Labels were remapped onto host behaviour ids (Walk/Rear/no_behavior).
+    # Labels were remapped onto host behavior ids (Walk/Rear/no_behavior).
     assert set(imported["label"]) == {"host-walk", "host-rear", "no_behavior"}
     assert all(sid.startswith("DonorTS__") for sid in imported["segment_id"])
     # Source features landed in real columns, not NaN-filled.
@@ -214,7 +214,7 @@ def test_load_labels_falls_back_to_review_log_without_training_set(tmp_path: Pat
 
 
 def _make_source_renamed(tmp_path: Path, feat_cols: list[str], name: str = "src") -> Path:
-    """Source whose behaviour is named 'Head Dip' (host calls it 'Dip')."""
+    """Source whose behavior is named 'Head Dip' (host calls it 'Dip')."""
     root = tmp_path / name
     _write_behaviors(root, [
         {"behavior_id": "no_behavior", "name": "No Behavior"},
@@ -284,7 +284,7 @@ def test_import_applies_alias(tmp_path: Path) -> None:
     assert result["imported_rows"] == 3
     ts = pd.read_parquet(host / "derived" / "training_sets" / "training_set.parquet")
     imported = ts[ts["label_source"] == "imported:DonorB"]
-    # Head Dip rows were remapped onto the host 'Dip' behaviour id.
+    # Head Dip rows were remapped onto the host 'Dip' behavior id.
     assert set(imported["label"]) == {"host-dip", "no_behavior"}
 
 
@@ -587,7 +587,7 @@ def test_import_records_manifest_and_lists(tmp_path: Path) -> None:
     assert rec.tag == "DonorM"
     assert rec.imported_rows == 3
     assert rec.source_root == str(src)
-    assert rec.behaviors  # host behaviour name -> count
+    assert rec.behaviors  # host behavior name -> count
 
 
 def test_remove_import_cleans_everything(tmp_path: Path) -> None:

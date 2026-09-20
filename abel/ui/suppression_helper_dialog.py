@@ -206,7 +206,7 @@ class SuppressionHelperDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Suppression Helper — Behavior Inhibition Matrix")
+        self.setWindowTitle("Suppression Helper: Behavior Inhibition Matrix")
         self.resize(1040, 900)
 
         self._names = list(behavior_names)
@@ -253,8 +253,8 @@ class SuppressionHelperDialog(QDialog):
             row_widgets: list[QDoubleSpinBox | None] = []
             for c in range(n):
                 if r == c:
-                    # Diagonal — cannot suppress yourself
-                    item = QTableWidgetItem("—")
+                    # Diagonal: cannot suppress yourself
+                    item = QTableWidgetItem("-")
                     item.setFlags(Qt.ItemFlag.NoItemFlags)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self._table.setItem(r, c, item)
@@ -315,13 +315,13 @@ class SuppressionHelperDialog(QDialog):
         temp_layout.addRow("Temperature:", self._temperature_spin)
         temp_hint = QLabel(
             "<1.0 sharpens (more confident); >1.0 smooths (more conservative). "
-            "Preview only — the value on the main panel is what gets saved."
+            "Preview only: the value on the main panel is what gets saved."
         )
         temp_hint.setWordWrap(True)
         temp_layout.addRow(temp_hint)
 
         # ── Matplotlib preview ────────────────────────────────────
-        preview_group = QGroupBox("Live Preview — Synthetic Waveforms")
+        preview_group = QGroupBox("Live Preview: Synthetic Waveforms")
         preview_layout = QVBoxLayout(preview_group)
 
         if _ensure_mpl():
@@ -341,7 +341,7 @@ class SuppressionHelperDialog(QDialog):
         else:
             self._has_plot = False
             preview_layout.addWidget(
-                QLabel("matplotlib is not available — preview disabled.")
+                QLabel("matplotlib is not available: preview disabled.")
             )
 
         # ── Dialog buttons ────────────────────────────────────────

@@ -115,7 +115,7 @@ while i < len(lines):
                                  subsequent_indent=pad + ' ' * len(marker), **WRAP))
         continue
 
-    if s == '**ABEL — Active-learning Behavior Estimation and Labeling**':
+    if re.fullmatch(r'\*\*ABEL\s*[-–—]\s*Active-learning Behavior Estimation and Labeling\*\*', s):
         i += 1; continue
     buf.append(s); i += 1
 

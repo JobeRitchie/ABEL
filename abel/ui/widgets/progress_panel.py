@@ -3,7 +3,7 @@
 Renders a :class:`~abel.utils.run_timeline.TimelineSnapshot`: an overall bar,
 elapsed / remaining / finish-clock readouts, and a per-stage checklist with live
 per-stage timings and an animated marker on the active stage.  The panel is a
-pure view — it owns no timing logic — so it can be reused by any long-running
+pure view, it owns no timing logic, so it can be reused by any long-running
 tab (Features prep, Active Learning pipeline, …).
 
 Typical use::
@@ -216,9 +216,9 @@ class ProgressPanel(QWidget):
         self._last_snapshot = None
         self.set_activity("")
         self._bar.setValue(0)
-        self._elapsed.setText("—")
-        self._remaining.setText("—")
-        self._eta.setText("—")
+        self._elapsed.setText("-")
+        self._remaining.setText("-")
+        self._eta.setText("-")
         for row in self._rows.values():
             row.update_view(
                 StageView(row.key, "", "pending", 0, 1, None, 0.0), ""
@@ -235,7 +235,7 @@ class ProgressPanel(QWidget):
     def _make_stat(self, grid: QGridLayout, col: int, caption: str) -> QLabel:
         cap = QLabel(caption)
         cap.setStyleSheet("font-size: 10px; color: #607D8B;")
-        val = QLabel("—")
+        val = QLabel("-")
         val.setStyleSheet(
             "font-family: Consolas, monospace; font-size: 13px;"
             " font-weight: 700; color: #CFD8DC;"

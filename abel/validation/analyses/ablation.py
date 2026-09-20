@@ -1,4 +1,4 @@
-"""Feature/pipeline ablation — what does each ABEL feature add on its own?
+"""Feature/pipeline ablation: what does each ABEL feature add on its own?
 
 Builds an *incremental* story rather than leave-one-out: a bare baseline (pose-only
 features, no calibration, fixed model complexity, no augmentation, no co-occurring
@@ -66,7 +66,7 @@ def build_ablation_configs(
 
     ``has_social`` (whether the training pool carries ``social_*`` interaction
     columns) adds the multi-animal social-feature bar; it is off for solo projects.
-    ``has_context`` adds the environment/ROI bar — that family used to be folded
+    ``has_context`` adds the environment/ROI bar, that family used to be folded
     into the "pose" baseline, which credited the environment's gains to pose (see
     :mod:`abel.validation.features`).
     """
@@ -75,7 +75,7 @@ def build_ablation_configs(
         AblationConfig(
             name=BASELINE_CONFIG,
             label="Baseline (pose only)",
-            description="The animal's own body only — pose geometry and kinematics — "
+            description="The animal's own body only: pose geometry and kinematics, "
                         "with no calibration, fixed model complexity, and no "
                         "augmentation. Excludes environment/ROI, video and social "
                         "features. The reference point every other bar is compared "
@@ -88,8 +88,8 @@ def build_ablation_configs(
         configs.append(AblationConfig(
             name="add_context_features",
             label="+ Environment / ROI context",
-            description="Adds environment features — ROI/zone occupancy, distance and "
-                        "angle to objects/targets, arena walls — on top of the pose-only "
+            description="Adds environment features: ROI/zone occupancy, distance and "
+                        "angle to objects/targets, arena walls, on top of the pose-only "
                         "baseline. In object-based assays this family carries the object "
                         "identity, so it must be scored separately from pose.",
             feature_set="pose+context",
@@ -110,7 +110,7 @@ def build_ablation_configs(
             label="+ Social features",
             description="Adds inter-animal interaction features (distance to the nearest "
                         "animal, approach velocity, heading alignment, contact state) on "
-                        "top of the pose-only baseline — the multi-animal value-add.",
+                        "top of the pose-only baseline: the multi-animal value-add.",
             feature_set="pose+social",
             overrides=dict(base),
         ))
@@ -129,7 +129,7 @@ def build_ablation_configs(
         label="+ Adaptive model complexity",
         description="Lets the trainer scale model capacity to the amount of labeled "
                     "data instead of a fixed configuration. Evaluated but NOT "
-                    "shipped on by default — it is absent from the shipped-pipeline "
+                    "shipped on by default: it is absent from the shipped-pipeline "
                     "bar for that reason.",
         feature_set="pose",
         overrides=ov,
@@ -162,9 +162,9 @@ def build_ablation_configs(
     # stated here: `include_imported` is forced False for every validation config
     # (see `engine.build_config`), while all eight manuscript projects ship with it
     # True. On DG_FearConditioning that removes 2878 of 5680 pool rows, and 481 of
-    # 954 positives for "Shocked". The exclusion is correct and stays — imported
+    # 954 positives for "Shocked". The exclusion is correct and stays, imported
     # rows inflate `n_pos_train` and corrupt the learning curve's x-axis, which is
-    # argued at length in `holdout.py` — but it means this bar measures the product
+    # argued at length in `holdout.py`, but it means this bar measures the product
     # *trained on this project's own labels only*, not the product exactly as a user
     # would configure it. Read the bar as the former.
     #
@@ -172,7 +172,7 @@ def build_ablation_configs(
     # the product turned it off (``TrainingConfig.adaptive_complexity = False``)
     # after this very suite measured no benefit across 43 behaviors.  Turning it on
     # here would report a configuration ABEL does not ship.  The rung above still
-    # measures it — that is the honest place for a feature that was evaluated and
+    # measures it: that is the honest place for a feature that was evaluated and
     # not adopted.
     all_ov = {
         "calibration_method": project.calibration_method,
@@ -234,7 +234,7 @@ class AblationResult:
 
 
 def _ci95(values) -> float:
-    """95% CI half-width across seeds (t-based — see :func:`metrics.ci95`).
+    """95% CI half-width across seeds (t-based: see :func:`metrics.ci95`).
 
     Previously used a 1.96 multiplier, which at the default 3 seeds is really an
     81% interval and over-called significance; the t multiplier (4.303 at df=2)
@@ -246,7 +246,7 @@ def _ci95(values) -> float:
 
 
 def _paired_p(deltas) -> float:
-    """Two-sided paired t-test p on the per-seed gains — the number a manuscript
+    """Two-sided paired t-test p on the per-seed gains, the number a manuscript
     reports, where ``is_significant`` only gives a boolean.  NaN when there are too
     few seeds or the gain is constant across them."""
     from abel.validation import metrics as vmetrics  # noqa: PLC0415
@@ -256,14 +256,14 @@ def _paired_p(deltas) -> float:
 
 def pooled_gain_by_behavior(abl_df) -> "pd.DataFrame":
     """Pool each enhancement's ΔF1 **across behaviors**, one row per (enhancement,
-    budget) — the manuscript-level test.
+    budget), the manuscript-level test.
 
     The per-result ``gain_p`` in :class:`AblationResult` pairs across random
     *seeds*.  That answers "is this gain reproducible for this one behavior under
     reseeding", with n = the seed count and no biological content: adding seeds
     shrinks the p-value without adding evidence, and a reviewer will say so.  The
-    claim a manuscript actually makes — "this feature family helps behaviors in
-    general" — has the *behavior* as its unit of analysis.
+    claim a manuscript actually makes, "this feature family helps behaviors in
+    general", has the *behavior* as its unit of analysis.
 
     So seeds are averaged within a behavior first, collapsing the nuisance
     dimension.  **But behaviors are not independent either.**  Behaviors within a
@@ -271,7 +271,7 @@ def pooled_gain_by_behavior(abl_df) -> "pd.DataFrame":
     measured on the manuscript runs their intra-class correlation is 0.30-0.42.  A
     plain t-test over 43 behaviors therefore treats ~18 behaviors' worth of
     information as 43, and on the shipped-pipeline rung it turns p = 0.049 into
-    p = 0.0002 — two orders of magnitude of significance conjured out of repeated
+    p = 0.0002, two orders of magnitude of significance conjured out of repeated
     measurement of the same eight projects.
 
     The reported test is therefore a **random-intercept model with project as the
@@ -280,14 +280,14 @@ def pooled_gain_by_behavior(abl_df) -> "pd.DataFrame":
     error, and takes its denominator df from Satterthwaite rather than the
     infinite-df Wald z that mixed-model packages report by default.  ``p_naive_``
     ``behavior``, ``p_project_mean`` and ``p_sign_flip`` ride alongside so a reader
-    can see the whole sensitivity range instead of trusting one modelling choice.
+    can see the whole sensitivity range instead of trusting one modeling choice.
 
     Multiplicity (``p_value_bh``) follows a pre-specified hierarchy rather than one
-    flat family.  ``all_features`` is the primary endpoint — it is the shipped
+    flat family.  ``all_features`` is the primary endpoint, it is the shipped
     configuration, the one bar the manuscript leads with, and a single pre-specified
     test needs no correction.  The remaining rungs are secondary, screened together
     within each clip budget under Benjamini-Hochberg.  Flattening all six into one
-    family instead would penalise the primary claim for the existence of the
+    family instead would penalize the primary claim for the existence of the
     exploratory rungs beside it.
     """
     import pandas as pd  # noqa: PLC0415
@@ -301,7 +301,7 @@ def pooled_gain_by_behavior(abl_df) -> "pd.DataFrame":
         return pd.DataFrame()
     df["_gain"] = pd.to_numeric(df["gain_over_baseline"], errors="coerce")
     # Rungs that could not have differed from the baseline (identical resolved
-    # features and settings — see AblationResult.untestable) contribute a structural
+    # features and settings: see AblationResult.untestable) contribute a structural
     # 0.0, not a measured one. Counting them as observations of "no effect" both
     # dilutes the mean toward zero and inflates n with rows that carry no
     # information; on the manuscript run that is 13 of 43 context rows.
@@ -325,7 +325,7 @@ def pooled_gain_by_behavior(abl_df) -> "pd.DataFrame":
         if vals.size == 0:
             continue
         # Cluster = project. Without a project column every behavior is its own
-        # cluster, which degrades to the naive test — correctly, since there is then
+        # cluster, which degrades to the naive test, correctly, since there is then
         # no information about what shares subjects with what.
         if has_project and keys and keys[0] == "project":
             clusters = [k[0] for k in per_beh.index]
@@ -341,7 +341,7 @@ def pooled_gain_by_behavior(abl_df) -> "pd.DataFrame":
             # Behaviors where this rung was structurally unable to differ from the
             # baseline, and so was never tested at all. Excluded from n_behaviors.
             "n_untestable": n_untestable,
-            # Descriptive, unweighted — what the bar height is.
+            # Descriptive, unweighted, what the bar height is.
             "mean_gain": float(np.mean(vals)),
             "median_gain": float(np.median(vals)),
             "n_helped": int(np.sum(vals > 0)),
@@ -375,7 +375,7 @@ def _add_bh(out, *, group_cols: list[str]):
     α = 0.05 line; correcting a single pre-specified test against the exploratory
     rungs beside it would be a penalty with no multiplicity to justify it.  The
     secondary rungs are a genuine screening family and are BH-corrected within each
-    clip budget — budgets are separate questions, not more tests of the same one.
+    clip budget, budgets are separate questions, not more tests of the same one.
     """
     import pandas as pd  # noqa: PLC0415
 
@@ -423,7 +423,7 @@ def run_ablation(
     ``clip_budget`` is the number of labeled positive clips to train every config on
     (``subsample.ALL_CLIPS`` = the full pool).  At a given budget all configs share the
     *same* per-seed subsample and seed, so each config's gain over the baseline is a
-    paired difference — its 95% CI (across seeds) tells you whether the gain is real or
+    paired difference, its 95% CI (across seeds) tells you whether the gain is real or
     within noise.
     """
     behavior_name = project.behavior_label(behavior_id)
@@ -489,7 +489,7 @@ def run_ablation(
     # "+ Environment / ROI" rung that resolves to the pose-only column list: same
     # features, same settings, same seed, therefore a bit-identical F1 and a gain of
     # exactly 0.0. Pooled as an ordinary observation it is a real measurement of "no
-    # effect", which it is not — it is the absence of a measurement, and on the
+    # effect", which it is not, it is the absence of a measurement, and on the
     # manuscript run 13 of 43 context rows are exactly this.
     base_cfg = next((c for c in configs if c.name == BASELINE_CONFIG), None)
     base_cols = _resolve_feature_cols(base_cfg.feature_set) if base_cfg else None

@@ -3,10 +3,10 @@
 Three subtabs share one :class:`ValidationService` and one assembled
 :class:`ValidationRun`:
 
-* **Overview** — per-behavior model quality, label counts, and bout counts.
-* **Validation Quiz** — a blind labeling test with hotkey assignment, looping,
+* **Overview**: per-behavior model quality, label counts, and bout counts.
+* **Validation Quiz**: a blind labeling test with hotkey assignment, looping,
   auto-advance, and an "Unsure" option.  Answers are stored per named reviewer.
-* **Results & Suggestions** — user-vs-machine + inter-rater metrics and
+* **Results & Suggestions**: user-vs-machine + inter-rater metrics and
   rule-based guidance, with an opt-in write-back into training labels.
 """
 
@@ -64,26 +64,26 @@ _QUALITY_COLORS = {
 
 def _fmt(value: object, pct: bool = False) -> str:
     if value is None:
-        return "—"
+        return "-"
     try:
         v = float(value)
     except (TypeError, ValueError):
         return str(value)
     # NaN means "not measurable here" (e.g. refinement suppressed because the
-    # held-out windows cannot support min_bout) — never render it as "nan".
+    # held-out windows cannot support min_bout): never render it as "nan".
     if not math.isfinite(v):
-        return "—"
+        return "-"
     return f"{v:.0%}" if pct else f"{v:.3f}"
 
 
 def _tpfpfn(tp: object, fp: object, fn: object) -> str:
-    """Compact 'TP/FP/FN' cell; '—' when counts are unavailable (not retrained)."""
+    """Compact 'TP/FP/FN' cell; '-' when counts are unavailable (not retrained)."""
     if tp is None or fp is None or fn is None:
-        return "—"
+        return "-"
     try:
         return f"{int(tp)}/{int(fp)}/{int(fn)}"
     except (TypeError, ValueError):
-        return "—"
+        return "-"
 
 
 # ===========================================================================
@@ -92,8 +92,8 @@ def _tpfpfn(tp: object, fp: object, fn: object) -> str:
 class LosoSubjectDialog(QDialog):
     """Choose which mice enter the LOSO run.
 
-    An unchecked mouse is excluded from the analysis entirely — never held out and
-    never trained on — so the run is a clean LOSO over the chosen cohort (drop a
+    An unchecked mouse is excluded from the analysis entirely, never held out and
+    never trained on, so the run is a clean LOSO over the chosen cohort (drop a
     mouse with a broken camera, a mis-tracked session, or an off-protocol subject
     without it contaminating any fold's training pool).
     """
@@ -106,7 +106,7 @@ class LosoSubjectDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._subjects = subjects or []
-        self.setWindowTitle("Leave-one-mouse-out CV — select mice")
+        self.setWindowTitle("Leave-one-mouse-out CV: select mice")
         # Size from font metrics, not fixed pixels, so display scaling can't clip it.
         em = max(8, self.fontMetrics().averageCharWidth())
         self.resize(em * 58, em * 40)
@@ -115,7 +115,7 @@ class LosoSubjectDialog(QDialog):
 
         intro = QLabel(
             "Each selected mouse is held out once and its data trains the other folds. "
-            "Unselected mice are excluded from the analysis entirely — neither held out "
+            "Unselected mice are excluded from the analysis entirely, neither held out "
             "nor trained on.\n\n"
             "Compute-heavy: one model is trained per selected mouse, per behavior."
         )
@@ -128,20 +128,20 @@ class LosoSubjectDialog(QDialog):
         want = None if preselected is None else {str(s) for s in preselected}
         for s in self._subjects:
             name = str(s.get("subject", "?"))
-            item = QListWidgetItem(f"{name}   —   {self._detail(s)}")
+            item = QListWidgetItem(f"{name}  -  {self._detail(s)}")
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             checked = True if want is None else name in want
             item.setCheckState(
                 Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
             )
-            # A mouse with no labeled behavior windows can never score a fold — it is
+            # A mouse with no labeled behavior windows can never score a fold, it is
             # shown (so its absence isn't a mystery) but cannot be selected.
             if not s.get("n_labeled", 0):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(Qt.CheckState.Unchecked)
                 item.setForeground(QColor("#78909C"))
-                item.setToolTip("No labeled behavior windows — nothing to score.")
+                item.setToolTip("No labeled behavior windows: nothing to score.")
             self._list.addItem(item)
         self._list.itemChanged.connect(lambda _i: self._update_state())
         layout.addWidget(self._list, 1)
@@ -149,9 +149,9 @@ class LosoSubjectDialog(QDialog):
         self._count = QLabel("")
         self._count.setStyleSheet("color: #90A4AE; font-size: 12px;")
 
-        all_btn = QPushButton("Select all")
+        all_btn = QPushButton("Select All")
         all_btn.clicked.connect(lambda: self._set_all(True))
-        none_btn = QPushButton("Select none")
+        none_btn = QPushButton("Select None")
         none_btn.clicked.connect(lambda: self._set_all(False))
 
         row = QHBoxLayout()
@@ -197,7 +197,7 @@ class LosoSubjectDialog(QDialog):
         total = self._list.count()
         self._count.setText(
             f"{n} of {total} mice selected"
-            + ("" if n >= 2 else "  —  LOSO needs at least 2")
+            + ("" if n >= 2 else " :  LOSO needs at least 2")
         )
         self._buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(n >= 2)
 
@@ -278,7 +278,7 @@ class LosoResultsDialog(QDialog):
                     f"{r['error']}</td></tr>"
                 )
                 continue
-            # Pooled target-class scores with the subject-level bootstrap CI —
+            # Pooled target-class scores with the subject-level bootstrap CI,
             # not the per-fold mean ± SEM, which loso.py itself flags invalid
             # (`fold_sem_valid: False`: folds are neither equally sized nor
             # independent observations of one quantity), and not the macro F1,
@@ -286,7 +286,7 @@ class LosoResultsDialog(QDialog):
             # 0.50 for a model that detects nothing.
             lo = _fmt(r.get("boot_f1_target_lo"))
             hi = _fmt(r.get("boot_f1_target_hi"))
-            ci = "—" if "—" in (lo, hi) else f"{lo}–{hi}"
+            ci = "-" if "-" in (lo, hi) else f"{lo}–{hi}"
             evaluable = bool(r.get("refined_evaluable", True))
             ref_f1 = _fmt(r.get("refined_target_f1")) if evaluable else "n/e"
             ref_counts = (
@@ -311,7 +311,7 @@ class LosoResultsDialog(QDialog):
         scope = ""
         if excluded:
             scope = (
-                "<p style='color:#FFCC80;'>⚠ Restricted run — these mice were excluded "
+                "<p style='color:#FFCC80;'>⚠ Restricted run, these mice were excluded "
                 "from both training and evaluation: " + ", ".join(excluded) + "</p>"
             )
         not_eval = sorted({
@@ -332,8 +332,8 @@ class LosoResultsDialog(QDialog):
             + "<p style='color:#90A4AE;'>Each mouse is held out once "
             "(Leave-One-Group-Out cross-validation) and every mouse's held-out "
             "predictions are pooled into one score per behavior. Scores are "
-            "<b>target-class</b> — this behavior alone, never averaged with 'not "
-            "this behavior' — and the 95% CI is a subject-level bootstrap "
+            "<b>target-class</b>: this behavior alone, never averaged with 'not "
+            "this behavior': and the 95% CI is a subject-level bootstrap "
             "(resampling mice, the unit of independence), not a per-fold SEM. "
             "Counts are per scored window against the reviewer's own accepted "
             "labels; refinement-only labels (temporal feedback / imported) are "
@@ -384,8 +384,8 @@ class ValidationOverviewPanel(QWidget):
     """Dashboard of every behavior model's quality and data coverage."""
 
     # Held-out counts are window-level: the unit of evaluation is one ~15-frame
-    # segment window, because that is the only unit a sparsely-labelled holdout
-    # can support (see refined_eval — event/bout counts were removed for exactly
+    # segment window, because that is the only unit a sparsely-labeled holdout
+    # can support (see refined_eval: event/bout counts were removed for exactly
     # this reason).  Scores are the model's own output, before temporal
     # refinement: on a sparse holdout the refined pass had to be withheld for
     # most behaviors, so its columns were almost always dashes.
@@ -408,9 +408,9 @@ class ValidationOverviewPanel(QWidget):
 
     _UNIT_NOTE = (
         "Unit: one segment window (~15 frames), not one bout and not one frame.\n"
-        "A sparsely-labelled held-out set cannot support bout-level scoring — a "
+        "A sparsely-labeled held-out set cannot support bout-level scoring, a "
         "bout needs contiguous observation, while the held-out rows are isolated "
-        "windows — so window-level counts are what the ground truth actually "
+        "windows: so window-level counts are what the ground truth actually "
         "supports."
     )
 
@@ -424,7 +424,7 @@ class ValidationOverviewPanel(QWidget):
         "the same row.\n\n"
         "It is not macro-averaged. Macro would average this behavior with the "
         "'not this behavior' class, which is ~85% of the held-out set and scores "
-        "~0.97 on its own — that lifts every number and gives a model that never "
+        "~0.97 on its own, that lifts every number and gives a model that never "
         "detects anything a floor near 0.50."
     )
 
@@ -447,18 +447,18 @@ class ValidationOverviewPanel(QWidget):
             + _TARGET_NOTE + "\n\n" + _RAW_NOTE
         ),
         "Prec (raw)": (
-            "TP / (TP + FP) — of the windows the model called this behavior, the "
+            "TP / (TP + FP): of the windows the model called this behavior, the "
             "fraction the reviewer agreed with.\n\n" + _TARGET_NOTE + "\n\n" + _RAW_NOTE
         ),
         "Rec (raw)": (
-            "TP / (TP + FN) — of the windows the reviewer labelled this behavior, "
+            "TP / (TP + FN): of the windows the reviewer labeled this behavior, "
             "the fraction the model found.\n\n" + _TARGET_NOTE + "\n\n" + _RAW_NOTE
         ),
         "TP/FP/FN (raw)": (
             "Held-out confusion counts before temporal refinement.\n\n"
-            "TP — reviewer said yes, model said yes.\n"
-            "FP — reviewer said no, model said yes.\n"
-            "FN — reviewer said yes, model said no.\n\n"
+            "TP: reviewer said yes, model said yes.\n"
+            "FP: reviewer said no, model said yes.\n"
+            "FN: reviewer said yes, model said no.\n\n"
             "Ground truth is the reviewer's own accepted label for that window, so "
             "a false positive means a human looked at it and said it was not this "
             "behavior.\n\n" + _UNIT_NOTE + "\n\n"
@@ -467,7 +467,7 @@ class ValidationOverviewPanel(QWidget):
             "their own, so they no longer take a column."
         ),
         "PR-AUC": (
-            "Average precision for this behavior across every threshold — a "
+            "Average precision for this behavior across every threshold, a "
             "threshold-free summary, so unlike F1 it does not move when you retune "
             "the onset threshold.\n\n"
             "Already target-class in the stored metrics, and the most robust single "
@@ -479,22 +479,22 @@ class ValidationOverviewPanel(QWidget):
             "Every behavior's model is trained on the same pool of all labeled "
             "windows (other behaviors' labels are its negatives) and split by "
             "mouse the same way, so the total train / val row counts are identical "
-            "across behaviors — hover a cell for them. Only the positives differ.\n\n"
-            "The shipped model is afterwards refit on ALL labelled rows so your "
+            "across behaviors: hover a cell for them. Only the positives differ.\n\n"
+            "The shipped model is afterwards refit on ALL labeled rows so your "
             "per-mouse corrections reach inference; these metrics stay from the "
             "honest held-out split."
         ),
         "Pos labels": (
             "Human labels for this behavior across the whole project (accepted "
             "review decisions + reviewer segment labels).\n\n"
-            "This is the label pool, not the modelled rows — it will not match "
+            "This is the label pool, not the modeled rows, it will not match "
             "Train + Val, because a label only becomes a row once its segment has "
             "extracted features. Hover a cell for the negative and total counts."
         ),
         "Bouts": (
             "Bouts detected in the full inference traces using this behavior's "
             "current Temporal Review settings. A count of output, not an accuracy "
-            "measure — no ground truth is involved."
+            "measure: no ground truth is involved."
         ),
         "Overlap": (
             "Fraction of this behavior's flagged frames where another behavior is "
@@ -528,7 +528,7 @@ class ValidationOverviewPanel(QWidget):
         self._loso_btn.setToolTip(
             "Train one model per subject (each mouse held out once), pool every "
             "subject's held-out predictions, and report ONE stable generalization "
-            "score per behavior — raw and after temporal refinement — instead of a "
+            "score per behavior: raw and after temporal refinement, instead of a "
             "single random holdout that's hostage to which mice land in validation.\n\n"
             "You choose which mice to include; excluded mice are left out of both "
             "training and evaluation.\n\n"
@@ -538,8 +538,8 @@ class ValidationOverviewPanel(QWidget):
 
         self.session_quality_btn = QPushButton("Session Quality…")
         self.session_quality_btn.setToolTip(
-            "Flag sessions whose model output looks abnormal — unusually low confidence "
-            "or odd bout counts — by comparing each session with others of the same "
+            "Flag sessions whose model output looks abnormal, unusually low confidence "
+            "or odd bout counts: by comparing each session with others of the same "
             "type (e.g. acclimation vs acclimation, test vs test).\n\n"
             "Uses the inference traces and bout thresholds from Temporal → Review. "
             "Flagged sessions' top-confidence windows can be sent to Clip Review."
@@ -626,7 +626,7 @@ class ValidationOverviewPanel(QWidget):
             f"  True negatives   {tn}   model no,  reviewer no\n\n"
             f"  precision {prec:.3f}    recall {rec:.3f}    specificity {spec:.3f}\n\n"
             "True negatives are large because most held-out windows are some other "
-            "behavior — read them alongside precision, not on their own."
+            "behavior: read them alongside precision, not on their own."
         )
 
     def refresh(self) -> None:
@@ -653,13 +653,13 @@ class ValidationOverviewPanel(QWidget):
             name = str(data.get("behavior_name", "?"))
             quality = data.get("quality", "unknown")
             overlap = data.get("overlap_fraction")
-            overlap_text = "—" if overlap is None else f"{overlap:.0%}"
+            overlap_text = "-" if overlap is None else f"{overlap:.0%}"
             basis = str(data.get("metrics_basis") or "macro")
             has_counts = data.get("raw_tp") is not None
 
             cells = [
                 name,
-                data.get("model_version", "—"),
+                data.get("model_version", "-"),
                 str(quality).capitalize(),
                 _fmt(data.get("frame_f1")),
                 _fmt(data.get("frame_precision")),
@@ -667,8 +667,8 @@ class ValidationOverviewPanel(QWidget):
                 _tpfpfn(data.get("raw_tp"), data.get("raw_fp"), data.get("raw_fn")),
                 _fmt(data.get("pr_auc")),
                 "{} / {}".format(
-                    data.get("n_train_pos") if data.get("n_train_pos") is not None else "—",
-                    data.get("n_val_pos") if data.get("n_val_pos") is not None else "—",
+                    data.get("n_train_pos") if data.get("n_train_pos") is not None else "-",
+                    data.get("n_val_pos") if data.get("n_val_pos") is not None else "-",
                 ),
                 str(data.get("n_positive_labels", 0)),
                 str(data.get("n_bouts", 0)),
@@ -697,7 +697,7 @@ class ValidationOverviewPanel(QWidget):
                 q_item.setBackground(QColor(_QUALITY_COLORS.get(quality, "#8FA6B4")))
             _tip(
                 "Quality",
-                f"{str(quality).capitalize()} — from the raw "
+                f"{str(quality).capitalize()}, from the raw "
                 + ("target-class" if basis == "target" else "macro")
                 + f" F1 of {_fmt(data.get('frame_f1'))}.\n\n"
                 + (
@@ -723,7 +723,7 @@ class ValidationOverviewPanel(QWidget):
                     _amber(_c)
                     _tip(
                         _c,
-                        "MACRO-averaged, not target-class — this model predates the "
+                        "MACRO-averaged, not target-class, this model predates the "
                         "saved held-out probability column, so its target-class score "
                         "cannot be recovered after the fact. Macro averages this "
                         "behavior with 'not this behavior' (~85% of the set, scoring "
@@ -738,7 +738,7 @@ class ValidationOverviewPanel(QWidget):
                 _tip(
                     "TP/FP/FN (raw)",
                     self._counts_tooltip(
-                        "Raw (P >= 0.5, no temporal refinement) —",
+                        "Raw (P >= 0.5, no temporal refinement),",
                         data.get("raw_tp"), data.get("raw_fp"),
                         data.get("raw_fn"), data.get("raw_tn"),
                     ),
@@ -754,31 +754,31 @@ class ValidationOverviewPanel(QWidget):
                 f"{pos} human labels for this behavior.\n"
                 f"{neg} labels for every other behavior, out of {pos + neg} in the "
                 "project.\n\n"
-                "This is the whole label pool. It will not equal Train + Val — a "
-                "label only becomes a modelled row once its segment has extracted "
+                "This is the whole label pool. It will not equal Train + Val, a "
+                "label only becomes a modeled row once its segment has extracted "
                 "features.",
             )
             _tip(
                 "Model",
-                "derived/models/" + str(data.get("model_version", "—"))
+                "derived/models/" + str(data.get("model_version", "-"))
                 + (f"\nLast trained: {data.get('last_trained')}" if data.get("last_trained") else "")
                 + (f"\nCalibration: {data.get('calibration')}" if data.get("calibration") else ""),
             )
             _split = (
                 "All labeled windows, shared by every behavior's model: "
-                f"{data.get('n_train') or '—'} trained on, "
-                f"{data.get('n_val') or '—'} held out."
+                f"{data.get('n_train') or '-'} trained on, "
+                f"{data.get('n_val') or '-'} held out."
             )
             if data.get("n_train_pos") is None:
                 _split += (
-                    "\n\nTraining positives were not recorded for this model — "
+                    "\n\nTraining positives were not recorded for this model, "
                     "retrain to fill them in."
                 )
             _tip("Pos train / val", _split)
 
             # --- overlap ------------------------------------------------------
             if overlap is not None:
-                # Amber/red as overlap rises — high overlap means weak inhibition.
+                # Amber/red as overlap rises: high overlap means weak inhibition.
                 o_item = self._table.item(r, col["Overlap"])
                 if o_item is not None:
                     if overlap >= 0.15:
@@ -1063,7 +1063,7 @@ class ValidationQuizPanel(QWidget):
         self._behaviors.set_project(project_root)
         self._rebuild_label_buttons()
         self._load_settings_into_popup()
-        # Resume an in-progress run if one exists, but never auto-generate one —
+        # Resume an in-progress run if one exists, but never auto-generate one,
         # the user decides when to build a test via "Generate Test".
         self.reload()
 
@@ -1138,7 +1138,7 @@ class ValidationQuizPanel(QWidget):
     def _generate(self) -> None:
         if self._busy:
             return
-        # Only confirm when an existing test would be superseded — a first test
+        # Only confirm when an existing test would be superseded, a first test
         # generates immediately so nothing is wasted.
         existing = self._service.load_active_run()
         if existing is not None and existing.clips:
@@ -1172,7 +1172,7 @@ class ValidationQuizPanel(QWidget):
         self._generate_btn.setEnabled(not busy)
         self._resume_btn.setEnabled(not busy)
         if busy:
-            self._progress_label.setText("Building test — extracting clips…")
+            self._progress_label.setText("Building test: extracting clips…")
 
     def _on_assembled(self, run: ValidationRun) -> None:
         self._busy = False
@@ -1421,7 +1421,7 @@ class ValidationResultsPanel(QWidget):
 
         self._commit_reviewer = QComboBox()
         self._commit_reviewer.setMinimumWidth(140)
-        self._commit_btn = QPushButton("Commit labels to training")
+        self._commit_btn = QPushButton("Commit Labels to Training")
         self._commit_btn.setToolTip(
             "Write this reviewer's (non-unsure) answers into reviewer_labels for future training."
         )
@@ -1526,7 +1526,7 @@ class ValidationResultsPanel(QWidget):
         for r in runs:
             stamp = r.created_at.strftime("%Y-%m-%d %H:%M")
             tag = " (active)" if active and active.run_id == r.run_id else ""
-            self._run_combo.addItem(f"{stamp} — {len(r.clips)} clips{tag}", userData=r.run_id)
+            self._run_combo.addItem(f"{stamp}, {len(r.clips)} clips{tag}", userData=r.run_id)
         if current is not None:
             idx = self._run_combo.findData(current)
             if idx >= 0:
@@ -1563,7 +1563,7 @@ class ValidationResultsPanel(QWidget):
             return
         self._service.delete_run(str(run_id))
         self.refresh()
-        # The quiz panel may have had this run open — let it reload/clear.
+        # The quiz panel may have had this run open: let it reload/clear.
         self.run_deleted.emit()
 
     def _export_excel(self) -> None:
@@ -1648,7 +1648,7 @@ class ValidationResultsPanel(QWidget):
     def _bar(value: float | None, color: str) -> str:
         """Render a horizontal metric bar (0–1) as an HTML cell."""
         if value is None:
-            return "<span style='color:#607D8B;'>—</span>"
+            return "<span style='color:#607D8B;'>-</span>"
         pct = max(0.0, min(1.0, float(value))) * 100.0
         return (
             "<table cellpadding='0' cellspacing='0' style='width:130px; border-collapse:collapse;'><tr>"
@@ -1683,7 +1683,7 @@ class ValidationResultsPanel(QWidget):
         for rid, rdata in metrics["per_reviewer"].items():
             agree = rdata.get("agreement")
             parts.append(
-                f"<p style='margin-bottom:2px;'><b style='color:#ECEFF1;'>{rid}</b> — "
+                f"<p style='margin-bottom:2px;'><b style='color:#ECEFF1;'>{rid}</b>, "
                 f"agreement with model: <b style='color:{self._metric_color(agree)};'>"
                 f"{_fmt(agree, pct=True)}</b> • unsure: {_fmt(rdata.get('unsure_rate'), pct=True)} • "
                 f"answered {rdata.get('n_answered', 0)}</p>"
@@ -1825,7 +1825,7 @@ class ValidationResultsPanel(QWidget):
             data = intra[rid]
         if not data or data.get("n", 0) == 0:
             parts.append(
-                f"<p style='color:#90A4AE;'>“{rid or '—'}” has not labeled any prior-accepted clips "
+                f"<p style='color:#90A4AE;'>“{rid or '-'}” has not labeled any prior-accepted clips "
                 "in this test yet. Increase the prior-accepted proportion in Settings, or have this "
                 "reviewer complete more of the test.</p>"
             )
@@ -1834,7 +1834,7 @@ class ValidationResultsPanel(QWidget):
         agree = data.get("agreement")
         kappa = data.get("kappa")
         parts.append(
-            f"<p><b style='color:#ECEFF1;'>{rid}</b> vs. their own prior-accepted labels — "
+            f"<p><b style='color:#ECEFF1;'>{rid}</b> vs. their own prior-accepted labels, "
             f"{data['n']} clip(s)"
             + (f", {data['n_unsure']} unsure" if data.get("n_unsure") else "")
             + f" • self-agreement <b style='color:{self._metric_color(agree)};'>{_fmt(agree, pct=True)}</b>"
@@ -1888,7 +1888,7 @@ class ValidationResultsPanel(QWidget):
                 tag = f" <span style='color:#FFB74D;'>({fr} borderline)</span>" if fr else ""
                 parts.append(
                     f"<li style='margin-bottom:3px;'>Model said <b style='color:#90CAF9;'>{m}</b>, "
-                    f"reviewers said <b style='color:#A5D6A7;'>{u}</b> — {cnt}×{tag}</li>"
+                    f"reviewers said <b style='color:#A5D6A7;'>{u}</b>, {cnt}×{tag}</li>"
                 )
             parts.append("</ul>")
 
@@ -1899,7 +1899,7 @@ class ValidationResultsPanel(QWidget):
                 if m != u:
                     max_off = max(max_off, matrix.get(m, {}).get(u, 0))
         parts.append(
-            "<p style='color:#78909C; margin-bottom:2px;'>Confusion matrix — rows: model label, "
+            "<p style='color:#78909C; margin-bottom:2px;'>Confusion matrix, rows: model label, "
             "columns: reviewer label. Off-diagonal cells are disagreements.</p>"
         )
         parts.append("<table cellpadding='6' cellspacing='0' style='border-collapse:collapse; margin-bottom:12px;'>")
@@ -2039,8 +2039,8 @@ class BehaviorGridPanel(QWidget):
         self._layout_combo.addItem("Probability bands (per row)", userData="bands")
         self._layout_combo.setToolTip(
             "How the 5×5 grid is filled.\n\n"
-            "• Strongest bouts — every cell shows the most-confident detections.\n"
-            "• Probability bands — each row is a different probability range (top "
+            "• Strongest bouts: every cell shows the most-confident detections.\n"
+            "• Probability bands: each row is a different probability range (top "
             "row = highest-probability bouts, bottom = lowest accepted), so you can "
             "see the full range of what is accepted as positive for this behavior."
         )
@@ -2109,7 +2109,7 @@ class BehaviorGridPanel(QWidget):
         layout.addLayout(controls)
         layout.addWidget(self._progress_bar)
         # Both the player and the empty-state placeholder take the stretch so the
-        # controls row stays pinned to the top whether or not a grid exists —
+        # controls row stays pinned to the top whether or not a grid exists,
         # without this the empty state has no stretch and Qt spreads the controls
         # vertically until the first grid (with a stretched player) is generated.
         layout.addWidget(self._player, 1)
@@ -2339,7 +2339,7 @@ class ValidationTab(QWidget):
 
         self.quiz_panel.run_changed.connect(self.results_panel.refresh)
         self.quiz_panel.answers_changed.connect(self.results_panel.refresh)
-        # If a test is deleted from Results, the quiz may have it open — reload it.
+        # If a test is deleted from Results, the quiz may have it open, reload it.
         self.results_panel.run_deleted.connect(self.quiz_panel.reload)
         self.overview_panel.session_quality_btn.clicked.connect(
             lambda _checked=False: self.session_quality_requested.emit()

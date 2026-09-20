@@ -1,7 +1,7 @@
 """Human clip-review effort: what did labeling this project actually cost?
 
 Every other analysis in this suite measures what the *model* did.  This one
-measures what the *person* did — the wall-clock labor that produced the labels
+measures what the *person* did, the wall-clock labor that produced the labels
 every other number rests on.  It is a pure read of files already on disk
 (``derived/review_tables/review_decisions.json``); nothing is trained, nothing is
 written back to the project, and it costs about a second per project.
@@ -11,12 +11,12 @@ How the time is measured
 ABEL stamps every review decision with the moment it was committed.  It does not
 record a start time, so a clip's review duration is measured as the **gap to the
 previous decision** by the same person: you look at a clip, you judge it, you
-commit — the interval between two commits is the time the second clip took.
+commit, the interval between two commits is the time the second clip took.
 Three gap classes fall out of that, and only one of them is review time:
 
 ``batch``   gap < :data:`BATCH_SEC` (0.05 s)
-    Not a human look.  One UI action — a bulk "assign behavior to selection", a
-    held-down keyboard shortcut, a temporal-review interval tiling into windows —
+    Not a human look.  One UI action, a bulk "assign behavior to selection", a
+    held-down keyboard shortcut, a temporal-review interval tiling into windows,
     writes many decisions in one loop.  Counting these as clips reviewed in
     ~0 seconds would drag the mean rate toward zero.
 
@@ -25,7 +25,7 @@ Three gap classes fall out of that, and only one of them is review time:
     are the sample behind every seconds-per-clip statistic here.
 
 ``break``   gap > :data:`BREAK_SEC`
-    The reviewer walked away.  Excluded entirely — charging a lunch break to the
+    The reviewer walked away.  Excluded entirely, charging a lunch break to the
     next clip would turn a 3-hour labeling job into a 3-week one.
 
 What this deliberately under-counts
@@ -40,13 +40,13 @@ Who counts as a reviewer
 ------------------------
 Three channels write into the same decisions file and they are not the same work:
 
-* **clip review** — the review queue, one human judgement per clip.  This is the
+* **clip review**: the review queue, one human judgment per clip.  This is the
   only channel timed, and the only one behind the headline rates.
-* ``temporal_feedback`` — corrections made by scrubbing a trace in the Temporal
+* ``temporal_feedback``: corrections made by scrubbing a trace in the Temporal
   Review tab.  Real human work, but one action tiles an interval into many
   windows in a single loop, so its decisions are near-simultaneous and would
   corrupt a per-clip rate.  Counted and reported separately, never timed.
-* ``imported:<tag>`` — labels copied in from another project by the model
+* ``imported:<tag>``, labels copied in from another project by the model
   refinement service.  Not this project's human work at all; excluded everywhere.
 
 Caveat on re-reviews
@@ -54,7 +54,7 @@ Caveat on re-reviews
 :meth:`ReviewService.upsert_decision` replaces a clip's record in place and
 re-stamps it, so a clip reviewed twice keeps only the later timestamp.  The
 measured cost is therefore the cost of the *surviving* pass over each clip, not
-of every pass ever made — another reason to read these numbers as a floor.
+of every pass ever made, another reason to read these numbers as a floor.
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ class ReviewEffortResult:
 
     # ── decision accounting (every row in the file lands in exactly one bucket) ──
     n_decisions_total: int = 0
-    n_clip_review: int = 0        # the review queue — the only timed channel
+    n_clip_review: int = 0        # the review queue: the only timed channel
     n_temporal_feedback: int = 0  # trace-scrubbing corrections, counted not timed
     n_imported: int = 0           # copied from another project; not human work here
 
@@ -188,7 +188,7 @@ def _timestamps(rows: Iterable[dict[str, Any]]) -> list[datetime]:
 
     Stamped by ``datetime.utcnow()`` and stored naive (see the timestamps note in
     the schema).  Only *differences* are used here, so the missing zone is
-    harmless — no local-time conversion is needed or attempted.
+    harmless, no local-time conversion is needed or attempted.
     """
     out: list[datetime] = []
     for row in rows:
@@ -245,7 +245,7 @@ def _footage_reviewed_hours(rows: list[dict[str, Any]], fps: float) -> float:
     """Hours of footage the reviewer actually watched, from the clips' own bounds.
 
     Measured per clip from ``adjusted_start_frame``/``adjusted_end_frame`` rather
-    than assumed from a nominal window length — projects set different clip
+    than assumed from a nominal window length, projects set different clip
     durations, and the decision rows carry the real ones.
     """
     if not np.isfinite(fps) or fps <= 0:
@@ -279,7 +279,7 @@ def measure_project(
                                project_name=project.name or project.project_id)
     try:
         rows = _load_decisions(project.root)
-    except Exception as exc:  # noqa: BLE001 — a missing/odd file must not sink a run
+    except Exception as exc:  # noqa: BLE001, a missing/odd file must not sink a run
         result.error = f"could not read review decisions: {type(exc).__name__}: {exc}"
         return result
     if not rows:
@@ -295,7 +295,7 @@ def measure_project(
     stamps = _timestamps(clip_rows)
     if len(stamps) < 2:
         result.error = (f"only {len(stamps)} timestamped clip-review decisions "
-                        "— need at least 2 to measure a gap")
+                        "- need at least 2 to measure a gap")
         return result
     result.first_decision = stamps[0].isoformat(timespec="seconds")
     result.last_decision = stamps[-1].isoformat(timespec="seconds")
@@ -307,7 +307,7 @@ def measure_project(
     result.n_batch = int(n_batch)
     result.n_breaks = int(n_breaks)
     if timed.size == 0:
-        result.error = ("no gaps fell in the per-clip band — every decision was "
+        result.error = ("no gaps fell in the per-clip band: every decision was "
                         "either a bulk action or separated by a break")
         return result
 
@@ -359,7 +359,7 @@ def pooled_summary(results: list[ReviewEffortResult]) -> dict[str, float]:
     """Totals and pooled per-clip statistics across every measured project.
 
     The pooled seconds-per-clip statistics are computed over the *concatenated
-    gaps*, not by averaging the per-project medians — a project that contributed
+    gaps*, not by averaging the per-project medians, a project that contributed
     9,000 clips should not weigh the same as one that contributed 900.
     """
     usable = _usable(results)
@@ -418,7 +418,7 @@ def pooled_summary(results: list[ReviewEffortResult]) -> dict[str, float]:
 
 
 def results_to_frame(results: list[ReviewEffortResult]) -> pd.DataFrame:
-    """One row per project — the paste-ready cost table."""
+    """One row per project: the paste-ready cost table."""
     rows = []
     for r in results:
         if r is None:
@@ -599,7 +599,7 @@ def plot_review_effort(results: list[ReviewEffortResult], save_path: Path) -> Pa
         for bar, value in zip(bars, values):
             ax.text(value, bar.get_y() + bar.get_height() / 2, f" {value:,.0f} h",
                     va="center", fontsize=8.5)
-        # Linear for the same reason as panel 2 — these bars are read by length.
+        # Linear for the same reason as panel 2: these bars are read by length.
         ax.margins(x=0.16)
         ax.invert_yaxis()
         ax.set_xlabel("human hours")

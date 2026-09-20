@@ -1,4 +1,4 @@
-"""Raw-data availability checks — the guard against silent degradation.
+"""Raw-data availability checks: the guard against silent degradation.
 
 The bug these cover: a project whose videos/pose live on an unmounted drive opens
 fine, then every downstream stage that recomputes from raw data produces empty or

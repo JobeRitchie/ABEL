@@ -6,12 +6,12 @@ the UI and exercised directly in tests.
 
 Responsibilities
 ----------------
-* ``model_overview`` — aggregate per-behavior model quality + label/bout counts.
-* ``assemble_run`` — build a blind quiz (a :class:`ValidationRun`) by sampling
+* ``model_overview``: aggregate per-behavior model quality + label/bout counts.
+* ``assemble_run``: build a blind quiz (a :class:`ValidationRun`) by sampling
   clips from four categories (prior-accepted, unreviewed-positive bouts, clearly
   negative regions, and near-threshold fringe) and extracting the needed video
   clips on the fly.
-* ``compute_metrics`` / ``suggestions`` — user-vs-machine and inter-rater
+* ``compute_metrics`` / ``suggestions``: user-vs-machine and inter-rater
   (user-vs-user) metrics plus rule-based improvement guidance.
 * persistence of runs/answers under ``derived/validation/`` and an opt-in
   write-back of reviewer answers into training labels.
@@ -232,7 +232,7 @@ class ValidationService:
             row = {
                 "behavior_id": bid,
                 "behavior_name": name,
-                "model_version": model_version or "—",
+                "model_version": model_version or "-",
                 "frame_f1": metrics.get("frame_f1"),
                 "frame_precision": metrics.get("frame_precision"),
                 "frame_recall": metrics.get("frame_recall"),
@@ -251,8 +251,8 @@ class ValidationService:
             # Held-out raw + post-refinement metrics recomputed from the model's
             # own saved held-out probabilities (None until the model is retrained
             # with that column).  When present these supersede metrics.json for
-            # the headline scores, because metrics.json stores *macro* P/R/F1 —
-            # target averaged with not-target — and a one-vs-rest holdout is ~85%
+            # the headline scores, because metrics.json stores *macro* P/R/F1,
+            # target averaged with not-target: and a one-vs-rest holdout is ~85%
             # not-target, so the macro number is far above the target's truth and
             # cannot be reconciled with the TP/FP/FN shown beside it.
             refined = self._refined_metrics(bid, name, model_dir)
@@ -1100,7 +1100,7 @@ class ValidationService:
     def _find_existing_clip(self, clip_id: str, session_id: str) -> Path | None:
         """Reuse an already-extracted, subject-centered clip for this id if one exists.
 
-        Only the Clip Review output (``derived/clips``) is trusted for reuse — those
+        Only the Clip Review output (``derived/clips``) is trusted for reuse, those
         clips are always cropped around the subject via pose centroids.  Clips in the
         validation cache are deliberately NOT reused: re-sampled windows are always
         re-extracted (overwriting any stale file) so freshly generated tests are
@@ -1132,9 +1132,9 @@ class ValidationService:
 
         With ``layout="strongest"`` (the default) bouts are detected per session
         and split into a *preferred* pool (the top ``top_fraction`` by mean
-        probability — the confident detections) and a *backfill* pool (the rest).
-        Both are filled round-robin so distinct *subjects* are preferred — every
-        subject contributes one bout before any subject contributes a second — and
+        probability, the confident detections) and a *backfill* pool (the rest).
+        Both are filled round-robin so distinct *subjects* are preferred, every
+        subject contributes one bout before any subject contributes a second, and
         the strongest bout from each session is chosen first.  The preferred pool
         is exhausted before the backfill pool is touched, so the grid is filled
         with the most confident detections first and only drops to weaker bouts
@@ -1142,9 +1142,9 @@ class ValidationService:
 
         With ``layout="bands"`` each *row* is a distinct probability band: all
         positive bouts are split into ``rows`` equal-frequency probability bands
-        and each grid row is filled from one band — the top row from the
+        and each grid row is filled from one band, the top row from the
         highest-probability band down to the bottom row from the lowest accepted
-        band — so the reviewer can see the full range of what counts as positive.
+        band, so the reviewer can see the full range of what counts as positive.
 
         In both layouts, bouts that frame-overlap an already-chosen bout from the
         same session are skipped so no bout is duplicated, and sessions whose
@@ -1315,7 +1315,7 @@ class ValidationService:
     ) -> Path:
         """Render a 5×5 looping montage of positive bouts to *out_path*.
 
-        Each cell is a subject-centred crop of one bout (padded by ``pre_seconds``
+        Each cell is a subject-centered crop of one bout (padded by ``pre_seconds``
         / ``post_seconds``) with optional pose-keypoint overlay.  ``crop_scale`` is
         a linear multiplier on each cell's crop half-width (>1 zooms out to show
         more surroundings, <1 tightens onto the subject).  ``keypoint_scale``
@@ -1343,7 +1343,7 @@ class ValidationService:
 
         manifest = self._imports.load_manifest(self._root())
         if manifest is None:
-            raise RuntimeError("Project import manifest is missing — re-open the project.")
+            raise RuntimeError("Project import manifest is missing: re-open the project.")
         presets = self._clips.load_project_presets()
         preset = presets[0] if presets else None
         if preset is None:
@@ -1504,7 +1504,7 @@ class ValidationService:
 
         Each test (run) gets a sheet with its per-reviewer / per-behavior metrics,
         intra-rater consistency, and overlap-excluded counts.  A leading ``Index``
-        sheet summarises every test.  Returns the number of test sheets written.
+        sheet summarizes every test.  Returns the number of test sheets written.
         """
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1753,7 +1753,7 @@ class ValidationService:
                 clip = clip_by_id.get(cid)
                 if clip is None or ans.is_unsure:
                     continue
-                # Skip ambiguous (multi-behavior) clips — they are not scored.
+                # Skip ambiguous (multi-behavior) clips: they are not scored.
                 if len(set(clip.coactive_labels or [])) >= 2:
                     continue
                 machine = clip.machine_label if clip.machine_label in matrix else NO_BEHAVIOR_ID
@@ -1809,7 +1809,7 @@ class ValidationService:
                 n_unsure += 1
                 continue
             # Ambiguous clips (model flagged 2+ behaviors) do not count against the
-            # reviewer — they are excluded from scoring and reported as feedback.
+            # reviewer: they are excluded from scoring and reported as feedback.
             coactive = set(clip.coactive_labels or [])
             if len(coactive) >= 2:
                 n_overlap += 1
@@ -1997,7 +1997,7 @@ class ValidationService:
                 "severity": "high" if kappa < 0.4 else "medium",
                 "message": (
                     f"Reviewers disagree with each other (κ = {kappa:.2f}). Behavior definitions may be "
-                    "ambiguous — refine the operational definition and inclusion/exclusion criteria in the "
+                    "ambiguous: refine the operational definition and inclusion/exclusion criteria in the "
                     "Behaviors tab before trusting model metrics."
                 ),
             })
@@ -2008,7 +2008,7 @@ class ValidationService:
                 "behavior": "All",
                 "severity": "medium",
                 "message": (
-                    f"High 'Unsure' rate ({mean_unsure:.0%}). Many clips are hard to judge — clarify behavior "
+                    f"High 'Unsure' rate ({mean_unsure:.0%}). Many clips are hard to judge, clarify behavior "
                     "definitions or lengthen clips for more context."
                 ),
             })
@@ -2027,7 +2027,7 @@ class ValidationService:
             if mostly_fringe:
                 msg = (
                     f"Model calls these clips '{machine}' but reviewers say '{user}' "
-                    f"({count}×, mostly borderline). These sit near the detection threshold — "
+                    f"({count}×, mostly borderline). These sit near the detection threshold, "
                     f"tune {machine}'s onset threshold in Temporal Review rather than retraining."
                 )
                 sev = "medium"
@@ -2080,7 +2080,7 @@ class ValidationService:
             out.append({
                 "behavior": "All",
                 "severity": "ok",
-                "message": "No problems detected — reviewers and models agree well across behaviors.",
+                "message": "No problems detected: reviewers and models agree well across behaviors.",
             })
         return out
 

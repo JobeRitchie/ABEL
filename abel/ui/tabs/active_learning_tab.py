@@ -294,7 +294,7 @@ class ActiveLearningTab(QWidget):
 
         self._session_scope_summary = QLabel("Session scope: all linked sessions")
         self._session_scope_summary.setWordWrap(True)
-        self._select_sessions_btn = QPushButton("Choose Sessions...")
+        self._select_sessions_btn = QPushButton("Choose Sessions…")
         self._select_sessions_btn.clicked.connect(self._open_session_selection_dialog)
 
         self._include_imported = QCheckBox("Include imported examples")
@@ -493,9 +493,9 @@ class ActiveLearningTab(QWidget):
         self._all_behavior_competition_margin.setValue(0.05)
         self._all_behavior_competition_margin.setToolTip(
             "Minimum probability gap required for the target behavior to beat a competing behavior.\n"
-            "< 1.0 (e.g. 0.05): candidates are included even when the target only marginally outscores competitors — "
+            "< 1.0 (e.g. 0.05): candidates are included even when the target only marginally outscores competitors, "
             "good for catching subtle or ambiguous events.\n"
-            "→ 1.0: only candidates where the target clearly dominates all competitors are kept — "
+            "→ 1.0: only candidates where the target clearly dominates all competitors are kept, "
             "stricter filtering that reduces confound overlap but may miss boundary cases."
         )
 
@@ -607,14 +607,14 @@ class ActiveLearningTab(QWidget):
         self._run_existing_btn = QPushButton("⏵ Run Existing Model")
         self._run_existing_btn.setToolTip(
             "Score this project's data with the saved model chosen above.\n"
-            "No training — the model is used as-is."
+            "No training: the model is used as-is."
         )
         self._run_existing_btn.clicked.connect(self._run_existing_model)
 
         self._run_models_btn = QPushButton("⏵ Run Models…")
         self._run_models_btn.setToolTip(
             "Run inference for selected behaviors using their existing trained\n"
-            "models on this project's data — like Pipeline All, but without\n"
+            "models on this project's data: like Pipeline All, but without\n"
             "retraining. Pick which behaviors to score."
         )
         self._run_models_btn.clicked.connect(self._run_models_selected_behaviors)
@@ -634,7 +634,7 @@ class ActiveLearningTab(QWidget):
         )
         self._run_pipeline_all_btn.clicked.connect(self._run_pipeline_all_behaviors)
 
-        self._gen_clips_btn = QPushButton("🎬 Generate Review Clips")
+        self._gen_clips_btn = QPushButton("Generate Review Clips")
         self._gen_clips_btn.setCheckable(True)
         self._gen_clips_btn.setChecked(True)
         self._gen_clips_btn.setToolTip(
@@ -691,7 +691,7 @@ class ActiveLearningTab(QWidget):
             "}"
         )
 
-        # Live "telemetry" readout — auto-populated from the progress stream and
+        # Live "telemetry" readout: auto-populated from the progress stream and
         # shown between the progress bar and the (now shorter) run log.
         self._progress_notes = ProgressNotesPanel()
 
@@ -715,8 +715,8 @@ class ActiveLearningTab(QWidget):
         self._viz_selector.addItem("PR Curve", userData="pr")
         self._viz_selector.addItem("Queue Composition", userData="queue")
         self._viz_selector.addItem("Pipeline Timing", userData="timing")
-        self._viz_selector.addItem("Cross-Behaviour Confounds", userData="confound_cross")
-        self._viz_selector.addItem("Unified UMAP (All Behaviours)", userData="unified_umap")
+        self._viz_selector.addItem("Cross-Behavior Confounds", userData="confound_cross")
+        self._viz_selector.addItem("Unified UMAP (All Behaviors)", userData="unified_umap")
         self._viz_selector.addItem("Unsupervised UMAP (Clusters)", userData="unsupervised_umap")
         self._viz_selector.addItem("Expert Assignment (Per Model)", userData="expert_assignment")
         self._viz_selector.currentIndexChanged.connect(self._on_viz_selection_changed)
@@ -735,7 +735,7 @@ class ActiveLearningTab(QWidget):
         self._viz_preview.setStyleSheet("border: 1px solid #1A2027; background: #0A1929; border-radius: 4px; color: #8FA6B4;")
         self._viz_pixmap_original: QPixmap | None = None
         self._viz_source_path: Path | None = None
-        self._viz_save_btn = QPushButton("Save Visualization...")
+        self._viz_save_btn = QPushButton("Save Visualization…")
         self._viz_save_btn.setToolTip(
             "Save the current visualization from its original file.\n"
             "For UMAP plots, SVG is offered when available for high-quality export."
@@ -763,22 +763,22 @@ class ActiveLearningTab(QWidget):
 
         self._confound_graph_btn = QPushButton("Confound Analysis")
         self._confound_graph_btn.setToolTip(
-            "Generate a between-behaviour co-activation matrix showing which\n"
-            "behaviours overlap and suggestions for improving labels."
+            "Generate a between-behavior co-activation matrix showing which\n"
+            "behaviors overlap and suggestions for improving labels."
         )
         self._confound_graph_btn.clicked.connect(self._generate_confound_graph)
 
         self._unified_umap_btn = QPushButton("Unified UMAP")
         self._unified_umap_btn.setToolTip(
             "Generate a single UMAP embedding combining predictions from\n"
-            "all behaviour models, coloured by dominant behaviour."
+            "all behavior models, colored by dominant behavior."
         )
         self._unified_umap_btn.clicked.connect(self._generate_unified_umap)
 
         self._unsupervised_umap_btn = QPushButton("Unsupervised UMAP")
         self._unsupervised_umap_btn.setToolTip(
-            "Generate a UMAP embedding directly from the raw segment features —\n"
-            "no models or labels required. Points are colour-coded by\n"
+            "Generate a UMAP embedding directly from the raw segment features,\n"
+            "no models or labels required. Points are color-coded by\n"
             "automatically-discovered clusters (HDBSCAN)."
         )
         self._unsupervised_umap_btn.clicked.connect(self._generate_unsupervised_umap)
@@ -798,20 +798,20 @@ class ActiveLearningTab(QWidget):
         )
         self._awareness_ablation_btn.clicked.connect(self._run_awareness_ablation)
 
-        # Consolidate the analysis/visualisation actions into a single compact
+        # Consolidate the analysis/visualization actions into a single compact
         # menu button so the toolbar row doesn't overflow and truncate labels.
         self._viz_menu_btn = QToolButton()
         self._viz_menu_btn.setText("Visualize  ▾")
         self._viz_menu_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self._viz_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._viz_menu_btn.setToolTip(
-            "Analysis & visualisation tools:\n"
-            "confound analysis, UMAP embeddings, and behaviour-awareness tests."
+            "Analysis & visualization tools:\n"
+            "confound analysis, UMAP embeddings, and behavior-awareness tests."
         )
         _viz_menu = QMenu(self._viz_menu_btn)
         for _label, _btn in (
             ("Confound Analysis", self._confound_graph_btn),
-            ("Unified UMAP (behaviours)", self._unified_umap_btn),
+            ("Unified UMAP (behaviors)", self._unified_umap_btn),
             ("Unsupervised UMAP (clusters)", self._unsupervised_umap_btn),
             ("Select from UMAP…", self._umap_select_btn),
             ("Test Behavior Awareness", self._awareness_ablation_btn),
@@ -843,7 +843,7 @@ class ActiveLearningTab(QWidget):
         splitter.setChildrenCollapsible(True)
         splitter.setHandleWidth(8)
 
-        # Pane 1 \u2014 controls (settings form + action buttons + status line).
+        # Pane 1: controls (settings form + action buttons + status line).
         controls_widget = QWidget()
         controls_layout = QVBoxLayout(controls_widget)
         controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -853,7 +853,7 @@ class ActiveLearningTab(QWidget):
         controls_layout.addWidget(self._status)
         splitter.addWidget(controls_widget)
 
-        # Pane 2 \u2014 bottom: visualization (left) + run log (right), split 50/50.
+        # Pane 2: bottom: visualization (left) + run log (right), split 50/50.
         # Left: visualization.
         viz_widget = QWidget()
         viz_layout = QVBoxLayout(viz_widget)
@@ -1302,7 +1302,7 @@ class ActiveLearningTab(QWidget):
                 self._queue_enable_confound.setChecked(bool(cfg["queue_enable_confound"]))
             if "queue_enable_hardneg" in cfg:
                 self._queue_enable_hardneg.setChecked(bool(cfg["queue_enable_hardneg"]))
-            # Mark the old quick_profile as custom since we use the new tiered system
+            # Individual queue toggles override any preset, so show "custom".
             idx = self._quick_profile.findData("custom")
             if idx >= 0:
                 self._quick_profile.setCurrentIndex(idx)
@@ -1360,27 +1360,27 @@ class ActiveLearningTab(QWidget):
         # Dataset size classification
         if n_sessions <= 5:
             size_class = "small"
-            reasons.append(f"{n_sessions} sessions — small dataset, Complete preset recommended")
+            reasons.append(f"{n_sessions} sessions, small dataset, Complete preset recommended")
         elif n_sessions <= 30:
             size_class = "medium"
-            reasons.append(f"{n_sessions} sessions — medium dataset, Standard preset recommended")
+            reasons.append(f"{n_sessions} sessions, medium dataset, Standard preset recommended")
         else:
             size_class = "large"
-            reasons.append(f"{n_sessions} sessions — large dataset, Quick preset with caps")
+            reasons.append(f"{n_sessions} sessions, large dataset, Quick preset with caps")
 
         # Label maturity
         if total_labels == 0:
             label_stage = "initial"
-            reasons.append("No reviewed labels yet — early exploration phase")
+            reasons.append("No reviewed labels yet: early exploration phase")
         elif total_labels < 30:
             label_stage = "early"
-            reasons.append(f"{total_labels} labels — still in early annotation rounds")
+            reasons.append(f"{total_labels} labels, still in early annotation rounds")
         elif total_labels < 100:
             label_stage = "developing"
-            reasons.append(f"{total_labels} labels — developing model, standard depth appropriate")
+            reasons.append(f"{total_labels} labels, developing model, standard depth appropriate")
         else:
             label_stage = "mature"
-            reasons.append(f"{total_labels} labels — mature dataset, full evaluation valuable")
+            reasons.append(f"{total_labels} labels, mature dataset, full evaluation valuable")
 
         # Apply recommended tier
         if size_class == "large" or (size_class == "medium" and label_stage == "initial"):
@@ -1451,7 +1451,7 @@ class ActiveLearningTab(QWidget):
             "<br>".join(summary_lines),
         )
         self._status.setText(f"Applied recommended settings ({tier.capitalize()} preset).")
-        self._append_log(f"Recommend: applied {tier} preset — " + "; ".join(reasons))
+        self._append_log(f"Recommend: applied {tier} preset, " + "; ".join(reasons))
 
     # ------------------------------------------------------------------
     # Active settings summary (always-visible badge)
@@ -1503,7 +1503,7 @@ class ActiveLearningTab(QWidget):
         50 % → balanced defaults
         100% → mostly edge cases (disagreement, confound, hard-neg heavy)
         """
-        t = max(0.0, min(1.0, pct / 100.0))  # normalise to [0, 1]
+        t = max(0.0, min(1.0, pct / 100.0))  # normalize to [0, 1]
 
         # Linearly interpolate between 'strong' and 'edge' weight profiles.
         # strong (t=0):  candidate=0.70, unc=0.15, dis=0.05, div=0.03, conf=0.03, hn=0.02, exp=0.02
@@ -1522,7 +1522,7 @@ class ActiveLearningTab(QWidget):
             "exploration":   _lerp(0.02, 0.05),
         }
 
-        # Auto-enable weighted queue when the user moves off centre.
+        # Auto-enable weighted queue when the user moves off center.
         if pct != 50 and not self._queue_weighted_enable.isChecked():
             self._queue_weighted_enable.setChecked(True)
 
@@ -1807,7 +1807,7 @@ class ActiveLearningTab(QWidget):
         if not filtered:
             raise ValueError(
                 "No selected sessions are available in the current manifest. "
-                "Use 'Choose Sessions...' to update the active-learning session scope."
+                "Use 'Choose Sessions…' to update the active-learning session scope."
             )
 
         available_ids = {str(s.session_id) for s in linked_sessions}
@@ -1965,9 +1965,9 @@ class ActiveLearningTab(QWidget):
 
         shown_unchecked = {col for col, cb in checkboxes.items() if not cb.isChecked()}
         if self._project_root is not None:
-            # Persist to config/feature_exclusions.json — the single source of
+            # Persist to config/feature_exclusions.json, the single source of
             # truth every downstream stage (training, UMAP, evaluation,
-            # benchmarks) reads — preserving exclusions for columns not shown here.
+            # benchmarks) reads: preserving exclusions for columns not shown here.
             merged = set_excluded_columns(
                 self._project_root, list(checkboxes.keys()), shown_unchecked
             )
@@ -2252,7 +2252,7 @@ class ActiveLearningTab(QWidget):
 
     def _open_settings_dialog(self) -> None:
         dlg = QDialog(self)
-        dlg.setWindowTitle("Active Learning — Advanced Settings")
+        dlg.setWindowTitle("Active Learning: Advanced Settings")
         dlg.resize(740, 800)
 
         form_host = QWidget(dlg)
@@ -2279,7 +2279,7 @@ class ActiveLearningTab(QWidget):
         _info(mode,
               "Uncertainty is best for most iterative AL workflows. Prototype for cluster-based exploration. "
               "Novelty for finding rare events. Low-prob to fill gaps.",
-              "Negligible — affects only candidate ranking, not training cost.")
+              "Negligible: affects only candidate ranking, not training cost.")
         form.addRow("Selection mode:", mode)
 
         query_size = QSpinBox(dlg)
@@ -2288,7 +2288,7 @@ class ActiveLearningTab(QWidget):
         query_size.setValue(int(self._query_size.value()))
         _info(query_size,
               "How many candidate clips are generated per run. Higher = more review work.",
-              "Minimal — only affects output volume. Has no effect on training duration.")
+              "Minimal: only affects output volume. Has no effect on training duration.")
         form.addRow("Query size:", query_size)
 
         validation_pct = QSpinBox(dlg)
@@ -2319,7 +2319,7 @@ class ActiveLearningTab(QWidget):
         _info(quick_test,
               "Samples a time window from each session instead of processing everything. "
               "Essential for early smoke-testing and rapid iteration.",
-              "Major — reduces runtime from 20+ min to 2-5 min.")
+              "Major: reduces runtime from 20+ min to 2-5 min.")
         form.addRow(quick_test)
 
         quick_profile = QComboBox(dlg)
@@ -2344,7 +2344,7 @@ class ActiveLearningTab(QWidget):
         _info(max_segments,
               "Caps total segment pool before training. Critical for large datasets (30+ sessions) "
               "to keep training fast.",
-              "High — training time scales linearly with segment count.")
+              "High: training time scales linearly with segment count.")
         form.addRow("Max segments:", max_segments)
 
         max_train_samples_per_class = QSpinBox(dlg)
@@ -2354,7 +2354,7 @@ class ActiveLearningTab(QWidget):
         _info(max_train_samples_per_class,
               "Critical for datasets with 80+ subjects. Try 500-2000. "
               "Prevents memory issues and training slowdown from class imbalance.",
-              "High — directly limits training data size.")
+              "High: directly limits training data size.")
         form.addRow("Training cap per class:", max_train_samples_per_class)
 
         no_behavior_weight = QDoubleSpinBox(dlg)
@@ -2367,7 +2367,7 @@ class ActiveLearningTab(QWidget):
               "Upweights no_behavior samples during training. "
               "Auto = adaptively computed from class imbalance ratio. "
               "Manual values >1.0 penalize false positives more aggressively.",
-              "Moderate — affects confidence calibration.")
+              "Moderate: affects confidence calibration.")
         form.addRow("No-behavior sample weight:", no_behavior_weight)
 
         quick_ident_minutes = QSpinBox(dlg)
@@ -2376,7 +2376,7 @@ class ActiveLearningTab(QWidget):
         quick_ident_minutes.setValue(int(self._quick_ident_minutes.value()))
         _info(quick_ident_minutes,
               "Only active when quick test mode is ON. Higher = more data per session.",
-              "Moderate — directly proportional to preprocessing time.")
+              "Moderate: directly proportional to preprocessing time.")
         form.addRow("Quick sample duration:", quick_ident_minutes)
 
         quick_ident_seed = QSpinBox(dlg)
@@ -2392,7 +2392,7 @@ class ActiveLearningTab(QWidget):
         _info(balanced_sampling,
               "Sample a random time window from each session without skipping pipeline stages. "
               "Good for reducing processing time while keeping full evaluation quality.",
-              "Moderate — reduces preprocessing proportionally to sampling fraction.")
+              "Moderate: reduces preprocessing proportionally to sampling fraction.")
         form.addRow(balanced_sampling)
 
         balanced_minutes = QSpinBox(dlg)
@@ -2434,7 +2434,7 @@ class ActiveLearningTab(QWidget):
               "computed before training so the classifier learns from them directly. Helps most "
               "for behaviors defined by appearance or substrate change (digging, grooming). "
               "Needs a reachable video + pose per session; requires video features to be on.",
-              "Moderate — roughly 1 min of GPU time per 1000 segments, cached per session.")
+              "Moderate: roughly 1 min of GPU time per 1000 segments, cached per session.")
         form.addRow(use_r3d_features)
 
         skip_evaluation = QCheckBox("Skip evaluation reports", dlg)
@@ -2442,7 +2442,7 @@ class ActiveLearningTab(QWidget):
         _info(skip_evaluation,
               "Evaluation generates UMAP, confusion matrix, PR curves. Skip for pure speed. "
               "Enable when you need to assess model quality.",
-              "Low-Moderate — adds 1-3 min for charts and metrics.")
+              "Low-Moderate: adds 1-3 min for charts and metrics.")
         form.addRow(skip_evaluation)
 
         enable_umap = QCheckBox("Enable UMAP generation", dlg)
@@ -2450,14 +2450,14 @@ class ActiveLearningTab(QWidget):
         _info(enable_umap,
               "Generate unified UMAP plots after pipeline run, pipeline all, retrain, and retrain all. "
               "Disable to skip UMAP for faster runs.",
-              "Moderate — UMAP computation can take 1-5 min on large datasets.")
+              "Moderate: UMAP computation can take 1-5 min on large datasets.")
         form.addRow(enable_umap)
 
         reuse_cached_features = QCheckBox("Reuse cached features", dlg)
         reuse_cached_features.setChecked(bool(self._reuse_cached_features.isChecked()))
         _info(reuse_cached_features,
               "Always recommended unless you changed pose smoothing or feature settings.",
-              "Major — skipping recompute saves 5-30 min.")
+              "Major: skipping recompute saves 5-30 min.")
         form.addRow(reuse_cached_features)
 
         remap_reviewed_windows = QCheckBox("Remap reviewed windows", dlg)
@@ -2473,14 +2473,14 @@ class ActiveLearningTab(QWidget):
         _info(auto_gen_windows,
               "Automatically computes features for reviewed segments (bout-based, random, prior windows) "
               "that are not in the current feature table so they can be included in training.",
-              "Low-Moderate — adds a few seconds per session with missing segments.")
+              "Low-Moderate: adds a few seconds per session with missing segments.")
         form.addRow(auto_gen_windows)
 
         strict_gpu = QCheckBox("Require GPU (fail if fallback)", dlg)
         strict_gpu.setChecked(bool(self._strict_gpu.isChecked()))
         _info(strict_gpu,
               "Only enable if you need to guarantee GPU training (e.g., timing benchmarks).",
-              "None — affects error handling only.")
+              "None: affects error handling only.")
         form.addRow(strict_gpu)
 
         # ── Optical Flow Speed ──
@@ -2493,7 +2493,7 @@ class ActiveLearningTab(QWidget):
               "Compute optical flow every Nth frame and linearly interpolate between. "
               "Higher values dramatically reduce context feature computation time. "
               "1 = every frame (slowest). 3 = default (~3× faster). 5 = aggressive (~5× faster).",
-              "Major — directly reduces GPU optical flow compute time proportionally.")
+              "Major: directly reduces GPU optical flow compute time proportionally.")
         form.addRow("Flow temporal stride:", flow_temporal_stride)
 
         # ── Multi-Behavior Ranking ──
@@ -2504,7 +2504,7 @@ class ActiveLearningTab(QWidget):
         _info(all_behavior_aware,
               "Enable when ≥2 behaviors are defined. Uses competing models to prioritize "
               "boundary cases between behaviors.",
-              "Low — loads additional model files but does not retrain them.")
+              "Low: loads additional model files but does not retrain them.")
         form.addRow(all_behavior_aware)
 
         competition_margin = QDoubleSpinBox(dlg)
@@ -2514,11 +2514,11 @@ class ActiveLearningTab(QWidget):
         competition_margin.setValue(float(self._all_behavior_competition_margin.value()))
         _info(competition_margin,
               "Minimum probability gap required for the target behavior to beat a competing behavior.\n"
-              "< 1.0 (e.g. 0.05): candidates are included even when the target only marginally outscores competitors — "
+              "< 1.0 (e.g. 0.05): candidates are included even when the target only marginally outscores competitors, "
               "good for catching subtle or ambiguous events.\n"
-              "→ 1.0: only candidates where the target clearly dominates all competitors are kept — "
+              "→ 1.0: only candidates where the target clearly dominates all competitors are kept, "
               "stricter filtering that reduces confound overlap but may miss boundary cases.",
-              "Negligible — applied only during candidate ranking.")
+              "Negligible: applied only during candidate ranking.")
         form.addRow("Competition margin:", competition_margin)
 
         # ── Weighted Queue ──
@@ -2532,7 +2532,7 @@ class ActiveLearningTab(QWidget):
         _info(candidate_focus_pct,
               "High-level control: 0% = mostly strong candidates, 50% = balanced, "
               "100% = mostly edge cases (hard negatives, confound boundaries, disagreements).",
-              "None — only affects candidate composition.")
+              "None: only affects candidate composition.")
         form.addRow("Candidate focus:", candidate_focus_pct)
 
         queue_weighted_enable = QCheckBox("Enable weighted queue", dlg)
@@ -2541,7 +2541,7 @@ class ActiveLearningTab(QWidget):
               "Combines multiple ranking signals (disagreement, diversity, hard negatives) "
               "into a composite candidate score. Most useful after 50+ reviewed labels when "
               "pure uncertainty sampling starts to plateau.",
-              "Low — affects candidate scoring, not training.")
+              "Low: affects candidate scoring, not training.")
         form.addRow(queue_weighted_enable)
 
         queue_enable_disagreement = QCheckBox("Disagreement", dlg)
@@ -2796,7 +2796,7 @@ class ActiveLearningTab(QWidget):
             short_ver = model_version[-20:] if len(model_version) > 20 else model_version
             title += f"  [{short_ver}]"
         ax.set_title(title, fontsize=11, fontweight="bold", pad=10)
-        ax.set_xlabel(f"Duration (seconds) — total {_fmt(total)}", fontsize=9)
+        ax.set_xlabel(f"Duration (seconds), total {_fmt(total)}", fontsize=9)
         ax.tick_params(axis="y", labelsize=9)
         ax.tick_params(axis="x", labelsize=8)
         ax.set_xlim(0, max(durations) * 1.18)
@@ -3148,8 +3148,8 @@ class ActiveLearningTab(QWidget):
 
         Segment summary statistics are stored as float32 from representation_v5
         on.  A project cached by an earlier version still holds them as float64,
-        which is twice the size and — because a full-table copy consolidates
-        every numeric column into one contiguous block — is what made large
+        which is twice the size and, because a full-table copy consolidates
+        every numeric column into one contiguous block, is what made large
         projects fail with "Unable to allocate N GiB" partway through a run,
         after the first behavior had already trained.
 
@@ -3208,7 +3208,7 @@ class ActiveLearningTab(QWidget):
             box.setInformativeText(
                 detail
                 + "Your extracted features are still on disk, so this does NOT require "
-                "re-extracting from video — ABEL rebuilds the segment table from "
+                "re-extracting from video: ABEL rebuilds the segment table from "
                 "them. Rebuilding happens automatically on the next run and adds a few "
                 "minutes to it."
             )
@@ -3361,7 +3361,7 @@ class ActiveLearningTab(QWidget):
             return
         if not self._preflight_representation_dtype():
             return
-        # ----- behaviour-selection dialog -----
+        # ----- behavior-selection dialog -----
         dlg = QDialog(self)
         dlg.setWindowTitle("Select Behaviors to Retrain")
         dlg_layout = QVBoxLayout(dlg)
@@ -3510,7 +3510,7 @@ class ActiveLearningTab(QWidget):
             if dur >= 0.3:
                 self._timing_profile.record(self._timing_last_phase, dur)
         # The whole-run total is the drift-free ETA anchor: record the true
-        # end-to-end wall time of this run (normalised per behavior) for batch
+        # end-to-end wall time of this run (normalized per behavior) for batch
         # runs that tagged themselves via _timing_mark_run.
         kind = getattr(self, "_timing_run_kind", None)
         units = getattr(self, "_timing_run_units", None)
@@ -3536,7 +3536,7 @@ class ActiveLearningTab(QWidget):
         own start timestamp. This is the reliable recording path: the
         ``_set_busy()`` finish hook only records when a run-kind tag set on the
         worker thread survives the busy lifecycle, which it intermittently does
-        not (and single-item tasks never tag themselves at all) — leaving the
+        not (and single-item tasks never tag themselves at all), leaving the
         anchor frozen at a stale value so the ETA underestimates every run.
 
         Records into the live profile the finish hook will persist so phase
@@ -3569,6 +3569,10 @@ class ActiveLearningTab(QWidget):
     ) -> dict[str, Any]:
         """Retrain every defined behavior in sequence, reusing _run_retrain_task."""
         results: list[dict[str, Any]] = []
+        # This batch also merges its candidates behavior-by-behavior; its
+        # first save replaces, so the queue does not carry over from the
+        # previous Retrain-All.
+        self._pipeline_all_saved_any = False
 
         trainable = getattr(self, "_retrain_all_selected", None)
         if trainable is None:
@@ -3654,7 +3658,7 @@ class ActiveLearningTab(QWidget):
                         f" | finish ~ {eta_local.strftime('%H:%M:%S')}"
                     )
                 else:
-                    # Not enough measured stages yet — avoid a misleading number.
+                    # Not enough measured stages yet: avoid a misleading number.
                     timing = f" | elapsed {_fmt_dur(elapsed)} | ETA calculating…"
                 new_status = self._batch_status(beh_idx, n_total, beh_name, clean_log)
                 progress_cb(global_value, g_max, f"{clean_log}{timing}", new_status)
@@ -3665,7 +3669,7 @@ class ActiveLearningTab(QWidget):
         # BOTH frame_features.parquet and segment_features.parquet.  If this
         # happens mid-loop (e.g. inside the first behavior's evaluation step)
         # it overwrites segment_features.parquet, causing later behaviors to
-        # see more segments than the first behavior — a scope mismatch that
+        # see more segments than the first behavior: a scope mismatch that
         # corrupts the unified UMAP via fillna(0.0).
         frame_path = self._project_root / "derived" / "representations" / "frame_features.parquet"
         if not frame_path.exists():
@@ -3739,6 +3743,7 @@ class ActiveLearningTab(QWidget):
                         progress_cb=_make_behavior_progress_cb(idx, bname),
                         target_behavior_override=bid,
                         skip_candidates=not getattr(self, "_batch_generate_clips", True),
+                        merge_candidates=True,
                     )
                     result["target_behavior_name"] = bname
                 except Exception as exc:
@@ -3810,7 +3815,7 @@ class ActiveLearningTab(QWidget):
                     f"candidates={int(r.get('n_candidates', 0))}"
                 )
             elif r.get("error"):
-                self._append_log(f"  {bname}: FAILED — {r['error']}")
+                self._append_log(f"  {bname}: FAILED, {r['error']}")
             else:
                 self._append_log(f"  {bname}: skipped (no usable labels)")
 
@@ -3824,7 +3829,7 @@ class ActiveLearningTab(QWidget):
         if all_candidates:
             self._emit_uncertainty_candidates_for_clip_extraction(
                 all_candidates,
-                source_label="Active Learning \u2014 Retrain All Behaviors",
+                source_label="Active Learning: Retrain All Behaviors",
                 append=True,
             )
 
@@ -3833,7 +3838,7 @@ class ActiveLearningTab(QWidget):
         if succeeded > 0 and self._is_umap_enabled():
             self._regenerate_unified_umap_inline()
         elif succeeded > 0:
-            self._append_log("UMAP generation disabled in settings — skipping.")
+            self._append_log("UMAP generation disabled in settings: skipping.")
 
     # ------------------------------------------------------------------
     # Run Pipeline All Behaviors (sequential full pipeline)
@@ -3852,7 +3857,7 @@ class ActiveLearningTab(QWidget):
             return
         if not self._preflight_representation_dtype():
             return
-        # ----- behaviour-selection dialog -----
+        # ----- behavior-selection dialog -----
         dlg = QDialog(self)
         dlg.setWindowTitle("Select Behaviors for Pipeline")
         dlg_layout = QVBoxLayout(dlg)
@@ -4021,7 +4026,7 @@ class ActiveLearningTab(QWidget):
                     f" | finish ~ {eta_local.strftime('%H:%M:%S')}"
                 )
             elif eta_seconds is not None:
-                # Not enough measured stages yet — avoid a misleading number.
+                # Not enough measured stages yet: avoid a misleading number.
                 out += " | ETA calculating…"
             return out
 
@@ -4094,6 +4099,11 @@ class ActiveLearningTab(QWidget):
         original_reuse = self._reuse_cached_features.isChecked()
         self._pipeline_all_force_reuse = False
         self._pipeline_all_skip_candidates = not getattr(self, "_batch_generate_clips", True)
+        # One behavior at a time: the queue must accumulate across the batch,
+        # but the batch's first save replaces, so it does not pile onto the
+        # previous run's queue.
+        self._pipeline_all_merge_candidates = True
+        self._pipeline_all_saved_any = False
         # Pipeline-All processes every behavior over the *same* sessions, so the
         # representation (frame/segment) tables are identical across behaviors.
         # Enable an in-memory reuse cache so behaviors 2..N skip re-reading the
@@ -4142,6 +4152,8 @@ class ActiveLearningTab(QWidget):
             self._pipeline_all_target_override = None
             self._pipeline_all_model_name_override = None
             self._pipeline_all_skip_candidates = False
+            self._pipeline_all_merge_candidates = False
+            self._pipeline_all_saved_any = False
             self._pipeline_all_active = False
             self._pipeline_all_repr_cache = None
 
@@ -4201,7 +4213,7 @@ class ActiveLearningTab(QWidget):
                     f"candidates={int(getattr(summary, 'n_candidates', 0))}"
                 )
             elif r.get("error"):
-                self._append_log(f"  {bname}: FAILED \u2014 {r['error']}")
+                self._append_log(f"  {bname}: FAILED, {r['error']}")
 
         self._append_log(f"Pipeline-all summary: {succeeded}/{total} succeeded.")
 
@@ -4209,15 +4221,15 @@ class ActiveLearningTab(QWidget):
         if all_candidates:
             self._emit_uncertainty_candidates_for_clip_extraction(
                 all_candidates,
-                source_label="Active Learning \u2014 Pipeline All Behaviors",
+                source_label="Active Learning: Pipeline All Behaviors",
                 append=True,
             )
         self._generate_expert_assignment_chart()
 
-        # Auto-generate cross-behaviour confound analysis and unified UMAP
+        # Auto-generate cross-behavior confound analysis and unified UMAP
         # now that all models have fresh predictions.
         if succeeded > 0 and self._project_root:
-            self._append_log("Generating cross-behaviour confound analysis…")
+            self._append_log("Generating cross-behavior confound analysis…")
             try:
                 from abel.services.evaluation_service import EvaluationService as _ES
                 svc = _ES()
@@ -4235,12 +4247,12 @@ class ActiveLearningTab(QWidget):
                     self._append_log(f"Confound analysis: {confound['error']}")
                 else:
                     n_behaviors = len(confound.get("behavior_ids", []))
-                    self._append_log(f"Confound analysis complete: {n_behaviors} behaviours.")
+                    self._append_log(f"Confound analysis complete: {n_behaviors} behaviors.")
             except Exception as exc:
                 self._append_log(f"Confound analysis failed: {exc}")
 
             if self._is_umap_enabled():
-                self._append_log("Generating unified behaviour UMAP…")
+                self._append_log("Generating unified behavior UMAP…")
                 try:
                     from abel.services.evaluation_service import EvaluationService as _ES2
                     svc2 = _ES2()
@@ -4264,7 +4276,7 @@ class ActiveLearningTab(QWidget):
                 except Exception as exc:
                     self._append_log(f"Unified UMAP failed: {exc}")
             else:
-                self._append_log("UMAP generation disabled in settings — skipping.")
+                self._append_log("UMAP generation disabled in settings: skipping.")
 
         self._refresh_visualization_preview()
 
@@ -4275,13 +4287,13 @@ class ActiveLearningTab(QWidget):
     def _run_models_selected_behaviors(self) -> None:
         """Run inference for user-selected behaviors using their existing models.
 
-        Like Pipeline All, but no training — each selected behavior is scored
+        Like Pipeline All, but no training, each selected behavior is scored
         with its most recent trained model.
         """
         if not self._project_root:
             QMessageBox.warning(self, "No project", "Open a project first.")
             return
-        # Resolve each behaviour to its newest trained model directory.
+        # Resolve each behavior to its newest trained model directory.
         model_map = self._snapshot_svc._auto_resolve_behavior_models(self._project_root)
         if not model_map:
             QMessageBox.information(
@@ -4294,7 +4306,7 @@ class ActiveLearningTab(QWidget):
             str(b.behavior_id).strip(): str(b.name)
             for b in self._behaviors.behaviors
         }
-        # Only offer behaviours that actually have a model.
+        # Only offer behaviors that actually have a model.
         entries = [
             (bid, behavior_label(bid, name_by_id), mv)
             for bid, mv in model_map.items()
@@ -4302,7 +4314,7 @@ class ActiveLearningTab(QWidget):
         entries.sort(key=lambda e: e[1].lower())
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Run Models — Select Behaviors")
+        dlg.setWindowTitle("Run Models: Select Behaviors")
         dlg_layout = QVBoxLayout(dlg)
         dlg_layout.addWidget(QLabel(
             f"{len(entries)} behavior(s) have a trained model.  "
@@ -4363,9 +4375,14 @@ class ActiveLearningTab(QWidget):
         n_total = len(selected)
         results: list[dict[str, Any]] = []
         all_candidates: list[Any] = []
-        # Honor the "Generate Review Clips" toggle — _run_existing_model_task
+        # Honor the "Generate Review Clips" toggle: _run_existing_model_task
         # reads this thread-safe flag to decide whether to generate candidates.
         self._pipeline_all_skip_candidates = not getattr(self, "_batch_generate_clips", True)
+        # One behavior at a time: the queue must accumulate across the batch,
+        # but the batch's first save replaces, so it does not pile onto the
+        # previous run's queue.
+        self._pipeline_all_merge_candidates = True
+        self._pipeline_all_saved_any = False
 
         # ── Whole-run ETA across ALL selected models ─────────────────────────
         # Previously this loop only printed "Model i/N" separators and let each
@@ -4470,6 +4487,8 @@ class ActiveLearningTab(QWidget):
                 results.append(result)
         finally:
             self._pipeline_all_skip_candidates = False
+            self._pipeline_all_merge_candidates = False
+            self._pipeline_all_saved_any = False
 
         succeeded = sum(1 for r in results if not r.get("error"))
         if progress_cb is not None:
@@ -4511,7 +4530,7 @@ class ActiveLearningTab(QWidget):
                 or self._behavior_display_name(str(r.get("target_behavior", "")))
             )
             if r.get("error"):
-                self._append_log(f"  {bname}: FAILED — {r['error']}")
+                self._append_log(f"  {bname}: FAILED, {r['error']}")
             else:
                 self._append_log(
                     f"  {bname}: segments={int(r.get('segment_rows', 0))}, "
@@ -4521,7 +4540,7 @@ class ActiveLearningTab(QWidget):
         if candidates:
             self._populate_candidate_table(candidates)
             self._emit_uncertainty_candidates_for_clip_extraction(
-                candidates, source_label="Active Learning — Run Models",
+                candidates, source_label="Active Learning: Run Models",
                 append=True,
             )
         self._refresh_visualization_preview()
@@ -4582,7 +4601,7 @@ class ActiveLearningTab(QWidget):
         if result is None:
             self._status.setText("Ablation study returned no result.")
             return
-        self._status.setText(f"Ablation complete — verdict: {result.verdict}")
+        self._status.setText(f"Ablation complete, verdict: {result.verdict}")
         if result.summary:
             self._append_log("")
             for line in result.summary.split("\n"):
@@ -4592,7 +4611,7 @@ class ActiveLearningTab(QWidget):
                 self._append_log(f"⚠ {w}")
 
     # ------------------------------------------------------------------
-    # Cross-behaviour confound analysis
+    # Cross-behavior confound analysis
     # ------------------------------------------------------------------
 
     def _generate_confound_graph(self) -> None:
@@ -4600,7 +4619,7 @@ class ActiveLearningTab(QWidget):
             QMessageBox.warning(self, "No project", "Open a project first.")
             return
         self._set_busy(True)
-        self._status.setText("Generating cross-behaviour confound analysis…")
+        self._status.setText("Generating cross-behavior confound analysis…")
         self._append_log("Generating confound analysis…")
 
         worker = TaskWorker(
@@ -4651,14 +4670,14 @@ class ActiveLearningTab(QWidget):
         self._refresh_visualization_preview()
 
     # ------------------------------------------------------------------
-    # Expert assignment chart — per-model metrics overview
+    # Expert assignment chart: per-model metrics overview
     # ------------------------------------------------------------------
 
     def _generate_expert_assignment_chart(self) -> None:
-        """Scan all behaviour model directories and render a grouped bar chart
-        of F1 / PR-AUC per behaviour model.  The chart is saved to
+        """Scan all behavior model directories and render a grouped bar chart
+        of F1 / PR-AUC per behavior model.  The chart is saved to
         ``derived/evaluation/expert_assignment_per_model.png`` and displayed
-        in the visualisation preview.
+        in the visualization preview.
         """
         if self._project_root is None:
             return
@@ -4678,7 +4697,7 @@ class ActiveLearningTab(QWidget):
             if bid:
                 behavior_short_names[bid] = str(b.short_name or b.name)
 
-        # Collect metrics from every behaviour model directory
+        # Collect metrics from every behavior model directory
         rows: list[dict[str, Any]] = []
         for model_dir in sorted(models_root.iterdir()):
             if not model_dir.is_dir():
@@ -4719,7 +4738,7 @@ class ActiveLearningTab(QWidget):
         ax.bar(x + 1.5 * width, recalls, width, label="Recall", color="#9C27B0")
 
         ax.set_ylabel("Score")
-        ax.set_title("Per-Model Performance — Expert Assignment Overview")
+        ax.set_title("Per-Model Performance: Expert Assignment Overview")
         ax.set_xticks(x)
         ax.set_xticklabels(behaviours, rotation=30, ha="right")
         ax.set_ylim(0, 1.05)
@@ -4762,7 +4781,7 @@ class ActiveLearningTab(QWidget):
         unified_path = eval_dir / "unified_umap_coordinates.parquet"
         unsup_path = eval_dir / "unsupervised_umap_coordinates.parquet"
         if unified_path.exists():
-            sources.append(("Unified UMAP (behaviours)", unified_path))
+            sources.append(("Unified UMAP (behaviors)", unified_path))
         if unsup_path.exists():
             sources.append(("Unsupervised UMAP (clusters)", unsup_path))
 
@@ -4875,14 +4894,14 @@ class ActiveLearningTab(QWidget):
         from abel.models.schemas import CandidateWindow  # noqa: PLC0415
 
         # The UMAP coord parquet's ``behavior_label`` column holds *display*
-        # names (behaviour name / short_name, "A + B" multi-labels, or cluster
-        # names like "Unclassified"), NOT canonical behaviour ids — see
+        # names (behavior name / short_name, "A + B" multi-labels, or cluster
+        # names like "Unclassified"), NOT canonical behavior ids, see
         # EvaluationService.generate_unified_umap. Storing it straight into
-        # ``behavior_id`` pollutes the Review-tab behaviour filter with
+        # ``behavior_id`` pollutes the Review-tab behavior filter with
         # duplicate entries (a name-string "Groom" renders identically to the
-        # real behaviour's "Groom") and stray short-name codes ("Wetdogshake",
-        # "none"). Map each label back to its behaviour id; anything that
-        # doesn't resolve to a single defined behaviour lands as unassigned.
+        # real behavior's "Groom") and stray short-name codes ("Wetdogshake",
+        # "none"). Map each label back to its behavior id; anything that
+        # doesn't resolve to a single defined behavior lands as unassigned.
         defined_bids = {str(b.behavior_id).strip() for b in self._behaviors.behaviors}
         name_to_bid: dict[str, str] = {}
         for b in self._behaviors.behaviors:
@@ -4922,7 +4941,7 @@ class ActiveLearningTab(QWidget):
             # windows into the Clips tab AND switches to it, so the user
             # actually sees them land.  The uncertainty signal deliberately
             # stays on the current tab, which made the selection look like a
-            # no-op.  These are still only *candidates* — clips must be
+            # no-op.  These are still only *candidates*, clips must be
             # extracted before they appear in the Review tab.
             self.edge_case_candidates_requested.emit(
                 windows, f"UMAP Selection ({len(windows)} segments)"
@@ -4935,26 +4954,26 @@ class ActiveLearningTab(QWidget):
                 "UMAP Selection Loaded",
                 f"{len(windows)} selected segment(s) were loaded into the "
                 "<b>Clips</b> tab as candidates.<br><br>"
-                "Click <b>Extract Clips</b> there to generate the clip files — "
+                "Click <b>Extract Clips</b> there to generate the clip files, "
                 "they'll then appear in the <b>Review</b> tab for labeling.",
             )
 
     # ------------------------------------------------------------------
-    # Unified UMAP across all behaviour models
+    # Unified UMAP across all behavior models
     # ------------------------------------------------------------------
 
     def _regenerate_unified_umap_inline(self) -> None:
-        """Regenerate the unified behaviour UMAP in the background (after a run).
+        """Regenerate the unified behavior UMAP in the background (after a run).
 
         Called at the tail of a retrain / pipeline-all run. The embedding is
-        computed off the GUI thread via a TaskWorker \u2014 the same background path
-        the manual "Unified UMAP" button uses \u2014 so the window stays responsive
+        computed off the GUI thread via a TaskWorker, the same background path
+        the manual "Unified UMAP" button uses, so the window stays responsive
         instead of going "not responding" while the embedding is built.
         """
         if not self._project_root:
             return
         # Capture all GUI-thread state up front so the worker never touches
-        # widgets or the behaviour model from another thread.
+        # widgets or the behavior model from another thread.
         project_root = self._project_root
         behavior_names = {
             str(b.behavior_id).strip(): str(b.short_name or b.name)
@@ -4972,7 +4991,7 @@ class ActiveLearningTab(QWidget):
             None,
         )
 
-        self._append_log("Regenerating unified behaviour UMAP\u2026")
+        self._append_log("Regenerating unified behavior UMAP\u2026")
         self._status.setText("Generating unified UMAP embedding\u2026")
         self._set_busy(True)
 
@@ -5047,14 +5066,14 @@ class ActiveLearningTab(QWidget):
         ratio_spin.setToolTip("Max ratio of predicted to reviewed segments per class.")
         form.addRow("Predicted / labeled ratio:", ratio_spin)
 
-        refined_chk = QCheckBox("Colour by refined (post-temporal-refinement) labels", dlg)
+        refined_chk = QCheckBox("Color by refined (post-temporal-refinement) labels", dlg)
         refined_chk.setChecked(bool(getattr(self, "_umap_refined_colours", False)))
         refined_chk.setToolTip(
-            "Apply each behaviour's temporal refinement (onset threshold + merge-gap +\n"
-            "min-bout) to its prediction trace and colour segments by the resulting bout\n"
+            "Apply each behavior's temporal refinement (onset threshold + merge-gap +\n"
+            "min-bout) to its prediction trace and color segments by the resulting bout\n"
             "label instead of raw per-window argmax. Spurious single-window predictions\n"
-            "drop to 'Unclassified', so the coloured clusters read cleaner. Note: this\n"
-            "changes point COLOURS, not their positions (positions come from features)."
+            "drop to 'Unclassified', so the colored clusters read cleaner. Note: this\n"
+            "changes point COLORS, not their positions (positions come from features)."
         )
         form.addRow("", refined_chk)
 
@@ -5122,7 +5141,7 @@ class ActiveLearningTab(QWidget):
         n_segments = payload.get("n_segments", 0)
         behaviors = payload.get("behaviors_used", [])
         self._status.setText(f"Unified UMAP complete ({method}, {n_segments} segments).")
-        self._append_log(f"Unified {method}: {n_segments} segments, behaviours={behaviors}.")
+        self._append_log(f"Unified {method}: {n_segments} segments, behaviors={behaviors}.")
         if out_path:
             self._append_log(f"Saved: {out_path}")
             self._show_image_in_viz_preview(Path(out_path))
@@ -5184,7 +5203,7 @@ class ActiveLearningTab(QWidget):
         self._status.setText("Generating unsupervised UMAP embedding…")
         self._append_log(
             "Generating unsupervised UMAP from raw features "
-            "(first run compiles UMAP/numba — this can take a minute)…"
+            "(first run compiles UMAP/numba: this can take a minute)…"
         )
 
         worker = TaskWorker(
@@ -5294,7 +5313,7 @@ class ActiveLearningTab(QWidget):
 
         # Stage-aware ETA. The steps have wildly unequal cost (scoring 75k
         # segments dwarfs candidate selection), so the old "elapsed / steps done"
-        # average was meaningless — at step 0 it read the whole run as 80 ms.
+        # average was meaningless: at step 0 it read the whole run as 80 ms.
         # Learn each stage's real duration, seeded from prior runs of this kind so
         # step 0 is already calibrated, and blend against the measured whole-run
         # anchor exactly as the batch run-models path does.
@@ -5321,7 +5340,7 @@ class ActiveLearningTab(QWidget):
             """Emit one progress event.
 
             ``sub`` is how far through the current step the work is (0..1), used
-            for the bar only — it never advances past the step it belongs to.
+            for the bar only, it never advances past the step it belongs to.
             """
             if progress_cb is None:
                 return
@@ -5348,7 +5367,7 @@ class ActiveLearningTab(QWidget):
             # from history; what it has ALREADY consumed is measured, and a step
             # cannot turn out shorter than that. When the phase reported a real
             # counter ("R3D features: session 8/33") that fraction extrapolates
-            # the step's true total — without this, a step running 40× its
+            # the step's true total: without this, a step running 40× its
             # expectation still reported "ETA 2 s" for minutes on end.
             in_step = est.seconds_in_stage()
             prior = est.expected_stage_seconds(stage)
@@ -5380,7 +5399,7 @@ class ActiveLearningTab(QWidget):
                     f" | finish ~ {eta_local.strftime('%H:%M:%S')}"
                 )
             else:
-                # No history and nothing measured yet — a number here would be a guess.
+                # No history and nothing measured yet: a number here would be a guess.
                 timing_text = f"{step_text} | elapsed {_fmt_duration(elapsed)} | ETA calculating…"
 
             bar_value = (
@@ -5630,7 +5649,7 @@ class ActiveLearningTab(QWidget):
         _check_cancel()
         step_started = time.monotonic()
         # Assembling the training set can be the longest silent stretch of the
-        # whole run — it enriches reviewed windows and backfills their R3D
+        # whole run: it enriches reviewed windows and backfills their R3D
         # embeddings, which decodes video (measured at ~2.5 min for 1292 segments
         # on the 3-chamber project). Relay its progress instead of going quiet.
         train_df = self._build_training_set(
@@ -5691,7 +5710,7 @@ class ActiveLearningTab(QWidget):
             cand = self._candidates.generate_segment_candidates(cfg, segment_df=segment_df)
             if not cand.success:
                 raise ValueError("Segment candidate generation failed: " + "; ".join(cand.warnings))
-            self._candidates.save_segment_candidates(cand, cfg)
+            self._candidates.save_segment_candidates(cand, cfg, merge=self._merge_candidates_now())
             n_candidates = int(cand.n_segments_selected)
             candidates_out = list(cand.candidates)
             current_step += 1
@@ -5754,6 +5773,7 @@ class ActiveLearningTab(QWidget):
         progress_cb: Callable[[int, int, str, str], None] | None = None,
         target_behavior_override: str | None = None,
         skip_candidates: bool = False,
+        merge_candidates: bool = False,
     ) -> dict[str, Any]:
         assert self._project_root is not None
         started_at = time.monotonic()
@@ -5827,11 +5847,11 @@ class ActiveLearningTab(QWidget):
         try:
             segment_df = pd.read_parquet(segment_path)
         except Exception as _exc:
-            # Corrupted or incompatible parquet — delete it so the next run
+            # Corrupted or incompatible parquet: delete it so the next run
             # triggers a clean rebuild, then fail with a clear message.
             import logging as _logging  # noqa: PLC0415
             _logging.getLogger("abel").warning(
-                "segment_features.parquet is corrupted (%s) — deleting for rebuild.", _exc
+                "segment_features.parquet is corrupted (%s), deleting for rebuild.", _exc
             )
             try:
                 segment_path.unlink(missing_ok=True)
@@ -5842,7 +5862,7 @@ class ActiveLearningTab(QWidget):
                 current_step,
                 total_steps,
                 f"Segment cache was corrupted and has been deleted. Please re-run 'Build Representations' then retry.",
-                "Segment cache corrupted — deleted for rebuild.",
+                "Segment cache corrupted: deleted for rebuild.",
             )
             return {"retrained": False, "error": f"Segment cache corrupted: {_exc}"}
         scoped_ids: set[str] | None = None
@@ -5852,7 +5872,7 @@ class ActiveLearningTab(QWidget):
             scoped_ids = {str(s.session_id) for s in scoped_sessions}
             segment_df = segment_df[segment_df["session_id"].astype(str).isin(scoped_ids)].reset_index(drop=True)
             if segment_df.empty:
-                # Cached segment file may be stale — try rebuilding through
+                # Cached segment file may be stale: try rebuilding through
                 # the representation service which auto-detects this case.
                 _progress(
                     current_step,
@@ -6034,7 +6054,12 @@ class ActiveLearningTab(QWidget):
             )
             cand = self._candidates.generate_segment_candidates(cfg, segment_df=segment_df)
             if cand.success:
-                self._candidates.save_segment_candidates(cand, cfg)
+                # In a batch run each behavior generates in turn, so the queue
+                # must accumulate: a replace would leave only the last
+                # behavior's candidates on disk.
+                self._candidates.save_segment_candidates(
+                    cand, cfg, merge=self._merge_candidates_now(merge_candidates)
+                )
                 candidates_out = list(cand.candidates)
             n_candidates = int(cand.n_segments_selected if cand.success else 0)
 
@@ -6089,7 +6114,7 @@ class ActiveLearningTab(QWidget):
                         "Loading frame features and running evaluation (this may take a moment)…",
                         "Evaluating retrained model and writing reports…",
                     )
-                    # Read only the 3 columns needed for evaluation — avoids
+                    # Read only the 3 columns needed for evaluation: avoids
                     # loading the full 4+ GB frame_features.parquet into RAM.
                     frame_df = pd.read_parquet(frame_path, columns=["frame", "animal_id", "session_id"])
                     self._evaluate_if_possible(
@@ -6210,7 +6235,7 @@ class ActiveLearningTab(QWidget):
                     float(_seed_data.get("total_wall_seconds", 0.0)),
                 )
         except Exception:
-            pass  # no prior run or file missing — EMA will self-seed after step 1
+            pass  # no prior run or file missing: EMA will self-seed after step 1
 
         # Scale factor: all values emitted to progress_cb are multiplied by
         # _CHUNK_SCALE so the bar can represent fractional session progress
@@ -6224,7 +6249,7 @@ class ActiveLearningTab(QWidget):
         _chunk_lock = threading.Lock()
         _chunk_fracs: dict[str, float] = {}  # session_id → fraction complete [0.0, 1.0]
 
-        # ETA state — exponential moving average of per-step durations.
+        # ETA state: exponential moving average of per-step durations.
         # α=0.3 blends 30% new step, 70% history, so early outliers (GPU
         # init, MOG2 warmup) decay quickly once regular steps flow in.
         _ema_step_seconds: float | None = None
@@ -6516,7 +6541,7 @@ class ActiveLearningTab(QWidget):
             # ── GPU-aware session parallelism ──────────────────────────────
             # When GPU optical flow is active, multiple session workers all
             # serialize on a single GPU lock.  Spawning cpu_cap workers is
-            # wasteful — most just block waiting for the lock.  We detect the
+            # wasteful: most just block waiting for the lock.  We detect the
             # flow backend directly (not just VRAM) and scale parallelism to
             # what the hardware can actually sustain.
             _gpu_info: dict = {}
@@ -6544,7 +6569,7 @@ class ActiveLearningTab(QWidget):
 
             if not requested_workers and _uses_gpu_flow:
                 # Scale session workers to GPU capability.  All GPU flow work
-                # serialises through a single lock, so extra session workers
+                # serializes through a single lock, so extra session workers
                 # mostly just block.  Keeping the count low avoids lock
                 # contention, memory pressure, and external-drive I/O storms.
                 if gpu_total_mb > 0:
@@ -6586,7 +6611,7 @@ class ActiveLearningTab(QWidget):
                 max_workers = min(len(session_jobs), requested_workers)
                 worker_source = "environment override"
             else:
-                # CPU-only flow — fill available cores.
+                # CPU-only flow: fill available cores.
                 max_workers = min(len(session_jobs), cpu_cap)
                 worker_source = f"auto (cpu_count-1={cpu_cap})"
 
@@ -6641,7 +6666,7 @@ class ActiveLearningTab(QWidget):
                     current_step,
                     total_steps,
                     (
-                        f"Pose feature format changed — refreshing pose features for "
+                        f"Pose feature format changed, refreshing pose features for "
                         f"{len(reused_pose_jobs)} cached session(s) so every session "
                         "shares one column set (video context cache is kept)."
                     ),
@@ -6675,8 +6700,8 @@ class ActiveLearningTab(QWidget):
                 )
 
                 def _chunk_progress(chunks_done: int, chunks_total: int, msg: str) -> None:
-                    full_msg = f"[{job_index}/{summary.n_sessions}] {session_id} — {msg}"
-                    # chunks_done=0 means "chunk starting" — don't update the fraction
+                    full_msg = f"[{job_index}/{summary.n_sessions}] {session_id}, {msg}"
+                    # chunks_done=0 means "chunk starting": don't update the fraction
                     # or it will reset any completed-chunk progress back to 0.
                     # Only update when chunks_done > 0 (i.e., a chunk just finished).
                     with _chunk_lock:
@@ -6758,12 +6783,12 @@ class ActiveLearningTab(QWidget):
                 _parts: list[str] = []
                 if _n_oom:
                     _parts.append(
-                        f"{_n_oom} GPU out-of-memory event(s) — "
+                        f"{_n_oom} GPU out-of-memory event(s), "
                         "those sub-batches fell back to CPU"
                     )
                 if _n_timeout:
                     _parts.append(
-                        f"{_n_timeout} GPU lock timeout(s) — "
+                        f"{_n_timeout} GPU lock timeout(s), "
                         "those sub-batches fell back to CPU"
                     )
                 _warn_summary = "; ".join(_parts) or f"{len(_gpu_warnings)} GPU issue(s)"
@@ -6786,10 +6811,10 @@ class ActiveLearningTab(QWidget):
                 )
 
             # Consolidate the per-session parquet files written by the parallel
-            # workers into the canonical monolithic files.  This single
-            # sequential write replaces the old O(N²) lock-based
-            # read-modify-write pattern (each of N parallel workers was
-            # reading and rewriting an ever-growing shared file).
+            # workers into the canonical monolithic files.  The consolidation is
+            # a single sequential write by design: letting each of N parallel
+            # workers read-modify-write one shared file under a lock is O(N²) on
+            # a file that grows with every write.
             _consol_start = time.monotonic()
             _progress(
                 current_step,
@@ -6807,7 +6832,7 @@ class ActiveLearningTab(QWidget):
 
         # Ensure consolidated monolithic files exist even when all sessions
         # hit the per-session cache (session_jobs was empty).  Consolidation
-        # is idempotent — if per-session files are absent it returns None.
+        # is idempotent: if per-session files are absent it returns None.
         _pose_mono = self._project_root / "derived" / "pose_features" / "frame_pose.parquet"
         if not _pose_mono.exists():
             PoseProcessingService.consolidate_session_files(self._project_root)
@@ -6929,7 +6954,7 @@ class ActiveLearningTab(QWidget):
         _check_cancel()
         step_started = time.monotonic()
         # Build training set from the FULL (pre-cap) segment grid so that
-        # reviewed labels from all frame ranges can be matched — not just the
+        # reviewed labels from all frame ranges can be matched, not just the
         # sparse subset selected by the max_segments stratified sample.
         _training_segment_df = full_segment_df_for_label_fallback if not full_segment_df_for_label_fallback.empty else segment_df
 
@@ -7127,7 +7152,7 @@ class ActiveLearningTab(QWidget):
             result = self._candidates.generate_segment_candidates(cfg, segment_df=segment_df)
             if not result.success:
                 raise ValueError("Segment candidate generation failed: " + "; ".join(result.warnings))
-            self._candidates.save_segment_candidates(result, cfg)
+            self._candidates.save_segment_candidates(result, cfg, merge=self._merge_candidates_now())
             summary.n_candidates = result.n_segments_selected
             candidates_list = list(result.candidates)
             current_step += 1
@@ -7149,7 +7174,7 @@ class ActiveLearningTab(QWidget):
                 "Evaluating predictions and writing reports…",
                 0.0,
             )
-            # Pass only the 3 identifier columns — frame_df from _repr.build()
+            # Pass only the 3 identifier columns: frame_df from _repr.build()
             # has all pose features (25+ GB in RAM) and we only need these 3.
             _frame_eval_cols = [c for c in ("frame", "animal_id", "session_id") if c in frame_df.columns]
             self._evaluate_if_possible(
@@ -7337,7 +7362,7 @@ class ActiveLearningTab(QWidget):
         Enriched segments are persisted to
         ``derived/representations/enriched_segments.parquet`` so that
         subsequent runs can skip recomputation for previously enriched
-        segment IDs. Segments that cannot be featurised at all are recorded
+        segment IDs. Segments that cannot be featurized at all are recorded
         alongside it, so they are not retried on every run.
         """
         if self._project_root is None:
@@ -7362,7 +7387,7 @@ class ActiveLearningTab(QWidget):
         skipped_ids: set[str] = set()
         if cache_path.exists():
             # Invalidate the cache when frame_pose.parquet or frame_context.parquet
-            # is newer than the cache — this happens when the user re-runs feature
+            # is newer than the cache: this happens when the user re-runs feature
             # extraction with new settings, ensuring temporal-review clips that were
             # previously only in the enrichment cache get recomputed from fresh data.
             _cache_mtime = cache_path.stat().st_mtime
@@ -7376,7 +7401,7 @@ class ActiveLearningTab(QWidget):
             )
             if _cache_stale:
                 logger.info(
-                    "Enrichment cache: feature files are newer than cache — invalidating "
+                    "Enrichment cache: feature files are newer than cache, invalidating "
                     "so temporal-review clips get fresh features from recomputed data."
                 )
             else:
@@ -7391,12 +7416,12 @@ class ActiveLearningTab(QWidget):
                     cached_enriched_df = pd.DataFrame()
                 # Segments that yield no features (their session has no pose data, or the
                 # window holds too few frames) leave no cache row, so without this record
-                # they are recomputed on every retrain — once per behaviour, each time
-                # re-reading the frame-pose store — and never succeed.
+                # they are recomputed on every retrain: once per behavior, each time
+                # re-reading the frame-pose store: and never succeed.
                 skipped_ids = {str(s) for s in read_json(skip_path, {}).get("segment_ids", [])}
                 if skipped_ids:
                     logger.info(
-                        "Enrichment cache: %d segment(s) previously found unfeaturisable; not retrying.",
+                        "Enrichment cache: %d segment(s) previously found unfeaturizable; not retrying.",
                         len(skipped_ids),
                     )
 
@@ -7407,7 +7432,7 @@ class ActiveLearningTab(QWidget):
 
         # Labels recorded before a re-import or a de-duplication name a session id the
         # project no longer has; the registry maps them onto the session that now owns
-        # the same recording, so the frames — and the labels — stay usable.
+        # the same recording, so the frames, and the labels, stay usable.
         session_remap = self._stale_session_remap()
 
         # Identify reviewed labels whose segment_id doesn't exist in the feature table.
@@ -7549,7 +7574,7 @@ class ActiveLearningTab(QWidget):
                     summary["animal_id"] = animal_id
                 new_rows.append(summary)
 
-        # Anything attempted that produced no row cannot be featurised from the data on
+        # Anything attempted that produced no row cannot be featurized from the data on
         # disk (window too short, or outside the session's frames); record it so the next
         # run doesn't attempt it again.
         skipped_ids |= attempted_ids - {str(row["segment_id"]) for row in new_rows}
@@ -7608,7 +7633,7 @@ class ActiveLearningTab(QWidget):
         The alignment pads columns the enriched rows lack.  ``reindex(...,
         fill_value=0.0)`` types those pads from a Python float, i.e. float64,
         which then upcasts the matching float32 columns when the two frames are
-        concatenated — the concat consolidates every numeric column into one
+        concatenated, the concat consolidates every numeric column into one
         contiguous block, so on a large project that single allocation was
         9.2 GiB and failed outright.  Padding per column at the target's own
         dtype keeps the block as narrow as the inputs already are.
@@ -7634,12 +7659,12 @@ class ActiveLearningTab(QWidget):
         """Attach real R3D embeddings to enriched rows missing them.
 
         ``_enrich_segment_df_for_reviewed_labels`` only recomputes pose/context
-        summary stats from cached frame-level data — it has no path to R3D,
+        summary stats from cached frame-level data, it has no path to R3D,
         which needs the raw video decoded. Rows it produced (or that
         ``_merge_enriched``'s zero-fill reindex padded before this fix existed)
         carry a placeholder 0.0 for every r3d_* column instead of NaN. Detect
         those and run R3DFeatureService directly on their (segment_id,
-        session_id, start_frame, end_frame) — it works on arbitrary frame
+        session_id, start_frame, end_frame), it works on arbitrary frame
         ranges, not just the fixed grid, so this covers both freshly enriched
         rows and legacy zero-filled cache entries in one pass. Returns
         ``(possibly-updated df, whether anything changed)``.
@@ -7742,7 +7767,7 @@ class ActiveLearningTab(QWidget):
         try:
             write_json(skip_path, {"segment_ids": sorted(skipped_ids)})
         except Exception:
-            logger.warning("Enrichment: could not record unfeaturisable segments to %s", skip_path, exc_info=True)
+            logger.warning("Enrichment: could not record unfeaturizable segments to %s", skip_path, exc_info=True)
 
     def _build_training_set(
         self,
@@ -7903,7 +7928,7 @@ class ActiveLearningTab(QWidget):
         mapped_count = 0
 
         # Labels whose segment_id already exists in the feature table can be
-        # kept verbatim — no need to split into sub-windows and re-match.
+        # kept verbatim: no need to split into sub-windows and re-match.
         existing_seg_ids = set(segment_df["segment_id"].astype(str))
 
         for item in labels_df.to_dict(orient="records"):
@@ -8089,7 +8114,7 @@ class ActiveLearningTab(QWidget):
         label_map: dict[int, str] = payload["label_map"]
 
         # Map the model's feature names onto the columns that supply them. A model
-        # trained before distance canonicalisation spells symmetric distances the
+        # trained before distance canonicalization spells symmetric distances the
         # other way round (dist_b_to_a vs dist_a_to_b); those are the same
         # measurement, present here under the canonical name, so they are not a
         # feature gap and must not raise a reliability warning.
@@ -8108,7 +8133,7 @@ class ActiveLearningTab(QWidget):
             )
         if missing_cols:
             # A model feature absent from the current segment table is backfilled
-            # with 0.0 so inference can proceed — but if a whole feature *family*
+            # with 0.0 so inference can proceed, but if a whole feature *family*
             # is missing, those zeros silently degrade the scores. The usual
             # cause is video/context features (optical flow, substrate motion,
             # TMT-zone distances) being absent because the sessions were extracted
@@ -8133,7 +8158,7 @@ class ActiveLearningTab(QWidget):
                     f"⚠ WARNING: '{self._behavior_display_name(target_behavior)}' was trained with video/context "
                     f"features (e.g. optical flow, TMT-zone distances) but {len(ctx_missing)} "
                     "such feature(s) are ABSENT for these sessions and were filled with 0. "
-                    "Scores for context-dependent behaviours will be UNRELIABLE. Fix: enable "
+                    "Scores for context-dependent behaviors will be UNRELIABLE. Fix: enable "
                     "\"Include video-derived features (optical flow, motion)\" in the Features "
                     "tab and re-run the Active Learning pipeline so context features are "
                     "extracted, then re-run the models."
@@ -8142,7 +8167,7 @@ class ActiveLearningTab(QWidget):
                 _log(
                     f"⚠ WARNING: {len(missing_cols)} of {len(feature_cols)} feature(s) this "
                     "model needs are missing from the current features and were filled with "
-                    "0 — scores may be unreliable. The current features were likely extracted "
+                    "0: scores may be unreliable. The current features were likely extracted "
                     "with different settings than this model was trained with."
                 )
 
@@ -8152,7 +8177,12 @@ class ActiveLearningTab(QWidget):
         x_df = segment_df.reindex(columns=source_cols)
         if missing_cols:
             x_df[missing_cols] = x_df[missing_cols].fillna(0.0)
-        x = x_df.to_numpy(dtype=float)
+        # float32, not float64: segment features are stored as float32 and
+        # XGBoost casts to float32 internally anyway, so the wider dtype only
+        # doubled the largest array in the pipeline (7.5 GiB at 628k x 1612).
+        x = x_df.to_numpy(dtype=np.float32)
+        # x_df is a full second copy of the matrix and is dead from here on.
+        del x_df
         probs = xgb_predict.predict_proba(clf, x)
         tgt_idx = resolve_target_class_index(label_map, target_behavior)
         if tgt_idx is None or not (0 <= tgt_idx < probs.shape[1]):
@@ -8188,7 +8218,7 @@ class ActiveLearningTab(QWidget):
         # collapses to 0) and let entropy, density and margin rank the segments.
         if train_df.empty or "label" not in train_df.columns:
             _log(
-                "No labels in this project yet — skipping the uncertainty ensemble; "
+                "No labels in this project yet: skipping the uncertainty ensemble; "
                 "ranking segments by the imported model's confidence, density and margin."
             )
             ensemble_probs = [binary_probs.copy() for _ in range(3)]
@@ -8256,7 +8286,7 @@ class ActiveLearningTab(QWidget):
             ensemble_probs=ensemble_probs,
             feature_cols=feature_cols,
             # The model-aligned matrix built above. segment_df itself may not carry
-            # every model feature name, and must not be made to — it is written
+            # every model feature name, and must not be made to, it is written
             # back to segment_features.parquet below.
             feature_matrix=x,
             weights=UncertaintyWeights(
@@ -8435,8 +8465,8 @@ class ActiveLearningTab(QWidget):
         # The Features tab's "Include video-derived features" checkbox is the
         # single source of truth for context extraction; it is persisted under
         # the `feature_extraction` block. `behavior_model.use_video_features`
-        # only syncs after a pose-extraction run, so honour the checkbox value
-        # directly here — otherwise toggling it on and running the pipeline
+        # only syncs after a pose-extraction run, so honor the checkbox value
+        # directly here: otherwise toggling it on and running the pipeline
         # would silently skip context features.
         fx = raw.get("feature_extraction") or {}
         if "use_video_features" in fx:
@@ -8449,6 +8479,28 @@ class ActiveLearningTab(QWidget):
             self._split_strategy.currentData() or model.get("evaluation_split_strategy", "group_shuffle_session")
         )
         return BehaviorModelConfig.model_validate(model)
+
+    def _merge_candidates_now(self, requested: "bool | None" = None) -> bool:
+        """True when this save should fold into the queue instead of replacing it.
+
+        A batch run generates one behavior at a time and the queue must
+        accumulate *across that run*, so one clip serves every behavior that
+        nominated it.  It must not accumulate across runs: merging
+        unconditionally meant a second Pipeline-All piled its queue on top of
+        the first, leaving candidates from superseded models reviewable as
+        current and growing ``n_segments_selected`` without bound.  The first
+        save of a batch therefore replaces and the rest merge.
+        """
+        want = bool(
+            getattr(self, "_pipeline_all_merge_candidates", False)
+            if requested is None
+            else requested
+        )
+        if not want:
+            return False
+        first = not getattr(self, "_pipeline_all_saved_any", False)
+        self._pipeline_all_saved_any = True
+        return not first
 
     def _persist_segment_settings(self, window_frames: int, stride_frames: int) -> None:
         if self._project_root is None:
@@ -8493,7 +8545,7 @@ class ActiveLearningTab(QWidget):
     ) -> SegmentCandidateGenerationConfig:
         resolved_examples_per_session = int(self._examples_per_session.value()) if examples_per_session is None else int(examples_per_session)
         query_size = self._resolved_query_size_limit()
-        # Honour query_size as the hard upper limit.  If the per-session
+        # Honor query_size as the hard upper limit.  If the per-session
         # distribution (examples_per_session × n_sessions) exceeds it, reduce
         # examples_per_session so the total fits within query_size rather
         # than silently expanding to a much larger number.
@@ -8541,7 +8593,7 @@ class ActiveLearningTab(QWidget):
         """Return queue_weight_* kwargs derived from the candidate focus slider."""
         w = getattr(self, "_focus_queue_weights", None)
         if not w:
-            # No focus adjustment yet — use dataclass defaults.
+            # No focus adjustment yet: use dataclass defaults.
             return {}
         return {
             "queue_weight_candidate":     w["candidate"],
@@ -8739,7 +8791,7 @@ class ActiveLearningTab(QWidget):
             return
         self._cancel_flag[0] = True
         self._status.setText("Stop requested. Waiting for current step to finish…")
-        self._append_log("Stop requested by user. Cancelling after current step.")
+        self._append_log("Stop requested by user. Canceling after current step.")
 
     def _append_log(self, message: str) -> None:
         self._log.append(message)
@@ -8865,7 +8917,7 @@ class ActiveLearningTab(QWidget):
 
         # ── Dialog layout ────────────────────────────────────────────────────────
         dlg = QDialog(self)
-        dlg.setWindowTitle("Batch Run — Apply Workflow to New Videos")
+        dlg.setWindowTitle("Batch Run: Apply Workflow to New Videos")
         dlg.setMinimumWidth(680)
         dlg.setMinimumHeight(560)
         root_layout = QVBoxLayout(dlg)
@@ -8878,7 +8930,7 @@ class ActiveLearningTab(QWidget):
             f"<b>Current workflow:</b> model <code>{snapshot.model_version}</code> | "
             f"behavior <code>{self._behavior_display_name(snapshot.target_behavior)}</code> | "
             f"window {snapshot.segment_window_frames} frames | "
-            f"saved {str(snapshot.created_at or '—')[:19]}"
+            f"saved {str(snapshot.created_at or '-')[:19]}"
         )
         root_layout.addWidget(banner)
 
@@ -8968,7 +9020,7 @@ class ActiveLearningTab(QWidget):
         chk_xlsx.setChecked(snapshot.export_xlsx)
         chk_video = QCheckBox()
         chk_video.setChecked(snapshot.export_labeled_video)
-        chk_video.setToolTip("Write labeled overlay video (slow — requires OpenCV).")
+        chk_video.setToolTip("Write labeled overlay video (slow: requires OpenCV).")
         fps_spin = QDoubleSpinBox()
         fps_spin.setRange(1.0, 1000.0)
         fps_spin.setDecimals(1)
@@ -8988,7 +9040,7 @@ class ActiveLearningTab(QWidget):
             "and threshold to produce frame-precise bout boundaries (start/end frame per bout).\n"
             "Outputs an additional *_bouts.csv per session alongside the segment predictions."
             if _temporal_available else
-            "Not available — model file not found for snapshot version."
+            "Not available: model file not found for snapshot version."
         )
         opts_form.addRow("Export CSV results:", chk_csv)
         opts_form.addRow("Export XLSX results:", chk_xlsx)
@@ -9104,10 +9156,10 @@ class ActiveLearningTab(QWidget):
                 stop_batch_btn.setEnabled(False)
                 _batch_running[0] = False
                 if "BATCH_CANCELLED" in tb:
-                    batch_log.append("Batch run cancelled.")
-                    batch_progress.setFormat("Cancelled")
+                    batch_log.append("Batch run canceled.")
+                    batch_progress.setFormat("Canceled")
                 else:
-                    batch_log.append("ERROR: batch run failed — check logs.")
+                    batch_log.append("ERROR: batch run failed, check logs.")
                     logger.error("Batch run failed:\n%s", tb)
 
             stop_batch_btn.clicked.connect(lambda: self._batch_cancel_flag.__setitem__(0, True))
@@ -9126,8 +9178,8 @@ class ActiveLearningTab(QWidget):
         Each behavior's trained model is identified by its name converted to a
         filesystem-safe slug (spaces/special chars → underscores), matching the
         ``derived/models/<slug>/model_state.pkl`` path convention.  Behaviors
-        whose model directory is not yet present are shown in grey but can still
-        be checked — the run will skip them gracefully.
+        whose model directory is not yet present are shown in gray but can still
+        be checked, the run will skip them gracefully.
 
         Current project settings (window, stride, excluded features, FPS, pose
         preset, context config) are captured at dialog-open time so the run
@@ -9183,16 +9235,16 @@ class ActiveLearningTab(QWidget):
 
         # ── Dialog ────────────────────────────────────────────────────────────
         dlg = QDialog(self)
-        dlg.setWindowTitle("Run All Behaviors \u2014 Apply Each Model to New Videos")
+        dlg.setWindowTitle("Run All Behaviors: Apply Each Model to New Videos")
         dlg.setMinimumWidth(720)
         dlg.setMinimumHeight(640)
         root_layout = QVBoxLayout(dlg)
 
         # Behavior list with model-availability indicators
         root_layout.addWidget(QLabel(
-            "<b>Behaviors to run</b> \u2014 model resolved from "
+            "<b>Behaviors to run</b>: model resolved from "
             "<code>derived/models/&lt;behavior_name&gt;/</code> "
-            "(grey = no trained model found yet):"
+            "(gray = no trained model found yet):"
         ))
         beh_list = QListWidget()
         beh_list.setMaximumHeight(160)
@@ -9302,7 +9354,7 @@ class ActiveLearningTab(QWidget):
         chk_xlsx.setChecked(False)
         chk_video = QCheckBox()
         chk_video.setChecked(False)
-        chk_video.setToolTip("Write labeled overlay video (slow \u2014 requires OpenCV).")
+        chk_video.setToolTip("Write labeled overlay video (slow: requires OpenCV).")
         fps_spin = QDoubleSpinBox()
         fps_spin.setRange(1.0, 1000.0)
         fps_spin.setDecimals(1)
@@ -9359,7 +9411,7 @@ class ActiveLearningTab(QWidget):
             fps_val = float(fps_spin.value())
             run_settings = self._ui_settings_payload()
 
-            # Build per-behavior snapshots — model_version = slugified behavior name.
+            # Build per-behavior snapshots: model_version = slugified behavior name.
             snapshots_to_run: list[tuple[str, WorkflowSnapshot]] = [
                 (
                     b.name,
@@ -9435,7 +9487,7 @@ class ActiveLearningTab(QWidget):
                 n_fail_total = sum(int(r.get("n_fail", 0)) for r in beh_results.values())
                 out_path = str(result.get("output_dir", ""))
                 all_log.append(
-                    f"Complete: {len(beh_results)} behavior(s) \u2014 "
+                    f"Complete: {len(beh_results)} behavior(s), "
                     f"{n_ok_total} session(s) succeeded, {n_fail_total} failed. "
                     f"Results: {out_path}"
                 )
@@ -9457,10 +9509,10 @@ class ActiveLearningTab(QWidget):
                 stop_all_btn.setEnabled(False)
                 _running[0] = False
                 if "BATCH_CANCELLED" in tb:
-                    all_log.append("Run cancelled.")
-                    all_progress.setFormat("Cancelled")
+                    all_log.append("Run canceled.")
+                    all_progress.setFormat("Canceled")
                 else:
-                    all_log.append("ERROR: run failed \u2014 check logs.")
+                    all_log.append("ERROR: run failed, check logs.")
                     logger.error("Run all behaviors failed:\n%s", tb)
 
             stop_all_btn.clicked.connect(lambda: self._batch_cancel_flag.__setitem__(0, True))
@@ -9631,7 +9683,7 @@ class ActiveLearningTab(QWidget):
                 # ── Step 4: Segment-level inference ───────────────────────────
                 _log(step, total_steps, f"{sess_label}: running model inference…", "Running inference")
                 if segment_df.empty:
-                    raise ValueError("No segments generated — recording may be too short for the current window settings.")
+                    raise ValueError("No segments generated: recording may be too short for the current window settings.")
                 pred_df = ActiveLearningTrainerService.predict_segments(model_dir, segment_df)
                 step += 1
 
@@ -9686,7 +9738,7 @@ class ActiveLearningTab(QWidget):
                 if "BATCH_CANCELLED" in str(re_exc):
                     raise
                 n_fail += 1
-                _log(step, total_steps, f"{sess_label}: FAILED — {re_exc}")
+                _log(step, total_steps, f"{sess_label}: FAILED, {re_exc}")
                 session_results.append({
                     "session_id": session_id,
                     "animal_id": animal_id,
@@ -9697,7 +9749,7 @@ class ActiveLearningTab(QWidget):
                 step = (i + 1) * steps_per_session
             except Exception as exc:
                 n_fail += 1
-                _log(step, total_steps, f"{sess_label}: FAILED — {exc}")
+                _log(step, total_steps, f"{sess_label}: FAILED, {exc}")
                 logger.exception("Batch run error for session %s", session_id)
                 session_results.append({
                     "session_id": session_id,
@@ -9762,7 +9814,7 @@ class ActiveLearningTab(QWidget):
         log_fn("setting up temporal mirror…")
 
         # ── Mirror only what the service needs into temp_root ──────────────
-        # 1. Behavior model pkl(s) — hard-link first, copy as fallback.
+        # 1. Behavior model pkl(s): hard-link first, copy as fallback.
         required_models: dict[str, str] = dict(tr_cfg.selected_behavior_models or {})
         if not required_models:
             required_models = {snapshot.target_behavior: snapshot.model_version}
@@ -9776,11 +9828,11 @@ class ActiveLearningTab(QWidget):
                 dst = dst_model_dir / fname
                 if src.exists() and not dst.exists():
                     try:
-                        os.link(src, dst)  # hard link — no data copy, works on same volume
+                        os.link(src, dst)  # hard link: no data copy, works on same volume
                     except OSError:
                         shutil.copy2(src, dst)
 
-        # 2. Segment features stub — the service reads this only to infer window size.
+        # 2. Segment features stub: the service reads this only to infer window size.
         #    We create a minimal two-row parquet with the correct start/end frame spread
         #    instead of copying the (potentially large) real project file.
         seg_stub_dir = temp_root / "derived" / "representations"
@@ -9833,7 +9885,7 @@ class ActiveLearningTab(QWidget):
                 progress_cb=lambda msg: log_fn(f"  {msg}"),
             )
         except Exception as exc:
-            log_fn(f"dense inference failed — {exc}")
+            log_fn(f"dense inference failed: {exc}")
             logger.warning("Batch temporal inference failed for session %s: %s", session_id, exc)
             return None
 
@@ -9851,7 +9903,7 @@ class ActiveLearningTab(QWidget):
                 progress_cb=lambda msg: log_fn(f"  {msg}"),
             )
         except Exception as exc:
-            log_fn(f"postprocess failed — {exc}")
+            log_fn(f"postprocess failed: {exc}")
             logger.warning("Batch temporal postprocess failed for session %s: %s", session_id, exc)
             return None
 
@@ -9866,7 +9918,7 @@ class ActiveLearningTab(QWidget):
         try:
             return pd.read_parquet(bout_path)
         except Exception as exc:
-            log_fn(f"could not read bout file — {exc}")
+            log_fn(f"could not read bout file: {exc}")
             return None
 
     def _on_pipeline_finished(self, payload: dict[str, Any]) -> None:
@@ -9923,7 +9975,7 @@ class ActiveLearningTab(QWidget):
         self._populate_candidate_table(candidates)
         self._emit_uncertainty_candidates_for_clip_extraction(
             candidates,
-            source_label=f"Active Learning — Uncertainty Ranking ({target_behavior_label})",
+            source_label=f"Active Learning: Uncertainty Ranking ({target_behavior_label})",
         )
         self._refresh_visualization_preview()
 
@@ -9952,7 +10004,7 @@ class ActiveLearningTab(QWidget):
         self._populate_candidate_table(list(payload.get("candidates", [])))
         self._emit_uncertainty_candidates_for_clip_extraction(
             list(payload.get("candidates", [])),
-            source_label=f"Active Learning — Uncertainty Ranking ({target_behavior_label})",
+            source_label=f"Active Learning: Uncertainty Ranking ({target_behavior_label})",
         )
         self._refresh_visualization_preview()
 
@@ -9988,7 +10040,7 @@ class ActiveLearningTab(QWidget):
         return out
 
     def _emit_uncertainty_candidates_for_clip_extraction(
-        self, candidates: list[Any], source_label: str = "Active Learning — Uncertainty Ranking",
+        self, candidates: list[Any], source_label: str = "Active Learning: Uncertainty Ranking",
         append: bool = False,
     ) -> None:
         """Convert pipeline CandidateSegment objects to CandidateWindow objects scored by
@@ -10063,7 +10115,7 @@ class ActiveLearningTab(QWidget):
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Edge Case Finder — Competing Behaviors")
+        dlg.setWindowTitle("Edge Case Finder: Competing Behaviors")
         dlg.setMinimumWidth(700)
 
         form = QFormLayout()
@@ -10403,13 +10455,13 @@ class ActiveLearningTab(QWidget):
         self._populate_candidate_table(candidates)
         self._emit_uncertainty_candidates_for_clip_extraction(
             candidates,
-            source_label=f"Active Learning \u2014 Retrain ({target_behavior_label})",
+            source_label=f"Active Learning: Retrain ({target_behavior_label})",
         )
         self._refresh_visualization_preview()
         if self._is_umap_enabled():
             self._regenerate_unified_umap_inline()
         else:
-            self._append_log("UMAP generation disabled in settings — skipping.")
+            self._append_log("UMAP generation disabled in settings: skipping.")
 
     def _on_failed(self, traceback_text: str) -> None:
         self._set_busy(False)
@@ -10551,23 +10603,23 @@ class ActiveLearningTab(QWidget):
             )
         elif selected == "confound_cross":
             text = (
-                "Cross-behaviour confound matrix:\n"
-                "- NxN heatmap of co-activation rates between behaviour models.\n"
+                "Cross-behavior confound matrix:\n"
+                "- NxN heatmap of co-activation rates between behavior models.\n"
                 "- High off-diagonal values indicate overlapping predictions.\n"
                 "- Click 'Confound Analysis' to generate or refresh."
             )
         elif selected == "unified_umap":
             text = (
-                "Unified UMAP (all behaviours):\n"
-                "- Single 2-D embedding coloured by dominant behaviour.\n"
-                "- Helps visualise how well behaviours separate in feature space.\n"
+                "Unified UMAP (all behaviors):\n"
+                "- Single 2-D embedding colored by dominant behavior.\n"
+                "- Helps visualize how well behaviors separate in feature space.\n"
                 "- Click 'Unified UMAP' to generate or refresh."
             )
         elif selected == "unsupervised_umap":
             text = (
                 "Unsupervised UMAP (clusters):\n"
                 "- 2-D embedding built directly from raw segment features.\n"
-                "- No models or labels required; colours are auto-discovered clusters (HDBSCAN).\n"
+                "- No models or labels required; colors are auto-discovered clusters (HDBSCAN).\n"
                 "- Use 'Select from UMAP' to lasso a cluster and send it to clip extraction.\n"
                 "- Click 'Unsupervised UMAP' to generate or refresh."
             )
@@ -10665,7 +10717,7 @@ class ActiveLearningTab(QWidget):
         self._render_visualization_pixmap()
 
     def _show_image_in_viz_preview(self, path: Path) -> None:
-        """Display an arbitrary image file in the visualisation preview label."""
+        """Display an arbitrary image file in the visualization preview label."""
         pix = QPixmap(str(path))
         if pix.isNull():
             return

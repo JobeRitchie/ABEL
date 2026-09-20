@@ -4,10 +4,10 @@ An ROI is a plain ``dict``.  Historically every ROI was an axis-aligned
 rectangle stored as ``{"x", "y", "w", "h"}``.  ROIs may now also be circles or
 freehand polygons, distinguished by an optional ``"shape"`` key:
 
-* ``{"shape": "rect", "x", "y", "w", "h"}`` — default; a missing ``shape`` is
+* ``{"shape": "rect", "x", "y", "w", "h"}``, default; a missing ``shape`` is
   treated as ``"rect"`` so every legacy config keeps working unchanged.
-* ``{"shape": "circle", "cx", "cy", "r", ...}`` — centre + radius.
-* ``{"shape": "polygon", "points": [[x, y], ...], ...}`` — ordered vertices.
+* ``{"shape": "circle", "cx", "cy", "r", ...}``, center + radius.
+* ``{"shape": "polygon", "points": [[x, y], ...], ...}``, ordered vertices.
 
 To keep the many rectangle-only consumers working, :func:`normalize_roi`
 *always* (re)computes the axis-aligned bounding box ``x/y/w/h`` from the shape
@@ -51,11 +51,11 @@ def _polygon_points(roi: Any) -> list[list[float]]:
 def normalize_roi(raw: Any) -> dict[str, Any]:
     """Return a canonical ROI dict with a valid ``shape`` and derived bbox.
 
-    * ``circle`` — clamps ``r`` to ``>= 0`` and recomputes ``x/y/w/h`` as the
+    * ``circle``: clamps ``r`` to ``>= 0`` and recomputes ``x/y/w/h`` as the
       inscribing bounding box.
-    * ``polygon`` — keeps ``>= 3`` finite vertices and recomputes the bbox as
+    * ``polygon``: keeps ``>= 3`` finite vertices and recomputes the bbox as
       the vertices' extent; a degenerate polygon collapses to an empty rect.
-    * ``rect`` (or anything else) — clamps ``w``/``h`` to ``>= 0``.
+    * ``rect`` (or anything else): clamps ``w``/``h`` to ``>= 0``.
 
     Pure Python (no NumPy) so the ROI service can call it cheaply on load/save.
     """
@@ -121,9 +121,9 @@ def roi_has_area(roi: Any) -> bool:
 
 
 def roi_center(roi: Any) -> tuple[float, float]:
-    """Return the ROI's representative centre used for distance/angle features.
+    """Return the ROI's representative center used for distance/angle features.
 
-    Circle → its centre; polygon → vertex centroid; rect → bbox centre.
+    Circle → its center; polygon → vertex centroid; rect → bbox center.
     """
     shape = roi_shape(roi)
     if shape == "circle":
@@ -196,9 +196,9 @@ def _point_in_polygon(xs: np.ndarray, ys: np.ndarray, poly: np.ndarray) -> np.nd
 
 # ── Advanced ROI geometry (edge / corner / axial position) ───────────────────
 #
-# The distance-to-centre features collapse an ROI to a single point, which
+# The distance-to-center features collapse an ROI to a single point, which
 # destroys the internal structure of any large or elongated zone: an EPM open
-# arm drawn as one ROI has its centre at the maze hub, so "far from centre"
+# arm drawn as one ROI has its center at the maze hub, so "far from center"
 # cannot distinguish the arm tip from the opposite closed arm.  The helpers
 # below expose where inside the zone the animal actually is.
 
@@ -236,7 +236,7 @@ def _segment_distance(xs: np.ndarray, ys: np.ndarray, a: np.ndarray, b: np.ndarr
 def roi_signed_distance(roi: Any, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
     """Signed distance to the ROI boundary, in pixels.
 
-    Positive inside (distance to the nearest edge — "how deep in the zone"),
+    Positive inside (distance to the nearest edge, "how deep in the zone"),
     negative outside (distance to the shape).  Zero exactly on the boundary.
     This is the feature that says "the animal is right at the lip of the open
     arm", which is where head-dipping happens.
@@ -294,7 +294,7 @@ def roi_corner_distance(roi: Any, xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
 
 
 def roi_axes(roi: Any) -> tuple[tuple[float, float], np.ndarray, np.ndarray, float, float]:
-    """Return ``(centre, long_axis, short_axis, half_long, half_short)``.
+    """Return ``(center, long_axis, short_axis, half_long, half_short)``.
 
     The axes are unit vectors.  For a rectangle/circle they are the axis-aligned
     bbox axes (long = whichever of w/h is larger); for a polygon they come from
@@ -338,9 +338,9 @@ def roi_axial_lateral(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Normalized signed position along the ROI's long and short axes.
 
-    ``+/-1`` are the ROI's ends, ``0`` its centre.  For an EPM open arm the
+    ``+/-1`` are the ROI's ends, ``0`` its center.  For an EPM open arm the
     axial coordinate is "how far out along the arm", and its absolute value
-    separates the two arm tips from the hub — information the centre-distance
+    separates the two arm tips from the hub, information the center-distance
     feature cannot represent.
     """
     xs = np.asarray(xs, dtype=float)
@@ -356,7 +356,7 @@ def roi_mask(roi: Any, x0: int, y0: int, height: int, width: int) -> np.ndarray:
     """Return a boolean ``(height, width)`` mask for a crop whose top-left pixel
     is ``(x0, y0)`` in ROI/frame coordinates.
 
-    Pixel centres are tested, so the mask marks exactly the pixels whose centre
+    Pixel centers are tested, so the mask marks exactly the pixels whose center
     lies inside the shape.  For a rectangle this is a full-True block (the crop
     is already the intersection with the bbox), so callers can skip masking.
     """
@@ -466,14 +466,14 @@ def rdp_simplify(points: list[list[float]], epsilon: float) -> list[list[float]]
     """Ramer–Douglas–Peucker simplification of a closed polygon.
 
     Drops vertices that lie within *epsilon* pixels of the line joining their
-    neighbours, "angularizing" a dense freehand trace into a cleaner polygon
+    neighbors, "angularizing" a dense freehand trace into a cleaner polygon
     with fewer, more deliberate corners.  Always keeps at least 3 vertices.
     """
     pts = [[float(p[0]), float(p[1])] for p in points if _finite2(p)]
     if len(pts) <= 3 or epsilon <= 0:
         return pts
     # Simplify as an open chain between the two farthest-apart anchor vertices,
-    # then recombine — a closed ring has no natural endpoints.
+    # then recombine: a closed ring has no natural endpoints.
     arr = np.asarray(pts, dtype=float)
     # Anchor: the vertex farthest from the centroid, and the one farthest from it.
     c = arr.mean(axis=0)
@@ -493,7 +493,7 @@ def rdp_simplify(points: list[list[float]], epsilon: float) -> list[list[float]]
 
 # Tolerance for decimating a raw freehand trace at capture time, in image
 # pixels.  Vertices are stored as integers, so a 1 px tolerance sits at the
-# storage quantisation floor: the outline cannot visibly move, while the long
+# storage quantization floor: the outline cannot visibly move, while the long
 # runs of near-collinear samples a mouse drag produces collapse away.
 FREEHAND_SIMPLIFY_EPS_PX = 1.0
 
@@ -502,7 +502,7 @@ def simplify_freehand(points: list[list[float]]) -> list[list[float]]:
     """Strip redundant vertices from a raw freehand trace.
 
     A hand-drawn ROI arrives as one sample per ~2 canvas pixels of mouse travel
-    — hundreds to thousands of vertices, nearly all of them collinear filler.
+   , hundreds to thousands of vertices, nearly all of them collinear filler.
     Stored verbatim they make ``environment_rois.yaml`` grow by tens of KB per
     zone per subject, and that file is parsed several times per subject switch,
     so the trace length shows up directly as UI lag.  Decimating at capture

@@ -2,9 +2,9 @@
 
 Documents the statistical rigor of ABEL for users and reviewers. Three subtabs:
 
-* **References** — the peer-reviewed sources justifying each procedure, with links.
-* **Formulas** — the raw formulas ABEL evaluates, each tied to its code.
-* **Write-up Helper** — a draft methods section assembled from the open project's
+* **References**: the peer-reviewed sources justifying each procedure, with links.
+* **Formulas**: the raw formulas ABEL evaluates, each tied to its code.
+* **Write-up Helper**: a draft methods section assembled from the open project's
   own settings and results.
 
 The first two render from :mod:`abel.ui.methods_content` (the single source of

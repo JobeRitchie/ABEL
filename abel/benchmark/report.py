@@ -1,4 +1,4 @@
-"""Report generation — HTML and CSV export for ablation benchmark results."""
+"""Report generation: HTML and CSV export for ablation benchmark results."""
 
 from __future__ import annotations
 
@@ -49,7 +49,7 @@ def export_html(
     """
     from abel.benchmark.metrics import format_mean_sem
 
-    # Resolve behaviour names from project if not provided
+    # Resolve behavior names from project if not provided
     if not behavior_names and results:
         try:
             project_root = Path(results[0].overrides.get("_project_root", ""))
@@ -76,7 +76,7 @@ def export_html(
 
     # ── Build HTML ────────────────────────────────────────────────
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    title = f"ABEL Ablation Report — {project_name or 'Project'}"
+    title = f"ABEL Ablation Report: {project_name or 'Project'}"
 
     def _df_to_html(frame: pd.DataFrame, table_id: str = "") -> str:
         if frame.empty:
@@ -147,7 +147,7 @@ def export_html(
             cls = "positive" if diff > 0 else "negative"
             summary_card = f"""
             <div class="summary-card">
-                <strong>Pipeline Impact — {beh_label}</strong><br>
+                <strong>Pipeline Impact: {beh_label}</strong><br>
                 All ON: F1 = <strong>{b_f1:.4f}</strong> &nbsp;|&nbsp;
                 All OFF: F1 = <strong>{o_f1:.4f}</strong> &nbsp;|&nbsp;
                 Net: <span class="{cls}"><strong>{diff:+.4f}</strong></span>

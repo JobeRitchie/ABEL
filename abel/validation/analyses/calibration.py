@@ -1,15 +1,15 @@
 """Probability-calibration validation of the production model.
 
 ABEL can calibrate its classifier probabilities (sigmoid / isotonic), and the
-ablation shows what that does to F1 — but F1 barely moves under calibration
+ablation shows what that does to F1, but F1 barely moves under calibration
 because it only depends on the argmax, not on whether ``P = 0.8`` really means
 "right 80% of the time".  A publication claim that the scores are *usable as
-probabilities* (for thresholding, uncertainty triage, or downstream modelling)
+probabilities* (for thresholding, uncertainty triage, or downstream modeling)
 needs a calibration figure: a reliability diagram plus the expected calibration
 error and Brier score.
 
 This consumes the retained held-out predictions from generalization (the
-production, project-configured model — already calibrated if the project turns
+production, project-configured model, already calibrated if the project turns
 calibration on), so it costs no extra training.  See
 :func:`abel.validation.metrics.calibration_curve`.
 """

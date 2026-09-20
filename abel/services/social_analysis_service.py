@@ -5,11 +5,11 @@ This service consumes the per-frame *social* features written by
 ``social_*`` columns, present only when a project tracks more than one animal and
 interaction features are enabled) and produces two things:
 
-1. **Summary metrics** — per (subject, session) descriptors of the dyadic
+1. **Summary metrics**: per (subject, session) descriptors of the dyadic
    relationship: mean inter-animal distance, time in contact, contact bouts,
    net approach, orientation, and a directed advance/yield balance.
 
-2. **A dominance HMM** — a Gaussian HMM fit over continuous social + movement
+2. **A dominance HMM**: a Gaussian HMM fit over continuous social + movement
    features, *pooled across the whole cohort* so its latent states form one
    shared vocabulary of interaction modes (separated / approaching / contact …).
    States dominated by close proximity are flagged as *interaction* states, and
@@ -354,7 +354,7 @@ class SocialAnalysisService:
         other's space (positive radial velocity toward it) while the other
         *yields* (retreats) is scored dominant.  The score is the mean radial
         velocity toward the other over interaction frames minus the fraction of
-        those frames spent yielding — higher = more dominant.  Subjects are
+        those frames spent yielding, higher = more dominant.  Subjects are
         ranked within each session (rank 1 = most dominant).
         """
         inter = set(interaction_states)

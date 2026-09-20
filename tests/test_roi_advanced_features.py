@@ -20,7 +20,7 @@ def arr(*vals):
 
 class TestSignedDistance:
     def test_rect_inside_is_positive_distance_to_nearest_edge(self):
-        # Centre of the strip: nearest edge is a side wall, 10 px away.
+        # Center of the strip: nearest edge is a side wall, 10 px away.
         d = rg.roi_signed_distance(RECT, arr(110.0), arr(100.0))
         assert d[0] == pytest.approx(10.0)
 
@@ -39,7 +39,7 @@ class TestSignedDistance:
 
     def test_circle_signed_distance(self):
         inside = rg.roi_signed_distance(CIRCLE, arr(50.0), arr(50.0))
-        assert inside[0] == pytest.approx(10.0)  # centre -> r
+        assert inside[0] == pytest.approx(10.0)  # center -> r
         edge = rg.roi_signed_distance(CIRCLE, arr(60.0), arr(50.0))
         assert edge[0] == pytest.approx(0.0)
         outside = rg.roi_signed_distance(CIRCLE, arr(65.0), arr(50.0))
@@ -76,9 +76,9 @@ class TestCornerDistance:
 
 class TestAxialLateral:
     def test_rect_axial_runs_along_the_long_axis(self):
-        # RECT is 20 wide x 200 tall -> long axis is y, centre at (110, 100).
+        # RECT is 20 wide x 200 tall -> long axis is y, center at (110, 100).
         axial, lateral = rg.roi_axial_lateral(RECT, arr(110.0, 110.0, 110.0), arr(100.0, 200.0, 0.0))
-        assert axial[0] == pytest.approx(0.0)   # centre of the arm
+        assert axial[0] == pytest.approx(0.0)   # center of the arm
         assert axial[1] == pytest.approx(1.0)   # far tip
         assert axial[2] == pytest.approx(-1.0)  # opposite tip
         assert np.allclose(lateral, 0.0)
@@ -89,7 +89,7 @@ class TestAxialLateral:
         assert lateral[1] == pytest.approx(-1.0)
 
     def test_the_two_arm_tips_are_distinguishable_unlike_centre_distance(self):
-        """The point of the whole feature: centre-distance conflates the tips."""
+        """The point of the whole feature: center-distance conflates the tips."""
         tips_x, tips_y = arr(110.0, 110.0), arr(0.0, 200.0)
         cx, cy = rg.roi_center(RECT)
         centre_dist = np.hypot(tips_x - cx, tips_y - cy)
@@ -108,8 +108,8 @@ class TestAxialLateral:
         """A diagonally-drawn arm: PCA axis, not an axis-aligned approximation."""
         diag = {"shape": "polygon",
                 "points": [[0, 0], [100, 100], [104, 96], [4, -4]]}
-        # (102, 98) is the far end of the strip's *centreline* (not a vertex):
-        # far out along the arm, but dead centre across it.
+        # (102, 98) is the far end of the strip's *centerline* (not a vertex):
+        # far out along the arm, but dead center across it.
         axial, lateral = rg.roi_axial_lateral(diag, arr(102.0), arr(98.0))
         assert abs(axial[0]) == pytest.approx(1.0, abs=0.05)
         assert abs(lateral[0]) == pytest.approx(0.0, abs=0.05)
@@ -143,7 +143,7 @@ class TestAdvancedRoiColumns:
             assert f"{pt}_to_roi_1_corner_dist" in cols
 
     def test_absent_roi_still_emits_a_stable_column_set(self):
-        """Degenerate ROI must not drop columns — the matrix schema is fixed."""
+        """Degenerate ROI must not drop columns: the matrix schema is fixed."""
         present = ContextFeatureService.advanced_roi_columns(
             RECT, 2, self.POINTS, dist_scale=1.0, n=2,
         )

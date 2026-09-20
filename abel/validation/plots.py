@@ -53,19 +53,19 @@ def _non_degenerate_points(points: list) -> list:
 
     A point is dropped when most of its seeds collapsed to predicting one class
     (``LearningCurvePoint.is_degenerate``, ultimately :func:`metrics.is_degenerate_fit`
-    — MCC ≤ 0).  These live at the cold-start end: they dominate the error-rate
+   , MCC ≤ 0).  These live at the cold-start end: they dominate the error-rate
     y-axis and make the trend read backwards, and under target-class F1 they also
     score *well* (recall 1.0, specificity 0.0), so they inflate the F1 curve and the
     knee that is read off it.
 
     This used to threshold the predicted-positive fraction at 0.5, which is right
-    for a rare-behavior detection curve and wrong everywhere else — pairwise
+    for a rare-behavior detection curve and wrong everywhere else, pairwise
     discrimination is ~50% positive by construction, and on the real cells that rule
     flags 1080 of 2000 discrimination fits whose median F1 is 0.971.  The MCC test is
     prevalence-agnostic and flags 9 of them.
 
     If *every* point is degenerate we keep them all rather than draw an empty
-    panel — better to show the ugly truth than nothing.
+    panel, better to show the ugly truth than nothing.
     """
     keep = [p for p in points if not getattr(p, "is_degenerate", False)]
     return keep or list(points)
@@ -100,23 +100,23 @@ def learning_curve_plot(lc, save_path: Path | None = None,
 
     ``view`` selects which metrics are drawn:
     ``f1_prauc`` (default, with knee marker), ``precision_recall``, ``counts``
-    (held-out error rates — false alarms & misses as % of the held-out set), or
+    (held-out error rates, false alarms & misses as % of the held-out set), or
     ``kappa``.
     """
     if not _HAS_MPL or not lc.points:
         return None
     xs = np.array([p.n_clips_mean for p in lc.points], dtype=float)
-    title = f"Learning curve — {lc.behavior_name} ({lc.project_id})"
+    title = f"Learning curve: {lc.behavior_name} ({lc.project_id})"
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
     if view == "counts":
         # Held-out error burden as a % of the fixed held-out set. We plot only the
-        # two error types — false alarms (FP) and misses (FN). The held-out set is
+        # two error types: false alarms (FP) and misses (FN). The held-out set is
         # identical at every budget, so true positives carry no information the
         # misses don't (TP = P − FN); plotting them too would be a redundant line.
         # Percent-of-held-out (not raw counts) keeps the average-across-behaviors
-        # panel fair — raw counts are dominated by behaviors with larger held-out
+        # panel fair: raw counts are dominated by behaviors with larger held-out
         # sets. The all-positive cold-start regime is dropped (see
         # _non_degenerate_points) so it doesn't dominate the y-axis.
         pts = _non_degenerate_points(lc.points)
@@ -128,7 +128,7 @@ def learning_curve_plot(lc, save_path: Path | None = None,
         ax.set_ylabel("% of held-out clips")
         ax.set_ylim(bottom=0)
         _knee_marker(ax, lc, y=ax.get_ylim()[1] * 0.02)
-        ax.set_title(f"{title}\nHeld-out error rate — false alarms & misses")
+        ax.set_title(f"{title}\nHeld-out error rate, false alarms & misses")
     elif view == "precision_recall":
         prec = np.array([p.precision_mean for p in lc.points], dtype=float)
         rec = np.array([p.recall_mean for p in lc.points], dtype=float)
@@ -184,7 +184,7 @@ def learning_curve_plot(lc, save_path: Path | None = None,
 def al_vs_random_plot(al_result, save_path: Path | None = None) -> "Figure | None":
     """Two panels: F1 vs. clips reviewed (AL vs random) and positives discovered.
 
-    The left panel is the headline — active learning reaching a target F1 with
+    The left panel is the headline, active learning reaching a target F1 with
     fewer reviewed clips.  The right panel shows *why*: uncertainty sampling
     surfaces the rare positive clips faster than random review.
     """
@@ -222,7 +222,7 @@ def al_vs_random_plot(al_result, save_path: Path | None = None) -> "Figure | Non
     ax1.set_xlabel("# clips reviewed (labeling effort)")
     ax1.set_ylabel("Target-class F1 (held-out subjects)")
     ax1.set_ylim(0, 1.05)
-    ax1.set_title(f"Active learning vs. random — {al_result.behavior_name}{sub}", fontsize=10)
+    ax1.set_title(f"Active learning vs. random, {al_result.behavior_name}{sub}", fontsize=10)
     ax1.legend(loc="lower right", fontsize=9)
     ax1.grid(alpha=0.3)
 
@@ -259,7 +259,7 @@ def _ablation_matrix_plot(abl_results: list, names: list[str], label_for, save_p
     """Pooled-ablation layout: headline summary bars + a behavior×config effect matrix.
 
     Left: the mean ΔF1 each enhancement buys, averaged over every behavior, with a
-    95% CI *across behaviors* — the one number per feature the manuscript quotes.
+    95% CI *across behaviors*, the one number per feature the manuscript quotes.
     Right: the same gains per behavior, so a feature that helps on average but hurts
     one behavior can't hide inside the mean.  Cells are annotated only where the
     per-seed CI excludes zero (bold ✦); everything else is within baseline noise and
@@ -351,7 +351,7 @@ def _ablation_matrix_plot(abl_results: list, names: list[str], label_for, save_p
                             color="#212121", alpha=0.75)
 
     # Project bands: separator + a label just outside the right edge of the matrix.
-    # clip_on=False is required — the label sits past the last column, i.e. outside
+    # clip_on=False is required: the label sits past the last column, i.e. outside
     # the axes' data limits, and would otherwise be silently clipped away.
     proj_seq = [str(r.project_id) for r in rows]
     for start, end, pid in _contiguous_runs(proj_seq):
@@ -367,7 +367,7 @@ def _ablation_matrix_plot(abl_results: list, names: list[str], label_for, save_p
     cb.ax.tick_params(labelsize=7)
 
     btxt = f"  @ {budget_title}" if budget_title else ""
-    fig.suptitle(f"Feature / pipeline ablation{btxt} — gain over the pose-only baseline",
+    fig.suptitle(f"Feature / pipeline ablation{btxt}, gain over the pose-only baseline",
                  fontsize=11.5, y=0.995)
     return _save(fig, save_path)
 
@@ -379,7 +379,7 @@ def ablation_impact_plot(abl_results: list, save_path: Path | None = None,
     Each bar is one enhancement added on its own (plus a final "all enhancements"
     bar), measured as the paired ``config F1 − baseline F1`` across seeds.  Error
     bars are the 95% CI of that paired difference; bars whose CI crosses zero are
-    faded — they are *not* distinguishable from the baseline (so a small negative
+    faded, they are *not* distinguishable from the baseline (so a small negative
     value is noise, not evidence the feature hurts).  Behaviors are side-by-side.
     """
     if not _HAS_MPL or not abl_results:
@@ -400,7 +400,7 @@ def ablation_impact_plot(abl_results: list, save_path: Path | None = None,
         return n
 
     # Side-by-side bars scale the figure as configs × behaviors, so pooling every
-    # project's behaviors into one chart produces a metres-tall strip. Past a
+    # project's behaviors into one chart produces a meters-tall strip. Past a
     # handful of behaviors, switch to the summary + effect-size matrix layout,
     # which stays one page regardless of how many behaviors are pooled.
     if len(abl_results) > _ABLATION_BAR_LIMIT:
@@ -427,7 +427,7 @@ def ablation_impact_plot(abl_results: list, save_path: Path | None = None,
         ax.barh(y + offset, vals, bar_h, xerr=errs,
                 color=_colour(bi), label=series_label, edgecolor="white", linewidth=0.3,
                 error_kw={"elinewidth": 0.8, "ecolor": "#444", "capsize": 2})
-        # Per-bar alpha (barh takes a single alpha, so recolour each patch).
+        # Per-bar alpha (barh takes a single alpha, so recolor each patch).
         for patch, a in zip(ax.patches[-len(names):], alphas):
             patch.set_alpha(a)
 
@@ -447,14 +447,14 @@ def ablation_impact_plot(abl_results: list, save_path: Path | None = None,
         allf = r.f1_means.get("all_features", float("nan"))
         sub = (f"\nbaseline F1 = {base:.3f}"
                + (f"   ·   shipped-pipeline F1 = {allf:.3f}" if np.isfinite(allf) else ""))
-        ax.set_title(f"Feature ablation{btxt} — {r.behavior_name} ({r.project_id}){sub}",
+        ax.set_title(f"Feature ablation{btxt}, {r.behavior_name} ({r.project_id}){sub}",
                      fontsize=11)
     else:
-        ax.set_title(f"Feature / pipeline ablation{btxt} — gain over pose-only baseline",
+        ax.set_title(f"Feature / pipeline ablation{btxt}, gain over pose-only baseline",
                      fontsize=11)
 
     # Interpretation note: error bars = 95% CI; faded = not distinguishable from baseline.
-    note = ("Error bars: 95% CI across seeds.  Faded bars overlap 0 — "
+    note = ("Error bars: 95% CI across seeds.  Faded bars overlap 0, "
             "not distinguishable from baseline (a small ± here is noise, not harm).")
     fig.text(0.5, 0.005, note, ha="center", va="bottom", fontsize=7.5, color="#666")
     ax.legend(loc="lower right", fontsize=8, frameon=False)
@@ -501,12 +501,12 @@ def cross_project_forest(
 ) -> "Figure | None":
     """THE headline meta-analysis figure: every (project × behavior) on one axis.
 
-    A bar chart of 3-6 project means is nearly empty and — because every project
-    lands in 0.91-0.94 on a 0-1 axis — conveys nothing.  The unit of evidence is
+    A bar chart of 3-6 project means is nearly empty and, because every project
+    lands in 0.91-0.94 on a 0-1 axis, conveys nothing.  The unit of evidence is
     really the **(project, behavior) pair**: ~25-30 rows for six assays.  This
-    draws each as a point with its 95% CI, grouped and coloured by project, worst
+    draws each as a point with its 95% CI, grouped and colored by project, worst
     first within each block, with a **pooled mean diamond per project** and one
-    grand diamond — i.e. the actual meta-analytic claim.
+    grand diamond, i.e. the actual meta-analytic claim.
 
     ``by_behavior`` is the frame from
     :func:`cross_project.accuracy_by_behavior` (columns ``project_id``,
@@ -524,7 +524,7 @@ def cross_project_forest(
     df[cicol] = pd.to_numeric(df.get(cicol, 0.0), errors="coerce").fillna(0.0)
 
     projects = sorted(df["project_id"].astype(str).unique())
-    rows: list[tuple] = []          # (label, mean, ci, colour, is_pooled)
+    rows: list[tuple] = []          # (label, mean, ci, color, is_pooled)
     for pi, pid in enumerate(projects):
         sub = df[df["project_id"].astype(str) == pid].sort_values(mcol)
         for _, r in sub.iterrows():
@@ -583,11 +583,11 @@ def cross_project_forest(
 
 
 def pool_generalization_by_behavior(gen_results: list) -> pd.DataFrame:
-    """Generalization κ per (assay, behavior) — one row each, never pooled by name.
+    """Generalization κ per (assay, behavior), one row each, never pooled by name.
 
     Every behavior is scoped to its assay/project: ``EPM``'s Rear and ``OFT``'s Rear
     are *different* models and stay two rows, keyed ``"<project> · <behavior>"``. We
-    do NOT merge same-named behaviors across projects — a "Rear" model trained in one
+    do NOT merge same-named behaviors across projects, a "Rear" model trained in one
     assay says nothing about a "Rear" model trained in another, and averaging them
     would fabricate a behavior that no single model represents.
 
@@ -607,7 +607,7 @@ def pool_generalization_by_behavior(gen_results: list) -> pd.DataFrame:
             acc["kappas"].extend(float(c.cohen_kappa) for c in cells)
             acc["f1s"].extend(float(c.f1) for c in cells if np.isfinite(c.f1))
         elif np.isfinite(r.kappa_mean):
-            # No retained cells (shouldn't happen) — fall back to the summary.
+            # No retained cells (shouldn't happen): fall back to the summary.
             acc["kappas"].append(float(r.kappa_mean))
             if np.isfinite(r.f1_mean):
                 acc["f1s"].append(float(r.f1_mean))
@@ -636,7 +636,7 @@ def pool_generalization_by_behavior(gen_results: list) -> pd.DataFrame:
 
 
 def human_ceiling_plot(gen_results: list, save_path: Path | None = None) -> "Figure | None":
-    """Model κ per (assay, behavior) — ONE panel, one bar per behavior model.
+    """Model κ per (assay, behavior), ONE panel, one bar per behavior model.
 
     Every bar is a single assay's behavior model (see
     :func:`pool_generalization_by_behavior`); same-named behaviors from different
@@ -658,7 +658,7 @@ def human_ceiling_plot(gen_results: list, save_path: Path | None = None) -> "Fig
     y = np.arange(len(df))
     vals = df["kappa"].to_numpy(dtype=float)
     errs = df["kappa_ci"].to_numpy(dtype=float)
-    # Colour carries the same grading as the reference lines, so the bar itself
+    # Color carries the same grading as the reference lines, so the bar itself
     # already says "substantial / almost perfect" before you read the axis.
     colors = ["#C62828" if not np.isfinite(v) or v < 0.6
               else "#F9A825" if v < 0.8 else "#2E7D32" for v in vals]
@@ -698,7 +698,7 @@ def human_ceiling_plot(gen_results: list, save_path: Path | None = None) -> "Fig
     if has_ceiling:
         handles.append(plt.Line2D([0], [0], color="#212121", linewidth=1.8,
                                   label="Human inter-rater ceiling"))
-    # Distinct projects in the RUN — not df['n_projects'].max(), which is the widest
+    # Distinct projects in the RUN: not df['n_projects'].max(), which is the widest
     # single behavior and undercounts whenever no one behavior spans every project.
     n_proj = len({str(r.project_id) for r in gen_results})
     sub = (f"{len(df)} behavior model{'s' if len(df) != 1 else ''} "
@@ -718,7 +718,7 @@ def _clip_unit(df: pd.DataFrame) -> str:
 
     ``clip_sec`` is per-project and projects genuinely differ (most use ~0.5 s but
     it is configurable), so a single duration is only printed when every row in
-    the figure shares it — otherwise the axis would quietly attribute one assay's
+    the figure shares it, otherwise the axis would quietly attribute one assay's
     clip length to all of them.
     """
     if "clip_sec" not in df.columns:
@@ -736,8 +736,8 @@ def confusion_counts_by_behavior(conf_df: pd.DataFrame,
     """The counts behind the rates: found / missed / false-alarmed, per behavior.
 
     Consumes :func:`cross_project.confusion_by_behavior`.  One stacked horizontal
-    bar per project·behavior with three segments — TP (found), FN (missed), FP
-    (false alarms) — so the bar's length is the union of what the reviewer marked
+    bar per project·behavior with three segments, TP (found), FN (missed), FP
+    (false alarms), so the bar's length is the union of what the reviewer marked
     and what the model called, and the green share *is* the agreement.
 
     TN is deliberately **not** drawn.  Under this imbalance it is 10-100× the
@@ -840,10 +840,10 @@ def discrimination_matrices(pair_results: list, save_path: Path | None = None,
                             feature_set: str = "pose_video") -> "Figure | None":
     """Behavior×behavior separability, and what a feature family adds to it.
 
-    Left: ROC-AUC of telling each behavior pair apart using **pose only** — dark
+    Left: ROC-AUC of telling each behavior pair apart using **pose only**, dark
     cells are the pairs the model conflates (0.5 = coin flip, 1.0 = perfectly
     separable). Right: the **change** in that AUC when ``feature_set`` is added,
-    on a diverging scale — bright red cells are the pairs the feature family
+    on a diverging scale, bright red cells are the pairs the feature family
     rescues.  Together they answer "which behaviors look alike, and which features
     fix that", pair by pair.
     """
@@ -868,22 +868,22 @@ def discrimination_matrices(pair_results: list, save_path: Path | None = None,
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(2 * size, size))
 
     # Held-out n per pair, so a "hard" pair resting on 199 clips can be told from
-    # one resting on 973 — it varies >3x within a project.
+    # one resting on 973: it varies >3x within a project.
     n_hold = {frozenset({r.name_a, r.name_b}): (r.n_hold_a + r.n_hold_b)
               for r in pair_results if not r.error}
-    # Pairs with no trained result must not look like pairs the baseline solved —
-    # three different meanings were sharing one grey. This covers BOTH ways a pair
+    # Pairs with no trained result must not look like pairs the baseline solved,
+    # three different meanings were sharing one gray. This covers BOTH ways a pair
     # can lack a number: dropped by the max_pairs cap (absent from pair_results), and
     # selected but skipped for too few clips (present, with r.error set). The latter
-    # used to render as plain grey, which on the left-hand AUC panel could only ever
-    # be read as "already solved" — a reading that is impossible for an unscored pair.
+    # used to render as plain gray, which on the left-hand AUC panel could only ever
+    # be read as "already solved": a reading that is impossible for an unscored pair.
     ran = {frozenset({r.name_a, r.name_b}) for r in pair_results if not r.error}
 
     def _ink(cmap, norm_val: float) -> str:
         """Pick ink by the cell's actual luminance, not a guess about the colormap.
 
         The old heuristic assumed a colormap dark at both ends and put white text on
-        viridis's bright-yellow top — 1.26:1 contrast, i.e. invisible, on exactly the
+        viridis's bright-yellow top, 1.26:1 contrast, i.e. invisible, on exactly the
         near-ceiling cells that dominate this figure.
         """
         r, g, b, _ = cmap(float(np.clip(norm_val, 0, 1)))
@@ -892,7 +892,7 @@ def discrimination_matrices(pair_results: list, save_path: Path | None = None,
 
     b_arr = base.to_numpy(dtype=float)
     # Anchor the low end just under the worst pair so the spread among the
-    # near-ceiling pairs stays visible (a fixed 0.5 floor paints them all one colour).
+    # near-ceiling pairs stays visible (a fixed 0.5 floor paints them all one color).
     lo = float(np.nanmin(b_arr)) if np.isfinite(b_arr).any() else 0.5
     vmin = max(0.5, min(0.95, lo - 0.02))
     cmap1 = plt.get_cmap("viridis")
@@ -927,7 +927,7 @@ def discrimination_matrices(pair_results: list, save_path: Path | None = None,
                     continue  # self-comparison: leave blank
                 key = frozenset({names[i], names[j]})
                 if key not in ran:
-                    # Never trained — mark it, don't let it read as "solved".
+                    # Never trained: mark it, don't let it read as "solved".
                     ax.add_patch(plt.Rectangle((j - 0.5, i - 0.5), 1, 1, facecolor="none",
                                                edgecolor="#B0BEC5", hatch="///",
                                                linewidth=0.0))
@@ -959,7 +959,7 @@ def discrimination_matrices(pair_results: list, save_path: Path | None = None,
     )
 
     proj = pair_results[0].project_id if pair_results else ""
-    fig.suptitle(f"Can ABEL tell these behaviors apart? — {proj}", fontsize=12, y=0.99)
+    fig.suptitle(f"Can ABEL tell these behaviors apart?, {proj}", fontsize=12, y=0.99)
     fig.tight_layout(rect=(0, 0.05, 1, 0.96))
     return _save(fig, save_path)
 
@@ -968,7 +968,7 @@ def discrimination_gain_plot(pair_results: list, save_path: Path | None = None
                              ) -> "Figure | None":
     """Per-pair ΔROC-AUC over the pose-only baseline, one bar group per pair.
 
-    Sorted so the pairs the pose baseline finds hardest sit at the top — the ones
+    Sorted so the pairs the pose baseline finds hardest sit at the top, the ones
     where a feature family has the most to prove.  Error bars are the 95% CI of the
     paired per-seed difference; bars whose CI crosses zero are faded (not
     distinguishable from pose-only).  The left-hand annotation carries each pair's
@@ -1008,9 +1008,9 @@ def discrimination_gain_plot(pair_results: list, save_path: Path | None = None
         sig = [r.is_significant(sname) for r in scored]
         offset = (si - n_sets / 2 + 0.5) * bar_h
         label = next((r.labels.get(sname, sname) for r in scored if sname in r.labels), sname)
-        # Fixed family colour, not _colour(si): the positional palette recoloured
+        # Fixed family color, not _colour(si): the positional palette recolored
         # "video" whenever a project lacked the context rung, so two figures in the
-        # same report disagreed about which colour meant which modality.
+        # same report disagreed about which color meant which modality.
         ax.barh(y + offset, vals, bar_h, xerr=errs, color=_family_colour(sname), label=label,
                 edgecolor="white", linewidth=0.3,
                 error_kw={"elinewidth": 0.8, "ecolor": "#444", "capsize": 2})
@@ -1034,7 +1034,7 @@ def discrimination_gain_plot(pair_results: list, save_path: Path | None = None
     ax.axvline(0, color="gray", linewidth=0.9)
     ax.set_yticks(y)
     # 3 dp: the rows are SORTED by this number, and at 2 dp six near-ceiling pairs
-    # all printed "1.00" while being ordered differently — the labels contradicted
+    # all printed "1.00" while being ordered differently, the labels contradicted
     # the ordering.
     ax.set_yticklabels([f"{r.pair_label}\n(pose AUC {r.baseline_auc:.3f})" for r in scored],
                        fontsize=8)
@@ -1042,7 +1042,7 @@ def discrimination_gain_plot(pair_results: list, save_path: Path | None = None
     ax.set_xlabel("Δ ROC-AUC vs. pose-only  (positive ⇒ the feature family separates this pair better)")
     ax.set_title("What each feature family adds to telling behavior pairs apart\n"
                  "hardest pairs (lowest pose-only AUC) at the top", fontsize=11)
-    note = ("Error bars: 95% CI of the paired per-seed difference.  Faded bars overlap 0 — "
+    note = ("Error bars: 95% CI of the paired per-seed difference.  Faded bars overlap 0, "
             "not distinguishable from the pose-only baseline.  Annotations give the share of "
             "the baseline's remaining error removed (raw ΔAUC understates gains near ceiling).")
     fig.text(0.5, 0.005, note, ha="center", va="bottom", fontsize=7.5, color="#666")
@@ -1056,11 +1056,11 @@ def discrimination_gain_plot(pair_results: list, save_path: Path | None = None
 #
 # The per-project matrices above are the archive: a full run writes one per project
 # PER add-on family, so a reader has to mentally join a dozen heatmaps to answer the
-# question the analysis exists for — across every assay, which behavior pairs does
+# question the analysis exists for: across every assay, which behavior pairs does
 # pose already separate, which does it confuse, and which modality rescues the ones
 # it confuses.  That is one scatter, and these two panels are it.
 
-# Marker per project. Colour is spent on the feature family (the result), so the
+# Marker per project. Color is spent on the feature family (the result), so the
 # assay has to be carried by shape.
 _PROJECT_MARKERS = ("o", "s", "^", "D", "v", "P", "X", "*", "<", ">", "h", "p")
 
@@ -1077,11 +1077,11 @@ _UNRESCUED_COLOUR = "#B0BEC5"      # no family measurably helps this pair
 
 
 def _family_colour(feature_set: str) -> str:
-    """Colour for one discrimination feature family.
+    """Color for one discrimination feature family.
 
     Reuses the behaviorscape modality palette rather than this module's positional
     ``_colour(i)``: with a per-index palette the same family draws in a different
-    colour whenever a project happens to lack one rung, and three figures in one
+    color whenever a project happens to lack one rung, and three figures in one
     report then disagree about what "video" looks like.
     """
     from abel.validation import features as vfeat  # noqa: PLC0415
@@ -1102,7 +1102,7 @@ def _clip_for_display(values, lo: float, hi: float):
     """Clip to the drawable range, reporting which points had to be moved.
 
     Returns ``(clipped, was_clipped)`` so the caller can draw the moved points with
-    a caret — a clamped point silently redrawn at the axis limit is a lie about
+    a caret, a clamped point silently redrawn at the axis limit is a lie about
     where the datum sits.
     """
     arr = np.asarray(values, dtype=float)
@@ -1111,7 +1111,7 @@ def _clip_for_display(values, lo: float, hi: float):
 
 
 def _short_pair_label(row, limit: int = 34) -> str:
-    """Just the pair — the assay is already carried by the marker shape.
+    """Just the pair: the assay is already carried by the marker shape.
 
     Prefixing the project made every label ~50 characters, and at 6pt two of them
     overprinted each other into an unreadable smear on the first render.
@@ -1130,7 +1130,7 @@ def _annotate_points(ax, xs, ys, labels, order, *, max_labels: int = 8,
     rather than drawn on top of it.  Proximity is judged in axes fractions, so it
     behaves the same on the log x-axis as the linear one.
 
-    Call this AFTER the axis limits are final — it reads them to normalise.
+    Call this AFTER the axis limits are final, it reads them to normalize.
     """
     x0, x1 = ax.get_xlim()
     y0, y1 = ax.get_ylim()
@@ -1161,16 +1161,16 @@ def discrimination_landscape(disc_df: "pd.DataFrame", save_path: Path | None = N
                              ) -> "Figure | None":
     """The whole run's discrimination result in two panels, all projects pooled.
 
-    **Left — the landscape.**  One point per behavior pair.  x is the pose-only error
+    **Left, the landscape.**  One point per behavior pair.  x is the pose-only error
     (``1 − ROC-AUC``) on a log axis, because most pairs sit above 0.98 AUC and a
     linear axis stacks them all on the wall.  y is the share of that error removed by
-    the best *single* feature family, coloured by which family that was — grey where
+    the best *single* feature family, colored by which family that was, gray where
     no family's paired gain clears its own CI.  Pairs with no headroom left are still
     drawn, as hollow dots in the shaded band: the wall of pose-solved pairs is a
     result, and dropping it would overstate how much the extra modalities matter.
 
-    **Right — the volcano.**  One point per pair × family, so a pair that both video
-    and context rescue is distinguishable from one only video rescues — information
+    **Right, the volcano.**  One point per pair × family, so a pair that both video
+    and context rescue is distinguishable from one only video rescues, information
     the left panel's "best family" necessarily collapses.  x is the same error-removed
     scale; y is ``−log10 p`` of the paired t-test on the per-seed ΔAUC.  The two axes
     are consistent by construction: dividing every paired seed difference by the
@@ -1208,7 +1208,7 @@ def discrimination_landscape(disc_df: "pd.DataFrame", save_path: Path | None = N
     pairs = df[df["best_family"].astype(bool)] if "best_family" in df.columns \
         else df.iloc[0:0]
     # Pairs with no headroom never get a best_family row (error_reduction is NaN by
-    # design), so recover them from the baseline rows — they are the pose-solved wall.
+    # design), so recover them from the baseline rows, they are the pose-solved wall.
     base_rows = df[df["feature_set"] == disc.BASELINE_FEATURE_SET]
     rescued_keys = set(zip(pairs["project"].astype(str), pairs["pair"].astype(str)))
     solved = base_rows[[(p, q) not in rescued_keys for p, q in
@@ -1251,8 +1251,8 @@ def discrimination_landscape(disc_df: "pd.DataFrame", save_path: Path | None = N
     ax1.axhline(0, color="#90A4AE", linewidth=0.9)
     ax1.set_xlabel("Pose-only error, 1 − ROC-AUC  (right ⇒ pose confuses this pair)")
     ax1.set_ylabel("Share of that error removed by the best feature family")
-    ax1.set_title("Discrimination landscape — every behavior pair, every assay\n"
-                  "colour = the modality that disambiguates the pair", fontsize=10)
+    ax1.set_title("Discrimination landscape: every behavior pair, every assay\n"
+                  "color = the modality that disambiguates the pair", fontsize=10)
     ax1.text(float(np.sqrt(_MIN_POSE_ERROR * disc.MIN_HEADROOM)),
              ax1.get_ylim()[1] * 0.5, "pose alone already solves these pairs",
              fontsize=7, color="#78909C", va="center", ha="center", rotation=90)
@@ -1302,7 +1302,7 @@ def discrimination_landscape(disc_df: "pd.DataFrame", save_path: Path | None = N
             ax2.text(_ER_HI + 0.04, -np.log10(bh), f"BH 5% FDR (p = {bh:.3g})",
                      fontsize=6.8, color="#37474F", va="bottom", ha="right")
 
-        # Name the extremes on both sides — a family that HURTS a pair is a finding.
+        # Name the extremes on both sides: a family that HURTS a pair is a finding.
         # One label per PAIR, not per point: a pair rescued by video AND by the
         # all-features union printed its own name twice, side by side.
         labels_b, order_b, seen = [], [], set()
@@ -1318,11 +1318,11 @@ def discrimination_landscape(disc_df: "pd.DataFrame", save_path: Path | None = N
 
     ax2.set_xlabel("Share of pose-only error removed  (left of 0 ⇒ the family hurts)")
     ax2.set_ylabel("−log₁₀ p  (paired t-test across seeds)")
-    ax2.set_title("Effect vs. evidence — every pair × feature family\n"
+    ax2.set_title("Effect vs. evidence, every pair × feature family\n"
                   "up = reproducible across seeds; right = large", fontsize=10)
     ax2.grid(alpha=0.25)
 
-    # ── Shared legend: what the colours mean, what the shapes mean ────────
+    # ── Shared legend: what the colors mean, what the shapes mean ────────
     from matplotlib.lines import Line2D  # noqa: PLC0415
 
     fams = [f for f in dict.fromkeys(df["feature_set"].astype(str))
@@ -1364,7 +1364,7 @@ def time_budget_plot(tb_result, save_path: Path | None = None) -> "Figure | None
     Left: prevalence of the behavior among each held-out session's *reviewed
     segments*, model (y) vs. reviewer (x), on the identity line.  Right: the
     matching Bland-Altman panel, whose limits of agreement say whether the measure
-    is usable for a single animal — the number that actually decides whether the
+    is usable for a single animal, the number that actually decides whether the
     model can replace the scorer, so it is promoted into the title rather than
     buried.  Points beyond the limits are labeled.
 
@@ -1408,12 +1408,12 @@ def time_budget_plot(tb_result, save_path: Path | None = None) -> "Figure | None
         if np.isfinite(val):
             bits.append(f"{lbl} = {val:.3f}")
     bits.append(f"n = {tb_result.n_units} sessions")
-    ax1.set_title(f"{tb_result.behavior_name} ({tb_result.project_id}) — "
+    ax1.set_title(f"{tb_result.behavior_name} ({tb_result.project_id}), "
                   f"per-session prevalence agreement\n" + "   ·   ".join(bits), fontsize=10)
     ax1.legend(loc="upper left", fontsize=8, frameon=False)
     ax1.grid(alpha=0.3)
 
-    # Right: Bland-Altman. The LoA width — not r — decides single-animal usability.
+    # Right: Bland-Altman. The LoA width, not r, decides single-animal usability.
     mean_xy = (tf + pf) / 2.0
     diff = pf - tf
     bias = tb_result.prev_bias
@@ -1430,7 +1430,7 @@ def time_budget_plot(tb_result, save_path: Path | None = None) -> "Figure | None
         if np.isfinite(yv):
             ax2.axhline(yv, color="#888", linestyle=":", linewidth=1.1)
     ax2.axhline(0, color="#bbb", linewidth=0.8)
-    # Label the sessions outside the limits of agreement — the ones a reader will ask about.
+    # Label the sessions outside the limits of agreement, the ones a reader will ask about.
     for x, d, lab in zip(mean_xy, diff, labels):
         if (np.isfinite(lo) and d < lo) or (np.isfinite(up) and d > up):
             ax2.annotate(str(lab)[:18], (x, d), fontsize=6, color="#546E7A",
@@ -1443,7 +1443,7 @@ def time_budget_plot(tb_result, save_path: Path | None = None) -> "Figure | None
     ax2.set_xlabel("Mean of model & reviewer prevalence")
     ax2.set_ylabel("Model − reviewer (prevalence)")
     width = tb_result.loa_width
-    ttl = "Bland-Altman — can this be trusted for ONE animal?"
+    ttl = "Bland-Altman: can this be trusted for ONE animal?"
     if np.isfinite(width):
         ttl += (f"\nbias {bias:+.3f}   ·   95% limits of agreement "
                 f"{lo:+.3f} to {up:+.3f}  (width {width:.3f})")
@@ -1451,7 +1451,7 @@ def time_budget_plot(tb_result, save_path: Path | None = None) -> "Figure | None
     ax2.grid(alpha=0.3)
 
     cov = tb_result.median_coverage
-    caveat = ("Prevalence is over REVIEWED segments, not session time — "
+    caveat = ("Prevalence is over REVIEWED segments, not session time, "
               "this is not a time budget.")
     if np.isfinite(cov):
         caveat += f"  Labeled segments cover a median {cov:.1%} of each session."
@@ -1461,11 +1461,11 @@ def time_budget_plot(tb_result, save_path: Path | None = None) -> "Figure | None
 
 
 def time_budget_forest(tb_results: list, save_path: Path | None = None) -> "Figure | None":
-    """All behaviors' agreement on ONE panel — the figure that goes in the paper.
+    """All behaviors' agreement on ONE panel: the figure that goes in the paper.
 
     Left: a forest plot of the per-session bias with its 95% CI (thick bar) and the
-    95% limits of agreement (thin whiskers), one row per behavior.  The LoA — not
-    r — decide whether the model can stand in for the scorer on a *single animal*,
+    95% limits of agreement (thin whiskers), one row per behavior.  The LoA, not
+    r, decide whether the model can stand in for the scorer on a *single animal*,
     and putting every behavior on a shared axis makes an unusable one impossible to
     miss.  A behavior whose bias CI straddles 0 has no systematic offset; a behavior
     whose whiskers are wide is unreliable per-animal no matter how good its r looks.
@@ -1478,7 +1478,7 @@ def time_budget_forest(tb_results: list, save_path: Path | None = None) -> "Figu
     rs = [r for r in tb_results if r is not None and np.isfinite(r.prev_bias)]
     if not rs:
         return None
-    # Widest limits of agreement (least usable) at the top — that is the risk.
+    # Widest limits of agreement (least usable) at the top, that is the risk.
     rs = sorted(rs, key=lambda r: (-(r.loa_width if np.isfinite(r.loa_width) else -1)))
     names = [f"{r.behavior_name}\n(n={r.n_units})" for r in rs]
     y = np.arange(len(rs), dtype=float)
@@ -1507,7 +1507,7 @@ def time_budget_forest(tb_results: list, save_path: Path | None = None) -> "Figu
     ax1.set_yticklabels(names, fontsize=8.5)
     ax1.invert_yaxis()
     ax1.set_xlabel("Model − reviewer, per-session prevalence")
-    ax1.set_title("Agreement per behavior — bias, its 95% CI, and the limits of agreement\n"
+    ax1.set_title("Agreement per behavior: bias, its 95% CI, and the limits of agreement\n"
                   "thin whiskers = 95% LoA (single-animal reliability) · thick bar = 95% CI of bias",
                   fontsize=10)
     ax1.grid(axis="x", alpha=0.3)
@@ -1531,18 +1531,18 @@ def time_budget_forest(tb_results: list, save_path: Path | None = None) -> "Figu
     ax2.grid(axis="x", alpha=0.3)
 
     cov = np.nanmedian([r.median_coverage for r in rs])
-    caveat = "Prevalence is over REVIEWED segments, not session time — this is not a time budget."
+    caveat = "Prevalence is over REVIEWED segments, not session time, this is not a time budget."
     if np.isfinite(cov):
         caveat += f"  Labeled segments cover a median {cov:.1%} of each session."
     fig.text(0.5, 0.005, caveat, ha="center", va="bottom", fontsize=7.5, color="#B71C1C")
     proj = rs[0].project_id
-    fig.suptitle(f"Model vs. reviewer — per-session agreement ({proj})", fontsize=12, y=0.995)
+    fig.suptitle(f"Model vs. reviewer, per-session agreement ({proj})", fontsize=12, y=0.995)
     fig.tight_layout(rect=(0, 0.045, 1, 0.96))
     return _save(fig, save_path)
 
 
 def time_budget_grid(tb_results: list, save_path: Path | None = None) -> "Figure | None":
-    """Small-multiples of the per-session identity scatters — one panel per behavior.
+    """Small-multiples of the per-session identity scatters, one panel per behavior.
 
     One shared figure instead of one file per behavior, so the whole project reads
     as a single result. Each panel keeps its own axis range (behaviors differ by an
@@ -1585,7 +1585,7 @@ def time_budget_grid(tb_results: list, save_path: Path | None = None) -> "Figure
 
     fig.supxlabel("Reviewer: share of reviewed segments in behavior", fontsize=9)
     fig.supylabel("Model: same share", fontsize=9)
-    fig.suptitle(f"Per-session prevalence, model vs. reviewer — {rs[0].project_id}",
+    fig.suptitle(f"Per-session prevalence, model vs. reviewer, {rs[0].project_id}",
                  fontsize=12)
     fig.tight_layout(rect=(0.01, 0.01, 1, 0.97))
     return _save(fig, save_path)
@@ -1601,7 +1601,7 @@ MIN_RELIABLE_BIN_N = 10
 def reliability_diagram(cal_result, save_path: Path | None = None) -> "Figure | None":
     """Reliability diagram + the bin-count histogram that makes it readable.
 
-    Behavior-model probabilities are strongly **bimodal** — nearly every held-out
+    Behavior-model probabilities are strongly **bimodal**, nearly every held-out
     segment scores close to 0 or close to 1, and the middle bins hold a handful of
     samples each.  Drawing those sparse bins as equal-weight vertices of a
     connected line produces a violent zigzag that screams "miscalibrated" while ECE
@@ -1609,7 +1609,7 @@ def reliability_diagram(cal_result, save_path: Path | None = None) -> "Figure | 
 
     So: bins are drawn as **bars on a fixed grid** (never connected), bins with
     fewer than :data:`MIN_RELIABLE_BIN_N` samples are drawn hollow and hatched, and
-    a lower panel shows the sample count per bin on a log axis — the standard
+    a lower panel shows the sample count per bin on a log axis, the standard
     presentation, and the only way to see that the zigzag is 2% of the data.
     """
     if not _HAS_MPL or cal_result is None:
@@ -1645,7 +1645,7 @@ def reliability_diagram(cal_result, save_path: Path | None = None) -> "Figure | 
     ax.set_ylabel("Empirical positive rate")
     sub = (f"ECE = {curve.ece:.3f}   ·   MCE = {curve.mce:.3f}   ·   "
            f"Brier = {curve.brier:.3f}   ·   n = {curve.n}")
-    ax.set_title(f"Reliability — {cal_result.behavior_name} ({cal_result.project_id})\n{sub}",
+    ax.set_title(f"Reliability: {cal_result.behavior_name} ({cal_result.project_id})\n{sub}",
                  fontsize=10)
     ax.legend(loc="upper left", fontsize=7.5, frameon=False)
     ax.grid(alpha=0.3)
@@ -1678,7 +1678,7 @@ def reliability_diagram(cal_result, save_path: Path | None = None) -> "Figure | 
 #
 # All four operate on a ``BehaviorscapeData`` (see
 # :mod:`abel.validation.analyses.behaviorscape`): a feature×behavior importance
-# matrix plus a ``feature -> modality`` map and the modality colour palette.
+# matrix plus a ``feature -> modality`` map and the modality color palette.
 
 
 def _modality_of(data, feat: str) -> str:
@@ -1752,10 +1752,10 @@ def behaviorscape_heatmap(data, save_path: Path | None = None) -> "Figure | None
     """Clustered feature×behavior importance heatmap with a modality side-strip.
 
     Behaviors (columns) are clustered by importance-profile similarity and a
-    dendrogram is drawn above them, so neighbouring columns are genuinely
+    dendrogram is drawn above them, so neighboring columns are genuinely
     similar.  Features (rows) are grouped into four contiguous **modality
-    bands** (pose / kinematics / video / context) — labelled directly on the
-    left strip — and clustered within each band.  The result reads as: which
+    bands** (pose / kinematics / video / context), labeled directly on the
+    left strip, and clustered within each band.  The result reads as: which
     *kinds* of features (the bands) light up for which behaviors.
     """
     if not _HAS_MPL or data is None or data.is_empty():
@@ -1801,7 +1801,7 @@ def behaviorscape_heatmap(data, save_path: Path | None = None) -> "Figure | None
 
     # Column dendrogram.  SciPy places leaves at x = 10·i + 5 (range 0..10n);
     # the heatmap spans -0.5..n-0.5.  Both fill the same gridspec cell, so leaf
-    # i lands at fraction (i+0.5)/n in each — they line up WITHOUT sharex (which
+    # i lands at fraction (i+0.5)/n in each, they line up WITHOUT sharex (which
     # would otherwise collapse the heatmap into the dendrogram's 0..10n range).
     if col_link is not None:
         try:
@@ -1853,7 +1853,7 @@ def behaviorscape_heatmap(data, save_path: Path | None = None) -> "Figure | None
            f"(kept if importance ≥ {data.threshold:g} in ≥1 project) · "
            f"columns clustered by profile similarity"
            if data.n_features_total else f"{kept} features")
-    fig.suptitle(f"Behaviorscape — feature importance across behaviors\n{sub}",
+    fig.suptitle(f"Behaviorscape, feature importance across behaviors\n{sub}",
                  fontsize=11, y=0.98)
     return _save(fig, save_path)
 
@@ -1865,7 +1865,7 @@ def behaviorscape_modality_bars(data, save_path: Path | None = None) -> "Figure 
     kinematics → video → context order) and, within each group, sorted by how
     strongly they rely on that dominant family (high → low).  Within each bar the
     four modality segments are ordered largest-first, so the strongest data
-    source always sits at the left edge (colour still encodes modality).  Faint
+    source always sits at the left edge (color still encodes modality).  Faint
     group bands + right-hand labels make the clusters explicit.
     """
     if not _HAS_MPL or data is None or data.is_empty():
@@ -1891,7 +1891,7 @@ def behaviorscape_modality_bars(data, save_path: Path | None = None) -> "Figure 
     for yi, beh in zip(y, behaviors):
         row = frac.loc[beh]
         left = 0.0
-        # Fixed modality order — NOT largest-segment-first. Re-sorting the stack
+        # Fixed modality order: NOT largest-segment-first. Re-sorting the stack
         # per bar means a given modality starts at a different x in every row, so
         # its width can no longer be compared across behaviors, which is the one
         # question this figure exists to answer.
@@ -1926,7 +1926,7 @@ def behaviorscape_modality_bars(data, save_path: Path | None = None) -> "Figure 
                  fontsize=11)
     handles = [Patch(facecolor=data.modality_colors[m], label=data.modality_labels[m])
                for m in data.present_modalities if m in frac.columns]
-    # Below the axes, not inside them — an in-axes legend sits on top of the
+    # Below the axes, not inside them, an in-axes legend sits on top of the
     # bottom bars, which are data.
     ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.08),
               fontsize=8, frameon=False, ncol=min(len(handles), 3))
@@ -1941,9 +1941,9 @@ def behaviorscape_clusters(data, save_path: Path | None = None) -> "Figure | Non
     For every pair of behaviors, the correlation of their feature-importance
     vectors says how much they draw on the *same* features.  The matrix is
     clustered (a dendrogram on top justifies the order) so similar behaviors form
-    bright blocks on the diagonal — e.g. the Sniff/Approach variants — while a
+    bright blocks on the diagonal, e.g. the Sniff/Approach variants, while a
     mostly-dark off-diagonal is itself the message: most behaviors recruit
-    distinct feature sets.  Tick labels are coloured by dominant modality.
+    distinct feature sets.  Tick labels are colored by dominant modality.
     """
     if not _HAS_MPL or data is None or data.is_empty():
         return None
@@ -1957,7 +1957,7 @@ def behaviorscape_clusters(data, save_path: Path | None = None) -> "Figure | Non
     from matplotlib.patches import Patch  # noqa: PLC0415
     from scipy.cluster.hierarchy import dendrogram  # noqa: PLC0415
 
-    # Pairwise profile correlation (clip negatives to 0 — anti-correlation of
+    # Pairwise profile correlation (clip negatives to 0, anti-correlation of
     # sparse non-negative importance vectors isn't meaningful here).
     corr = np.corrcoef(data.matrix.to_numpy(dtype=float).T)
     corr = np.nan_to_num(corr, nan=0.0)
@@ -1987,7 +1987,7 @@ def behaviorscape_clusters(data, save_path: Path | None = None) -> "Figure | Non
     ax_dendro.axis("off")
 
     # The diagonal is 1.0 by construction and carries no information, but leaving it
-    # in pins the colour scale to 1.0 and crushes every real off-diagonal block
+    # in pins the color scale to 1.0 and crushes every real off-diagonal block
     # (which top out far lower) into near-black. Mask it and scale to the strongest
     # actual pair, so the shared-profile blocks are the brightest thing on the plot.
     corr_off = corr.copy()
@@ -2013,13 +2013,13 @@ def behaviorscape_clusters(data, save_path: Path | None = None) -> "Figure | Non
                    f"= {vmax:.2f})", fontsize=8)
     cbar.ax.tick_params(labelsize=7)
 
-    # Only the modalities with features behind them — see `present_modalities`.
+    # Only the modalities with features behind them: see `present_modalities`.
     handles = [Patch(facecolor=data.modality_colors[m], label=data.modality_labels[m])
                for m in data.present_modalities]
     ax_dendro.legend(handles=handles, loc="center left", bbox_to_anchor=(1.0, 0.5),
                      fontsize=8, frameon=False, title="dominant modality",
                      title_fontsize=8.5)
-    fig.suptitle("Behavior similarity — do behaviors share feature profiles?\n"
+    fig.suptitle("Behavior similarity: do behaviors share feature profiles?\n"
                  "bright blocks = behaviors using the same features "
                  "(self-similarity diagonal masked)", fontsize=11, y=0.99)
     return _save(fig, save_path)
@@ -2030,9 +2030,9 @@ def _packed_component_layout(g, nx) -> dict:
     compact grid, so a graph that is mostly disjoint modules reads as neat tiles
     instead of a few clusters flung across an ocean of whitespace.
 
-    Tiles are not all the same size.  Components differ wildly in node count — the
+    Tiles are not all the same size.  Components differ wildly in node count, the
     feature-sharing Sniff/Approach cluster can hold six behaviors and thirty features
-    while most tiles hold one behavior and four — and forcing that component into a
+    while most tiles hold one behavior and four, and forcing that component into a
     1×1 tile piles its behavior chips on top of each other.  A component much larger
     than the median therefore gets a full-width row to itself.
     """
@@ -2090,7 +2090,7 @@ def _separate_chips(pos: dict, chips, *, x_ext: float, y_ext: float,
     This is a small collision relaxation on the chips' estimated bounding boxes
     (converted from rendered points into data units via the figure's scale): on each
     pass, any overlapping pair is pushed apart along the axis of least penetration.
-    Feature nodes are left alone — only the chips move.
+    Feature nodes are left alone, only the chips move.
     """
     names = [c for c in chips if c in pos]
     if len(names) < 2:
@@ -2132,11 +2132,11 @@ def behaviorscape_network(data, save_path: Path | None = None,
     """Feature↔behavior network, drawn as tidy per-module tiles.
 
     Each behavior links to its top-``k`` features (edge width/opacity ∝
-    importance).  The graph is split into connected components — each a behavior
-    (or a few feature-sharing behaviors) with its driving features — and the
+    importance).  The graph is split into connected components, each a behavior
+    (or a few feature-sharing behaviors) with its driving features, and the
     components are packed into a grid so the modular structure is legible rather
     than diffuse.  Greedy-modularity Q is reported as the overall 'how modular'
-    summary.  Feature dots keep the modality colours used across every figure.
+    summary.  Feature dots keep the modality colors used across every figure.
     """
     if not _HAS_MPL or data is None or data.is_empty():
         return None
@@ -2179,7 +2179,7 @@ def behaviorscape_network(data, save_path: Path | None = None,
 
     pos = _packed_component_layout(g, nx)
 
-    # Size the canvas from the layout's real extent — tiles are no longer uniform,
+    # Size the canvas from the layout's real extent: tiles are no longer uniform,
     # so a fixed square would letterbox a wide layout and crush a tall one.
     n_tiles = nx.number_connected_components(g)
     xs = np.array([p[0] for p in pos.values()])
@@ -2193,7 +2193,7 @@ def behaviorscape_network(data, save_path: Path | None = None,
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
 
     # The spring layout places behavior nodes as *points*, but each is drawn as a
-    # wide text chip — so behaviors that share features (which is exactly what this
+    # wide text chip: so behaviors that share features (which is exactly what this
     # figure is about) end up with their chips stacked on top of each other. Nudge
     # the chips apart using their real rendered footprint.
     _separate_chips(pos, behaviors, x_ext=x_ext, y_ext=y_ext, fig_w=fig_w, fig_h=fig_h)
@@ -2206,7 +2206,7 @@ def behaviorscape_network(data, save_path: Path | None = None,
         ax.plot([x0, x1], [y0, y1], color="#90A4AE",
                 linewidth=0.4 + 2.4 * (w / wmax), alpha=0.45, zorder=1)
 
-    # Feature nodes: colour = modality, size = weighted degree.
+    # Feature nodes: color = modality, size = weighted degree.
     fmax = max((wdeg.get(f, 0.0) for f in features), default=1.0) or 1.0
     for m in data.modality_order:
         fs = [f for f in features if data.modality.get(f) == m]
@@ -2227,11 +2227,11 @@ def behaviorscape_network(data, save_path: Path | None = None,
                     bbox=dict(boxstyle="round,pad=0.28", facecolor="#263238",
                               edgecolor="white", linewidth=0.8, alpha=0.92))
 
-    # Label EVERY feature node, not just the top hubs. An unlabelled dot carries no
+    # Label EVERY feature node, not just the top hubs. An unlabeled dot carries no
     # information in a feature-landscape figure, and the old top-8 rule dropped the
     # labels on the node directly under a behavior chip. Each label is pushed
-    # radially outward from its tile centre, so it points away from the chip (which
-    # sits near the centre) instead of landing on top of it.
+    # radially outward from its tile center, so it points away from the chip (which
+    # sits near the center) instead of landing on top of it.
     tile_of: dict[tuple[int, int], list[str]] = {}
     for nd, p in pos.items():
         tile_of.setdefault((round(float(p[0])), round(float(p[1]))), []).append(nd)
@@ -2256,7 +2256,7 @@ def behaviorscape_network(data, save_path: Path | None = None,
     ax.margins(x=0.06, y=0.06)
     y0, y1 = ax.get_ylim()
     ax.set_ylim(y0, y1 + 0.16 * (y1 - y0))
-    # Node size encodes importance, so the legend has to say what a size means —
+    # Node size encodes importance, so the legend has to say what a size means,
     # otherwise the biggest dot on the page is uninterpretable.
     size_handles = [
         plt.scatter([], [], s=24 + 150 * frac_, facecolor="#B0BEC5",
@@ -2279,7 +2279,7 @@ def behaviorscape_network(data, save_path: Path | None = None,
     ax.legend(handles=size_handles, loc="upper right", fontsize=7.5, title="dot size",
               title_fontsize=8.5, labelspacing=1.1, borderpad=0.9, **lg_kw)
     q_txt = f" · modularity Q={modularity_q:.2f}" if np.isfinite(modularity_q) else ""
-    ax.set_title(f"Behaviorscape network — {n_tiles} feature modules{q_txt}\n"
+    ax.set_title(f"Behaviorscape network: {n_tiles} feature modules{q_txt}\n"
                  "each tile = a behavior + its top features · "
                  "dot size = importance · edge width = link strength", fontsize=10.5)
     fig.tight_layout()
@@ -2292,7 +2292,7 @@ def behaviorscape_distinctiveness(data, save_path: Path | None = None,
 
     Quantifies the heatmap's qualitative story.  Each bar is a behavior's mean
     cosine distance from its (per-project) replicates to *every other* behavior's
-    importance centroid — i.e. how much that behavior's feature reliance differs
+    importance centroid, i.e. how much that behavior's feature reliance differs
     from the rest; error bars are the SE across project replicates.  The title
     carries the PERMANOVA test of whether behavior identity explains the
     importance-profile variance (the formal 'different behaviors rely on
@@ -2327,7 +2327,7 @@ def behaviorscape_distinctiveness(data, save_path: Path | None = None,
     ax.set_yticks(y)
     ax.set_yticklabels([f"{b}  (n={stats.n_replicates[b]})" for b in order], fontsize=8)
     ax.invert_yaxis()
-    ax.set_xlabel("distinctiveness — mean profile distance to other behaviors (cosine)")
+    ax.set_xlabel("distinctiveness: mean profile distance to other behaviors (cosine)")
     # Cosine distinctiveness lives in a narrow band near 1.0; anchoring the axis at
     # 0 squeezes every bar's differences into the last sliver of the panel. Frame
     # the observed range instead (the axis break is explicit in the label).
@@ -2338,7 +2338,7 @@ def behaviorscape_distinctiveness(data, save_path: Path | None = None,
         left = max(0.0, lo - pad)
         if left > 0.02:
             ax.set_xlim(left, min(1.0, hi + pad * 0.6))
-            ax.set_xlabel("distinctiveness — mean profile distance to other behaviors "
+            ax.set_xlabel("distinctiveness: mean profile distance to other behaviors "
                           f"(cosine; axis starts at {left:.2f})")
         else:
             ax.set_xlim(left=0)
@@ -2350,7 +2350,7 @@ def behaviorscape_distinctiveness(data, save_path: Path | None = None,
                f"variance (pseudo-F={pm['pseudo_F']:.1f}, {p_txt}; "
                f"{pm['n_groups']} behaviors × ≥2 projects, {pm['n_perm']} permutations)")
     else:
-        sub = ("descriptive only — the PERMANOVA test needs ≥2 behaviors with ≥2 "
+        sub = ("descriptive only: the PERMANOVA test needs ≥2 behaviors with ≥2 "
                "projects each")
     ax.set_title(f"Do different behaviors rely on different features?\n{sub}", fontsize=10.5)
 
@@ -2380,7 +2380,7 @@ def behaviorscape_figures(data, out_dir: Path) -> list[Path]:
         path = out_dir / fname
         try:
             fig = fn(data, save_path=path)
-        except Exception:  # noqa: BLE001 — one bad figure shouldn't sink the rest
+        except Exception:  # noqa: BLE001, one bad figure shouldn't sink the rest
             fig = None
         if fig is not None and path.exists():
             saved.append(path)

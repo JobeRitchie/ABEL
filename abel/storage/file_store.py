@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-# PyYAML's pure-Python scanner is the bottleneck on any large config — a 1 MB
+# PyYAML's pure-Python scanner is the bottleneck on any large config, a 1 MB
 # environment_rois.yaml (hand-drawn polygon ROIs are thousands of vertices)
 # takes seconds to parse, and the ROI tab parses it several times per subject
 # switch.  libyaml is 5-10x faster and ships with the wheel; fall back to the
@@ -40,7 +40,7 @@ def atomic_write_parquet(df: "Any", path: Path, **to_parquet_kwargs: Any) -> Non
     The DataFrame is first written to a uniquely-named temporary file in the
     destination directory, then moved into place with an atomic ``os.replace``.
     If the process is interrupted mid-write (e.g. the app is closed during a
-    long run) only the temp file is ever partial — the canonical parquet at
+    long run) only the temp file is ever partial, the canonical parquet at
     *path* is never left truncated/footerless, which would otherwise make it
     unreadable ("Parquet magic bytes not found in footer").
     """

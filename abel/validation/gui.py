@@ -110,7 +110,7 @@ class _RunWorker(QRunnable):
 
 
 class _PreflightWorker(QRunnable):
-    """Phase 1 of the rare-behaviour workflow — the seconds-long rarity check."""
+    """Phase 1 of the rare-behavior workflow: the seconds-long rarity check."""
 
     def __init__(self, projects, behaviors, cfg) -> None:
         super().__init__()
@@ -249,7 +249,7 @@ class _BehaviorscapeWorker(QRunnable):
                         pm = stats.permanova
                         p_txt = "p<0.001" if pm["p"] < 0.001 else f"p={pm['p']:.3f}"
                         stats_line = (
-                            f"PERMANOVA — behavior explains {pm['R2'] * 100:.0f}% of "
+                            f"PERMANOVA, behavior explains {pm['R2'] * 100:.0f}% of "
                             f"importance variance (pseudo-F={pm['pseudo_F']:.1f}, {p_txt}, "
                             f"{pm['n_groups']} behaviors with ≥2 projects).\n"
                         )
@@ -321,7 +321,7 @@ class _VideoValueWorker(QRunnable):
                 for bid in bids:
                     name = project.behavior_label(bid)
                     self.signals.progress.emit(
-                        f"Video-feature comparison — {project.project_id}: {name}",
+                        f"Video-feature comparison: {project.project_id}: {name}",
                         done / total)
                     results.append(video_value.run_video_value(
                         trainer, project, str(bid), hsplit, n_seeds=self.n_seeds,
@@ -392,7 +392,7 @@ class _R3DValueWorker(QRunnable):
                 for bid in bids:
                     name = project.behavior_label(bid)
                     self.signals.progress.emit(
-                        f"R3D comparison — {project.project_id}: {name}", done / total)
+                        f"R3D comparison: {project.project_id}: {name}", done / total)
                     results.append(r3d_value.run_r3d_value(
                         trainer, project, str(bid), hsplit, n_seeds=self.n_seeds,
                         decompose=self.decompose,
@@ -485,7 +485,7 @@ class _BenchmarkWorker(QRunnable):
 
 
 class _ReviewEffortWorker(QRunnable):
-    """Human clip-review effort ledger — a cheap read of the decision logs."""
+    """Human clip-review effort ledger: a cheap read of the decision logs."""
 
     def __init__(self, projects, out_dir, break_sec: float, batch_sec: float) -> None:
         super().__init__()
@@ -534,7 +534,7 @@ class _ReviewEffortWorker(QRunnable):
 
 
 class _UmapWorker(QRunnable):
-    """Build the all-project embedding, then draw it — both off the UI thread."""
+    """Build the all-project embedding, then draw it, both off the UI thread."""
 
     def __init__(self, projects, behaviors, emb_settings, plot_settings, out_dir) -> None:
         super().__init__()
@@ -573,7 +573,7 @@ class _UmapWorker(QRunnable):
 
 
 class _UmapRenderWorker(QRunnable):
-    """Redraw a saved embedding with new plot settings — no reducer, no training.
+    """Redraw a saved embedding with new plot settings, no reducer, no training.
 
     Split from :class:`_UmapWorker` because that is the whole workflow of this tab:
     the coordinates cost minutes, the picture costs a second, and tuning label
@@ -635,7 +635,7 @@ def _umap_summary_from_meta(frame, meta: dict) -> str:
     sb, sp = qc.get("silhouette_behavior_feat"), qc.get("silhouette_project_feat")
     if sb is not None and sp is not None:
         verdict = ("behavior structure dominates" if sb > sp else
-                   "PROJECT identity dominates — the clusters are largely assays, "
+                   "PROJECT identity dominates: the clusters are largely assays, "
                    "not acts")
         lines.append(f"Feature-space silhouette: behavior {sb:+.3f} vs "
                      f"project {sp:+.3f} → {verdict}.")
@@ -673,9 +673,9 @@ class _FigurePopout(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
 
         bar = QHBoxLayout()
-        fit_btn = QPushButton("Fit to window"); fit_btn.clicked.connect(self._fit_to_window)
+        fit_btn = QPushButton("Fit to Window"); fit_btn.clicked.connect(self._fit_to_window)
         full_btn = QPushButton("100%"); full_btn.clicked.connect(self._actual_size)
-        save_btn = QPushButton("Save copy…"); save_btn.clicked.connect(self._save)
+        save_btn = QPushButton("Save Copy…"); save_btn.clicked.connect(self._save)
         bar.addWidget(fit_btn); bar.addWidget(full_btn); bar.addStretch(); bar.addWidget(save_btn)
         root.addLayout(bar)
 
@@ -777,7 +777,7 @@ class _ImageStrip(QScrollArea):
         super().__init__()
         self.setWidgetResizable(True)
         # Thumbnails are sized to the pane, so a horizontal scrollbar would only
-        # ever mean the sizing was wrong — never let one appear.
+        # ever mean the sizing was wrong: never let one appear.
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._host = QWidget()
         self._grid = QGridLayout(self._host)
@@ -811,7 +811,7 @@ class _ImageStrip(QScrollArea):
     def _rebuild(self) -> None:
         self._clear()
         if not self._items:
-            empty = QLabel("No figures yet — run this analysis to populate the panel.")
+            empty = QLabel("No figures yet: run this analysis to populate the panel.")
             empty.setStyleSheet("color:#6c7086; padding: 24px;")
             self._grid.addWidget(empty, 0, 0)
             return
@@ -825,7 +825,7 @@ class _ImageStrip(QScrollArea):
         avail = max(240, self.viewport().width() - reserve)
         self._last_w = self.viewport().width()
         # The label's border is drawn *inside* the widget, so each thumbnail
-        # occupies its pixmap plus the frame — budget for it when dividing the
+        # occupies its pixmap plus the frame: budget for it when dividing the
         # width, or the last column overflows by exactly the border.
         pad = 2 * _ClickableThumbnail.BORDER_PX
         cols = max(1, (avail + sp) // (self._MIN_THUMB_W + pad + sp))
@@ -930,12 +930,12 @@ class _ResultPanel(QWidget):
         self._folder_btn.clicked.connect(self._open_folder)
         self._folder_btn.setEnabled(False)
         # Opt-in (learning-curve tab only): redraw this tab's figures from the
-        # saved point CSVs using the current plotting code — no retraining. Wired
+        # saved point CSVs using the current plotting code, no retraining. Wired
         # by enable_rerender(); hidden otherwise.
         self._rerender_fn = None
         self._rerender_btn = QPushButton("Re-render Figures")
         self._rerender_btn.setToolTip(
-            "Redraw these figures from the saved data (no retraining) — use after a "
+            "Redraw these figures from the saved data (no retraining), use after a "
             "plotting change to refresh an existing run.")
         self._rerender_btn.clicked.connect(self._do_rerender)
         self._rerender_btn.setVisible(False)
@@ -945,7 +945,7 @@ class _ResultPanel(QWidget):
         self._csv_btn.clicked.connect(self._export_data)
         self._copy_btn = QPushButton("Copy Data (clipboard)")
         self._copy_btn.setToolTip(
-            "Copy the selected data table to the clipboard as tab-separated values — "
+            "Copy the selected data table to the clipboard as tab-separated values, "
             "paste straight into Excel, Prism, GraphPad, or Origin.")
         self._copy_btn.clicked.connect(self._copy_data)
         self._png_btn.setEnabled(False)
@@ -1060,7 +1060,7 @@ class _ResultPanel(QWidget):
         err = None
         try:
             n = int(self._rerender_fn(lc_dir))
-        except Exception as exc:  # noqa: BLE001 — surface, never crash the tab
+        except Exception as exc:  # noqa: BLE001, surface, never crash the tab
             err = exc
         finally:
             QApplication.restoreOverrideCursor()  # single restore (see err below)
@@ -1171,7 +1171,7 @@ class _ResultPanel(QWidget):
         csv.writer(buf, delimiter="\t", lineterminator="\n").writerows(rows)
         QApplication.clipboard().setText(buf.getvalue())
         n = max(0, len(rows) - 1)
-        self._notify(f"Copied {n} rows (tab-separated) to clipboard — paste into your graphing app.")
+        self._notify(f"Copied {n} rows (tab-separated) to clipboard, paste into your graphing app.")
 
     def _notify(self, msg: str) -> None:
         win = self.window()
@@ -1212,9 +1212,9 @@ def _relax_forms(obj) -> None:
 
     The settings forms were written for a full-width tab, so labels like
     "Seed exemplars (define the behavior):" set a minimum width the ~390 px
-    column cannot honour and the row gets clipped.  WrapLongRows drops the
-    field onto its own line instead whenever the row will not fit — which is
-    also the only display-scaling-safe behaviour here, since the label width
+    column cannot honor and the row gets clipped.  WrapLongRows drops the
+    field onto its own line instead whenever the row will not fit, which is
+    also the only display-scaling-safe behavior here, since the label width
     grows with the user's DPI setting.
     """
     layout = obj.layout() if isinstance(obj, QWidget) else obj
@@ -1235,7 +1235,7 @@ def _split_tab(left_items: list, panel: QWidget, *, left_chars: int = 64) -> QWi
     """Build an analysis tab as *settings/explanation left, results right*.
 
     The left column is scrollable and stays narrow; the results panel takes
-    every remaining pixel, which is the whole point — figures are the output,
+    every remaining pixel, which is the whole point, figures are the output,
     the settings are read once.  The splitter is user-draggable and the left
     side is collapsible, so the figures can be given the entire tab.
 
@@ -1282,8 +1282,8 @@ def _split_tab(left_items: list, panel: QWidget, *, left_chars: int = 64) -> QWi
         # Measured, not hard-coded: character width tracks the font, which
         # tracks the display-scaling factor, and the floor guarantees the
         # settings are never clipped.  Deferred to the event loop because the
-        # window's stylesheet — which changes every widget's padding, and so
-        # its minimum width — is applied after the tabs are built.
+        # window's stylesheet: which changes every widget's padding, and so
+        # its minimum width: is applied after the tabs are built.
         fm = host.fontMetrics()
         sb = scroll.verticalScrollBar().sizeHint().width()
         wanted = max(fm.averageCharWidth() * left_chars,
@@ -1311,15 +1311,15 @@ def _split_tab(left_items: list, panel: QWidget, *, left_chars: int = 64) -> QWi
 #          "choice" ([(shown, value), …]) · "text" (placeholder,)
 
 _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
-    ("Rows — what goes into the map", [
+    ("Rows: what goes into the map", [
         ("include_no_behavior", "Include 'no behavior' background", "bool", (),
-         "Add the unlabelled background class. It is usually the biggest group and\n"
-         "swamps the legend — but it is the only way to see whether a behavior is\n"
+         "Add the unlabeled background class. It is usually the biggest group and\n"
+         "swamps the legend: but it is the only way to see whether a behavior is\n"
          "separable from 'nothing in particular' rather than just from other behaviors."),
         ("max_rows_per_behavior", "Max clips per (project · behavior)", "int",
          (0, 50000, 100),
-         "Cap on how many labelled clips each behavior contributes. 0 = no cap.\n"
-         "Without a cap the map is dominated by whichever assay labelled the most,\n"
+         "Cap on how many labeled clips each behavior contributes. 0 = no cap.\n"
+         "Without a cap the map is dominated by whichever assay labeled the most,\n"
          "and UMAP's local structure follows density."),
         ("max_rows_total", "Max clips overall", "int", (0, 500000, 1000),
          "Global cap, applied after the per-behavior one, proportionally by group so\n"
@@ -1327,13 +1327,13 @@ _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
          "takes a few minutes."),
         ("min_rows_per_behavior", "Drop groups with fewer clips than", "int",
          (0, 5000, 5),
-         "A cluster of three points still gets a colour, a label and a hull, and\n"
+         "A cluster of three points still gets a color, a label and a hull, and\n"
          "means nothing. Groups below this are dropped and reported."),
         ("min_confidence", "Minimum reviewer confidence", "float", (0.0, 1.0, 0.1, 2),
          "Keep only clips at or above this confidence. 0 keeps everything, which is\n"
          "usually what a map wants; the held-out accuracy analyses use 1.0."),
         ("exclude_imported", "Exclude imported clips", "bool", (),
-         "Drop 'imported:*' rows — clips copied in from another project. Leaving them\n"
+         "Drop 'imported:*' rows, clips copied in from another project. Leaving them\n"
          "in plots the same clip twice under two different project names."),
         ("exclude_refine_only", "Exclude temporal-feedback corrections", "bool", (),
          "Drop reviewer FP/FN correction rows. They are deliberately atypical examples,\n"
@@ -1341,7 +1341,7 @@ _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
         ("sample_seed", "Subsampling seed", "int", (0, 999999, 1),
          "Fixes which clips are drawn when a cap applies, so a map is reproducible."),
     ]),
-    ("Feature space — what describes a point", [
+    ("Feature space: what describes a point", [
         ("use_pose", "Pose geometry", "bool", (),
          "Body-part angles, curvature, positions and pairwise distances."),
         ("use_kinematics", "Kinematics", "bool", (),
@@ -1350,7 +1350,7 @@ _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
          "Pixel-derived motion. Switch it off to ask whether the map is driven by\n"
          "appearance rather than posture."),
         ("use_r3d", "R3D appearance embedding (512 dims)", "bool", (),
-         "The learned appearance embedding. 512 columns — enough to outvote every\n"
+         "The learned appearance embedding. 512 columns, enough to outvote every\n"
          "handcrafted feature combined, so try the map both ways."),
         ("use_context", "Context (ROI / object / zone)", "bool", (),
          "Distances and angles to objects, ROIs and arena features. Off by default:\n"
@@ -1360,17 +1360,17 @@ _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
          "Distance to nearest animal, approach velocity, heading alignment, contact.\n"
          "Present only in multi-animal projects."),
         ("feature_space", "Feature space across projects", "choice",
-         ([("Shared — intersect columns (comparable)", "shared"),
-           ("Union — every column, gaps filled", "union")],),
+         ([("Shared: intersect columns (comparable)", "shared"),
+           ("Union: every column, gaps filled", "union")],),
          "Projects do not share a column set. 'Shared' embeds on the intersection so\n"
          "every point is described by the same measurements. 'Union' keeps everything\n"
-         "and fills what a project lacks — faster to set up, and it guarantees a\n"
+         "and fills what a project lacks: faster to set up, and it guarantees a\n"
          "project-shaped blob you can mistake for biology."),
         ("nan_policy", "Missing values", "choice",
          ([("Fill with the column median", "median"),
            ("Fill with zero", "zero"),
            ("Drop the whole column", "drop_columns")],),
-         "How gaps are filled — mostly relevant under 'Union', where a project simply\n"
+         "How gaps are filled: mostly relevant under 'Union', where a project simply\n"
          "lacks a column. 'Drop the whole column' is the safe option and collapses\n"
          "union back to roughly the shared set."),
         ("drop_zero_variance", "Drop constant columns", "bool", (),
@@ -1384,23 +1384,23 @@ _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
          "0 = keep all. A blunt way to stop one large family (the 512 R3D dims)\n"
          "dominating the distance simply by column count."),
     ]),
-    ("Scaling — putting the columns on a common footing", [
+    ("Scaling: putting the columns on a common footing", [
         ("scaler", "Column scaling", "choice",
          ([("Z-score (mean / SD)", "zscore"),
            ("Robust (median / IQR)", "robust"),
            ("Min-max to [0, 1]", "minmax"),
-           ("None — raw units", "none")],),
+           ("None: raw units", "none")],),
          "Never leave this at 'None' with mixed units: whichever feature happens to be\n"
          "measured in the largest numbers then decides the whole map. 'Robust' is the\n"
          "better choice when a few extreme clips are stretching everything."),
         ("per_project_zscore", "Standardize within each project first", "bool", (),
-         "Centres each project on its own mean before pooling, removing per-rig offsets\n"
-         "(lighting, camera height, arena scale) — and removing any genuine between-assay\n"
+         "Centers each project on its own mean before pooling, removing per-rig offsets\n"
+         "(lighting, camera height, arena scale), and removing any genuine between-assay\n"
          "difference with them. Run it both ways and compare the QC numbers."),
         ("pca_components", "PCA components before the reducer", "int", (0, 500, 5),
          "0 = off. 50 is the conventional pre-reduction: it denoises, makes UMAP several\n"
          "times faster, and barely changes the layout. The run reports how much variance\n"
-         "it kept — raise it if that number is low."),
+         "it kept: raise it if that number is low."),
         ("pca_whiten", "Whiten the PCA components", "bool", (),
          "Rescale every component to unit variance. Stops the first component dominating\n"
          "the distance; also amplifies noisy trailing components."),
@@ -1431,13 +1431,13 @@ _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
          "Euclidean after z-scoring is standard. Cosine ignores overall magnitude and\n"
          "often behaves better when the R3D embedding dominates the column count."),
         ("n_components", "Output dimensions", "int", (2, 3, 1),
-         "2 for a figure. 3 only if you want the coordinates for something else — the\n"
+         "2 for a figure. 3 only if you want the coordinates for something else, the\n"
          "figure always plots the first two."),
         ("set_op_mix_ratio", "set_op_mix_ratio", "float", (0.0, 1.0, 0.05, 2),
-         "Fuzzy union (1.0) vs fuzzy intersection (0.0) of the local neighbourhoods.\n"
+         "Fuzzy union (1.0) vs fuzzy intersection (0.0) of the local neighborhoods.\n"
          "Below 1.0 breaks weakly-connected regions apart."),
         ("local_connectivity", "local_connectivity", "float", (0.5, 10.0, 0.5, 1),
-         "How many neighbours are assumed fully connected. Raise to 2-4 if a\n"
+         "How many neighbors are assumed fully connected. Raise to 2-4 if a\n"
          "high-dimensional feature space shatters into speckle."),
         ("repulsion_strength", "repulsion_strength", "float", (0.1, 10.0, 0.1, 2),
          "Weight on negative samples during layout. Higher = more empty space between\n"
@@ -1453,36 +1453,36 @@ _UMAP_EMBED_SPEC: list[tuple[str, list[tuple]]] = [
          "random is faster to start and occasionally escapes a bad spectral layout."),
         ("densmap", "densMAP (preserve local density)", "bool", (),
          "Make a tight cluster *look* tight. Off by default because it changes what\n"
-         "area on the page means — with it on, a large blob is a diffuse behavior\n"
+         "area on the page means: with it on, a large blob is a diffuse behavior\n"
          "rather than simply a common one."),
         ("dens_lambda", "densMAP λ", "float", (0.0, 20.0, 0.5, 1),
          "How strongly densMAP enforces the density match. Only used when densMAP is on."),
         ("random_state", "Random seed (−1 = none)", "int", (-1, 999999, 1),
          "Fixes the layout across runs. UMAP disables its own parallelism when a seed\n"
-         "is set, so −1 is faster but no longer reproducible — don't publish from −1."),
+         "is set, so −1 is faster but no longer reproducible, don't publish from −1."),
         ("tsne_perplexity", "t-SNE perplexity", "float", (5.0, 200.0, 5.0, 1),
-         "Effective neighbourhood size for t-SNE (5-50 typical). Ignored by UMAP and PCA;\n"
+         "Effective neighborhood size for t-SNE (5-50 typical). Ignored by UMAP and PCA;\n"
          "automatically lowered if the point count cannot support it."),
     ]),
     ("Grouping", [
         ("pool_behaviors_by_name", "Pool same-named behaviors across projects", "bool", (),
          "OFF (default): groups are 'Project · Behavior', so an EPM Rear and an\n"
-         "open-field Rear stay separate — the convention the rest of this suite\n"
+         "open-field Rear stay separate: the convention the rest of this suite\n"
          "enforces, because they are different measurements of arguably different acts.\n"
          "ON: they merge, which is how you ask whether the two land in the same place."),
     ]),
 ]
 
 _UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
-    ("Colour & points", [
-        ("color_by", "Colour points by", "choice",
+    ("Color & points", [
+        ("color_by", "Color points by", "choice",
          ([("Project · Behavior (assay-scoped)", "group"),
            ("Project", "project"),
            ("Behavior name (pooled across projects)", "behavior")],),
-         "Colouring by Project is the fastest check on whether the map is really a\n"
-         "behavior map. This also decides what gets labelled."),
+         "Coloring by Project is the fastest check on whether the map is really a\n"
+         "behavior map. This also decides what gets labeled."),
         ("palette", "Palette", "choice",
-         ([("Distinct — best above ~15 groups", "distinct"),
+         ([("Distinct: best above ~15 groups", "distinct"),
            ("ABEL suite palette", "abel"),
            ("One hue per project, shades within", "assay_shades"),
            ("Matplotlib tab20", "tab20"),
@@ -1507,15 +1507,15 @@ _UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
     ]),
     ("Cluster labels", [
         ("label_mode", "Label mode", "choice",
-         ([("Offset — pushed off the cluster, with a leader line", "offset"),
+         ([("Offset: pushed off the cluster, with a leader line", "offset"),
            ("On the cluster", "anchor"),
            ("No labels (legend only)", "none")],),
          "On a dense map an on-cluster label sits inside the points it names and\n"
-         "collides with its neighbours. Offset is the readable choice."),
+         "collides with its neighbors. Offset is the readable choice."),
         ("label_anchor", "Anchor point of each cluster", "choice",
-         ([("Medoid — a real clip, always inside the cluster", "medoid"),
-           ("Centroid — the mean position", "centroid"),
-           ("Density peak — the visual centre of mass", "density")],),
+         ([("Medoid: a real clip, always inside the cluster", "medoid"),
+           ("Centroid: the mean position", "centroid"),
+           ("Density peak: the visual center of mass", "density")],),
          "Where the label refers to and the leader line starts. A centroid can land in\n"
          "the empty middle of a crescent-shaped cluster; a medoid never does."),
         ("label_offset", "Label distance from its cluster", "float",
@@ -1525,13 +1525,13 @@ _UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
          "Under the 'Perimeter' push below this means something different: it is the\n"
          "inset of the label ring from the figure edge, so smaller = further out."),
         ("label_push", "Direction the label is pushed", "choice",
-         ([("Radial — straight out from the map's centre", "radial"),
-           ("Sparse — toward the emptiest nearby direction", "sparse"),
-           ("Perimeter — fan every label out to the figure's rim", "perimeter"),
+         ([("Radial: straight out from the map's center", "radial"),
+           ("Sparse: toward the emptiest nearby direction", "sparse"),
+           ("Perimeter: fan every label out to the figure's rim", "perimeter"),
            ("Up", "up"), ("No push", "none")],),
          "'Sparse' keeps labels near their clusters and is best when clusters are\n"
          "interleaved. 'Perimeter' moves every label clear of the data and packs them\n"
-         "around the edge in bearing order — the readable choice when 30+ clusters\n"
+         "around the edge in bearing order: the readable choice when 30+ clusters\n"
          "pile into one dense region."),
         ("label_repel_iters", "Overlap-resolution passes", "int", (0, 3000, 50),
          "0 disables repulsion, and labels may then sit on top of each other.\n"
@@ -1560,14 +1560,14 @@ _UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
          ([("bold", "bold"), ("normal", "normal")],),
          "Bold survives being drawn over scattered points; normal is calmer on a\n"
          "sparse map."),
-        ("label_color", "Label colour", "choice",
+        ("label_color", "Label color", "choice",
          ([("Match the cluster", "cluster"),
-           ("Plain foreground colour", "foreground")],),
+           ("Plain foreground color", "foreground")],),
          "Matching the cluster is what lets a reader follow a label to its points\n"
          "without tracing the leader line."),
         ("label_halo", "Outline (halo) width behind the text", "float",
          (0.0, 10.0, 0.5, 1),
-         "A background-coloured stroke around the glyphs — the cheapest way to keep\n"
+         "A background-colored stroke around the glyphs: the cheapest way to keep\n"
          "text legible over points without an opaque box. Ignored when the box is on."),
         ("label_box", "Draw a box behind each label", "bool", (),
          "Very legible, and it takes up more room, which makes the repulsion push\n"
@@ -1582,20 +1582,20 @@ _UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
         ("label_min_points", "Only label groups with at least N clips", "int",
          (0, 10000, 5),
          "0 = label everything. Small groups produce the most crowding for the least\n"
-         "information; they stay coloured and in the legend either way."),
+         "information; they stay colored and in the legend either way."),
     ]),
     ("Leader lines", [
         ("leader_lines", "Draw leader lines", "bool", (),
          "The line from the cluster to its label. Without it a large offset is\n"
-         "ambiguous — leave it on whenever the offset is non-zero."),
+         "ambiguous: leave it on whenever the offset is non-zero."),
         ("leader_width", "Line width", "float", (0.0, 4.0, 0.1, 2), "Line width in points."),
         ("leader_alpha", "Line opacity", "float", (0.0, 1.0, 0.05, 2),
          "Keep it below 1.0 so the lines read as annotation rather than data."),
         ("leader_style", "Line style", "choice",
          ([("solid", "-"), ("dashed", "--"), ("dotted", ":"), ("dash-dot", "-.")],),
          "Dotted reads as annotation most clearly on a dense map."),
-        ("leader_color_by_cluster", "Colour the line like its cluster", "bool", (),
-         "Otherwise every line is the theme's muted grey, which is calmer but harder\n"
+        ("leader_color_by_cluster", "Color the line like its cluster", "bool", (),
+         "Otherwise every line is the theme's muted gray, which is calmer but harder\n"
          "to follow when lines cross."),
     ]),
     ("Cluster overlays", [
@@ -1607,13 +1607,13 @@ _UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
          "Shows each cluster's extent. The ellipse is the most robust to stragglers;\n"
          "a hull is exact but one outlier stretches it across the figure."),
         ("overlay_alpha", "Shading opacity", "float", (0.0, 1.0, 0.02, 2),
-         "Keep it low (0.08-0.15) — with 30+ overlapping clusters this is the setting\n"
+         "Keep it low (0.08-0.15), with 30+ overlapping clusters this is the setting\n"
          "that decides whether the figure is readable at all."),
         ("overlay_edge_width", "Outline width", "float", (0.0, 4.0, 0.1, 2),
          "0 = fill only. An outline helps when the fill is very faint."),
         ("overlay_quantile", "Fraction of points enclosed", "float",
          (0.1, 1.0, 0.05, 2),
-         "For a hull, the most central fraction of the cluster to enclose — trimming\n"
+         "For a hull, the most central fraction of the cluster to enclose, trimming\n"
          "the outliers a convex hull would otherwise stretch to. For a density\n"
          "contour, the fraction of probability mass inside the line."),
         ("centroid_marker", "Mark each cluster's anchor", "bool", (),
@@ -1621,18 +1621,18 @@ _UMAP_PLOT_SPEC: list[tuple[str, list[tuple]]] = [
     ]),
     ("Frame, legend & export", [
         ("facet_by", "Split into panels by", "choice",
-         ([("None — one map", "none"),
+         ([("None: one map", "none"),
            ("Project", "project"), ("Behavior name", "behavior")],),
          "One small panel per project or behavior, all sharing the single embedding's\n"
          "axes so panels are directly comparable. The best answer to a map too crowded\n"
          "to label."),
         ("facet_cols", "Panels per row", "int", (1, 8, 1), "Grid width when faceting."),
-        ("facet_context", "Grey context points behind each panel", "bool", (),
-         "Draws the rest of the map in grey so each panel is read against the whole."),
+        ("facet_context", "Gray context points behind each panel", "bool", (),
+         "Draws the rest of the map in gray so each panel is read against the whole."),
         ("legend", "Legend", "choice",
          ([("Right of the map", "right"), ("Below the map", "below"),
            ("None", "none")],),
-         "With labels on the map itself the legend is often redundant — turning it off\n"
+         "With labels on the map itself the legend is often redundant, turning it off\n"
          "gives the figure back a third of its width."),
         ("legend_cols", "Legend columns", "int", (1, 8, 1),
          "Multiple columns keep a 40-group legend from running off the page."),
@@ -1740,7 +1740,7 @@ def _read_settings_widgets(spec: list, store: dict) -> dict:
 class ValidationWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ABEL — Validation & Meta-Analysis Suite")
+        self.setWindowTitle("ABEL: Validation & Meta-Analysis Suite")
         # Sized for the split layout: ~390 px of settings plus a results pane
         # wide enough for two side-by-side figures.
         self.resize(1560, 900)
@@ -1827,7 +1827,7 @@ class ValidationWindow(QMainWindow):
         pren = QPushButton("Rename…")
         pren.setToolTip(
             "Give this project a different display name (or double-click it).\n\n"
-            "The new name replaces the original everywhere downstream — every figure\n"
+            "The new name replaces the original everywhere downstream, every figure\n"
             "title, table, and export. Your project on disk is NOT modified.")
         pren.clicked.connect(self._rename_project)
         rem = QPushButton("Remove"); rem.clicked.connect(self._remove_project)
@@ -1844,7 +1844,7 @@ class ValidationWindow(QMainWindow):
         self._autoadd_metric.setToolTip(
             "Metric used to judge each behavior's existing trained model.\n"
             "F1: interpretable balance of precision/recall at the operating point.\n"
-            "PR-AUC: threshold-independent — more robust for rare behaviors.")
+            "PR-AUC: threshold-independent, more robust for rare behaviors.")
         af.addRow("Strength metric:", self._autoadd_metric)
         self._autoadd_thresh = QDoubleSpinBox()
         self._autoadd_thresh.setRange(0.0, 1.0)
@@ -1854,12 +1854,12 @@ class ValidationWindow(QMainWindow):
             "Behaviors whose model scores below this are added but left unchecked. "
             "Behaviors with no trained model are also left unchecked.")
         af.addRow("Min model strength:", self._autoadd_thresh)
-        scan_btn = QPushButton("Scan directory && add projects…")
+        scan_btn = QPushButton("Scan Directory && Add Projects…")
         scan_btn.setToolTip("Recursively find every ABEL project under a folder, add them all, "
                             "and check only behaviors whose model clears the threshold.")
         scan_btn.clicked.connect(self._auto_add_directory)
         af.addRow(scan_btn)
-        apply_btn = QPushButton("Apply strength filter to loaded projects")
+        apply_btn = QPushButton("Apply Strength Filter to Loaded Projects")
         apply_btn.setToolTip("Re-check behaviors across the already-loaded projects using the "
                              "metric + threshold above (overrides current checkbox selection).")
         apply_btn.clicked.connect(self._apply_strength_to_loaded)
@@ -1879,12 +1879,12 @@ class ValidationWindow(QMainWindow):
         ren = QPushButton("Rename…")
         ren.setToolTip(
             "Give this behavior a different display name (or double-click it).\n\n"
-            "The new name is used everywhere downstream — every figure, table and export —\n"
+            "The new name is used everywhere downstream: every figure, table and export,\n"
             "as if it were the behavior's real name. Your project on disk is NOT modified.\n\n"
             "Rename behaviors to MATCH across projects (e.g. 'Grooming' → 'Groom') and the\n"
             "generalization figure pools them into a single bar.")
         ren.clicked.connect(self._rename_behavior)
-        reset = QPushButton("Reset name")
+        reset = QPushButton("Reset Name")
         reset.setToolTip("Restore this behavior's original name from the project.")
         reset.clicked.connect(self._reset_behavior_name)
         beh_btns.addWidget(ren); beh_btns.addWidget(reset); beh_btns.addStretch(1)
@@ -1899,14 +1899,14 @@ class ValidationWindow(QMainWindow):
         split.setSizes([400, 600])
         lay.addWidget(split, 1)
 
-        # saved setup: projects loaded, behaviors checked, renames — and where runs go
+        # saved setup: projects loaded, behaviors checked, renames, and where runs go
         sess_box = QGroupBox("Validation session (saved setup)")
         sv = QVBoxLayout(sess_box)
-        self._session_lbl = QLabel("No session — runs go to the unfiled folder.")
+        self._session_lbl = QLabel("No session: runs go to the unfiled folder.")
         self._session_lbl.setWordWrap(True)
         self._session_lbl.setToolTip(
             "A session records which projects are loaded, which behaviors are checked,\n"
-            "and every rename you applied — and files each run inside its own folder.")
+            "and every rename you applied: and files each run inside its own folder.")
         sv.addWidget(self._session_lbl)
         srow = QHBoxLayout()
         for text, tip, slot in (
@@ -1942,7 +1942,7 @@ class ValidationWindow(QMainWindow):
         self._out_lbl.setToolTip(
             "Where run results are written. Save a session and runs go into that "
             "session's runs/ folder instead.")
-        out_btn = QPushButton("Choose output folder…"); out_btn.clicked.connect(self._choose_output)
+        out_btn = QPushButton("Choose Output Folder…"); out_btn.clicked.connect(self._choose_output)
         out_row.addWidget(self._out_lbl, 1); out_row.addWidget(out_btn)
         form.addRow("Output folder:", self._wrap(out_row))
         lay.addWidget(box)
@@ -1961,7 +1961,7 @@ class ValidationWindow(QMainWindow):
             "Export Everything writes all figures and data CSVs to a folder of your choice.\n"
             "\n"
             "The default tick set is the manuscript's Figure 3. Every panel of it is written\n"
-            "pre-pivoted to prism/FIGURES/ — one file per panel, paste-ready, with INDEX.txt\n"
+            "pre-pivoted to prism/FIGURES/: one file per panel, paste-ready, with INDEX.txt\n"
             "naming the Prism table type for each. Nothing there is hand-assembled, so\n"
             "adding behaviors or a new rarest behavior needs no reformatting.")
         left.append(intro)
@@ -1973,14 +1973,14 @@ class ValidationWindow(QMainWindow):
             ANALYSIS_THROUGHPUT:
                 "Times feature extraction and training on one session per project. "
                 "Extraction is a slow full rebuild. Dense inference is deliberately "
-                "excluded here — it rewrites the project's traces; run it from the "
+                "excluded here: it rewrites the project's traces; run it from the "
                 "Throughput tab if you want it.",
             ANALYSIS_AL_CURVE:
                 "The most expensive analysis: it retrains at every acquisition step, "
                 "for two arms, for every seed.",
             ANALYSIS_RARE_DISCOVERY:
                 "Clip hunting: essence / active learning / UMAP vs random and a "
-                "whole-video scan. Expensive — it trains a model at every effort "
+                "whole-video scan. Expensive, it trains a model at every effort "
                 "checkpoint, for every arm, for every behavior.",
             ANALYSIS_BEHAVIORSCAPE:
                 "Pools feature importance across every project, so it is most "
@@ -1989,7 +1989,7 @@ class ValidationWindow(QMainWindow):
             ANALYSIS_REVIEW_EFFORT:
                 "How much human time the labels cost: seconds per clip, total active "
                 "review hours, and review hours per hour of video. Reads each "
-                "project's review decision log — nothing is trained, so it is nearly "
+                "project's review decision log: nothing is trained, so it is nearly "
                 "free to tick.",
         }
         for key in FULL_SUITE:
@@ -2006,12 +2006,12 @@ class ValidationWindow(QMainWindow):
             self._suite_checks[key] = cb
             av.addWidget(cb)
         row = QHBoxLayout()
-        fig3_btn = QPushButton("Figure 3 set")
+        fig3_btn = QPushButton("Figure 3 Set")
         fig3_btn.setToolTip(
             "Tick exactly the analyses behind the manuscript's Figure 3: learning "
             "curves, ablation, discrimination, generalization, rare-behavior "
             "discovery, behaviorscape and video value. Every panel of the figure "
-            "then lands pre-pivoted in prism/FIGURES — paste each file into the "
+            "then lands pre-pivoted in prism/FIGURES: paste each file into the "
             "Prism table type its INDEX.txt names.\n\n"
             "Active learning is NOT in this set: no Figure 3 panel uses it and it "
             "is the slowest analysis in the suite. Tick it separately if you want "
@@ -2019,10 +2019,10 @@ class ValidationWindow(QMainWindow):
         fig3_btn.clicked.connect(lambda: [
             cb.setChecked(k in FIGURE3_ANALYSES)
             for k, cb in self._suite_checks.items()])
-        all_btn = QPushButton("Select all")
+        all_btn = QPushButton("Select All")
         all_btn.clicked.connect(
             lambda: [cb.setChecked(True) for cb in self._suite_checks.values()])
-        none_btn = QPushButton("Select none")
+        none_btn = QPushButton("Select None")
         none_btn.clicked.connect(
             lambda: [cb.setChecked(False) for cb in self._suite_checks.values()])
         row.addWidget(fig3_btn); row.addWidget(all_btn); row.addWidget(none_btn)
@@ -2039,9 +2039,9 @@ class ValidationWindow(QMainWindow):
             "font-size:11px;")
         pv.addWidget(preset_lbl)
         note = QLabel(
-            "These are deliberately not editable — the point of this tab is that the run "
+            "These are deliberately not editable: the point of this tab is that the run "
             "is reproducible and defensible without anyone tuning it. The shared held-out "
-            "settings on the Projects tab are still honoured. Use the individual analysis "
+            "settings on the Projects tab are still honored. Use the individual analysis "
             "tabs if you need to change a setting.")
         note.setWordWrap(True)
         note.setStyleSheet("color:#6c7086; font-size:11px;")
@@ -2152,7 +2152,7 @@ class ValidationWindow(QMainWindow):
                            f"{html.escape(current)}</h3>")
             colour = colours.get(f.kind, "#cdd6f4")
             tag = tags.get(f.kind)
-            prefix = (f"<b style='color:{colour};'>{tag} — </b>" if tag else "")
+            prefix = (f"<b style='color:{colour};'>{tag}, </b>" if tag else "")
             out.append(
                 f"<p style='margin:0 0 8px;'>"
                 f"<span style='color:{colour};'>{prefix}"
@@ -2190,7 +2190,7 @@ class ValidationWindow(QMainWindow):
             out.pdf_path = pdf_path
             self._log_msg(f"Summary PDF → {pdf_path}")
             return pdf_path
-        except Exception as exc:  # noqa: BLE001 — HTML fallback is always there
+        except Exception as exc:  # noqa: BLE001, HTML fallback is always there
             self._log_msg(f"PDF RENDER FAILED: {exc}")
             return None
         finally:
@@ -2204,12 +2204,12 @@ class ValidationWindow(QMainWindow):
         target = pdf or (self._last_run.summary_html if self._last_run else None)
         if not target:
             QMessageBox.warning(self, "No report",
-                                "The summary report was not produced — see the Log tab.")
+                                "The summary report was not produced: see the Log tab.")
             return
         if pdf is None:
             QMessageBox.information(
                 self, "PDF unavailable",
-                "The PDF could not be rendered, so the summary HTML will open instead — "
+                "The PDF could not be rendered, so the summary HTML will open instead, "
                 "print it to PDF from your browser. See the Log tab for the reason.")
         self._open_path(Path(target))
 
@@ -2288,12 +2288,12 @@ class ValidationWindow(QMainWindow):
         form.addRow("Clip budget(s):", self._abl_budgets)
         info = _explain(
             "How to read this: the comparison point is a pose-only Baseline with every\n"
-            "enhancement off. Each bar adds ONE enhancement on its own — video features,\n"
+            "enhancement off. Each bar adds ONE enhancement on its own, video features,\n"
             "probability calibration, adaptive model complexity, feature augmentation, and\n"
-            "co-occurring labels (when the project uses them) — and the final bar enables ALL\n"
+            "co-occurring labels (when the project uses them), and the final bar enables ALL\n"
             "of them together. Bars show ΔF1 vs. the baseline; positive ⇒ that feature helps.\n"
             "Error bars are 95% CIs across seeds; FADED bars overlap 0 (not distinguishable\n"
-            "from baseline — a small ± there is noise, not harm). One chart per clip budget.")
+            "from baseline: a small ± there is noise, not harm). One chart per clip budget.")
         form.addRow(info)
         run = QPushButton("Run Ablation"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_ABLATION]))
@@ -2315,7 +2315,7 @@ class ValidationWindow(QMainWindow):
             "closest together (the ones most likely to be confused) are kept.")
         form.addRow("Max behavior pairs:", self._disc_max_pairs)
         info = _explain(
-            "How this differs from Ablation: Ablation asks a DETECTION question — can we\n"
+            "How this differs from Ablation: Ablation asks a DETECTION question, can we\n"
             "find behavior X against everything else? Because 'everything else' is mostly\n"
             "easy negatives, a feature family can look useless there while doing the job\n"
             "that matters: telling two SIMILAR behaviors apart (Freeze vs Groom; Sniff vs Eat).\n\n"
@@ -2323,18 +2323,18 @@ class ValidationWindow(QMainWindow):
             "binary A-vs-B model on just those clips, once per feature family (pose only →\n"
             "+ video → + social), all sharing the same clips and seed, and scores separability\n"
             "with ROC-AUC.\n\n"
-            "Read the LANDSCAPE figure first — it is the whole run, every pair of every\n"
+            "Read the LANDSCAPE figure first: it is the whole run, every pair of every\n"
             "assay, in two panels. LEFT: each point is one behavior pair, placed by how much\n"
             "error pose alone leaves (x, right = pose confuses it) against the share of that\n"
-            "error the best feature family removes (y), coloured by WHICH family. Pairs in\n"
+            "error the best feature family removes (y), colored by WHICH family. Pairs in\n"
             "the shaded band are already solved by pose. Hollow points mean no family\n"
-            "measurably helps. RIGHT: a volcano over every pair × family — how big the gain\n"
+            "measurably helps. RIGHT: a volcano over every pair × family, how big the gain\n"
             "was (x) against how reproducible it was across seeds (y), so a large-but-noisy\n"
             "gain is visibly different from a small-but-rock-solid one.\n\n"
             "The per-project matrix views behind it are the per-assay detail: LEFT = pose-only\n"
             "separability (dark = the model confuses that pair). RIGHT = the share of the pose\n"
             "baseline's REMAINING error each family removes (red = it disambiguates the pair).\n"
-            "Hatched cells were never trained — past the max-pairs cap, or too few clips.")
+            "Hatched cells were never trained: past the max-pairs cap, or too few clips.")
         form.addRow(info)
         run = QPushButton("Run Discrimination"); run.setObjectName("runBtn")
         run.clicked.connect(lambda: self._run([ANALYSIS_DISCRIMINATION]))
@@ -2351,11 +2351,11 @@ class ValidationWindow(QMainWindow):
             "Trains on training-pool subjects, evaluates on held-out subjects.\n"
             "Reports F1 + Cohen's κ vs. held-out reviewed labels.\n\n"
             "This run also produces two further analyses from the SAME held-out predictions\n"
-            "(so they cost no extra training) — pick them from the view dropdown below:\n"
-            "  • Biological readout — does the model reproduce the measure a scorer would\n"
+            "(so they cost no extra training): pick them from the view dropdown below:\n"
+            "  • Biological readout: does the model reproduce the measure a scorer would\n"
             "    report? Per-session time-in-behavior and bout counts, model vs. reviewed,\n"
             "    with Pearson r, Lin's CCC, R² and Bland-Altman bias / limits of agreement.\n"
-            "  • Calibration — a reliability diagram with ECE and Brier score, i.e. whether\n"
+            "  • Calibration: a reliability diagram with ECE and Brier score, i.e. whether\n"
             "    a predicted probability of 0.8 really means right 80% of the time.")
         form.addRow(info)
         run = QPushButton("Run Generalization"); run.setObjectName("runBtn")
@@ -2394,7 +2394,7 @@ class ValidationWindow(QMainWindow):
         box = QGroupBox("Rare-behavior discovery (clip hunting) settings")
         form = QFormLayout(box)
         # Checkbox text cannot word-wrap, so a long label sets a minimum width the
-        # settings column cannot honour — keep the labels terse and put the
+        # settings column cannot honor: keep the labels terse and put the
         # explanation in the tooltip.
         self._rare_auto = QCheckBox("Auto-target the rarest behavior per project")
         self._rare_auto.setChecked(False)
@@ -2402,7 +2402,7 @@ class ValidationWindow(QMainWindow):
             "Per project, rank behaviors by rarity first (cheap) and hunt only "
             "the rarest one.\n"
             "With several projects checked, the rarity pass runs first for each "
-            "project — it reads the dense bout detections only, no model fitting — "
+            "project: it reads the dense bout detections only, no model fitting, "
             "and the whole discovery/effort-to-quality budget then goes to that "
             "project's rarest behavior before moving to the next project.\n"
             "If the rarest behavior has too few confirmed positives to "
@@ -2417,13 +2417,13 @@ class ValidationWindow(QMainWindow):
         self._rare_budget = QSpinBox(); self._rare_budget.setRange(50, 5000); self._rare_budget.setValue(400)
         form.addRow("Review budget (clips):", self._rare_budget)
         self._rare_rarity = QCheckBox("Rarity-scaling figure")
-        self._rare_rarity.setToolTip("Effort vs. prevalence — how the hunt scales as the "
+        self._rare_rarity.setToolTip("Effort vs. prevalence, how the hunt scales as the "
                                      "target behavior gets rarer.")
         self._rare_rarity.setChecked(True)
         form.addRow(self._rare_rarity)
         self._rare_fullpool = QCheckBox("Full segment pool at deployment rarity")
         self._rare_fullpool.setToolTip(
-            "Recommended — the reviewed pool is ~12× enriched for the target, so "
+            "Recommended: the reviewed pool is ~12× enriched for the target, so "
             "scoring against it flatters every method equally and understates how "
             "much work deployment rarity really takes.")
         self._rare_fullpool.setChecked(True)
@@ -2444,7 +2444,7 @@ class ValidationWindow(QMainWindow):
             "a rare behavior. Cross-validated: the definition is built from the seed\n"
             "exemplars and scored only on held-out positives it never saw. Also reports\n"
             "how rare each behavior is (from dense bout detections). The optional\n"
-            "effort-to-quality figure asks the paired question — how much labeling each\n"
+            "effort-to-quality figure asks the paired question, how much labeling each\n"
             "tool needs before the trained model itself is good (held-out F1 / PR-AUC).\n"
             "Check several projects to also get the combined cross-project panels\n"
             "(mean discovery curve, fold-enrichment and effort saved per project).")
@@ -2457,14 +2457,14 @@ class ValidationWindow(QMainWindow):
         # running overnight is the expensive way to learn it.
         phase = QGroupBox("Two-phase run")
         pl = QVBoxLayout(phase)
-        check = QPushButton("1 · Check rarity + examples (fast)")
+        check = QPushButton("1 · Check Rarity + Examples (fast)")
         check.setToolTip(
             "Reads the dense bout detections and the training set's label column "
-            "for every checked project — no model fitting. Reports which behavior "
+            "for every checked project: no model fitting. Reports which behavior "
             "is rarest in each project and whether it has enough confirmed "
             "examples to hunt.")
         check.clicked.connect(self._run_rare_preflight)
-        run = QPushButton("2 · Run discovery on the rare behaviors")
+        run = QPushButton("2 · Run Discovery on the Rare Behaviors")
         run.setObjectName("runBtn")
         run.clicked.connect(self._run_rare_discovery)
         # Stacked, not side-by-side: the settings column is ~390 px wide and
@@ -2472,7 +2472,7 @@ class ValidationWindow(QMainWindow):
         pl.addWidget(check)
         pl.addWidget(run)
         self._rare_preflight_msg = QLabel(
-            "Run the fast check first — it tells you if any project needs more "
+            "Run the fast check first: it tells you if any project needs more "
             "labeled examples before the hunt is worth starting.")
         self._rare_preflight_msg.setWordWrap(True)
         self._rare_preflight_msg.setStyleSheet("color:#a6adc8;")
@@ -2490,11 +2490,11 @@ class ValidationWindow(QMainWindow):
             self._sync_rare_swap_btn)
         pl.addWidget(self._rare_preflight_table)
         # The ranking is a heuristic; the user knows things the files do not (that a
-        # behaviour is gated by the design, that the second-rarest is the
+        # behavior is gated by the design, that the second-rarest is the
         # interesting one).  Let them say so rather than re-running with different
         # exclusions until the table agrees.
         swap_row = QHBoxLayout()
-        self._rare_swap_btn = QPushButton("Hunt the selected behavior instead")
+        self._rare_swap_btn = QPushButton("Hunt the Selected Behavior Instead")
         self._rare_swap_btn.setEnabled(False)
         self._rare_swap_btn.setToolTip(
             "Override the automatic pick for that project. The hunt will target the "
@@ -2542,11 +2542,11 @@ class ValidationWindow(QMainWindow):
         if beh.status == rd.PREFLIGHT_WARN and QMessageBox.question(
             self, "Thin evidence",
             f"{beh.behavior_name} leaves only {beh.n_held_out} examples to "
-            f"discover — the curves will be noisy.\n\nHunt it anyway?",
+            f"discover, the curves will be noisy.\n\nHunt it anyway?",
         ) != QMessageBox.StandardButton.Yes:
             return
         proj.target_override = beh.behavior_id
-        self._log_msg(f"Target override — {proj.project_name}: hunting "
+        self._log_msg(f"Target override: {proj.project_name}: hunting "
                       f"{beh.behavior_name}")
         self._on_preflight_done(self._rare_preflight)   # repaint "← will be hunted"
 
@@ -2587,7 +2587,7 @@ class ValidationWindow(QMainWindow):
             prev = r.get("time_fraction", r.get("bout_rate", float("nan")))
             hunted = " ← will be hunted" if r["would_be_hunted"] else ""
             cells = [r["project"], r["behavior"] + hunted, str(r["rarity_rank"]),
-                     "—" if prev != prev else f"{prev:.4g}",
+                     "-" if prev != prev else f"{prev:.4g}",
                      str(r["confirmed_examples"]), str(r["left_to_discover"]),
                      verdicts.get(r["status"], r["status"])]
             for j, text in enumerate(cells):
@@ -2611,7 +2611,7 @@ class ValidationWindow(QMainWindow):
             if p.target is not None:
                 bits.append(f"{p.project_name}: {p.target.behavior_name} "
                             f"({p.target.n_labeled} examples)")
-        msg = "Will hunt — " + "; ".join(bits) if bits else "Nothing is runnable."
+        msg = "Will hunt: " + "; ".join(bits) if bits else "Nothing is runnable."
         if blocked:
             msg += ("\n⚠ Rarest behavior has too few confirmed examples in: "
                     + "; ".join(f"{p.project_name} ({p.rarest.behavior_name}, "
@@ -2624,7 +2624,7 @@ class ValidationWindow(QMainWindow):
         if dead:
             msg += ("\n⚠ No huntable behavior at all in: "
                     + "; ".join(f"{p.project_name}"
-                                + (f" — {p.error}" if p.error else "")
+                                + (f", {p.error}" if p.error else "")
                                 for p in dead))
         self._rare_preflight_msg.setText(msg)
         self._rare_preflight_msg.setStyleSheet(
@@ -2634,7 +2634,7 @@ class ValidationWindow(QMainWindow):
 
     # ── phase 2: the heavy hunt, on the behaviors phase 1 picked ──
     def _run_rare_discovery(self) -> None:
-        """Run the hunt — on the preflight's targets when a check has been run."""
+        """Run the hunt: on the preflight's targets when a check has been run."""
         from abel.validation.analyses import rare_discovery as rd  # noqa: PLC0415
         override = None
         if self._rare_preflight:
@@ -2654,7 +2654,7 @@ class ValidationWindow(QMainWindow):
             if skipped:
                 warn += f"Skipping (no huntable behavior): {', '.join(skipped)}\n\n"
             if thin:
-                warn += ("Thin evidence — the curves will be noisy:\n"
+                warn += ("Thin evidence: the curves will be noisy:\n"
                          + "\n".join(f"  • {p.project_name}: "
                                      f"{p.target.behavior_name} "
                                      f"({p.target.n_labeled} examples)"
@@ -2681,7 +2681,7 @@ class ValidationWindow(QMainWindow):
     def _build_cross_tab(self) -> QWidget:
         intro = _explain(
             "Cross-project dashboard, assembled from the most recent run. Nothing to "
-            "configure here — it pools whatever the last analysis produced across every "
+            "configure here: it pools whatever the last analysis produced across every "
             "project you had loaded.")
         openb = QPushButton("Open full HTML report…")
         openb.clicked.connect(self._open_report)
@@ -2704,7 +2704,7 @@ class ValidationWindow(QMainWindow):
             "and renders five publication figures: a clustered heatmap, per-behavior modality\n"
             "bars, a PERMANOVA distinctiveness test (do behaviors rely on different features?),\n"
             "a behavior-similarity matrix, and a feature↔behavior network. Behaviors are pooled\n"
-            "by name — use the alias table to merge across slight naming differences.")
+            "by name: use the alias table to merge across slight naming differences.")
 
         box = QGroupBox("Settings")
         form = QFormLayout(box)
@@ -2727,7 +2727,7 @@ class ValidationWindow(QMainWindow):
 
         alias_box = QGroupBox("Behavior pooling (edit 'Pooled name' to merge behaviors)")
         av = QVBoxLayout(alias_box)
-        refresh = QPushButton("Refresh from checked behaviors")
+        refresh = QPushButton("Refresh from Checked Behaviors")
         refresh.setToolTip("Populate the table from the behaviors currently checked on the "
                            "Projects tab.")
         refresh.clicked.connect(self._refresh_bscape_aliases)
@@ -2738,7 +2738,7 @@ class ValidationWindow(QMainWindow):
         self._bscape_alias_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch)
         self._bscape_alias_table.setMinimumHeight(140)
-        # Click a column header to sort — handy for spotting replicates / variants.
+        # Click a column header to sort: handy for spotting replicates / variants.
         self._bscape_alias_table.setSortingEnabled(True)
         self._bscape_alias_table.horizontalHeader().setSortIndicatorShown(True)
         self._bscape_alias_table.horizontalHeader().setToolTip(
@@ -2854,7 +2854,7 @@ class ValidationWindow(QMainWindow):
 
     def _on_behaviorscape_error(self, tb: str) -> None:
         self._set_busy(False)
-        self._bscape_status.setText("Behaviorscape failed — see Log tab.")
+        self._bscape_status.setText("Behaviorscape failed: see Log tab.")
         self._log_msg("BEHAVIORSCAPE ERROR:\n" + tb)
         QMessageBox.critical(self, "Behaviorscape failed",
                              tb.splitlines()[-1] if tb else "Unknown error")
@@ -2865,20 +2865,20 @@ class ValidationWindow(QMainWindow):
         from abel.validation.analyses import all_project_umap as apu  # noqa: PLC0415
 
         intro = _explain(
-            "One map holding every labelled clip from every checked project. Each point is\n"
-            "one clip; the reducer places it by its features; the figure colours and labels\n"
+            "One map holding every labeled clip from every checked project. Each point is\n"
+            "one clip; the reducer places it by its features; the figure colors and labels\n"
             "the clusters. Use it to ask where the assays' behaviors sit relative to each\n"
-            "other — does an EPM Rear land on an open-field Rear, is Groom one region or\n"
+            "other: does an EPM Rear land on an open-field Rear, is Groom one region or\n"
             "several, does a rare behavior have a place of its own?\n\n"
             "Two things to know before reading one. Projects do not share a column set, so\n"
             "the map is built on the columns they have in common (the 'Shared' feature\n"
-            "space) — otherwise a cluster can be an artifact of a column only one project\n"
+            "space): otherwise a cluster can be an artifact of a column only one project\n"
             "has. And project identity is a confound: rigs, lighting and arenas differ, so\n"
             "every run reports behavior structure and project structure side by side. If the\n"
             "project number is the larger one, the clusters are assays, not acts.\n\n"
             "Workflow: 'Compute Embedding' is the slow step (minutes). Everything under\n"
-            "'Colour', 'Cluster labels', 'Overlays' and 'Frame' is a re-render of the saved\n"
-            "coordinates — hit 'Re-render Figure' and it comes back in a second. Tune label\n"
+            "'Color', 'Cluster labels', 'Overlays' and 'Frame' is a re-render of the saved\n"
+            "coordinates: hit 'Re-render Figure' and it comes back in a second. Tune label\n"
             "distance there, not by recomputing.")
 
         self._umap_embed_w: dict = {}
@@ -2900,7 +2900,7 @@ class ValidationWindow(QMainWindow):
                                    umap_plot.PlotSettings().to_dict())
 
         run = QPushButton("Compute Embedding"); run.setObjectName("runBtn")
-        run.setToolTip("Read every checked project's labelled clips, build the shared\n"
+        run.setToolTip("Read every checked project's labeled clips, build the shared\n"
                        "feature matrix and run the reducer. Minutes, not seconds.")
         run.clicked.connect(self._run_umap)
         self._umap_run_btn = run
@@ -2908,7 +2908,7 @@ class ValidationWindow(QMainWindow):
         rerender = QPushButton("Re-render Figure (fast)")
         rerender.setToolTip(
             "Redraw the LAST computed (or loaded) embedding with the current figure\n"
-            "settings. No reducer, no training — this is how you tune label distance.")
+            "settings. No reducer, no training, this is how you tune label distance.")
         rerender.clicked.connect(self._rerender_umap)
         self._umap_rerender_btn = rerender
         rerender.setEnabled(False)
@@ -2966,7 +2966,7 @@ class ValidationWindow(QMainWindow):
                     self, "umap-learn not installed",
                     "The UMAP reducer needs the umap-learn package, which is not "
                     "installed:\n\n    pip install umap-learn\n\n"
-                    "Build the map with PCA instead? (Linear structure only — fine "
+                    "Build the map with PCA instead? (Linear structure only, fine "
                     "for a smoke test, not for a figure.)",
                 ) != QMessageBox.StandardButton.Yes:
                     return
@@ -3036,7 +3036,7 @@ class ValidationWindow(QMainWindow):
 
     def _on_umap_error(self, tb: str) -> None:
         self._set_busy(False)
-        self._umap_status.setText("All-project map failed — see Log tab.")
+        self._umap_status.setText("All-project map failed: see Log tab.")
         self._log_msg("ALL-PROJECT MAP ERROR:\n" + tb)
         QMessageBox.critical(self, "All-project map failed",
                              tb.splitlines()[-1] if tb else "Unknown error")
@@ -3047,7 +3047,7 @@ class ValidationWindow(QMainWindow):
             "Video-motion-feature value: how much do the video features (optical flow,\n"
             "surface motion, R3D appearance) improve detection? For each checked (project,\n"
             "behavior) this trains ABEL's real classifier twice on the SAME held-out split and\n"
-            "the SAME training subsample — once WITHOUT the video features and once WITH them —\n"
+            "the SAME training subsample: once WITHOUT the video features and once WITH them,\n"
             "so the F1 difference is a clean paired estimate of what the video motion features\n"
             "add. Great for the Groom-vs-Freeze case: both are low-locomotion and confusable by\n"
             "pose alone, so the rhythmic-motion signal is where video features pay off.\n"
@@ -3105,9 +3105,9 @@ class ValidationWindow(QMainWindow):
         intro = _explain(
             "Does the R3D appearance embedding earn its cost? R3D-18 is its own toggle on\n"
             "the Features tab, under 'use video features': it runs a pretrained 3-D CNN over\n"
-            "a pose-centred crop of every segment and adds 512 dense columns. It is the most\n"
-            "expensive family ABEL extracts — it wants a GPU, caches per session, and needs\n"
-            "the video still reachable — so it deserves its own test.\n\n"
+            "a pose-centered crop of every segment and adds 512 dense columns. It is the most\n"
+            "expensive family ABEL extracts: it wants a GPU, caches per session, and needs\n"
+            "the video still reachable: so it deserves its own test.\n\n"
             "For each checked (project, behavior) this trains ABEL's real classifier twice on\n"
             "the SAME held-out split and the SAME training pool: once with EVERY feature\n"
             "except the r3d_* columns, once with them. The paired ΔF1 is exactly what\n"
@@ -3128,8 +3128,8 @@ class ValidationWindow(QMainWindow):
         self._r3d_decompose = QCheckBox("Also decompose R3D vs. handcrafted video")
         self._r3d_decompose.setChecked(False)
         self._r3d_decompose.setToolTip(
-            "Adds three arms over the same pose baseline — pose only, pose + flow/surface,\n"
-            "pose + R3D — so you can see whether R3D is REDUNDANT with the handcrafted\n"
+            "Adds three arms over the same pose baseline: pose only, pose + flow/surface,\n"
+            "pose + R3D: so you can see whether R3D is REDUNDANT with the handcrafted\n"
             "video features or complementary to them. The paired gain alone cannot tell\n"
             "you which. Costs 2.5x the training time (5 arms per seed instead of 2).")
         form.addRow("", self._r3d_decompose)
@@ -3203,14 +3203,14 @@ class ValidationWindow(QMainWindow):
             "on one representative session per added project, normalized by the video's real\n"
             "duration (× real-time; higher = faster). Runs on ALL projects added on the Projects\n"
             "tab; training is timed for the checked behaviors (or all, if none are checked).\n"
-            "• Feature extraction — full pose+video+representation rebuild (SLOW; GPU-bound).\n"
-            "• Training — time to fit one classifier once features exist.\n"
-            "• Dense inference — running the models over every window of the session. This\n"
+            "• Feature extraction: full pose+video+representation rebuild (SLOW; GPU-bound).\n"
+            "• Training: time to fit one classifier once features exist.\n"
+            "• Dense inference: running the models over every window of the session. This\n"
             "  recomputes that one session's temporal-refinement traces on the real project.")
 
         box = QGroupBox("Stages to benchmark"); form = QVBoxLayout(box)
         self._bench_extract = QCheckBox("Feature extraction / session")
-        self._bench_extract.setToolTip("Slow — a full pose+video+representation rebuild.")
+        self._bench_extract.setToolTip("Slow: a full pose+video+representation rebuild.")
         self._bench_extract.setChecked(True)
         self._bench_train = QCheckBox("Model training (given features)")
         self._bench_train.setChecked(True)
@@ -3235,16 +3235,16 @@ class ValidationWindow(QMainWindow):
     def _build_review_effort_tab(self) -> QWidget:
         intro = _explain(
             "Human review effort: what did labeling actually cost? Reads each added\n"
-            "project's review decision log — nothing is trained and nothing is written\n"
+            "project's review decision log: nothing is trained and nothing is written\n"
             "back to the project, so this takes about a second.\n"
             "\n"
             "A clip's review time is the gap to the previous decision by the same\n"
             "reviewer: you look, you judge, you commit. Two kinds of gap are NOT review\n"
             "time and are excluded:\n"
-            "• under the bulk-action threshold — one UI action (an assign-to-selection,\n"
+            "• under the bulk-action threshold: one UI action (an assign-to-selection,\n"
             "  a held-down shortcut, a temporal-review interval tiling into windows)\n"
             "  writing many decisions in one loop, not a human looking at clips.\n"
-            "• over the break threshold — the reviewer walked away.\n"
+            "• over the break threshold: the reviewer walked away.\n"
             "\n"
             "Because the first clip after every break has no measurable gap, the hours\n"
             "reported are a floor. The table also carries an adjusted total that adds\n"
@@ -3373,7 +3373,7 @@ class ValidationWindow(QMainWindow):
         self._log_msg("JOB ERROR:\n" + tb)
         for status in ("_vv_status", "_bench_status"):
             if hasattr(self, status):
-                getattr(self, status).setText("Run failed — see Log tab.")
+                getattr(self, status).setText("Run failed: see Log tab.")
         QMessageBox.critical(self, "Run failed",
                              tb.splitlines()[-1] if tb else "Unknown error")
 
@@ -3381,7 +3381,7 @@ class ValidationWindow(QMainWindow):
         w = QWidget(); lay = QVBoxLayout(w)
         intro = QLabel(
             "Export a feature-demonstration clip (raw vs. smoothed DLC tracking with a\n"
-            "live trace strip) to an MP4 — the same visual as the main GUI's video preview,\n"
+            "live trace strip) to an MP4: the same visual as the main GUI's video preview,\n"
             "for showing what a feature responds to. Uses a random window of the chosen session.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#a6adc8;")
@@ -3598,7 +3598,7 @@ class ValidationWindow(QMainWindow):
 
     def _on_demo_error(self, tb: str) -> None:
         self._demo_btn.setEnabled(True)
-        self._demo_status.setText("Export failed — see Log tab.")
+        self._demo_status.setText("Export failed: see Log tab.")
         self._log_msg("DEMO ERROR:\n" + tb)
         QMessageBox.critical(self, "Demo export failed", tb.splitlines()[-1] if tb else "Unknown error")
 
@@ -3698,7 +3698,7 @@ class ValidationWindow(QMainWindow):
         if duplicate:
             notes.append(f"Already in list: {', '.join(duplicate)}.")
         if invalid:
-            notes.append("Skipped — no derived/training_sets/training_set.parquet: "
+            notes.append("Skipped: no derived/training_sets/training_set.parquet: "
                          + ", ".join(invalid) + ".")
         if duplicate or invalid:
             QMessageBox.information(self, "Add Projects", "\n".join(notes))
@@ -3717,7 +3717,7 @@ class ValidationWindow(QMainWindow):
         """Behaviors to check for ``proj`` given a strength metric + threshold.
 
         Returns ``(selected_ids, n_behaviors, n_included, n_weak, n_no_model)``.
-        Reads existing on-disk model metrics only — no training.
+        Reads existing on-disk model metrics only, no training.
         """
         from abel.validation.datamodel import read_behavior_model_metrics  # noqa: PLC0415
 
@@ -3847,7 +3847,7 @@ class ValidationWindow(QMainWindow):
 
     @staticmethod
     def _project_item_text(proj: ProjectRef) -> str:
-        """List label — a renamed project shows what it was, so the mapping is auditable."""
+        """List label: a renamed project shows what it was, so the mapping is auditable."""
         base = f"{proj.name}  ({len(proj.behavior_names)} behaviors)"
         return f"{base}   [was: {proj.original_name}]" if proj.is_renamed else base
 
@@ -3922,7 +3922,7 @@ class ValidationWindow(QMainWindow):
 
     @staticmethod
     def _behavior_item_text(proj: ProjectRef, bid: str) -> str:
-        """List label — a renamed behavior shows what it was, so the mapping is auditable."""
+        """List label: a renamed behavior shows what it was, so the mapping is auditable."""
         label = proj.behavior_label(bid)
         disk = proj.behavior_disk_name(bid)
         return label if label == disk else f"{label}   (was: {disk})"
@@ -3944,7 +3944,7 @@ class ValidationWindow(QMainWindow):
                            item: QListWidgetItem) -> None:
         proj.set_behavior_alias(bid, new_name)
         # Rewriting the text re-emits itemChanged, which would re-read the check
-        # state as a toggle — block it, the checkbox hasn't moved.
+        # state as a toggle: block it, the checkbox hasn't moved.
         self._beh_list.blockSignals(True)
         item.setText(self._behavior_item_text(proj, bid))
         self._beh_list.blockSignals(False)
@@ -4007,12 +4007,12 @@ class ValidationWindow(QMainWindow):
 
     def _refresh_session_label(self) -> None:
         if not self._session_name:
-            self._session_lbl.setText("No session — runs go to the unfiled folder.")
+            self._session_lbl.setText("No session: runs go to the unfiled folder.")
             return
         runs = self._session_store.session_dir(self._session_name) / RUNS_DIRNAME
         n_beh = sum(len(b) for b in self._selected.values())
         self._session_lbl.setText(
-            f"<b>{html.escape(self._session_name)}</b> — {len(self._projects)} project(s), "
+            f"<b>{html.escape(self._session_name)}</b>, {len(self._projects)} project(s), "
             f"{n_beh} behavior(s) checked<br><span style='color:#78909C;'>"
             f"{html.escape(str(runs))}</span>")
 
@@ -4050,7 +4050,7 @@ class ValidationWindow(QMainWindow):
         if self._session_store.exists(name):
             try:
                 created = self._session_store.load(name).created_at
-            except Exception:  # noqa: BLE001 — a stale file must not block a save
+            except Exception:  # noqa: BLE001, a stale file must not block a save
                 created = ""
         path = self._session_store.save(self._capture_session(name, created_at=created))
         self._session_name = name
@@ -4068,7 +4068,7 @@ class ValidationWindow(QMainWindow):
                 f"'Save As…'. Sessions live in:\n{self._session_store.root}")
             return
         labels = [
-            f"{i.name}  —  {i.n_projects} project(s), {i.n_behaviors} behavior(s), "
+            f"{i.name} - {i.n_projects} project(s), {i.n_behaviors} behavior(s), "
             f"{i.n_runs} run(s)   [{i.updated_at[:16]}]"
             for i in infos
         ]
@@ -4118,7 +4118,7 @@ class ValidationWindow(QMainWindow):
                 msg.append("Projects that could not be loaded:\n  "
                            + "\n  ".join(restored.missing_projects)
                            + "\n\nThey are kept in the session, so saving now will not "
-                             "erase them — reconnect the drive and load again to use them.")
+                             "erase them: reconnect the drive and load again to use them.")
             if restored.missing_behaviors:
                 msg.append("Behaviors no longer in their project:\n  "
                            + "\n  ".join(restored.missing_behaviors))
@@ -4176,7 +4176,7 @@ class ValidationWindow(QMainWindow):
         if cfg is None:
             cfg = self._build_config(analyses)
         if behaviors_override:
-            # The targets are already chosen — re-ranking would only risk
+            # The targets are already chosen: re-ranking would only risk
             # disagreeing with the table the user just approved.
             cfg.rare_auto_target = False
         projects = [self._projects[pid] for pid in behaviors]
@@ -4185,7 +4185,7 @@ class ValidationWindow(QMainWindow):
         # which is indistinguishable from a real negative result on the figure.
         if not confirm_run_with_missing_raw_data(
                 self, [p.root for p in projects], what="this validation run"):
-            self._log_msg("Run cancelled: raw data unavailable.")
+            self._log_msg("Run canceled: raw data unavailable.")
             return
         # The setup as of this run: saved to the session now (so it can never drift
         # away from what launched the run) and frozen into the run dir when it lands.
@@ -4249,7 +4249,7 @@ class ValidationWindow(QMainWindow):
         if self._run_session is not None:
             try:
                 self._session_store.attach_to_run(self._run_session, out.run_dir)
-            except Exception as exc:  # noqa: BLE001 — bookkeeping must not sink a finished run
+            except Exception as exc:  # noqa: BLE001, bookkeeping must not sink a finished run
                 self._log_msg(f"Could not write the run's setup snapshot: {exc}")
             self._refresh_session_label()
         # populate the relevant tab's panels (figures + export targets)
@@ -4271,7 +4271,7 @@ class ValidationWindow(QMainWindow):
             disc_dir = out.run_dir / "discrimination"
             # A separability matrix is written per ADD-ON feature family
             # (…__separability_matrix__pose_video.png), so which views exist is only
-            # known from what the run produced — a fixed view list silently showed
+            # known from what the run produced: a fixed view list silently showed
             # an empty panel.
             views: dict[str, list[Path]] = {}
             # First = the tab's default view. The pooled landscape answers the whole
@@ -4283,7 +4283,7 @@ class ValidationWindow(QMainWindow):
             for png in sorted(disc_dir.glob("*__separability_matrix__*.png")):
                 fs = png.stem.split("__separability_matrix__", 1)[-1]
                 label = FEATURE_SET_LABELS.get(fs, fs).lstrip("+ ").strip()
-                views.setdefault(f"Separability matrix — Δ from {label}", []).append(png)
+                views.setdefault(f"Separability matrix: Δ from {label}", []).append(png)
             gain_imgs = sorted(disc_dir.glob("*__feature_gain_by_pair.png"))
             if gain_imgs:
                 views["Feature gain per behavior pair"] = gain_imgs
@@ -4303,7 +4303,7 @@ class ValidationWindow(QMainWindow):
         if ANALYSIS_GENERALIZATION in analyses:
             # The generalization run also emits the biological-readout and
             # calibration analyses (they reuse its held-out predictions, so they
-            # cost no extra training) — surface them as views on the same panel.
+            # cost no extra training): surface them as views on the same panel.
             gen_dir = out.run_dir / "generalization"
             tb_dir = out.run_dir / "time_budget"
             cal_dir = out.run_dir / "calibration"
@@ -4336,7 +4336,7 @@ class ValidationWindow(QMainWindow):
         if ANALYSIS_RARE_DISCOVERY in analyses:
             rd_dir = out.run_dir / "rare_discovery"
             prism_dir = out.run_dir / "prism"
-            # Behaviour rarity first (0_ prefix), then discovery/effort/rarity figures.
+            # Behavior rarity first (0_ prefix), then discovery/effort/rarity figures.
             rd_imgs = sorted(rd_dir.glob("*.png"))
             # A multi-project run files each project's Prism tables under its own
             # stem (…__<project>.csv), so match by prefix rather than exact name
@@ -4352,7 +4352,7 @@ class ValidationWindow(QMainWindow):
             ):
                 for p in sorted(prism_dir.glob(f"{base}*.csv")):
                     stem = p.stem[len(base):].lstrip("_").replace("_", " ").strip()
-                    rare_tables[f"{label} — {stem}" if stem else label] = p
+                    rare_tables[f"{label}, {stem}" if stem else label] = p
             for label, p in (("Which behavior was hunted", rd_dir / "hunted_targets.csv"),
                              ("Combined across projects",
                               rd_dir / "combined_across_projects.csv")):
@@ -4411,7 +4411,7 @@ class ValidationWindow(QMainWindow):
 
         # The consolidated summary. Findings are cheap and always shown; the PDF
         # render needs the GUI thread (QtWebEngine wants an event loop), which is
-        # exactly where we are now — it cannot be done inside the worker.
+        # exactly where we are now: it cannot be done inside the worker.
         if out.summary_html is not None:
             self._populate_suite_tab(out)
             if self._pending_pdf:
@@ -4453,7 +4453,7 @@ class ValidationWindow(QMainWindow):
     def _on_error(self, tb: str) -> None:
         self._set_busy(False)
         self._pending_pdf = False
-        self._suite_status.setText("Run failed — see the Log tab.")
+        self._suite_status.setText("Run failed: see the Log tab.")
         self._log_msg("ERROR:\n" + tb)
         QMessageBox.critical(self, "Run failed", tb.splitlines()[-1] if tb else "Unknown error")
 

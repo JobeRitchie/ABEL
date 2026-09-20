@@ -54,7 +54,7 @@ class LearningCurvePoint:
     fn_pct: float = float("nan")
     # 95% CI half-widths for the percent-of-held-out confusion rates. Per behavior
     # these are the seed-to-seed spread; on the average curve (see average_curve)
-    # they are the spread *across behaviors* — mirroring how f1_ci is built, so a
+    # they are the spread *across behaviors*: mirroring how f1_ci is built, so a
     # Prism error-rate graph carries the same error bars as the F1/PR-AUC one.
     tp_pct_ci: float = float("nan")
     fp_pct_ci: float = float("nan")
@@ -72,7 +72,7 @@ class LearningCurvePoint:
     n_degenerate: int = 0
     n_calibrated: int = 0
     # Behaviors contributing to this point. 1 on a per-behavior curve; on an average
-    # curve it is the real, per-x composition — which is NOT constant across x, and
+    # curve it is the real, per-x composition, which is NOT constant across x, and
     # was previously recoverable only by dividing n_seeds by the seed count.
     n_behaviors: int = 1
 
@@ -111,7 +111,7 @@ class LearningCurveResult:
 
 
 def _ci95(values: np.ndarray) -> float:
-    """95% CI half-width across seeds (t-based — see :func:`metrics.ci95`)."""
+    """95% CI half-width across seeds (t-based: see :func:`metrics.ci95`)."""
     from abel.validation import metrics as vmetrics  # noqa: PLC0415
 
     return vmetrics.ci95(values)
@@ -119,7 +119,7 @@ def _ci95(values: np.ndarray) -> float:
 
 #: Saturation criterion for :func:`detect_knee`, named so a figure legend can quote
 #: it instead of guessing.  ``KNEE_EPS = 0.02`` means the knee is the first clip
-#: count reaching **98%** of the curve's own maximum F1 — not 95%, which is the
+#: count reaching **98%** of the curve's own maximum F1, not 95%, which is the
 #: looser threshold this is easy to mistake it for.
 KNEE_EPS = 0.02
 KNEE_DELTA = 0.01
@@ -131,7 +131,7 @@ def detect_knee(points: list[LearningCurvePoint], eps: float = KNEE_EPS,
 
     Degenerate points are dropped first.  Under target-class F1 an always-predict-
     target collapse scores *well* (recall 1.0, specificity 0.0), and those live at
-    the cold-start end of the curve — precisely where the knee is hunted.  Left in,
+    the cold-start end of the curve, precisely where the knee is hunted.  Left in,
     they inflate ``f1_max`` and can plant the knee at the smallest budget on the
     schedule, reporting "20 clips is enough" from a model that had learned nothing.
     Points are kept if all of them are degenerate, so a fully-degenerate curve still
@@ -187,8 +187,8 @@ def bootstrap_knee_ci(
 ) -> dict[str, float]:
     """Percentile CIs for the knee and the F1 ceiling by resampling units.
 
-    Both statistics are read off the *mean* curve — the knee is a discrete argmin
-    over the clip schedule, the ceiling is a max — so neither has a closed-form
+    Both statistics are read off the *mean* curve, the knee is a discrete argmin
+    over the clip schedule, the ceiling is a max, so neither has a closed-form
     standard error, and the per-point ``f1_ci`` is no substitute: it describes F1 at
     a fixed budget, not where the curve turns.  A replicate resamples units **with
     replacement**, rebuilds the mean curve from exactly those units, and re-runs
@@ -198,7 +198,7 @@ def bootstrap_knee_ci(
 
     * ``"seeds"`` (a single behavior's curve) resamples **independently at each
       budget**.  :func:`derive_seed` keys on ``size``, so repeat *r* at 50 clips and
-      repeat *r* at 100 clips are unrelated fits on unrelated subsamples — there is
+      repeat *r* at 100 clips are unrelated fits on unrelated subsamples, there is
       no seed to hold fixed down the schedule, and treating the repeat index as if
       there were would impose a correlation the design does not have.
     * ``"behaviors"`` (the average curve) resamples **whole curves**.  A behavior is
@@ -209,11 +209,11 @@ def bootstrap_knee_ci(
     land on the clip schedule, so this is a *grid* interval: ``lo == hi`` means every
     replicate picked the same schedule step, not that the knee is known to the clip.
     And the held-out set is fixed across replicates, so the interval covers
-    subsample/seed (or behavior-panel) variability only — not sampling of animals or
+    subsample/seed (or behavior-panel) variability only, not sampling of animals or
     of held-out clips.
 
     Returns ``knee_lo``/``knee_hi``/``f1_max_lo``/``f1_max_hi`` (2.5 / 97.5
-    percentiles), the replicate and unit counts, and ``knee_undefined_frac`` — the
+    percentiles), the replicate and unit counts, and ``knee_undefined_frac``, the
     share of replicates with no defined knee, which is the honest signal that a curve
     is too degenerate for the interval to mean much.
     """
@@ -498,7 +498,7 @@ def average_curve(
     results: list[LearningCurveResult], project_label: str = "all projects",
     *, balanced: bool = False,
 ) -> LearningCurveResult | None:
-    """Mean learning curve across behaviors — the headline "best clip count in general".
+    """Mean learning curve across behaviors: the headline "best clip count in general".
 
     Points are grouped by their schedule step (``requested_size``) so every behavior
     contributes at matching clip counts; metrics are averaged across behaviors and the
@@ -510,7 +510,7 @@ def average_curve(
     as the budget grows: on the manuscript run the curve goes from 43 behaviors at
     x=5 to 28 at x=400, a 35% attrition.  Since the behaviors that drop out are the
     rare, hard ones, part of the apparent right-hand *plateau* is the denominator
-    losing its hardest members rather than the model ceasing to improve — measured at
+    losing its hardest members rather than the model ceasing to improve, measured at
     x=200, all-available scores 0.786 against 0.759 for a fixed cohort, a gap of
     +0.027.
 
@@ -526,8 +526,8 @@ def average_curve(
 
     if balanced:
         # Hold the COHORT fixed, not the x-range. Intersecting the schedules instead
-        # would delete the high-budget end — exactly the region a plateau claim is
-        # about — so the deepest schedule that at least two behaviors reach is kept,
+        # would delete the high-budget end: exactly the region a plateau claim is
+        # about: so the deepest schedule that at least two behaviors reach is kept,
         # and only behaviors reaching all of it contribute. The schedule is a prefix
         # (a behavior with n positives has every smaller budget too), so "reached the
         # deepest budget" is the whole membership test.

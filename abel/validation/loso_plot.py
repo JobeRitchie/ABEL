@@ -9,7 +9,7 @@ cross-validation figure: one group of bars per behavior, showing **PR-AUC** and
 Two deliberate choices, because the obvious alternatives mislead here:
 
 * **Pooled, not per-fold mean ± SEM.** :mod:`abel.validation.loso` marks the
-  per-fold spread ``fold_sem_valid: False`` — folds are neither equally sized nor
+  per-fold spread ``fold_sem_valid: False``, folds are neither equally sized nor
   independent draws of one quantity, so their SEM is descriptive scatter rather
   than an error bar.
 * **Target-class F1, not macro.** Macro averages the behavior with "not the

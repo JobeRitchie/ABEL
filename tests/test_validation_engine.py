@@ -156,7 +156,7 @@ def test_calibration_slice_is_group_disjoint_from_fit_rows():
 
 
 def test_calibration_slice_carries_target_positives():
-    """Both sides keep target positives — the one-vs-rest collapse trap.
+    """Both sides keep target positives: the one-vs-rest collapse trap.
 
     A slice full of *other* behaviors looks two-class in the pool but reaches the
     calibrator as a single class once the trainer collapses to target-vs-rest.
@@ -236,14 +236,14 @@ def test_engine_reports_training_counts_after_carve():
         n_pos_train=pool_pos, n_neg_train=0,
     )
     # The slice came out of the budget, so fewer positives were trained on than
-    # the caller requested — the reported count must reflect that.
+    # the caller requested: the reported count must reflect that.
     assert 0 < res.n_pos_train < pool_pos
 
 
 def test_trainer_calibrates_on_cal_split_not_val():
     """End-to-end: with cal_idx supplied, the calibrator is fit off the val rows.
 
-    Guards the actual defect — a calibrator fit on the evaluation rows scores
+    Guards the actual defect, a calibrator fit on the evaluation rows scores
     them optimistically, so identical models must differ once the calibration
     source moves.
     """
@@ -274,10 +274,10 @@ def test_trainer_calibrates_on_cal_split_not_val():
     r_cal = _run((tr, va, ca))      # calibrator fit on its own split (new path)
     r_none = _run((tr, va), method="none")   # no calibration at all
 
-    # Same base model, same evaluation rows — only the calibration source moved.
+    # Same base model, same evaluation rows, only the calibration source moved.
     assert np.array_equal(r_val.y_val, r_cal.y_val)
     assert not np.allclose(r_val.val_probs, r_cal.val_probs), (
-        "probabilities identical — cal_idx was ignored and the calibrator "
+        "probabilities identical: cal_idx was ignored and the calibrator "
         "still fit on the validation split"
     )
 
@@ -352,7 +352,7 @@ def test_al_vs_random_discovers_positives_faster():
     )
     assert res.al_points and res.random_points
     # AL must never acquire a held-out clip: every cell's positives come from the pool,
-    # and the held-out set is fixed — so no error and finite F1 once the model trains.
+    # and the held-out set is fixed: so no error and finite F1 once the model trains.
     assert all(not c.error for c in res.cells if c.n_clips >= 50)
     # Headline claim: AL discovers ≥ as many positives by the final budget.
     al_pos = res.al_points[-1].n_pos_mean
@@ -627,7 +627,7 @@ def test_video_value_errors_without_video_cols():
     from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
     from abel.validation import video_value
 
-    df = _synthetic_training_frame()  # feat_a/feat_b only — no video columns
+    df = _synthetic_training_frame()  # feat_a/feat_b only: no video columns
     proj = _project_ref()
     sp = holdout.split(proj, holdout_groups=["s4"], min_confidence=1.0, df=df)
     r = video_value.run_video_value(

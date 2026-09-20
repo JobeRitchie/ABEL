@@ -3,7 +3,7 @@
 The bug: a project whose subject names never got parsed out of the filenames
 carries ``subject_id = None`` on every linked session.  The list required both
 a subject id *and* a session id, so it silently dropped all 60 rows and
-"Subject override" showed an empty box — with no way to give those sessions the
+"Subject override" showed an empty box, with no way to give those sessions the
 per-session zones they exist to hold.  Feature extraction does not drop them:
 ``_build_prep_jobs`` falls back to the session id, keying the ROI
 ``session::session``, so the list falls back the same way and the key it writes

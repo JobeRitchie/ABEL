@@ -172,7 +172,7 @@ def test_fast_random_absent_generation_excludes_accepted_ranges(tmp_path) -> Non
 
     # Random-absent sampling draws real rows from the extracted segment grid rather
     # than synthesizing frame ranges, so that reviewed labels land on a segment_id
-    # that already carries every feature — R3D included — instead of being enriched
+    # that already carries every feature: R3D included, instead of being enriched
     # (and zero-filled) later. The fixture therefore needs the grid to exist.
     grid_rows = [
         {

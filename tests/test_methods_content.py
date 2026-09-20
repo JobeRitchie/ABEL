@@ -81,7 +81,7 @@ def test_formula_sources_resolve_to_real_code() -> None:
                 continue
             for attr in parts[split:]:
                 assert hasattr(obj, attr), (
-                    f"{f.name}: '{f.source}' does not resolve — no attribute "
+                    f"{f.name}: '{f.source}' does not resolve, no attribute "
                     f"'{attr}' on {obj!r}"
                 )
                 obj = getattr(obj, attr)

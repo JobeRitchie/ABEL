@@ -1,10 +1,10 @@
-"""Deleting a behaviour must purge its orphaned trained model + eval output.
+"""Deleting a behavior must purge its orphaned trained model + eval output.
 
-Downstream tools (unified UMAP, analytics, apply-models) discover behaviours by
+Downstream tools (unified UMAP, analytics, apply-models) discover behaviors by
 scanning ``derived/models`` for ``behavior_model_*`` directories. Before this
 fix, ``BehaviorService.delete`` only edited the definitions YAML, leaving the
-trained model on disk — so a removed behaviour (e.g. "Wall Rear") kept showing
-up in the active-learning UMAP. These tests pin the cleanup behaviour.
+trained model on disk, so a removed behavior (e.g. "Wall Rear") kept showing
+up in the active-learning UMAP. These tests pin the cleanup behavior.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ def test_delete_purges_orphaned_model_and_eval(tmp_path: Path) -> None:
     # Orphaned model + its per-model evaluation output are gone.
     assert not drop_md.exists()
     assert not (tmp_path / "derived" / "evaluation" / "by_model" / "behavior_model_Wall_Rear").exists()
-    # The surviving behaviour's model is untouched.
+    # The surviving behavior's model is untouched.
     assert keep_md.exists()
     assert (tmp_path / "derived" / "evaluation" / "by_model" / "behavior_model_Rear").exists()
 
@@ -61,7 +61,7 @@ def test_delete_matches_by_target_id_not_folder_name(tmp_path: Path) -> None:
     svc.set_project(tmp_path)
     drop_id = _add(svc, "Wall Rear")
 
-    # Folder name bears no resemblance to the behaviour name.
+    # Folder name bears no resemblance to the behavior name.
     md = _make_model(tmp_path, "custom_experiment_42", drop_id)
     assert md.exists()
 
@@ -82,7 +82,7 @@ def test_purge_is_noop_without_matching_model(tmp_path: Path) -> None:
 
 
 def test_delete_purges_candidate_decision_and_label_references(tmp_path: Path) -> None:
-    """A deleted behaviour must vanish from the review queue, decisions, and
+    """A deleted behavior must vanish from the review queue, decisions, and
     reviewer labels so it no longer appears in the clip-review dropdown or in
     training data."""
     svc = BehaviorService()

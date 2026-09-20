@@ -1,7 +1,7 @@
 """Shared per-individual color palette.
 
 Used by the Animal Identity dialog (swatches) and the clip renderer (overlay
-dots + legend) so a given animal shows the *same* color everywhere — that's how
+dots + legend) so a given animal shows the *same* color everywhere, that's how
 a reviewer maps a colored dot in a clip back to a named identity.
 """
 
@@ -21,6 +21,6 @@ def color_for(idx: int) -> tuple[int, int, int]:
 
 
 def color_for_bgr(idx: int) -> tuple[int, int, int]:
-    """BGR color for the same index — for OpenCV drawing."""
+    """BGR color for the same index: for OpenCV drawing."""
     r, g, b = color_for(idx)
     return (b, g, r)

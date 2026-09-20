@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from abel.models.schemas import BehaviorDefinition, ReviewerLabelRecord
+from abel.models.schemas import BehaviorDefinition, ReviewDecisionType, ReviewerLabelRecord
 from abel.services.behavior_service import BehaviorService
 from abel.services.review_service import ReviewService
 from abel.ui.tabs.active_learning_tab import ActiveLearningTab
@@ -270,3 +270,64 @@ def test_review_label_display_is_animal_aware(svc):
         [{"behavior_id": "???", "focal_animal_id": "ghost", "partner_animal_id": None}], {}, svc,
     )
     assert re.sub("<[^>]+>", "", fallback[0]) == "??? · ghost"
+
+
+def test_saved_labels_row_renders_every_subject(svc, monkeypatch):
+    """The review panel's "Saved labels" row shows one tag per subject.
+
+    Regression: the panel only had the single-behavior "Review label" combo, so a
+    two-mouse clip labeled "Fighting m0 -> m1" + "Rearing m1" displayed as a bare
+    "Fighting", the second subject's behavior was invisible even though both rows
+    were saved.
+    """
+    import re
+    from types import SimpleNamespace
+
+    from abel.ui.tabs.review_tab import ReviewTab
+
+    cand = SimpleNamespace(
+        window_id=f"seg_m0_{SESS}_0_29", session_id=SESS, start_frame=0, end_frame=29,
+    )
+    structured = [
+        {"behavior_id": "fighting", "focal_animal_id": "m0", "partner_animal_id": "m1"},
+        {"behavior_id": "rearing", "focal_animal_id": "m1", "partner_animal_id": None},
+    ]
+    tab = SimpleNamespace(
+        _current_candidate_idx=0,
+        _visible_candidates=[cand],
+        _behavior_service=svc,
+        _review_service=SimpleNamespace(get_structured_labels=lambda wid: structured),
+        _decision_by_clip_id={},
+        _saved_labels_display=SimpleNamespace(
+            setText=lambda t: setattr(tab, "_text", t), setStyleSheet=lambda s: None,
+        ),
+        _clip_animals_for=lambda c: [("m0", "black", (0, 0, 0)), ("m1", "green", (0, 0, 0))],
+        _normalize_behavior_id=lambda b: b,
+        _decision_to_review_label=ReviewTab._decision_to_review_label,
+    )
+    tab._saved_labels_for = lambda c: ReviewTab._saved_labels_for(tab, c)
+    tab._format_structured_tags = ReviewTab._format_structured_tags
+    ReviewTab._update_saved_labels_display(tab)
+    plain = re.sub("<[^>]+>", "", tab._text)
+    assert "Fighting · black → green" in plain     # actor -> recipient, not a bare name
+    assert "Rearing · green" in plain              # the other mouse is visible too
+    assert "2 subjects labeled" in plain
+
+    # A multi-animal clip with only a clip-level (combo) label says so, instead of
+    # letting one behavior stand for both mice.
+    tab._review_service = SimpleNamespace(get_structured_labels=lambda wid: [])
+    tab._decision_by_clip_id = {
+        cand.window_id: SimpleNamespace(
+            decision=ReviewDecisionType.ACCEPT, behavior_label="fighting",
+        )
+    }
+    ReviewTab._update_saved_labels_display(tab)
+    plain = re.sub("<[^>]+>", "", tab._text)
+    assert plain.startswith("Fighting")
+    assert "· None" not in plain                   # no subject -> no bogus animal name
+    assert "whole clip" in plain
+
+    # Nothing saved yet -> the row points at the soundboard for per-subject labels.
+    tab._decision_by_clip_id = {}
+    ReviewTab._update_saved_labels_display(tab)
+    assert "soundboard" in re.sub("<[^>]+>", "", tab._text)

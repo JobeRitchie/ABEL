@@ -2,12 +2,12 @@
 
 This module powers **Targeted Clip Mining**: it turns each candidate window
 into a small vector of interpretable, physically-meaningful metrics (time spent
-in a zone, distance to a zone, centroid speed, distance travelled, body
+in a zone, distance to a zone, centroid speed, distance traveled, body
 elongation, …) and then lets the UI
 
-* **mine** — find every clip whose metrics satisfy a set of user-defined
+* **mine**: find every clip whose metrics satisfy a set of user-defined
   criteria (``metric between low/high``), and
-* **extract essence** — infer those criteria automatically from a handful of
+* **extract essence**: infer those criteria automatically from a handful of
   exemplar clips the user hand-picked (the overlapping value range per metric).
 
 Metrics are derived from the project's cleaned pose plus the subject/session ROI
@@ -17,13 +17,13 @@ different pixel scales.
 
 **Two metric spaces.**  The interpretable metrics above are what a human sets by
 hand ("nose past edge > 10 mm") and are the only ones offered in the criteria
-search box.  Essence extraction — which picks its own features from exemplar
-clips — additionally draws on the *shipped* per-window features the classifier
+search box.  Essence extraction, which picks its own features from exemplar
+clips, additionally draws on the *shipped* per-window features the classifier
 itself is trained on (``derived/representations/segment_features.parquet``:
 ~1200 columns of oscillation / periodicity / angular-velocity / jerk / context
 features).  Those are machine-named, so they are poor manual controls, but they
-are exactly where the signal for behaviours like wet-dog-shake lives, and they
-are precomputed — so essence over them needs no pose recompute and no mounted
+are exactly where the signal for behaviors like wet-dog-shake lives, and they
+are precomputed, so essence over them needs no pose recompute and no mounted
 pose drive.  Rich ids are namespaced ``feat:<column>`` so they never collide
 with an interpretable metric id and can be told apart anywhere.
 
@@ -83,7 +83,7 @@ _ROI_METRIC_SPECS: list[tuple[str, str, str, str]] = [
      "Fraction of the clip the body centroid spends inside the zone (occupancy)."),
     ("centroid_dist_to_roi_mm", "Distance to zone (mean)", "mm",
      "Mean distance from the body centroid to the zone edge (ROI proximity). "
-     "Negative = inside the zone, positive = outside — lower is nearer/inside."),
+     "Negative = inside the zone, positive = outside, lower is nearer/inside."),
     ("centroid_dist_to_roi_min_mm", "Closest approach to zone", "mm",
      "Nearest the centroid gets to the zone edge over the clip. "
      "Negative = it entered the zone (how deep); positive = closest it came from outside."),
@@ -100,7 +100,7 @@ _ROI_METRIC_SPECS: list[tuple[str, str, str, str]] = [
      "Fraction of frames the tail base is inside the zone."),
 ]
 
-# Centroid speed (mm/s) below which a frame counts as "immobile" — a rough,
+# Centroid speed (mm/s) below which a frame counts as "immobile", a rough,
 # generic near-still cutoff used by the immobility metric.
 IMMOBILE_MM_S = 15.0
 
@@ -112,7 +112,7 @@ _NONROI_METRIC_DEFS: list[MetricDef] = [
     MetricDef("centroid_speed_max", "Centroid speed (max)", "Motion", "mm/s",
               "Peak body-centroid speed across the clip."),
     MetricDef("centroid_speed_std", "Centroid speed (variability)", "Motion", "mm/s",
-              "Standard deviation of centroid speed — steady vs bursty movement."),
+              "Standard deviation of centroid speed: steady vs bursty movement."),
     MetricDef("centroid_accel_mean", "Centroid acceleration (mean)", "Motion", "mm/s²",
               "Average magnitude of frame-to-frame change in centroid speed."),
     MetricDef("immobile_frac", "Immobile time (fraction)", "Motion", "0–1",
@@ -127,12 +127,12 @@ _NONROI_METRIC_DEFS: list[MetricDef] = [
               "Average tail-base speed across the clip."),
     MetricDef("nose_travel_mm", "Nose travel (range)", "Motion", "mm",
               "Bounding extent of nose positions (how far the nose ranges)."),
-    MetricDef("centroid_path_mm", "Distance travelled", "Motion", "mm",
+    MetricDef("centroid_path_mm", "Distance traveled", "Motion", "mm",
               "Total path length of the body centroid across the clip (how much it moved)."),
     MetricDef("centroid_displacement_mm", "Net displacement", "Motion", "mm",
               "Straight-line distance from the clip's first to last centroid position."),
     MetricDef("path_tortuosity", "Path tortuosity", "Motion", "×",
-              "Centroid path length ÷ net displacement — 1 = straight, higher = more winding."),
+              "Centroid path length ÷ net displacement: 1 = straight, higher = more winding."),
     MetricDef("turning_total_deg", "Total turning", "Motion", "°",
               "Sum of absolute heading changes of the centroid across the clip."),
     MetricDef("turning_rate_mean", "Turning rate (mean)", "Motion", "°/s",
@@ -150,7 +150,7 @@ _NONROI_METRIC_DEFS: list[MetricDef] = [
     MetricDef("body_length_range_mm", "Body length (range)", "Posture", "mm",
               "Max − min nose-to-tail-base distance (how much it stretches/compresses)."),
     MetricDef("body_stretch_ratio", "Stretch ratio", "Posture", "×",
-              "Max body length ÷ median body length — how much the animal elongates."),
+              "Max body length ÷ median body length: how much the animal elongates."),
     # ── Timing ───────────────────────────────────────────────────────────
     MetricDef("duration_sec", "Duration", "Timing", "s",
               "Clip length in seconds."),
@@ -171,7 +171,7 @@ def build_metric_defs(roi_count: int) -> list[MetricDef]:
 
     A single-zone project reproduces the original registry exactly (ROI metrics
     grouped under ``"Edge & ROI"``); multi-zone projects emit one ROI-metric block
-    per zone, grouped and labelled ``"ROI 1" … "ROI N"`` so each zone is selectable.
+    per zone, grouped and labeled ``"ROI 1" … "ROI N"`` so each zone is selectable.
     ROI-independent motion/posture/timing metrics always follow, once.
     """
     roi_count = max(1, int(roi_count))
@@ -184,7 +184,7 @@ def build_metric_defs(roi_count: int) -> list[MetricDef]:
     return defs
 
 
-# Default (single-zone) registry — preserved verbatim for backward compatibility.
+# Default (single-zone) registry: preserved verbatim for backward compatibility.
 METRIC_DEFS: list[MetricDef] = build_metric_defs(1)
 
 # Comprehensive id → def lookup covering every zone variant, so label/unit
@@ -198,8 +198,8 @@ METRIC_IDS: list[str] = [m.id for m in METRIC_DEFS]
 # Metrics that carry no essence signal and must never be chosen as a criterion:
 # ``duration_sec`` is constant across the fixed-window segment pool (every segment
 # is the same length), so it "agrees" perfectly across any exemplar set yet
-# discriminates nothing — exactly the kind of degenerate feature the old
-# tightest-spread ranking used to surface.
+# discriminates nothing: the degenerate case a spread-based ranking picks first
+# unless it is excluded.
 _ESSENCE_SKIP_METRICS: frozenset[str] = frozenset({"duration_sec"})
 
 # How many candidate features the greedy essence search may consider, taken
@@ -210,11 +210,11 @@ _ESSENCE_SKIP_METRICS: frozenset[str] = frozenset({"duration_sec"})
 # ~30 interpretable clip metrics.
 ESSENCE_MAX_FEATURES = 40
 
-# How many candidate features the *ranker* may consider — far more than the box.
+# How many candidate features the *ranker* may consider, far more than the box.
 # A greedy conjunction has to justify every feature it adds, so it stays small; an
-# L1-penalised fit selects jointly and prunes what it doesn't need, so it can be
+# L1-penalized fit selects jointly and prunes what it doesn't need, so it can be
 # handed a wide pool and left to keep ~35 of them.  Piloting over 8 projects
-# (274,770 windows) found 40 features starves the fit while 300 costs ~0.45 s —
+# (274,770 windows) found 40 features starves the fit while 300 costs ~0.45 s,
 # faster than the greedy box it replaces.
 ESSENCE_RANKER_MAX_FEATURES = 300
 
@@ -222,10 +222,10 @@ ESSENCE_RANKER_MAX_FEATURES = 300
 # ---------------------------------------------------------------------------
 # Rich (shipped) feature space
 # ---------------------------------------------------------------------------
-# The per-window features produced by Feature Extraction — the very vectors the
+# The per-window features produced by Feature Extraction, the very vectors the
 # classifier, active learning and UMAP consume.  Essence extraction can range
 # over them as well as over the interpretable clip metrics above; they are
-# namespaced so a rich id is always recognisable and can never collide with a
+# namespaced so a rich id is always recognizable and can never collide with a
 # clip-metric id (``nose_speed_mean`` exists in both spaces, in different units).
 
 RICH_PREFIX = "feat:"
@@ -240,6 +240,7 @@ _RICH_META_COLS: frozenset[str] = frozenset({
     "uncertainty_entropy", "uncertainty_margin", "density_outlier_score",
     "uncertainty_score", "prediction_prob", "prediction_prob_fused",
     "prediction_variance",
+    "pose_present_frac", "partner_present_frac",
 })
 
 # Trailing summary-statistic suffixes, rendered as a parenthetical so
@@ -291,7 +292,7 @@ def rich_column(metric_id: str) -> str:
 def essence_signal(metric_id: str) -> str:
     """The underlying signal of a metric, ignoring its summary statistic.
 
-    ``feat:nose_speed_mean`` and ``feat:nose_speed_p90`` summarise one signal, so
+    ``feat:nose_speed_mean`` and ``feat:nose_speed_p90`` summarize one signal, so
     they share ``feat:nose_speed``; clip metrics are their own signal.
     """
     if not is_rich_metric(metric_id):
@@ -329,7 +330,7 @@ def rich_metric_def(metric_id: str) -> MetricDef:
         group=group,
         unit="",
         description=(
-            f"Extracted feature '{col}' from ABEL's feature extraction — one of "
+            f"Extracted feature '{col}' from ABEL's feature extraction, one of "
             "the same per-window features the classifier is trained on. Units are "
             "the extractor's internal ones, so compare it against the scope range "
             "rather than reading it as mm or mm/s."
@@ -338,7 +339,7 @@ def rich_metric_def(metric_id: str) -> MetricDef:
 
 
 def metric_def_for(metric_id: str) -> MetricDef | None:
-    """Definition for any criterion id — interpretable metric or rich feature."""
+    """Definition for any criterion id: interpretable metric or rich feature."""
     m = METRIC_BY_ID.get(metric_id)
     if m is not None:
         return m
@@ -428,7 +429,7 @@ def _format_violation(c: "Criterion", val: float, below: bool) -> str:
     # violations stay unambiguous across zones; single-zone stays unprefixed.
     if m and m.group.startswith("ROI"):
         label = f"{m.group} {label}"
-    # Append only genuine measurement units (mm, mm/s, s) — skip scale
+    # Append only genuine measurement units (mm, mm/s, s), skip scale
     # descriptors like "0–1" or "×" that read as noise after a comparison.
     unit = f" {m.unit}" if m and m.unit and any(ch.isalpha() for ch in m.unit) else ""
     if below:
@@ -460,7 +461,7 @@ def select_even_by_group(
     a batch of 100 across 10 subjects gives roughly 10 clips each instead of 100
     from the one animal whose recording happens to score highest.  Groups that run
     out are simply skipped, so their unused slots go to the subjects that still
-    have matches — "even where possible", never fewer clips than a plain top-N cut.
+    have matches, "even where possible", never fewer clips than a plain top-N cut.
     Group order follows first appearance, so the strongest match overall is still
     the first clip returned.
     """
@@ -493,8 +494,8 @@ def _score_clips_task(
 ) -> dict[str, dict[str, float]]:
     """Worker-process entry: score a batch of clips for one project.
 
-    Rebuilds a fresh :class:`ClipMetricsService` inside the worker — its pose /
-    ROI caches and loaded manifest can't be pickled across the process boundary —
+    Rebuilds a fresh :class:`ClipMetricsService` inside the worker, its pose /
+    ROI caches and loaded manifest can't be pickled across the process boundary,
     then returns only the per-window metric dicts, which are small enough to ship
     back cheaply.  ``refs`` is grouped by session by the caller, so each session's
     pose is loaded exactly once within this worker.
@@ -558,7 +559,7 @@ class ClipMetricsService:
         """Subject (animal) the session belongs to, or the session id if unknown.
 
         Used to spread a mined batch evenly across animals rather than across
-        recordings — several sessions of the same mouse must not count as several
+        recordings, several sessions of the same mouse must not count as several
         subjects.  Sessions the manifest doesn't cover fall back to their own id,
         which keeps them separate rather than silently pooling them together.
         """
@@ -567,7 +568,7 @@ class ClipMetricsService:
     def load_segment_pool(self, session_ids: set[str] | None = None) -> list[ClipRef]:
         """Return every feature-extraction segment as a mineable :class:`ClipRef`.
 
-        This is the *full* candidate pool — all windows scored during feature
+        This is the *full* candidate pool, all windows scored during feature
         extraction (``derived/representations/segment_features.parquet``), not
         just the clips already loaded into the review queue.  ``window_id`` is the
         ``segment_id`` (they are the same for segment-derived windows), so matches
@@ -604,7 +605,7 @@ class ClipMetricsService:
 
         Every metric is recomputed from each session's *raw* pose at the path
         recorded in the project manifest.  If that file has moved or its drive is
-        unmounted, the clip scores all-NaN — which downstream looks exactly like
+        unmounted, the clip scores all-NaN, which downstream looks exactly like
         "no shared features".  Callers use this to warn the user explicitly
         rather than fail silently.  The value is the unreachable path (``None`` if
         the manifest has no pose entry for the session at all).  Sessions are
@@ -741,7 +742,7 @@ class ClipMetricsService:
 
         Drops columns too sparse to anchor a criterion bound (finite in fewer than
         ``min_finite_frac`` of the rows) and columns that are constant across them
-        — both would otherwise masquerade as a perfect "signature".  The row set is
+       , both would otherwise masquerade as a perfect "signature".  The row set is
         the exemplars *plus* their background, so a column is judged on the same
         rows the contrast will use.
         """
@@ -770,8 +771,8 @@ class ClipMetricsService:
         The two metric spaces are *unioned* column-wise rather than one replacing
         the other: the shipped features bring the oscillation / angular / jerk
         signal the interpretable metrics simply do not have, while the clip
-        metrics keep zone geometry ("nose past edge") — which the feature table
-        has no equivalent of — in the running.  Whichever separates the exemplars
+        metrics keep zone geometry ("nose past edge"), which the feature table
+        has no equivalent of, in the running.  Whichever separates the exemplars
         best then wins on merit inside the greedy search.
 
         Each space contributes only if it can supply *both* frames (a contrast
@@ -809,13 +810,13 @@ class ClipMetricsService:
             elif not rich.empty:
                 notes.append(
                     "The selected clips aren't in this project's extracted feature "
-                    "table (re-run Feature Extraction to include them) — essence "
+                    "table (re-run Feature Extraction to include them), essence "
                     "used the pose metrics only."
                 )
         else:
             notes.append(
                 "No extracted feature table for this project "
-                "(derived/representations/segment_features.parquet) — essence used "
+                "(derived/representations/segment_features.parquet), essence used "
                 "the pose metrics only. Run Feature Extraction for a sharper essence."
             )
 
@@ -1135,7 +1136,7 @@ class ClipMetricsService:
     _PARALLEL_MIN_CLIPS = 600
     # When there are fewer sessions than workers a big session is split into
     # sub-chunks to fill the remaining cores, but each split reloads that
-    # session's pose — only worth it once a chunk carries at least this many
+    # session's pose: only worth it once a chunk carries at least this many
     # clips, so small sessions are never over-split into a net loss.
     _MIN_SPLIT_CHUNK = 1500
 
@@ -1168,7 +1169,7 @@ class ClipMetricsService:
             and self._project_root is not None
         ):
             chunks = self._plan_chunks(by_session, want_workers)
-            # Only pay the process-pool cost when it actually buys parallelism —
+            # Only pay the process-pool cost when it actually buys parallelism,
             # a single chunk (one small session) is faster scored in-process.
             if len(chunks) >= 2:
                 try:
@@ -1245,10 +1246,10 @@ class ClipMetricsService:
     ) -> list[list[ClipRef]]:
         """Split the pool into worker tasks, keeping each session's pose load once.
 
-        With at least ``want_workers`` sessions, each session is its own task —
+        With at least ``want_workers`` sessions, each session is its own task,
         the ideal case, since pose is loaded exactly once per task and completion
         order balances the load.  With fewer (but larger) sessions, big sessions
-        are split into contiguous sub-chunks — proportional to their size — so all
+        are split into contiguous sub-chunks, proportional to their size, so all
         cores stay busy, at the cost of reloading that session's pose per chunk.
         A session is only split while each resulting chunk still carries at least
         ``_MIN_SPLIT_CHUNK`` clips, so a small session stays whole (splitting it
@@ -1283,19 +1284,19 @@ class ClipMetricsService:
         enabled criteria each matched clip passes (always 1.0 in AND mode), used
         by the UI to rank near-misses.
 
-        ``rank_scores`` — an optional per-window graded "essence-likeness" score
+        ``rank_scores``, an optional per-window graded "essence-likeness" score
         (see :meth:`build_essence_scorer`).  When given, the matched clips are
-        ranked by it and their ``scores`` carry it, so a behaviour that genuinely
+        ranked by it and their ``scores`` carry it, so a behavior that genuinely
         overlaps others (and therefore still yields a broad AND match) still gets
         loaded best-first up to the UI cap, instead of the flat 1.0 AND score that
         can't tell one match from another.
 
-        ``rank_only`` — treat the criteria as *descriptive* rather than as a filter:
+        ``rank_only``, treat the criteria as *descriptive* rather than as a filter:
         every evaluated clip is returned, ordered by ``rank_scores``.  This is the
         mode essence extraction uses.  A conjunction of ranges is a cliff, and a
-        behaviour's real instances do not all fall on the near side of it: measured
+        behavior's real instances do not all fall on the near side of it: measured
         across 8 projects the box kept only 4–7% of held-out instances from 3
-        exemplars.  Ranking loses nothing — a poor fit is simply ordered late — and
+        exemplars.  Ranking loses nothing, a poor fit is simply ordered late, and
         the cap on what gets loaded already supplies the selectivity the box was
         being used for.  Requires ``rank_scores``; without one there is no ordering
         to substitute for the filter, so it falls back to gating.
@@ -1350,7 +1351,7 @@ class ClipMetricsService:
                 result.scores[wid] = gv if np.isfinite(gv) else 0.0
             else:
                 result.scores[wid] = float(pass_counts[i] / max(1, n_active))
-        # Rank strongest matches first — by essence-likeness when a ranker was
+        # Rank strongest matches first: by essence-likeness when a ranker was
         # supplied, else by the fraction of criteria passed (meaningful in OR mode).
         result.matched_ids.sort(key=lambda w: result.scores.get(w, 0.0), reverse=True)
         return result
@@ -1380,7 +1381,7 @@ class ClipMetricsService:
         ]
         result = EssenceCheckResult(n_evaluated=int(len(df)))
         if df.empty or not active:
-            # Nothing to test against — treat every clip as passing.
+            # Nothing to test against: treat every clip as passing.
             result.passed_ids = [str(w) for w in df.index]
             return result
 
@@ -1470,22 +1471,22 @@ class ClipMetricsService:
         """Rank metrics by how *alike* the exemplars are on them (tightest first).
 
         The signature of a hand-picked clip set is the features on which those
-        clips agree, made comparable across units by normalising each feature's
+        clips agree, made comparable across units by normalizing each feature's
         exemplar spread (robust 10–90th-pct span, or min–max for very small sets):
 
-        * **With a population baseline** (``population_df`` — e.g. the pool once
+        * **With a population baseline** (``population_df``: e.g. the pool once
           "Find matches" has scored it) each spread is divided by that feature's
           spread across the pool, so a low ratio means the exemplars are consistent
           *and* the feature is discriminative.  This needs no full scan by the
-          caller — it just reuses a baseline if one is already on hand.
+          caller, it just reuses a baseline if one is already on hand.
         * **Without one** (``population_df is None``) it works straight off the
           highlighted clips: each spread is divided by the exemplars' own median
           magnitude (a scale-free relative spread / coefficient-of-variation), so
           essence extraction stays instant and never forces a population scan.
 
         Returns ``[(metric_id, normalised_spread), …]`` ascending (best first).
-        Metrics without enough finite exemplar data — or, in population mode, whose
-        pool spread is degenerate — are skipped.
+        Metrics without enough finite exemplar data, or, in population mode, whose
+        pool spread is degenerate, are skipped.
         """
         out: list[tuple[str, float]] = []
         if exemplar_df is None or exemplar_df.empty:
@@ -1503,13 +1504,13 @@ class ClipMetricsService:
             # A feature the exemplars are perfectly constant on (e.g. the fixed
             # segment ``duration_sec``, or a saturated fraction) has zero spread,
             # so it would rank as the "tightest" signature yet range to a
-            # degenerate point and discriminate nothing — skip it.
+            # degenerate point and discriminate nothing: skip it.
             if float(ex.max() - ex.min()) <= 1e-9:
                 continue
             # Dead / all-zero features (e.g. an inactive keypoint's distance for a
             # paw-less model) have a perfect zero spread, so they'd masquerade as
             # the tightest "signature" and flood the top-k. A feature the exemplars
-            # agree on only because it's constantly zero carries no essence — skip it.
+            # agree on only because it's constantly zero carries no essence, skip it.
             if np.all(np.abs(ex) <= 1e-9):
                 continue
             ex_spread = (
@@ -1530,7 +1531,7 @@ class ClipMetricsService:
                     continue
                 out.append((mid, ex_spread / pop_scale))
             else:
-                # Scale-free relative spread — units cancel, so a fraction and a
+                # Scale-free relative spread: units cancel, so a fraction and a
                 # mm/s metric are comparable without any population reference.
                 scale = max(abs(float(np.median(ex))), 1e-6)
                 out.append((mid, ex_spread / scale))
@@ -1549,20 +1550,20 @@ class ClipMetricsService:
     ) -> list[Criterion]:
         """Infer the criteria that describe what the exemplars share.
 
-        These ranges are what the user is *shown* — the readable operational
-        definition of the behaviour ("faster and more stretched than the pool") and
+        These ranges are what the user is *shown*, the readable operational
+        definition of the behavior ("faster and more stretched than the pool") and
         the thing they edit, save, and audit a review queue against.  They are no
         longer what selects clips for review: that is
         :meth:`build_essence_scorer`'s continuous ranking, because a conjunction of
-        ranges used as a gate was measured to discard 50–96% of a behaviour's real
+        ranges used as a gate was measured to discard 50–96% of a behavior's real
         instances.  See :meth:`mine`'s ``rank_only``.
 
-        With a **background** (``population_df`` — a random pool sample or the
+        With a **background** (``population_df``, a random pool sample or the
         already-scored pool) this delegates to :meth:`extract_contrastive_essence`,
         which chooses the features and ranges by how the exemplars *differ from the
         pool*, not merely by where they happen to agree.  That is the difference
         between "these clips are all fast" (half the project is fast) and "these
-        clips are faster / jerkier / more stretched than the pool" — only the
+        clips are faster / jerkier / more stretched than the pool", only the
         latter is a usable definition.
 
         Without any background it falls back to the legacy shared-feature ranging
@@ -1620,7 +1621,7 @@ class ClipMetricsService:
 
         The separation floor is what stops a metric the exemplars are tight on *by
         coincidence* (noise) from being committed when only a handful of clips are
-        selected — the small-exemplar overfitting failure.  If nothing clears the
+        selected, the small-exemplar overfitting failure.  If nothing clears the
         floor (very few or very homogeneous clips), the best-separated few are
         returned so the search still has something to work with.
 
@@ -1671,7 +1672,7 @@ class ClipMetricsService:
         surviving background falls below ``max_leak`` of the pool, or once no
         remaining metric removes a meaningful share of background.  Any slots
         still free are then filled with strongly separating, non-redundant
-        features that fit the same recall budget, so a behaviour one feature
+        features that fit the same recall budget, so a behavior one feature
         already isolates is still described by up to ``k`` of them.
 
         This is what makes the result both *tight* (it is scored against the pool,
@@ -1696,7 +1697,7 @@ class ClipMetricsService:
         ex_cols = {m: pd.to_numeric(exemplar_df[m], errors="coerce").to_numpy(float) for m in feats}
         bg_cols = {m: pd.to_numeric(background_df[m], errors="coerce").to_numpy(float) for m in feats}
         # Per-metric pad (2% of the exemplar 10–90 span) so exemplars sit just
-        # inside the bound rather than exactly on it — helps held-out clips clear it.
+        # inside the bound rather than exactly on it: helps held-out clips clear it.
         pads = {}
         for m in feats:
             ef = ex_cols[m][np.isfinite(ex_cols[m])]
@@ -1715,7 +1716,7 @@ class ClipMetricsService:
         def _best_bound(m: str, base_bg: np.ndarray):
             """Best recall-safe bound on *m*: ``(removed, recall, low, high, new_ex, new_bg)``.
 
-            ``removed`` counts the ``base_bg`` windows the bound excludes — the
+            ``removed`` counts the ``base_bg`` windows the bound excludes, the
             still-surviving background while the box is being built, the whole
             pool when a feature has to justify itself on its own.
             """
@@ -1781,9 +1782,9 @@ class ClipMetricsService:
             if surv_bg.sum() / max(1, n_bg) <= max_leak:
                 break
 
-        # A behaviour at the extreme of one axis (freezing, a jump) has a single
+        # A behavior at the extreme of one axis (freezing, a jump) has a single
         # feature that already excludes ~all of the pool, which ends the search
-        # above after one criterion — and every such behaviour then reads as that
+        # above after one criterion: and every such behavior then reads as that
         # one axis.  Fill the remaining slots with features that separate the
         # exemplars from the *whole* pool on their own, are not near-copies of a
         # chosen one, and fit inside the exemplar recall budget already spent.
@@ -1836,7 +1837,7 @@ class ClipMetricsService:
         """Build a graded exemplar-likeness ranker (higher = more exemplar-like).
 
         This is the *primary* essence output: a continuous ordering of the pool by
-        how exemplar-like each window is.  It is built by an L1-penalised logistic
+        how exemplar-like each window is.  It is built by an L1-penalized logistic
         fit of exemplars vs. background over a wide pool of separated features,
         which selects a sparse subset of them jointly.  Falls back to a stateless,
         discrimination-weighted contrastive z-score over the best ``n_features``
@@ -1845,8 +1846,8 @@ class ClipMetricsService:
 
         Why a sparse fit rather than the AND-box the criteria still display: piloted
         over 8 projects, the greedy box retained only 4–7% of held-out instances of
-        a behaviour from 3 exemplars and 33–50% from 20 — it is selective (5–21x
-        lift) but it discards most of the behaviour, and as a hard gate that loss is
+        a behavior from 3 exemplars and 33–50% from 20, it is selective (5–21x
+        lift) but it discards most of the behavior, and as a hard gate that loss is
         unrecoverable.  A ranking has no such cliff: a window the definition fits
         poorly is ordered late, not excluded.
         """
@@ -1887,8 +1888,8 @@ class EssenceScorer:
 
     ``feature_ids`` is everything the fit was *offered*; ``active_feature_ids`` is
     the sparse subset it actually kept (or the fallback's features).  Callers that
-    have to materialise columns — joining the shipped feature table onto a scored
-    pool — should use the active list: the rest carry zero coefficients and so
+    have to materialise columns, joining the shipped feature table onto a scored
+    pool, should use the active list: the rest carry zero coefficients and so
     cannot move the score, whatever value they are given.
     """
 
@@ -1901,7 +1902,7 @@ class EssenceScorer:
     _model: object | None = None  # fitted sklearn pipeline, when available
     _active: list[str] = field(default_factory=list)  # non-zero-coefficient subset
 
-    # Below this many exemplars even a penalised fit is too unstable to trust;
+    # Below this many exemplars even a penalized fit is too unstable to trust;
     # use the stateless weighted z-score instead.
     _MIN_SPARSE_EXEMPLARS = 4
 
@@ -1939,7 +1940,7 @@ class EssenceScorer:
                 )
             )
         # ``feats`` arrives best-separated-first, so the fallback's small feature
-        # set is its prefix; its weights are normalised over just those, since the
+        # set is its prefix; its weights are normalized over just those, since the
         # z-score is a weighted mean and the unused tail must not dilute it.
         fallback = feats[: max(1, int(n_fallback_features))]
         wsum = sum(weight[m] for m in fallback) or 1.0
@@ -1965,7 +1966,7 @@ class EssenceScorer:
         """L1 logistic exemplar-vs-background fit; ``(pipeline, kept features)``.
 
         L1 rather than the ridge penalty this replaces because the feature pool is
-        wide (~300) and heavily correlated — a ridge fit spreads weight thinly over
+        wide (~300) and heavily correlated, a ridge fit spreads weight thinly over
         every correlated copy of the same signal, while L1 picks one per group and
         zeroes the rest, which is both a better ranker and a far cheaper one to
         evaluate (only the survivors' columns ever have to be read).  ``liblinear``

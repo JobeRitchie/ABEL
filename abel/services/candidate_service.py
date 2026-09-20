@@ -11,6 +11,7 @@ Pipeline position:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,9 +79,20 @@ class CandidateGenerationService:
     def __init__(self) -> None:
         self._project_root: Path | None = None
         self._provenance = ProvenanceService()
+        # Validated external windows, keyed by the file's identity on disk.
+        # An AL run persists every window it ranked, so this list runs to
+        # hundreds of thousands of rows and re-validating it per call showed up
+        # as seconds of UI lag on every Review-tab refresh.
+        self._external_cache: list[CandidateWindow] = []
+        self._external_cache_stamp: tuple[str, int, int] | None = None
+
+    def _invalidate_external_cache(self) -> None:
+        self._external_cache = []
+        self._external_cache_stamp = None
 
     def set_project(self, project_root: Path) -> None:
         self._project_root = project_root
+        self._invalidate_external_cache()
 
     def _external_windows_path(self) -> Path | None:
         if not self._project_root:
@@ -126,6 +138,27 @@ class CandidateGenerationService:
         path = self._external_windows_path()
         if path is None:
             return []
+
+        # Reuse the validated list while the file is untouched.  Writes made
+        # through this service invalidate the cache explicitly; the stamp is
+        # what catches an edit from outside it (e.g. no_behavior_repair).
+        #
+        # Project drives here are often exFAT, whose mtime granularity is a
+        # whole second -- so a rewrite in the same second, at the same size,
+        # is indistinguishable from no change.  Refusing to cache a file that
+        # was modified within the last couple of seconds closes that window;
+        # writes are rare, so the next refresh caches normally.
+        stamp: tuple[str, int, int] | None = None
+        cacheable = False
+        try:
+            stat = path.stat()
+            stamp = (str(path), stat.st_mtime_ns, stat.st_size)
+            cacheable = (time.time() - stat.st_mtime) > 2.0
+        except OSError:
+            stamp = None
+        if cacheable and stamp is not None and stamp == self._external_cache_stamp:
+            return list(self._external_cache)
+
         raw = read_json(path, {"candidates": []})
         out: list[CandidateWindow] = []
         for item in list(raw.get("candidates", [])):
@@ -133,7 +166,13 @@ class CandidateGenerationService:
                 out.append(CandidateWindow.model_validate(item))
             except Exception:
                 continue
-        return out
+
+        if cacheable and stamp is not None:
+            self._external_cache = out
+            self._external_cache_stamp = stamp
+        else:
+            self._invalidate_external_cache()
+        return list(out)
 
     def remove_external_candidates_by_source(self, source: str) -> int:
         """Remove all persisted external window candidates whose source matches *source*.
@@ -154,6 +193,7 @@ class CandidateGenerationService:
                     "candidates": [c.model_dump(mode="json") for c in kept],
                 },
             )
+            self._invalidate_external_cache()
         return removed
 
     def remove_external_window_candidates(self, window_ids: list[str]) -> int:
@@ -178,10 +218,40 @@ class CandidateGenerationService:
                     "candidates": [c.model_dump(mode="json") for c in kept],
                 },
             )
+            self._invalidate_external_cache()
         return removed
 
+    @staticmethod
+    def _merge_window_candidate(old: CandidateWindow, new: CandidateWindow) -> CandidateWindow:
+        """Fold *new* into *old*, unioning their nominating behaviors.
+
+        The queue is keyed by segment id so one extracted clip serves every
+        behavior that nominated it.  A plain overwrite therefore dropped the
+        earlier behaviors: in a 15-behavior batch run each model nominates
+        largely the same uncertain windows, so only the last model in the loop
+        stayed visible and whole behaviors vanished from the review queue.
+        The higher ``total_score`` (uncertainty) wins, so queue ordering still
+        reflects the most uncertain nomination.
+        """
+        merged_ids = list(old.behavior_ids)
+        for bid in new.behavior_ids:
+            if bid not in merged_ids:
+                merged_ids.append(bid)
+        keep = new if float(new.total_score or 0.0) >= float(old.total_score or 0.0) else old
+        return keep.model_copy(update={
+            "behavior_ids": merged_ids,
+            "behavior_id": merged_ids[0] if merged_ids else None,
+            # A clip already rendered for this window must not be forgotten by a
+            # later nomination that carries no path.
+            "clip_path": new.clip_path or old.clip_path,
+        })
+
     def upsert_external_window_candidates(self, candidates: list[CandidateWindow]) -> int:
-        """Add or update external window candidates persisted for cross-tab visibility."""
+        """Add or update external window candidates persisted for cross-tab visibility.
+
+        Re-nominating a window that is already queued merges the two rather than
+        replacing it, so every behavior that asked for the window is preserved.
+        """
         path = self._external_windows_path()
         if path is None or not candidates:
             return 0
@@ -190,7 +260,9 @@ class CandidateGenerationService:
         by_id: dict[str, CandidateWindow] = {str(c.window_id): c for c in existing}
         before = len(by_id)
         for cand in candidates:
-            by_id[str(cand.window_id)] = cand
+            wid = str(cand.window_id)
+            prior = by_id.get(wid)
+            by_id[wid] = self._merge_window_candidate(prior, cand) if prior else cand
 
         write_json(
             path,
@@ -199,6 +271,7 @@ class CandidateGenerationService:
                 "candidates": [c.model_dump(mode="json") for c in by_id.values()],
             },
         )
+        self._invalidate_external_cache()
         return max(0, len(by_id) - before)
 
     def clear_clip_paths(self, session_id: str | None = None) -> int:
@@ -234,6 +307,7 @@ class CandidateGenerationService:
             ext_path.unlink(missing_ok=True)
             removed = True
             logger.info("Cleared persisted external window candidates: %s", ext_path)
+        self._invalidate_external_cache()
         return removed
 
     def reviewed_segment_ids(self) -> set[str]:
@@ -270,8 +344,8 @@ class CandidateGenerationService:
         Removes candidate windows from both the persisted segment queue
         (``candidate_segments.json``) and the external-window queue.  When
         *preserve_reviewed* is True (the default), windows the user has already
-        reviewed — those whose ``segment_id`` appears in
-        ``reviewer_labels.parquet`` — are kept so reviewed clips/windows are
+        reviewed, those whose ``segment_id`` appears in
+        ``reviewer_labels.parquet``, are kept so reviewed clips/windows are
         never lost.  This method never touches reviewer labels or rendered clip
         files under ``derived/clips/``.
 
@@ -309,6 +383,7 @@ class CandidateGenerationService:
             "segment_id",
         )
         _prune(self._external_windows_path(), "window_id")
+        self._invalidate_external_cache()
 
         logger.info(
             "Cleared candidate queue: removed=%d, kept_reviewed=%d (preserve_reviewed=%s)",
@@ -466,7 +541,7 @@ class CandidateGenerationService:
         Samples real rows from the already-extracted segment grid
         (``segment_features.parquet``) rather than synthesizing arbitrary
         frame ranges. Reviewed labels then land on the grid's own
-        ``segment_id`` and get every feature the grid has — including R3D —
+        ``segment_id`` and get every feature the grid has, including R3D,
         for free, instead of needing on-the-fly enrichment later (see
         ``_enrich_segment_df_for_reviewed_labels`` in active_learning_tab.py,
         which cannot compute R3D and used to zero-fill it).
@@ -679,29 +754,111 @@ class CandidateGenerationService:
         self,
         result: SegmentCandidateGenerationResult,
         config: SegmentCandidateGenerationConfig,
+        merge: bool = False,
     ) -> None:
+        """Persist a candidate-generation run's selection.
+
+        With *merge* (batch runs, Retrain All / Pipeline All, which generate one
+        behavior at a time) the new selection is folded into whatever the queue
+        already holds, keyed by ``segment_id``, and each row accumulates the
+        behaviors that nominated it in ``behavior_ids``.  Without it the run
+        replaces the queue, which is what a single deliberate generation means.
+
+        A plain replace during a batch run left only the last behavior's
+        candidates on disk, so 15 models' worth of review work collapsed to one
+        behavior's queue.
+        """
         if not self._project_root:
             return
         out_path = self._project_root / "derived" / "review_tables" / "candidate_segments.json"
+        rows = [c.model_dump(mode="json") for c in result.candidates]
+        target = str(getattr(config, "target_behavior_id", "") or "").strip()
+        for row in rows:
+            ids = [str(b).strip() for b in (row.get("behavior_ids") or []) if str(b).strip()]
+            primary = str(row.get("behavior_id") or "").strip() or target
+            if primary and primary not in ids:
+                ids.insert(0, primary)
+            row["behavior_ids"] = ids
+            row["behavior_id"] = ids[0] if ids else None
+
+        n_loaded, n_ranked = result.n_segments_loaded, result.n_segments_ranked
+        warnings = list(result.warnings)
+        behavior_ids = [target] if target else []
+
+        if merge:
+            raw = read_json(out_path, {})
+            prior = {str(r.get("segment_id")): r for r in (raw.get("candidates") or [])}
+            for row in rows:
+                sid = str(row.get("segment_id"))
+                old_row = prior.get(sid)
+                if old_row is None:
+                    prior[sid] = row
+                    continue
+                ids = [
+                    str(b).strip()
+                    for b in (old_row.get("behavior_ids") or [old_row.get("behavior_id")])
+                    if str(b or "").strip()
+                ]
+                for bid in row["behavior_ids"]:
+                    if bid not in ids:
+                        ids.append(bid)
+                # Keep the more uncertain nomination's scores, but every behavior.
+                keep = (
+                    row
+                    if float(row.get("uncertainty_score") or 0.0)
+                    >= float(old_row.get("uncertainty_score") or 0.0)
+                    else old_row
+                )
+                merged = dict(keep)
+                merged["behavior_ids"] = ids
+                merged["behavior_id"] = ids[0] if ids else None
+                prior[sid] = merged
+            rows = list(prior.values())
+            prior_cfg = raw.get("config") or {}
+            behavior_ids = [
+                str(b).strip()
+                for b in (prior_cfg.get("target_behavior_ids") or [])
+                if str(b).strip()
+            ]
+            prior_target = str(prior_cfg.get("target_behavior_id") or "").strip()
+            if prior_target and prior_target not in behavior_ids:
+                behavior_ids.insert(0, prior_target)
+            if target and target not in behavior_ids:
+                behavior_ids.append(target)
+            n_loaded = max(int(raw.get("n_segments_loaded") or 0), n_loaded)
+            n_ranked = max(int(raw.get("n_segments_ranked") or 0), n_ranked)
+            for w in (raw.get("warnings") or []):
+                if w not in warnings:
+                    warnings.append(w)
+
+        cfg_payload = dict(config.__dict__)
+        cfg_payload["target_behavior_ids"] = behavior_ids
         write_json(
             out_path,
             {
                 "generated_at": datetime.utcnow().isoformat(),
-                "config": config.__dict__,
-                "n_segments_loaded": result.n_segments_loaded,
-                "n_segments_ranked": result.n_segments_ranked,
-                "n_segments_selected": result.n_segments_selected,
-                "candidates": [c.model_dump(mode="json") for c in result.candidates],
-                "warnings": result.warnings,
+                "config": cfg_payload,
+                "n_segments_loaded": n_loaded,
+                "n_segments_ranked": n_ranked,
+                "n_segments_selected": len(rows),
+                "candidates": rows,
+                "warnings": warnings,
             },
         )
-        self._write_queue_composition_diagnostics(result, config)
+        self._write_queue_composition_diagnostics(rows, config)
 
     def _write_queue_composition_diagnostics(
         self,
-        result: SegmentCandidateGenerationResult,
+        rows: "list[dict]",
         config: SegmentCandidateGenerationConfig,
     ) -> None:
+        """Describe the queue as it was just written to disk.
+
+        ``rows`` is the persisted queue, not one run's selection: during a batch
+        run each behavior merges into the same file, so reporting the run's own
+        candidates made ``n_selected`` and every ``reason_fraction`` describe the
+        last behavior of the batch while the queue held all of them.
+        """
         if not self._project_root:
             return
         analysis_dir = self._project_root / "derived" / "analysis" / "diagnostics" / "queue"
@@ -709,17 +866,18 @@ class CandidateGenerationService:
         run_dir = analysis_dir / "runs" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        reasons = [str(c.selection_reason or "unknown") for c in result.candidates]
+        reasons = [str(r.get("selection_reason") or "unknown") for r in rows]
         reason_counts = pd.Series(reasons).value_counts().to_dict() if reasons else {}
+        n_selected = len(rows)
 
         payload = {
             "run_id": run_id,
             "generated_at": datetime.utcnow().isoformat(),
-            "n_selected": int(result.n_segments_selected),
+            "n_selected": int(n_selected),
             "config": config.__dict__,
             "reason_counts": {str(k): int(v) for k, v in reason_counts.items()},
             "reason_fraction": {
-                str(k): float(v) / max(1.0, float(result.n_segments_selected))
+                str(k): float(v) / max(1.0, float(n_selected))
                 for k, v in reason_counts.items()
             },
         }
@@ -919,10 +1077,14 @@ class CandidateGenerationService:
                 "prediction_prob",
                 "uncertainty_score",
                 "rank_score",
+                # Presence bookkeeping, not a feature, it must not shape the
+                # diversity distances either.
+                "pose_present_frac",
+                "partner_present_frac",
             }
             and pd.api.types.is_numeric_dtype(out[c])
         ]
-        # Honour project feature exclusions so diversity distances use the same
+        # Honor project feature exclusions so diversity distances use the same
         # feature set as the rest of the Active Learning workflow.
         if project_root is not None:
             from abel.utils.feature_exclusions import apply_feature_exclusions
@@ -1119,7 +1281,7 @@ class CandidateGenerationService:
 
         This keeps candidate IDs unchanged while making ranking aware of
         behavior competition.  When *co_occurring* is True, high scores from
-        peer behavior models do **not** penalise ranking because overlapping
+        peer behavior models do **not** penalize ranking because overlapping
         behaviors are expected.
         """
         if not self._project_root or merged.empty or "segment_id" not in merged.columns:
@@ -1197,7 +1359,7 @@ class CandidateGenerationService:
         out["other_behavior_support"] = peer_support
         if co_occurring:
             # In co-occurring mode, peer behavior scores do not reduce
-            # exclusivity — a segment genuinely expressing multiple behaviors
+            # exclusivity: a segment genuinely expressing multiple behaviors
             # is not ambiguous, so we keep margin at prediction_prob and
             # exclusivity_uncertainty at zero.
             out["exclusivity_margin"] = out["prediction_prob"].to_numpy(dtype=float)
@@ -1437,6 +1599,13 @@ class CandidateGenerationService:
             # Use the segment's own behavior_id if present, otherwise fall back to target.
             seg_behavior = str(getattr(seg, "behavior_id", "") or "").strip() or None
             effective_behavior = seg_behavior or behavior_value
+            # A batch run merges several behaviors onto one segment row; carry
+            # them all so no behavior disappears from the review queue.
+            seg_behaviors = [
+                str(b).strip()
+                for b in (getattr(seg, "behavior_ids", None) or [])
+                if str(b).strip()
+            ]
             # Preserve segment identity as clip/window id for downstream label joins.
             out.append(
                 CandidateWindow(
@@ -1445,6 +1614,7 @@ class CandidateGenerationService:
                     start_frame=int(seg.start_frame),
                     end_frame=int(seg.end_frame),
                     behavior_id=effective_behavior,
+                    behavior_ids=seg_behaviors,
                     seed_similarity_score=1.0 - float(seg.uncertainty_score),
                     total_score=float(0.7 * seg.prediction_prob + 0.3 * (1.0 - seg.uncertainty_score)),
                     clip_path=None,

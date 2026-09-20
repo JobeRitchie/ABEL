@@ -1,4 +1,4 @@
-"""P4: unified z-scoring — parity, stats persistence, and cache reuse.
+"""P4: unified z-scoring, parity, stats persistence, and cache reuse.
 
 - The vectorised ``_zscore_by_group`` must produce bit-for-bit the same result
   as the original per-group Python loop (data not damaged).

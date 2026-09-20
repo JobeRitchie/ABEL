@@ -2,7 +2,7 @@
 
 Given held-out per-window probabilities and reviewer labels, this searches a grid
 of ``(onset_threshold, min_bout_duration_frames, merge_gap_frames)`` and returns
-the combination that maximizes event-level bout F1 — the number the reviewer
+the combination that maximizes event-level bout F1, the number the reviewer
 actually judges in the Temporal Review tab. It reuses the exact bout-matching
 primitives from :mod:`abel.temporal_refinement.refined_eval`, so a suggestion
 scored here reproduces the same TP/FP/FN the Validation tab and benchmark report.
@@ -62,12 +62,12 @@ def _session_traces(
     smoothing) so the grid search scores identically to the shipped metric.
 
     .. warning::
-       **Known issue — this tuner inherits the bout-scoring flaw.**  It tunes
+       **Known issue, this tuner inherits the bout-scoring flaw.**  It tunes
        against labeled segments, which are sparse (measured ~34% frame coverage,
        gaps up to 517 frames), so the interpolated stretches it scores on were
        never predicted by the model.  That biases the search toward large
        ``min_bout_duration_frames``, and a min_bout longer than the observed
-       island makes refinement unmeasurable on held-out data — one shipped
+       island makes refinement unmeasurable on held-out data, one shipped
        project auto-tuned to ``min_bout=30`` against 15-frame windows, which
        :func:`refined_eval.refinement_evaluability` now reports as not evaluable.
        Settings tuned before that gate existed are worth re-checking by hand.
@@ -191,7 +191,7 @@ def suggest_temporal_settings(
     if not traces:
         return {"error": "no scorable sessions (need >=2 windows per session)"}
 
-    # Ground-truth bout-length profile — used to warn about sparse fixed-window
+    # Ground-truth bout-length profile: used to warn about sparse fixed-window
     # labels, where recall is structurally capped and min-bout must be re-checked
     # on dense inference. (True bouts are merge-gap-independent for this profile.)
     bout_lengths: list[int] = []

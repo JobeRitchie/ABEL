@@ -194,7 +194,7 @@ def test_time_budget_none_when_no_predictions():
 
 
 def test_ci95_uses_t_not_1p96():
-    """A 1.96 multiplier at 3 seeds is really an 81% interval — over-calls significance."""
+    """A 1.96 multiplier at 3 seeds is really an 81% interval, over-calls significance."""
     assert abs(vm.t_critical_95(3) - 4.303) < 1e-3   # df=2
     assert abs(vm.t_critical_95(2) - 12.706) < 1e-3  # df=1
     assert vm.t_critical_95(30) < 2.1                # converges toward 1.96
@@ -209,7 +209,7 @@ def test_ci95_uses_t_not_1p96():
 
 
 def test_paired_p_matches_scipy_and_declines_degenerate_input():
-    """The one paired t-test the suite shares — ablation, video-value and
+    """The one paired t-test the suite shares: ablation, video-value and
     discrimination all call this, so it must not drift between them."""
     vals = [0.031, 0.028, 0.035, 0.030, 0.033]
     scipy_stats = __import__("scipy.stats", fromlist=["stats"])
@@ -224,7 +224,7 @@ def test_paired_p_matches_scipy_and_declines_degenerate_input():
     assert np.isnan(vm.paired_p([0.05]))
     assert np.isnan(vm.paired_p([0.05, 0.05, 0.05]))
     assert np.isnan(vm.paired_p([]))
-    # NaN seeds are dropped, not propagated — a failed fit must not sink the test.
+    # NaN seeds are dropped, not propagated, a failed fit must not sink the test.
     assert abs(vm.paired_p([0.031, np.nan, 0.028, 0.035, 0.030, 0.033])
                - vm.paired_p(vals)) < 1e-12
 
@@ -233,7 +233,7 @@ def test_benjamini_hochberg_threshold_controls_the_discovery_rate():
     """A discrimination run tests ~40-100 pair x family combinations, so a bare
     p<0.05 line expects a handful of false positives by construction."""
     # 10 tests, 3 genuinely tiny p's. k=3 is the last rejection, so the critical
-    # value is 3/10 * 0.05 — stricter than a bare 0.05, looser than Bonferroni.
+    # value is 3/10 * 0.05, stricter than a bare 0.05, looser than Bonferroni.
     ps = [1e-6, 1e-5, 1e-4] + [0.30, 0.44, 0.51, 0.62, 0.73, 0.88, 0.95]
     thr = vm.benjamini_hochberg_threshold(ps)
     assert abs(thr - 3 / 10 * 0.05) < 1e-12

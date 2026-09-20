@@ -8,16 +8,16 @@ Two rules shape everything here:
 
 * **Never invent a number.**  Every value in the output is read from the project
   (``project.yaml``, ``behavior_definitions.yaml``, the model directories, the
-  motif settings, the import manifest).  Anything ABEL cannot know — the pose
-  tracker and its version, the animals, the apparatus — is emitted as an explicit
+  motif settings, the import manifest).  Anything ABEL cannot know, the pose
+  tracker and its version, the animals, the apparatus, is emitted as an explicit
   ``[FILL IN: …]`` placeholder rather than a plausible guess.
 * **The output is a draft, not manuscript text.**  :data:`WARNING_TEXT` says so,
   the UI repeats it, and it is prepended to the generated text by default.  A
   methods section is a claim about what was done; only the author can confirm it.
 
 The module is deliberately Qt-free and side-effect-free so it can be tested
-headlessly.  The two expensive inputs — per-behavior model metrics and reviewer
-agreement — are *injected* by the caller (see :func:`gather_facts`), because both
+headlessly.  The two expensive inputs, per-behavior model metrics and reviewer
+agreement, are *injected* by the caller (see :func:`gather_facts`), because both
 come from :class:`~abel.services.validation_service.ValidationService` and belong
 on a worker thread, not in a renderer.
 """
@@ -41,7 +41,7 @@ REPO_URL = "https://github.com/JobeRitchie/ABEL"
 
 WARNING_TEXT = (
     "=" * 78 + "\n"
-    "DRAFT ONLY — THIS IS NOT PUBLICATION TEXT\n"
+    "DRAFT ONLY: THIS IS NOT PUBLICATION TEXT\n"
     + "=" * 78 + "\n"
     "This draft was assembled from the settings and results stored in this ABEL\n"
     "project. It is a starting point and a checklist, NOT a methods section.\n"
@@ -214,13 +214,13 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _num(value: Any, digits: int = 3) -> str:
-    """Format a metric, or an em dash when it is missing or not finite."""
+    """Format a metric, or a dash when it is missing or not finite."""
     try:
         f = float(value)
     except (TypeError, ValueError):
-        return "—"
+        return "-"
     if not math.isfinite(f):
-        return "—"
+        return "-"
     return f"{f:.{digits}f}"
 
 
@@ -228,7 +228,7 @@ def _count(value: Any) -> str:
     try:
         return f"{int(value):,}"
     except (TypeError, ValueError):
-        return "—"
+        return "-"
 
 
 def _plural(n: int, singular: str, plural: str | None = None) -> str:
@@ -251,9 +251,9 @@ def _sec(frames: Any, fps: float) -> str:
     try:
         f = float(frames)
     except (TypeError, ValueError):
-        return "—"
+        return "-"
     if fps <= 0:
-        return "—"
+        return "-"
     return f"{f / fps:.2f}"
 
 
@@ -360,7 +360,7 @@ def _gather_recordings(root: Path) -> dict[str, Any]:
 
 
 def _gather_roi(root: Path) -> dict[str, Any]:
-    """Target-zone count and shapes, read through the ROI service's normaliser."""
+    """Target-zone count and shapes, read through the ROI service's normalizer."""
     try:
         from abel.services.roi_service import ROIService  # noqa: PLC0415
 
@@ -384,6 +384,7 @@ def _gather_roi(root: Path) -> dict[str, Any]:
             "has_zones": bool(shapes),
             "shapes": dict(shapes),
             "motion_radius_px": svc.local_motion_radius(root),
+            "bg_var_threshold": svc.bg_var_threshold(root),
             "excluded_days": svc.get_roi_excluded_days(root),
         }
     except Exception:
@@ -511,7 +512,7 @@ def _r_ml_approach(f: dict[str, Any]) -> str:
         "xgboost": "gradient-boosted decision trees (XGBoost)",
         "lightgbm": "gradient-boosted decision trees (LightGBM)",
         "random_forest": "a random forest",
-        "logistic_regression": "L2-regularised logistic regression",
+        "logistic_regression": "L2-regularized logistic regression",
     }.get(family, f"a {family} classifier")
     calib = str(bm.get("calibration_method") or "sigmoid")
     calib_label = {
@@ -551,7 +552,7 @@ def _r_behaviors(f: dict[str, Any]) -> str:
         str(r.get("behavior_id")): r
         for r in f["model_rows"]
         if not _is_no_behavior(str(r.get("behavior_id", "")))
-        and str(r.get("model_version") or "—") != "—"
+        and str(r.get("model_version") or "-") != "-"
     }
     lines = [
         f"Separate classifiers were trained for {len(names)} "
@@ -597,7 +598,7 @@ def _r_behavior_definitions(f: dict[str, Any]) -> str:
                 pieces.append(f"Minimum duration: {float(b['min_duration_sec']):.2f} s")
         except (TypeError, ValueError):
             pass
-        out.append(f"  {name} — " + " ".join(pieces))
+        out.append(f"  {name}, " + " ".join(pieces))
     return "\n".join(out)
 
 
@@ -646,7 +647,7 @@ def _r_dataset(f: dict[str, Any]) -> str:
 def _r_pose(f: dict[str, Any]) -> str:
     rec = f["recordings"]
     kp = rec.get("keypoints") or []
-    fmt = ", ".join(f.upper() for f in (rec.get("pose_formats") or [])) or "—"
+    fmt = ", ".join(f.upper() for f in (rec.get("pose_formats") or [])) or "-"
     tracker = _fill(
         "pose-estimation software and version, e.g. DeepLabCut 2.3.x or SLEAP 1.3.x"
     )
@@ -680,6 +681,14 @@ def _r_pose(f: dict[str, Any]) -> str:
         )
     if bits:
         parts.append("Before feature extraction, " + ", ".join(bits) + ".")
+    _absence = int(sm.get("absence_max_fill_frames") or 0)
+    if _absence > 0:
+        parts.append(
+            f"Animals undetected for more than {_absence} consecutive frames were "
+            "treated as absent rather than held at their last known pose, and "
+            "analysis windows containing any frame in which the animal was absent "
+            "were excluded."
+        )
     return " ".join(parts)
 
 
@@ -697,7 +706,7 @@ def _r_features(f: dict[str, Any]) -> str:
         window_txt = "windows of " + _fill("window and stride length")
     parts = [
         f"Pose tracks were divided into overlapping {window_txt}, and each window was "
-        f"summarised by a fixed-length feature vector."
+        f"summarized by a fixed-length feature vector."
     ]
 
     families = ["per-keypoint kinematics (speed, acceleration, oscillation power)"]
@@ -706,7 +715,7 @@ def _r_features(f: dict[str, Any]) -> str:
     if inv.get("enable_egocentric_kinematics", True):
         inv_bits.append("egocentric (heading-relative) velocity")
     if inv.get("enable_body_length_normalization", True):
-        inv_bits.append("body-length normalisation of all distances")
+        inv_bits.append("body-length normalization of all distances")
     if inv.get("enable_relative_geometry", True):
         inv_bits.append("all pairwise inter-keypoint distances")
     if inv.get("enable_head_direction", True):
@@ -777,14 +786,16 @@ def _r_roi(f: dict[str, Any]) -> str:
         parts.append(
             f"Local pixel-motion features were computed within "
             f"{2 * int(roi['motion_radius_px'])} × {2 * int(roi['motion_radius_px'])} px "
-            f"windows centred on the body centroid and nose, with MOG2 background "
-            f"subtraction applied to that moving window rather than the full frame "
+            f"windows centered on the body centroid and nose, with MOG2 background "
+            f"subtraction (history 200 frames, variance threshold "
+            f"{int(roi.get('bg_var_threshold', 16))}) applied to that moving window "
+            f"rather than the full frame "
             f"(windows kept a constant size at the frame edge by replicating border "
             f"pixels, and held at the last tracked position through keypoint dropouts)."
         )
     if roi.get("excluded_days"):
         parts.append(
-            f"Sessions labelled {_join([str(d) for d in roi['excluded_days']])} were excluded "
+            f"Sessions labeled {_join([str(d) for d in roi['excluded_days']])} were excluded "
             f"from zone-based analyses."
         )
     return " ".join(parts)
@@ -842,7 +853,7 @@ def _r_training(f: dict[str, Any]) -> str:
             f"but a reviewer rejected) at a ratio of "
             f"{float(bm['hard_negative_sampling_ratio']):g}."
         )
-    if any(str(r.get("model_version") or "—") != "—" for r in f["model_rows"]):
+    if any(str(r.get("model_version") or "-") != "-" for r in f["model_rows"]):
         parts.append(
             "All reported metrics come from the held-out split; the model actually applied "
             "to the full dataset was then refit on all labeled windows, so every reviewer "
@@ -855,7 +866,7 @@ def _r_performance(f: dict[str, Any]) -> str:
     rows = [
         r for r in f["model_rows"]
         if not _is_no_behavior(str(r.get("behavior_id", "")))
-        and str(r.get("model_version") or "—") != "—"
+        and str(r.get("model_version") or "-") != "-"
     ]
     if not rows:
         return (
@@ -896,7 +907,7 @@ def _r_performance(f: dict[str, Any]) -> str:
             "\"target\". Retrain those behaviors to obtain target-class scores before "
             "reporting them."
         )
-    refined = [r for r in rows if _num(r.get("refined_f1")) != "—"]
+    refined = [r for r in rows if _num(r.get("refined_f1")) != "-"]
     if refined:
         notes.append(
             "Window-level scores are before temporal refinement. After the bout "
@@ -1057,9 +1068,9 @@ def _r_hmm(f: dict[str, Any]) -> str:
         else "the Viterbi maximum-likelihood state path"
     )
     return (
-        f"Sequential structure in the behavior stream was modelled with a categorical hidden "
+        f"Sequential structure in the behavior stream was modeled with a categorical hidden "
         f"Markov model over each subject's ordered bout sequence (hmmlearn), fitted by "
-        f"Baum–Welch expectation–maximisation with {states}, "
+        f"Baum–Welch expectation–maximization with {states}, "
         f"{int(m.get('hmm_n_restarts') or 5)} random restarts of up to "
         f"{int(m.get('hmm_n_iter') or 200):,} iterations each (seed "
         f"{int(m.get('hmm_random_seed') or 0)}; the restart with the highest log-likelihood "
@@ -1088,7 +1099,7 @@ def _r_motifs(f: dict[str, Any]) -> str:
             f"Sessions were additionally embedded from their "
             f"{int(m.get('cluster_ngram_n') or 3)}-gram profiles with UMAP "
             f"({int(m.get('umap_n_components') or 10)} components, "
-            f"{int(m.get('umap_n_neighbors') or 10)} neighbours, min_dist "
+            f"{int(m.get('umap_n_neighbors') or 10)} neighbors, min_dist "
             f"{float(m.get('umap_min_dist') or 0.1):g}) and clustered with HDBSCAN "
             f"(minimum cluster size {int(m.get('hdbscan_min_cluster_size') or 3)})."
         )
@@ -1116,7 +1127,7 @@ def _r_stats(f: dict[str, Any]) -> str:
         "session. "
         + _fill(
             "your actual test, the software you ran it in, the alpha level, and any "
-            "repeated-measures or covariate structure — ABEL's built-in tests are a "
+            "repeated-measures or covariate structure: ABEL's built-in tests are a "
             "screening tool, not a substitute for a designed analysis"
         )
     )
@@ -1141,7 +1152,7 @@ def _r_reproducibility(f: dict[str, Any]) -> str:
     ]
     rows = [
         r for r in f["model_rows"]
-        if str(r.get("model_version") or "—") != "—"
+        if str(r.get("model_version") or "-") != "-"
         and not _is_no_behavior(str(r.get("behavior_id", "")))
     ]
     if rows:

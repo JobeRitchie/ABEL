@@ -63,7 +63,7 @@ def test_counts_are_averaged_over_seeds_not_summed():
     out = cp.confusion_by_behavior(_cells())
     assert len(out) == 1
     row = out.iloc[0]
-    # mean(190, 192, 191) = 191 — not 573.
+    # mean(190, 192, 191) = 191, not 573.
     assert row["tp"] == 191
     assert row["fn"] == 23
     assert row["fp"] == 17
@@ -208,7 +208,7 @@ def test_clip_length_is_measured_from_rows_not_read_from_config():
 
 
 def test_clip_length_is_nan_when_unmeasurable():
-    """A missing or bound-less training set must yield no duration at all —
+    """A missing or bound-less training set must yield no duration at all,
     callers then name the unit without one rather than inventing a number."""
     proj = ProjectRef(project_id="P", name="P", root=Path("nonexistent"))
     assert math.isnan(vhold.median_clip_frames(proj))

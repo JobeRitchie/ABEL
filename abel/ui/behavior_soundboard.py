@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from abel.services.behavior_service import behavior_label
+from abel.services.behavior_service import NO_BEHAVIOR_ID, behavior_label
 
 
 _SOLO_BTN_QSS = (
@@ -51,6 +51,11 @@ _SOCIAL_BTN_QSS = (
     "border-radius:8px;padding:6px 10px;font-weight:600;}"
     "QPushButton:hover{background:#2E2547;border-color:#9575CD;}"
 )
+_NONE_BTN_QSS = (
+    "QPushButton{background:#263238;color:#CFD8DC;border:1px solid #455A64;"
+    "border-radius:8px;padding:8px 10px;font-weight:700;}"
+    "QPushButton:hover{background:#31424B;border-color:#607D8B;}"
+)
 _WINDOW_QSS = (
     "#hint{color:#8A97A3;font-size:11px;}"
     "#status{color:#E3F2FD;font-weight:600;font-size:12px;}"
@@ -62,6 +67,8 @@ _WINDOW_QSS = (
     "#commit{background:#2E7D32;color:#FFFFFF;border:none;border-radius:8px;padding:9px;font-weight:700;}"
     "#commit:hover{background:#388E3C;}"
     "#commit:disabled{background:#33475B;color:#78909C;}"
+    "#clear{background:#3A2429;color:#FFCDD2;border:1px solid #8C4A52;border-radius:8px;padding:7px;font-weight:600;}"
+    "#clear:hover{background:#4A2C32;border-color:#B71C1C;}"
 )
 
 
@@ -78,6 +85,7 @@ class BehaviorSoundboard(QWidget):
         self._on_behavior: Callable[[str], None] = lambda _bid: None          # single-animal path
         self._on_structured: Callable[[str, str, "str | None"], None] = lambda *_: None
         self._on_commit: Callable[[list], None] = lambda _labels: None         # persist clip labels
+        self._on_clear: Callable[[], int] = lambda: 0                          # erase saved clip labels
         self._nav: dict[str, Callable[[], None]] = {}
 
         # State
@@ -115,7 +123,7 @@ class BehaviorSoundboard(QWidget):
         self._status.setMinimumHeight(16)
         root.addWidget(self._status)
 
-        # Behavior button grid — compact buttons, top-left aligned (stretch
+        # Behavior button grid: compact buttons, top-left aligned (stretch
         # absorbers keep them at natural size instead of filling the window).
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -126,6 +134,28 @@ class BehaviorSoundboard(QWidget):
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._scroll.setWidget(self._grid_host)
         root.addWidget(self._scroll, 3)
+
+        # Universal negative, two scopes: the whole clip in one click, or just
+        # the selected subject (one animal can be idle while another rears).
+        none_row = QWidget()
+        none_layout = QHBoxLayout(none_row)
+        none_layout.setContentsMargins(0, 0, 0, 0)
+        none_layout.setSpacing(8)
+        self._none_btn = QPushButton()
+        self._none_btn.setObjectName("noneAll")
+        self._none_btn.setStyleSheet(_NONE_BTN_QSS)
+        self._none_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._none_btn.setMinimumHeight(40)
+        self._none_btn.clicked.connect(self._label_all_no_behavior)
+        none_layout.addWidget(self._none_btn, 1)
+        self._none_one_btn = QPushButton()
+        self._none_one_btn.setObjectName("noneOne")
+        self._none_one_btn.setStyleSheet(_NONE_BTN_QSS)
+        self._none_one_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._none_one_btn.setMinimumHeight(40)
+        self._none_one_btn.clicked.connect(self._label_selected_no_behavior)
+        none_layout.addWidget(self._none_one_btn, 1)
+        root.addWidget(none_row)
 
         divider = QFrame()
         divider.setObjectName("divider")
@@ -148,14 +178,29 @@ class BehaviorSoundboard(QWidget):
         root.addWidget(lbl_scroll, 2)
 
         # Commit: persist the clip's collected labels via the review tab.
-        self._commit_btn = QPushButton("✓ Commit labels for this clip")
+        self._commit_btn = QPushButton("✓ Commit Labels for This Clip")
         self._commit_btn.setObjectName("commit")
         self._commit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._commit_btn.setMinimumHeight(38)
         self._commit_btn.clicked.connect(self._commit)
         root.addWidget(self._commit_btn)
 
+        # Clear: drop the staged chips *and* whatever was already saved for this
+        # clip, so a mislabeled clip can be put back to unreviewed without
+        # leaving the soundboard.
+        self._clear_btn = QPushButton("✕ Clear Labels for This Clip")
+        self._clear_btn.setObjectName("clear")
+        self._clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._clear_btn.setMinimumHeight(32)
+        self._clear_btn.setToolTip(
+            "Remove every label staged or already saved for this clip and put it "
+            "back in the queue as unreviewed. The clip file is kept."
+        )
+        self._clear_btn.clicked.connect(self._clear_clip_labels)
+        root.addWidget(self._clear_btn)
+
         self.setStyleSheet(_WINDOW_QSS)
+        self._sync_none_button()
         self._refresh_labels_list()
         self.resize(640, 640)
 
@@ -169,6 +214,7 @@ class BehaviorSoundboard(QWidget):
         nav: "dict[str, Callable[[], None]]",
         on_structured: "Callable[[str, str, str | None], None] | None" = None,
         on_commit: "Callable[[list], None] | None" = None,
+        on_clear: "Callable[[], int] | None" = None,
     ) -> None:
         """``behaviors``: list of ``(behavior_id, name, key, is_social, directionality)``.
 
@@ -177,7 +223,8 @@ class BehaviorSoundboard(QWidget):
         multi-animal path (partner is ``None`` for solo behaviors).
         ``on_commit(labels)`` persists the clip's collected structured labels,
         where ``labels`` is a list of ``{behavior_id, focal_animal_id,
-        partner_animal_id}`` dicts.
+        partner_animal_id}`` dicts. ``on_clear()`` erases the clip's saved
+        labels and returns how many stored rows it removed.
         """
         self._behaviors = list(behaviors)
         self._on_behavior = on_behavior
@@ -186,11 +233,14 @@ class BehaviorSoundboard(QWidget):
             self._on_structured = on_structured
         if on_commit is not None:
             self._on_commit = on_commit
+        if on_clear is not None:
+            self._on_clear = on_clear
         self._key_to_behavior = {
             str(key).lower(): bid
             for (bid, _n, key, *_rest) in self._behaviors if key
         }
         self._rebuild_behavior_grid()
+        self._sync_none_button()
         self._reset_designation()
 
     def set_animals(self, animals: "list[tuple]") -> None:
@@ -201,6 +251,7 @@ class BehaviorSoundboard(QWidget):
         self._animals = list(animals or [])
         self._selected_animal = self._animals[0][0] if len(self._animals) == 1 else None
         self._rebuild_animal_bar()
+        self._sync_none_button()
         self._reset_designation()
         self.set_clip_labels([])
 
@@ -273,36 +324,87 @@ class BehaviorSoundboard(QWidget):
         self._sync_animal_buttons()
 
     def _rebuild_behavior_grid(self) -> None:
+        """Lay the behavior buttons out in two labeled blocks: solo, then social.
+
+        ``no_behavior`` is left out of the grid, it gets its own all-subjects
+        button below, since the universal negative applies to the whole clip
+        rather than to one designated animal.
+        """
         while self._grid.count():
             it = self._grid.takeAt(0)
             w = it.widget()
             if w is not None:
                 w.deleteLater()
-        if not self._behaviors:
+        entries = [b for b in self._behaviors if b[0] != NO_BEHAVIOR_ID]
+        if not entries:
             self._grid.addWidget(QLabel("No behaviors defined for this project."), 0, 0)
             return
-        n_rows = 0
-        for i, (bid, name, key, is_social, direction) in enumerate(self._behaviors):
-            tag = ""
-            if is_social:
-                tag = " →" if direction == "directed" else " ⇄"
-            text = f"{name}{tag}" + (f"   ({key})" if key else "")
-            btn = QPushButton(text)
-            btn.setMinimumSize(132, 42)
-            btn.setMaximumHeight(46)
-            btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setStyleSheet(_SOCIAL_BTN_QSS if is_social else _SOLO_BTN_QSS)
-            if is_social:
-                verb = "actor → recipient" if direction == "directed" else "the two animals"
-                btn.setToolTip(f"Social behavior — click it, then designate {verb}.")
-            btn.clicked.connect(lambda _c=False, b=bid: self._on_behavior_clicked(b))
-            row, col = i // self._columns, i % self._columns
-            self._grid.addWidget(btn, row, col)
-            n_rows = row
+        solo = [b for b in entries if not b[3]]
+        social = [b for b in entries if b[3]]
+        # Headers only earn their space when there is actually a split to show
+        # (single-animal projects have no social behaviors at all).
+        show_headers = bool(solo and social)
+        row = 0
+        for title, group in (("SOLO", solo), ("SOCIAL", social)):
+            if not group:
+                continue
+            if show_headers:
+                header = QLabel(f"{title}  ({len(group)})")
+                header.setObjectName("section")
+                self._grid.addWidget(header, row, 0, 1, self._columns)
+                row += 1
+            for i, entry in enumerate(group):
+                self._grid.addWidget(
+                    self._make_behavior_button(entry), row + i // self._columns, i % self._columns
+                )
+            row += (len(group) + self._columns - 1) // self._columns
         # Absorb extra space so buttons stay compact at top-left rather than stretching.
         self._grid.setColumnStretch(self._columns, 1)
-        self._grid.setRowStretch(n_rows + 1, 1)
+        self._grid.setRowStretch(row, 1)
+
+    def _make_behavior_button(self, entry: tuple) -> QPushButton:
+        bid, name, key, is_social, direction = entry
+        tag = ""
+        if is_social:
+            tag = " →" if direction == "directed" else " ⇄"
+        btn = QPushButton(f"{name}{tag}" + (f"   ({key})" if key else ""))
+        btn.setMinimumSize(132, 42)
+        btn.setMaximumHeight(46)
+        btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setStyleSheet(_SOCIAL_BTN_QSS if is_social else _SOLO_BTN_QSS)
+        if is_social:
+            verb = "actor → recipient" if direction == "directed" else "the two animals"
+            btn.setToolTip(f"Social behavior, click it, then designate {verb}.")
+        btn.clicked.connect(lambda _c=False, b=bid: self._on_behavior_clicked(b))
+        return btn
+
+    def _no_behavior_name(self) -> str:
+        b = self._behavior(NO_BEHAVIOR_ID)
+        return str(b[1]) if b else behavior_label(NO_BEHAVIOR_ID)
+
+    def _sync_none_button(self) -> None:
+        name = self._no_behavior_name()
+        key = next((k for (bid, _n, k, *_r) in self._behaviors if bid == NO_BEHAVIOR_ID and k), "")
+        suffix = f"   ({key})" if key else ""
+        self._none_one_btn.setVisible(self._multi())
+        if self._multi():
+            self._none_btn.setText(f"⌀ {name}, all subjects{suffix}")
+            self._none_btn.setToolTip(
+                "Label every animal in this clip as the universal negative and commit "
+                "it. Replaces any labels staged for this clip."
+            )
+            who = self._animal_name(self._selected_animal) if self._selected_animal else "selected subject"
+            self._none_one_btn.setText(f"⌀ {name}, {who}")
+            self._none_one_btn.setEnabled(self._selected_animal is not None)
+            self._none_one_btn.setToolTip(
+                "Stage the universal negative for the selected animal only, leaving "
+                "the other animals' labels alone (one can be idle while another is "
+                "behaving). Commit when the clip is done."
+            )
+        else:
+            self._none_btn.setText(f"⌀ {name}{suffix}")
+            self._none_btn.setToolTip("Label this clip as the universal negative.")
 
     # ------------------------------------------------------------------
     # Interaction
@@ -314,6 +416,11 @@ class BehaviorSoundboard(QWidget):
         return next((n for (aid, n, _c) in self._animals if aid == animal_id), animal_id)
 
     def _on_behavior_clicked(self, bid: str) -> None:
+        # The universal negative is clip-wide, never per-animal (this also
+        # routes its keyboard shortcut to the all-subjects button).
+        if bid == NO_BEHAVIOR_ID:
+            self._label_all_no_behavior()
+            return
         # Single-animal project -> legacy path.
         if not self._multi():
             self._on_behavior(bid)
@@ -358,6 +465,7 @@ class BehaviorSoundboard(QWidget):
         hi = set(highlight or ([] if self._pending_social else ([self._selected_animal] if self._selected_animal else [])))
         for btn, (aid, _n, _c) in zip(self._animal_btns, self._animals):
             btn.setChecked(aid in hi)
+        self._sync_none_button()
 
     def _add_label(self, bid: str, focal: str, partner: "str | None") -> None:
         b = self._behavior(bid)
@@ -375,6 +483,73 @@ class BehaviorSoundboard(QWidget):
         self._refresh_labels_list()
         self._on_structured(bid, focal, partner)
 
+    def _label_all_no_behavior(self) -> None:
+        """Label every subject in the clip as ``no_behavior`` and commit it.
+
+        The universal negative contradicts any positive label, so this replaces
+        whatever was staged for the clip rather than adding to it. In a
+        single-animal project there is nothing to designate, so it falls back to
+        the review tab's normal no-behavior path.
+        """
+        if not self._multi():
+            self._on_behavior(NO_BEHAVIOR_ID)
+            return
+        self._pending_social = None
+        self._sync_animal_buttons()
+        name = self._no_behavior_name()
+        self._clip_labels = [
+            {
+                "behavior_id": NO_BEHAVIOR_ID, "focal_animal_id": aid,
+                "partner_animal_id": None, "display": f"{name}: {animal_name}",
+            }
+            for (aid, animal_name, _rgb) in self._animals
+        ]
+        self._refresh_labels_list()
+        for lab in self._clip_labels:
+            self._on_structured(NO_BEHAVIOR_ID, lab["focal_animal_id"], None)
+        self._commit()
+
+    def _label_selected_no_behavior(self) -> None:
+        """Stage the universal negative for the selected animal only.
+
+        The clip-wide button is wrong when only *some* subjects are idle, so
+        this one behaves like any other solo behavior: it applies to the
+        designated animal and waits for the commit. Because the negative
+        contradicts that animal's positives, its existing chips are dropped,
+        the other animals' labels are untouched.
+        """
+        if not self._multi():
+            self._on_behavior(NO_BEHAVIOR_ID)
+            return
+        if self._selected_animal is None:
+            self._status.setText("Select an animal (top), then click the ⌀ button.")
+            return
+        self._pending_social = None
+        focal = self._selected_animal
+        self._clip_labels = [
+            lab for lab in self._clip_labels
+            if lab.get("focal_animal_id") != focal and lab.get("partner_animal_id") != focal
+        ]
+        self._sync_animal_buttons()
+        self._add_label(NO_BEHAVIOR_ID, focal, None)
+
+    def _clear_clip_labels(self) -> None:
+        """Discard staged chips and ask the review tab to erase saved labels."""
+        self._pending_social = None
+        staged = len(self._clip_labels)
+        self.set_clip_labels([])
+        self._reset_designation()
+        try:
+            removed = int(self._on_clear() or 0)
+        except Exception:  # a clearing failure must not wedge the window
+            removed = 0
+        if removed:
+            self._status.setText(f"Cleared {removed} saved label{'s' if removed != 1 else ''}.")
+        elif staged:
+            self._status.setText(f"Discarded {staged} staged label{'s' if staged != 1 else ''}.")
+        else:
+            self._status.setText("Nothing to clear on this clip.")
+
     def _remove_label(self, idx: int) -> None:
         if 0 <= idx < len(self._clip_labels):
             self._clip_labels.pop(idx)
@@ -383,7 +558,7 @@ class BehaviorSoundboard(QWidget):
     def _commit(self) -> None:
         """Persist the clip's collected labels through the review tab."""
         if not self._clip_labels:
-            self._status.setText("No labels to commit — pick a behavior first.")
+            self._status.setText("No labels to commit: pick a behavior first.")
             return
         payload = [
             {
@@ -409,7 +584,7 @@ class BehaviorSoundboard(QWidget):
             if w is not None:
                 w.deleteLater()
         if not self._clip_labels:
-            empty = QLabel("No labels yet — pick a behavior above.")
+            empty = QLabel("No labels yet: pick a behavior above.")
             empty.setStyleSheet("color:#607D8B; font-style:italic;")
             self._labels_layout.addWidget(empty)
             self._labels_layout.addStretch(1)
@@ -439,7 +614,9 @@ class BehaviorSoundboard(QWidget):
             self._hint.setText(
                 "Pick a behavior, then the animal(s). Solo: click a behavior for the "
                 "selected animal. Social: click the behavior, then the two animals "
-                "(actor then recipient for directed). Arrow keys still move clips."
+                "(actor then recipient for directed). Empty clip: the ⌀ all-subjects "
+                "button labels everyone at once; the ⌀ per-subject button marks just "
+                "the selected animal idle. Arrow keys still move clips."
             )
             self._status.setText("")
         else:
@@ -467,7 +644,7 @@ class BehaviorSoundboard(QWidget):
 
         if key == Qt.Key.Key_Escape and self._pending_social is not None:
             self._pending_social = None
-            self._status.setText("Cancelled.")
+            self._status.setText("Canceled.")
             self._sync_animal_buttons()
             return
         if ctrl and key == Qt.Key.Key_A:

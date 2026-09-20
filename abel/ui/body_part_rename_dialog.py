@@ -1,7 +1,7 @@
 """Dialog for renaming body parts (keypoints) to new project-wide names.
 
-Unlike Keypoint Mapping — which reconciles differently-named pose files onto the
-project's *existing* keypoint scheme — this lets the user give body parts brand
+Unlike Keypoint Mapping, which reconciles differently-named pose files onto the
+project's *existing* keypoint scheme, this lets the user give body parts brand
 new names of their own choosing.  The renames are stored in the project's
 keypoint alias map (``config/keypoint_aliases.json``) and applied during pose
 loading, so every downstream step (feature extraction, context features, trained
@@ -50,7 +50,7 @@ class BodyPartRenameDialog(QDialog):
         layout = QVBoxLayout(self)
         explainer = QLabel(
             "Give body parts new names. The new names replace the originals "
-            "everywhere downstream — feature extraction, context features and "
+            "everywhere downstream: feature extraction, context features and "
             "any models you train on this project. Leave a name unchanged to "
             "keep it.\n\nThis is different from Keypoint Mapping, which only "
             "aligns differently-named pose files onto the project's existing "

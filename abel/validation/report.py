@@ -39,7 +39,7 @@ def build_html(
         f'<section><h2>{html.escape(h)}</h2>{inner}</section>' for h, inner in sections
     )
     doc = f"""<!doctype html><html><head><meta charset="utf-8">
-<title>ABEL Validation — {html.escape(run_id)}</title>
+<title>ABEL Validation: {html.escape(run_id)}</title>
 <style>
  body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:24px;color:#1a1a2e;background:#fafafc;}}
  h1{{font-size:22px;}} h2{{font-size:17px;margin-top:28px;border-bottom:2px solid #2196F3;padding-bottom:4px;}}
@@ -49,7 +49,7 @@ def build_html(
  table.vtab th{{background:#eef3fb;}}
  section{{background:#fff;padding:14px 18px;border-radius:8px;border:1px solid #e8e8ee;margin:14px 0;}}
 </style></head><body>
-<h1>ABEL Validation &amp; Meta-Analysis — {html.escape(run_id)}</h1>
+<h1>ABEL Validation &amp; Meta-Analysis, {html.escape(run_id)}</h1>
 <div class="overview">{ov}</div>
 {body}
 </body></html>"""

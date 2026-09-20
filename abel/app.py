@@ -136,7 +136,7 @@ QPushButton#destructive:disabled {
 }
 
 /* Qt's default disabled palette lands around #5D5D5D, which measures 2.6:1 on
-   our grounds -- a user can see something is greyed out but cannot read which
+   our grounds -- a user can see something is grayed out but cannot read which
    action it is. Restate it for every widget class that carries text. */
 QLabel:disabled, QCheckBox:disabled, QRadioButton:disabled,
 QGroupBox:disabled, QGroupBox::title:disabled,

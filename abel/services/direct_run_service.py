@@ -1,4 +1,4 @@
-"""Direct Use pipeline — replay a trained workflow on new sessions.
+"""Direct Use pipeline: replay a trained workflow on new sessions.
 
 Runs the full inference pipeline from raw pose/video to bout outputs
 using a frozen WorkflowSnapshot from a source project, without any
@@ -255,9 +255,9 @@ class DirectRunService:
         behavior_models = dict(snapshot.selected_behavior_models or {})
         excluded_ids = list(snapshot.excluded_behavior_ids or [])
 
-        # Robustness: older snapshots (created before multi-behaviour
+        # Robustness: older snapshots (created before multi-behavior
         # auto-discovery) saved an empty map, which would collapse Direct
-        # Use to a single behaviour.  Re-resolve every trained model from
+        # Use to a single behavior.  Re-resolve every trained model from
         # the source project so the full competition runs regardless of
         # how stale the snapshot is.
         if not behavior_models:
@@ -433,7 +433,7 @@ class DirectRunService:
                 except Exception as exc:
                     logger.warning("Context consolidation failed: %s", exc)
             else:
-                _emit("context_features", 2, 1.0, "Video features disabled — skipping context extraction.")
+                _emit("context_features", 2, 1.0, "Video features disabled: skipping context extraction.")
             state.step_timings["context_features"] = time.monotonic() - step_start
             state.completed_steps.append("context_features")
 
@@ -473,7 +473,7 @@ class DirectRunService:
             state.completed_steps.append("representation")
             _emit("representation", 3, 1.0, "Representations built.")
 
-            # ── Step 5: Dense Inference (all behaviours) ────────────
+            # ── Step 5: Dense Inference (all behaviors) ────────────
             step_start = time.monotonic()
             if self._cancelled:
                 return {"status": "cancelled"}
@@ -505,8 +505,8 @@ class DirectRunService:
                 if val is not None:
                     setattr(tr_cfg, key, val)
 
-            # Use "target_behavior" as concept_id — this triggers
-            # multi-behaviour competitive inference.
+            # Use "target_behavior" as concept_id: this triggers
+            # multi-behavior competitive inference.
             concept_id = "target_behavior"
             try:
                 tr_service.run_temporal_refinement_inference(
@@ -522,12 +522,12 @@ class DirectRunService:
             state.completed_steps.append("inference")
             _emit("inference", 4, 1.0, "Inference complete.")
 
-            # ── Step 6: Temporal Refinement (per-behaviour postprocess)
+            # ── Step 6: Temporal Refinement (per-behavior postprocess)
             step_start = time.monotonic()
             if self._cancelled:
                 return {"status": "cancelled"}
 
-            # Resolve per-behaviour postprocess thresholds from
+            # Resolve per-behavior postprocess thresholds from
             # temporal_review_settings (user-tuned) falling back to
             # temporal_refinement_settings, then to defaults.
             review = snapshot.temporal_review_settings or {}
@@ -620,7 +620,7 @@ class DirectRunService:
             state.completed_steps.append("temporal_refinement")
             _emit("temporal_refinement", 5, 1.0, "Temporal refinement complete.")
 
-            # ── Step 7: Export bouts for ALL behaviours ──────────────
+            # ── Step 7: Export bouts for ALL behaviors ──────────────
             step_start = time.monotonic()
             if self._cancelled:
                 return {"status": "cancelled"}
@@ -660,10 +660,10 @@ class DirectRunService:
         behavior_ids: list[str],
         snapshot: WorkflowSnapshot,
     ) -> int:
-        """Collect bout parquets from per-behaviour TR output into derived/behavior_bouts/.
+        """Collect bout parquets from per-behavior TR output into derived/behavior_bouts/.
 
-        Iterates over every behaviour that was postprocessed and gathers the
-        bout DataFrames into a combined parquet per behaviour and an overall
+        Iterates over every behavior that was postprocessed and gathers the
+        bout DataFrames into a combined parquet per behavior and an overall
         merged file.
         """
         tr_root = project_root / "derived" / "temporal_refinement"
@@ -672,10 +672,10 @@ class DirectRunService:
         total_bouts = 0
         all_dfs: list[pd.DataFrame] = []
 
-        # Only per-behaviour postprocess output is a valid bout source. The
+        # Only per-behavior postprocess output is a valid bout source. The
         # "target_behavior" group-level postprocess thresholds the generic
         # max-over-all-behaviors probability trace, so its bouts represent
-        # "any behavior active" rather than a single behavior — folding them in
+        # "any behavior active" rather than a single behavior, folding them in
         # would inflate the total count and emit a misleading
         # target_behavior_bouts.parquet.
         search_ids = list(behavior_ids)
@@ -726,7 +726,7 @@ class DirectRunService:
             except Exception:
                 continue
 
-        # Write combined file for all behaviours
+        # Write combined file for all behaviors
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True)
             combined.to_parquet(
@@ -746,9 +746,9 @@ class DirectRunService:
         Copies the two config files the Features tab writes besides
         project.yaml:
 
-        * ``config/feature_exclusions.json`` — disabled feature groups
+        * ``config/feature_exclusions.json``: disabled feature groups
           (per-keypoint kinematics, global movement, oscillation, orientation).
-        * ``config/experiment.yaml`` → ``behavior_model.invariant_features`` —
+        * ``config/experiment.yaml`` → ``behavior_model.invariant_features``,
           the robustness toggles (egocentric, body-length norm, relative
           geometry, head direction, joint angles, spine curvature, clip deltas).
 
@@ -759,7 +759,7 @@ class DirectRunService:
         dst_cfg = target_project_root / "config"
         dst_cfg.mkdir(parents=True, exist_ok=True)
 
-        # feature_exclusions.json — copy wholesale (it is purely feature
+        # feature_exclusions.json, copy wholesale (it is purely feature
         # selection state) when the target doesn't already have one.
         try:
             src_excl = src_cfg / "feature_exclusions.json"
@@ -769,7 +769,7 @@ class DirectRunService:
         except Exception as exc:
             logger.warning("Could not carry feature_exclusions.json: %s", exc)
 
-        # experiment.yaml — merge only the invariant_features block so we don't
+        # experiment.yaml, merge only the invariant_features block so we don't
         # drag along unrelated, possibly project-specific experiment config.
         try:
             src_exp = src_cfg / "experiment.yaml"
@@ -787,7 +787,7 @@ class DirectRunService:
     def _behavior_display_name(
         self, bid: str, snapshot: WorkflowSnapshot,
     ) -> str:
-        """Look up a human-readable name for a behaviour ID."""
+        """Look up a human-readable name for a behavior ID."""
         for b in snapshot.behavior_definitions:
             b_id = b.get("behavior_id", b.get("name", ""))
             if b_id == bid:
@@ -800,16 +800,16 @@ class DirectRunService:
     ) -> bool:
         """Decide whether to recompute context/video features.
 
-        Honours the snapshot flag first.  For older snapshots created before
+        Honors the snapshot flag first.  For older snapshots created before
         that flag existed (default False), fall back to evidence from the
-        source project — the model's ``run_settings.json`` or an existing
-        ``frame_context.parquet`` — so a video-trained model never silently
+        source project, the model's ``run_settings.json`` or an existing
+        ``frame_context.parquet``, so a video-trained model never silently
         runs without its context features.
         """
         if bool(getattr(snapshot, "use_video_features", False)):
             return True
         # An explicit "on" captured from the source's Features tab is a
-        # deliberate user choice — honour it even when the snapshot's own flag
+        # deliberate user choice: honor it even when the snapshot's own flag
         # was lost.  Without this, a video-trained project whose model
         # run_settings.json omits the key gets silently downgraded to
         # pose-only, and the new project runs with no video/context features.
@@ -845,10 +845,10 @@ class DirectRunService:
 
         Caller must already have decided that video features are on; appearance
         embeddings are a sub-family of those.  Getting this wrong is costly in
-        both directions — ``False`` for a model trained with the embeddings
+        both directions, ``False`` for a model trained with the embeddings
         feeds inference a segment table missing 512 of its columns, and ``True``
         for a model trained without them spends GPU minutes per session on
-        columns nothing reads — so prefer an explicit record over a guess.
+        columns nothing reads, so prefer an explicit record over a guess.
         """
         fx = getattr(snapshot, "feature_extraction_settings", None) or {}
         if "use_r3d_features" in fx:

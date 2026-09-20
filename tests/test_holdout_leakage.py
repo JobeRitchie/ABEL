@@ -3,13 +3,13 @@
 These pin two defects found against real projects (DG_FearConditioning, DG_EPM):
 
 1. ``train_and_evaluate`` moves ``temporal_feedback`` / ``imported:*`` rows OUT of
-   the validation split and INTO training — *after* a ``precomputed_split`` is
+   the validation split and INTO training, *after* a ``precomputed_split`` is
    applied. Any such row left in the holdout frame therefore becomes a training
    row belonging to a held-out session. On real data this leaked rows from 2 FC
    and 2 EPM sessions into training while other rows of those same sessions were
    still being scored.
 2. ``TrainingConfig.include_imported`` is only consumed by ``_load_training_frame``,
-   which ``train_and_evaluate`` never calls — so the engine's ``include_imported=
+   which ``train_and_evaluate`` never calls, so the engine's ``include_imported=
    False`` was a no-op and 51% of DG_FearConditioning's training pool was clips
    imported from another project, counted as this project's labeling effort.
 """
@@ -67,7 +67,7 @@ def test_refine_only_rows_never_reach_the_holdout_frame(tmp_path):
     assert holdout.is_refine_only(sp.holdout).sum() == 0
     # Both the temporal_feedback and the imported row of the held-out session go.
     assert sp.n_refine_only_dropped == 2
-    # And they must not have been quietly rehomed into the training pool either —
+    # And they must not have been quietly rehomed into the training pool either,
     # a held-out session contributes NOTHING.
     assert (sp.train_pool["session_id"] == "s_hold").sum() == 0
 
@@ -77,7 +77,7 @@ def test_imported_rows_are_kept_out_of_the_training_pool(tmp_path):
     sp = holdout.split(_project(tmp_path), df=_frame(), holdout_groups=["s_hold"])
     assert holdout.is_imported(sp.train_pool).sum() == 0
     assert sp.n_imported_dropped == 1  # the training session's imported row
-    # temporal_feedback in a TRAINING session is legitimate training data — keep it.
+    # temporal_feedback in a TRAINING session is legitimate training data, keep it.
     assert (sp.train_pool["label_source"] == "temporal_feedback").sum() == 1
 
     # Opt out and the imported row stays (so the old behavior remains reachable).
@@ -100,7 +100,7 @@ def test_leakage_guard_rejects_a_smuggled_refine_row(tmp_path):
 
 
 def test_manifest_does_not_advertise_unevaluable_groups(tmp_path):
-    """A group made entirely of refine-only rows has nothing to score — say so."""
+    """A group made entirely of refine-only rows has nothing to score, say so."""
     df = _frame()
     # Make the held-out session refine-only end to end.
     df.loc[df.session_id == "s_hold", "label_source"] = "temporal_feedback"

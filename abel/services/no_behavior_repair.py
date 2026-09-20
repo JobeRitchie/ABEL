@@ -1,35 +1,35 @@
 """Detect and repair a repurposed ``No Behavior`` label.
 
-``no_behavior`` is not an ordinary behaviour id: it is the universal negative
+``no_behavior`` is not an ordinary behavior id: it is the universal negative
 class.  Training collapses every alternate label onto it, dense refinement skips
-it in the behaviour competition, and exports drop it.  Renaming the built-in
-``No Behavior`` definition therefore does not create a new behaviour — it aliases
-a real behaviour (say *Freezing*) onto the negative class, so the same token
+it in the behavior competition, and exports drop it.  Renaming the built-in
+``No Behavior`` definition therefore does not create a new behavior, it aliases
+a real behavior (say *Freezing*) onto the negative class, so the same token
 means "this is freezing" in the review store and "this is nothing" in the
-trainer.  Adding a second behaviour *named* ``No Behavior`` compounds it, because
-several code paths match the negative class on the normalised **name** as well
+trainer.  Adding a second behavior *named* ``No Behavior`` compounds it, because
+several code paths match the negative class on the normalized **name** as well
 as the id.
 
 :class:`~abel.services.behavior_service.BehaviorService` now refuses both edits,
 but projects made before that guard already carry the conflict.  This module
 detects it and repairs it by swapping the two identities:
 
-* the repurposed behaviour (holding ``no_behavior``) is moved onto a fresh UUID,
+* the repurposed behavior (holding ``no_behavior``) is moved onto a fresh UUID,
   taking all of its labels, decisions, candidates and settings with it;
-* the user's own ``No Behavior`` behaviour is promoted onto the reserved
+* the user's own ``No Behavior`` behavior is promoted onto the reserved
   ``no_behavior`` id, so the negatives they recorded become the real negative
   class (when they never made one, a fresh built-in definition is created).
 
 Hard negatives the application itself wrote (temporal-review false-positive
-rejections) are recognised by their provenance and stay on ``no_behavior``
-instead of being carried over to the repurposed behaviour.  Rows that are
-genuinely ambiguous — a click on the review tab's built-in "No Behavior" button
-is stored exactly like a positive label for the repurposed behaviour — are
+rejections) are recognized by their provenance and stay on ``no_behavior``
+instead of being carried over to the repurposed behavior.  Rows that are
+genuinely ambiguous, a click on the review tab's built-in "No Behavior" button
+is stored exactly like a positive label for the repurposed behavior, are
 counted and reported rather than guessed at silently.
 
 Every model trained while the conflict existed was fitted against a contaminated
 negative class, so the repair retires those artifacts (into the backup) and the
-behaviours must be retrained.  Nothing is deleted outright: every file the repair
+behaviors must be retrained.  Nothing is deleted outright: every file the repair
 touches is copied into ``derived/backups/no_behavior_repair_<timestamp>/`` first.
 """
 
@@ -50,12 +50,12 @@ from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 logger = logging.getLogger(__name__)
 
 # Written by the temporal-review tab when the reviewer rejects a stretch of a
-# behaviour's trace; the parquet row carries the negative sentinel and the
+# behavior's trace; the parquet row carries the negative sentinel and the
 # decision carries the concept that was wrong.  This pairing is what lets the
 # repair tell a system-written hard negative from a user's positive label.
 _TEMPORAL_FEEDBACK_REVIEWER = "temporal_feedback"
 
-# Project stores that key rows by behaviour id.  ``key`` is the list the rows
+# Project stores that key rows by behavior id.  ``key`` is the list the rows
 # live under; ``fields`` are the columns holding (possibly pipe-joined) ids.
 _JSON_ROW_STORES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("derived/review_tables/external_window_candidates.json", "candidates", ("behavior_id",)),
@@ -65,7 +65,7 @@ _JSON_ROW_STORES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("config/seeds.json", "seeds", ("behavior_id",)),
 )
 
-# Settings files whose *keys* (and nested keys) are behaviour ids.
+# Settings files whose *keys* (and nested keys) are behavior ids.
 _JSON_KEYED_SETTINGS: tuple[str, ...] = (
     "config/temporal_review_settings.json",
     "config/temporal_refinement_settings.json",
@@ -73,7 +73,7 @@ _JSON_KEYED_SETTINGS: tuple[str, ...] = (
 
 
 def safe_id_token(behavior_id: str) -> str:
-    """Filesystem-safe form of a behaviour id (matches the artifact writers)."""
+    """Filesystem-safe form of a behavior id (matches the artifact writers)."""
     return "".join(
         ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(behavior_id).strip()
     )
@@ -84,9 +84,9 @@ class NoBehaviorConflict:
     """A project where the reserved negative identity is held by the wrong rows.
 
     Two independent halves, either of which is enough to corrupt training:
-    ``repurposed_name`` — the built-in negative was renamed into a real behaviour,
+    ``repurposed_name``, the built-in negative was renamed into a real behavior,
     so the ``no_behavior`` **id** now means something positive; and
-    ``replacement_id`` — a second behaviour is *named* "No Behavior", which the
+    ``replacement_id``, a second behavior is *named* "No Behavior", which the
     name-based negative checks read as the negative class.
     """
 
@@ -94,7 +94,7 @@ class NoBehaviorConflict:
     """Name the built-in negative was renamed to (e.g. ``"Freezing"``)."""
 
     replacement_id: str | None = None
-    """Id of the user-created behaviour named "No Behavior", if they made one."""
+    """Id of the user-created behavior named "No Behavior", if they made one."""
 
     replacement_name: str | None = None
 
@@ -204,7 +204,7 @@ class RepairReport:
             )
         if self.retired_models:
             lines.append(
-                f"  • {len(self.retired_models)} trained model(s) retired to the backup — "
+                f"  • {len(self.retired_models)} trained model(s) retired to the backup, "
                 "they were fitted against the mixed-up negative class and must be retrained."
             )
         if self.retired_artifacts:
@@ -252,7 +252,7 @@ class NoBehaviorRepair:
 
         # Applied as one simultaneous swap so neither id clobbers the other. When
         # only a duplicate exists the built-in stays put and the duplicate merges
-        # into it — its rows already meant "negative".
+        # into it: its rows already meant "negative".
         new_id = str(uuid.uuid4()) if conflict.repurposed_name else None
         remap: dict[str, str] = {}
         if new_id:
@@ -303,11 +303,11 @@ class NoBehaviorRepair:
     # --- provenance -----------------------------------------------------
 
     def _system_negative_segment_ids(self) -> set[str]:
-        """Segments the app itself labelled as hard negatives.
+        """Segments the app itself labeled as hard negatives.
 
         The temporal-review tab writes a rejection as ``reviewer='temporal_feedback'``
         with ``decision='reject'``; the matching parquet row carries the negative
-        sentinel.  Those rows mean "nothing here", not the repurposed behaviour, so
+        sentinel.  Those rows mean "nothing here", not the repurposed behavior, so
         they must stay on ``no_behavior`` through the swap.
         """
         path = self._root / "derived" / "review_tables" / "review_decisions.json"
@@ -331,7 +331,7 @@ class NoBehaviorRepair:
 
     @staticmethod
     def _remap_token(value: object, remap: dict[str, str]) -> str:
-        """Rewrite a (possibly pipe-joined) behaviour label through *remap*."""
+        """Rewrite a (possibly pipe-joined) behavior label through *remap*."""
         parts = [p.strip() for p in str(value or "").split("|")]
         return "|".join(remap.get(p, p) for p in parts)
 
@@ -386,7 +386,7 @@ class NoBehaviorRepair:
 
         changed = int((rewritten != original).sum())
         # Sentinel rows written by a human reviewer cannot be told apart from a
-        # genuine label for the repurposed behaviour; they follow the behaviour.
+        # genuine label for the repurposed behavior; they follow the behavior.
         # Only meaningful when the sentinel id is actually being moved.
         ambiguous = (
             int(
@@ -421,7 +421,7 @@ class NoBehaviorRepair:
             if not isinstance(row, dict):
                 continue
             # A temporal-review rejection is a hard negative, not a label for the
-            # repurposed behaviour — leave it on the sentinel.
+            # repurposed behavior: leave it on the sentinel.
             if (
                 str(row.get("reviewer") or "") == _TEMPORAL_FEEDBACK_REVIEWER
                 and str(row.get("decision") or "").lower() == "reject"
@@ -492,9 +492,9 @@ class NoBehaviorRepair:
 
     @classmethod
     def _remap_keys_deep(cls, value: Any, remap: dict[str, str]) -> tuple[Any, int]:
-        """Rewrite dict keys that are behaviour ids, at any nesting depth.
+        """Rewrite dict keys that are behavior ids, at any nesting depth.
 
-        Per-behaviour settings are stored as ``{behavior_id: {...}}`` and the
+        Per-behavior settings are stored as ``{behavior_id: {...}}`` and the
         suppression matrix nests a second level of ids, so the rewrite has to walk
         the whole structure rather than only the top level.
         """
@@ -555,9 +555,9 @@ class NoBehaviorRepair:
     ) -> list[str]:
         """Move models trained on either affected id into the backup.
 
-        A model whose target was the repurposed behaviour was trained down the
-        ``no_behavior`` branch of the trainer — its positives are the negatives of
-        every other behaviour.  Remapping its id would keep a wrong model wearing a
+        A model whose target was the repurposed behavior was trained down the
+        ``no_behavior`` branch of the trainer, its positives are the negatives of
+        every other behavior.  Remapping its id would keep a wrong model wearing a
         right name, so it is retired and must be retrained.
         """
         models_root = self._root / "derived" / "models"
@@ -585,7 +585,7 @@ class NoBehaviorRepair:
     def _retire_artifacts(
         self, remap: dict[str, str], dry_run: bool, backup_dir: Path | None
     ) -> list[str]:
-        """Retire per-behaviour derived folders keyed by the old ids."""
+        """Retire per-behavior derived folders keyed by the old ids."""
         retired: list[str] = []
         tokens = {safe_id_token(bid) for bid in remap}
         for parent in (

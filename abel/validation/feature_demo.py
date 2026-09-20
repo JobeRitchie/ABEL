@@ -1,8 +1,8 @@
 """Export a feature-demonstration clip (raw vs smoothed DLC + trace strip) to MP4.
 
-Reuses the main GUI's preview renderer wholesale — :func:`render_preview_frames`
+Reuses the main GUI's preview renderer wholesale, :func:`render_preview_frames`
 and :func:`_render_graph_strip` from
-:mod:`abel.ui.smoothing_preview_dialog` — so the exported video matches what the
+:mod:`abel.ui.smoothing_preview_dialog`, so the exported video matches what the
 "Preview Video Settings" dialog shows, but written to disk for slides / figures
 that demonstrate what a feature actually responds to.
 
@@ -65,6 +65,7 @@ def export_feature_demo(
         interpolate=smoothing.interpolate_dropouts,
         interpolate_max_gap=smoothing.interpolate_max_gap,
         smoothing_window=smoothing.smoothing_window,
+        absence_max_fill_frames=smoothing.absence_max_fill_frames,
     )
 
     # Probe fps + total frames so the clip window is valid.
@@ -101,7 +102,7 @@ def export_feature_demo(
     )
     if not result.frames:
         raise RuntimeError(
-            "No frames rendered — check the video/pose files are accessible and OpenCV is installed."
+            "No frames rendered: check the video/pose files are accessible and OpenCV is installed."
         )
 
     h0, w0 = result.frames[0].shape[:2]

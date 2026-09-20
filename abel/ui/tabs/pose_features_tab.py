@@ -1,10 +1,10 @@
-"""Pose Features tab — extract features and pre-build the Active-Learning cache.
+"""Pose Features tab: extract features and pre-build the Active-Learning cache.
 
 This is the feature-preparation step of the pipeline.  It runs in two phases:
 
-1. **Kinematic windows** (``.npz``) — fast, pose-only, used by motif/syllable
+1. **Kinematic windows** (``.npz``). Fast, pose-only, used by motif
    discovery.  No video is decoded in this phase.
-2. **Active-Learning prep** — frame-pose parquet, video context features (when
+2. **Active-Learning prep**: frame-pose parquet, video context features (when
    "Include video features" is enabled), and the cached frame/segment
    representations.  This is the heavy work that used to run on the first
    Active-Learning training run; doing it here makes that run fast.
@@ -61,9 +61,14 @@ from abel.services.feature_prep_service import (
 )
 from abel.services.import_service import ImportService
 from abel.services.pose_features_service import PoseFeaturesService, PoseFeatureConfig
-from abel.services.roi_service import ROIService
+from abel.services.roi_service import (
+    BG_VAR_THRESHOLD_MAX,
+    BG_VAR_THRESHOLD_MIN,
+    DEFAULT_BG_VAR_THRESHOLD,
+    ROIService,
+)
 from abel.storage.file_store import read_json, read_yaml, write_yaml
-from abel.ui.smoothing_preview_dialog import SmoothingPreviewDialog
+from abel.ui.smoothing_preview_dialog import BG_THRESHOLD_TOOLTIP, SmoothingPreviewDialog
 from abel.ui.widgets.progress_panel import ProgressPanel
 from abel.utils.run_timeline import RunTimeline, Stage
 from abel.workers.task_worker import TaskWorker
@@ -75,15 +80,15 @@ STAGE_KINEMATICS = "kinematics"
 
 # Shared with the ROI tab, which edits the same project setting.
 LOCAL_RADIUS_TOOLTIP = (
-    "Half-width of the square window that follows the animal — one centred on the "
-    "body centroid, one on the nose — for the local surface-motion features "
+    "Half-width of the square window that follows the animal, one centered on the "
+    "body centroid, one on the nose, for the local surface-motion features "
     "(background-subtraction foreground fraction, frame-to-frame pixel change, "
     "pixel variance).\n\n"
     "Background subtraction runs only inside that window, never on the whole "
     "frame. The MOG2 model is fed the moving crop, so its 'background' is the "
     "recent (~200-frame) appearance of the area around the animal, and "
-    "'foreground' means that local patch changed — body movement or disturbed "
-    "bedding — not simply that the animal is present. Near the frame edge the "
+    "'foreground' means that local patch changed: body movement or disturbed "
+    "bedding: not simply that the animal is present. Near the frame edge the "
     "window keeps its size (border pixels are repeated), and through tracking "
     "dropouts it stays at the last tracked position.\n\n"
     "Larger values take in more of the surrounding floor. Paw/nose optical-flow "
@@ -125,7 +130,7 @@ class PoseFeaturesTab(QWidget):
     _progress_updated = Signal(int, str)  # (value, format_text)
     segmentation_completed = Signal()  # emitted after a successful extraction run
 
-    # Structured prep-progress signals — emitted from the worker thread and
+    # Structured prep-progress signals: emitted from the worker thread and
     # delivered (queued) to GUI-thread slots that drive the timeline + panel.
     _prep_stage_start = Signal(str, str, int)   # (key, label, total_units)
     _prep_stage_advance = Signal(str, float, str)  # (key, done_units, message)
@@ -148,7 +153,7 @@ class PoseFeaturesTab(QWidget):
         self._rois = roi_service or ROIService()
         self._project_root: Path | None = None
         # Guards against settings being written back while a project is being
-        # loaded — restoring presets/spinboxes during init would otherwise fire
+        # loaded: restoring presets/spinboxes during init would otherwise fire
         # valueChanged and clobber the saved settings before they're read.
         self._suspend_settings_save = False
         self._manifest = None
@@ -198,6 +203,14 @@ class PoseFeaturesTab(QWidget):
             "Use this when feature extraction is wrongly skipping work because of "
             "stale caches. Source pose/video files and settings are not touched."
         )
+        sel_stale_btn = QPushButton("Select Needing Extraction")
+        sel_stale_btn.setToolTip(
+            "Tick only the sessions whose cached features are missing or were "
+            "dropped: e.g. after fixing a session's identities or re-exporting "
+            "its pose file. Run then rebuilds just those, leaving every other "
+            "session's cache alone."
+        )
+        sel_stale_btn.clicked.connect(self._select_needing_extraction)
         sel_all_btn.clicked.connect(self._select_all)
         sel_none_btn.clicked.connect(self._select_none)
         refresh_btn.clicked.connect(self._refresh_clicked)
@@ -207,6 +220,7 @@ class PoseFeaturesTab(QWidget):
         sel_row.addStretch()
         sel_row.addWidget(clear_cache_btn)
         sel_row.addWidget(refresh_btn)
+        sel_row.addWidget(sel_stale_btn)
         sel_row.addWidget(sel_all_btn)
         sel_row.addWidget(sel_none_btn)
 
@@ -228,7 +242,7 @@ class PoseFeaturesTab(QWidget):
         save_preset_btn.clicked.connect(self._save_preset)
         suggest_btn = QPushButton("✦  Suggest Settings")
         suggest_btn.setToolTip(
-            "Analyse your behavior definitions and imported sessions to recommend "
+            "Analyze your behavior definitions and imported sessions to recommend "
             "window duration, stride, and smoothing settings"
         )
         suggest_btn.setStyleSheet(
@@ -269,7 +283,7 @@ class PoseFeaturesTab(QWidget):
         self._p_stride.setValue(1.0)
         self._p_stride.setToolTip(
             "Time between the start of consecutive windows.\n\n"
-            "Stride < window duration means windows overlap—this increases resolution "
+            "Stride < window duration means windows overlap, this increases resolution "
             "but produces more features (larger dataset, longer extraction).\n"
             "Stride = window duration means no overlap.\n\n"
             "Smaller strides (e.g. 0.25 s) help detect short events precisely. "
@@ -333,16 +347,27 @@ class PoseFeaturesTab(QWidget):
         param_form.addRow("", self._p_use_video)
         self._p_use_video.stateChanged.connect(self._save_extraction_settings)
 
+        # ── Keep review clips in step with re-extracted features ────────
+        self._auto_refresh_clips = QCheckBox("Re-cut review clips for re-processed sessions")
+        self._auto_refresh_clips.setChecked(True)
+        self._auto_refresh_clips.setToolTip(
+            "After features are rebuilt for a session, re-extract the clips that "
+            "session already has, so their crop and identity overlays match the new "
+            "features. Only sessions processed in this run are touched."
+        )
+        param_form.addRow("", self._auto_refresh_clips)
+        self._auto_refresh_clips.stateChanged.connect(self._save_extraction_settings)
+
         # ── R3D appearance embeddings toggle (a video sub-family) ───────
         self._p_use_r3d = QCheckBox("R3D appearance embeddings (512 dims per segment)")
         self._p_use_r3d.setChecked(True)
         self._p_use_r3d.setToolTip(
-            "Runs a pretrained R3D-18 video network over a pose-centred crop of each "
+            "Runs a pretrained R3D-18 video network over a pose-centered crop of each "
             "segment and adds its 512-dimensional embedding (r3d_000…r3d_511) to the "
             "feature set before training, so the classifier learns from appearance "
             "directly.\n\n"
             "Helps most for behaviors defined by how the animal or the substrate looks "
-            "rather than by keypoint geometry — digging, grooming, bedding displacement.\n\n"
+            "rather than by keypoint geometry: digging, grooming, bedding displacement.\n\n"
             "Cost: roughly a minute of GPU time per 1000 segments (much slower on CPU), "
             "cached per session so repeat runs are a parquet read. Needs a reachable "
             "video and pose file per session, and requires video features above."
@@ -350,7 +375,7 @@ class PoseFeaturesTab(QWidget):
         param_form.addRow("", self._p_use_r3d)
         self._p_use_r3d.stateChanged.connect(self._save_extraction_settings)
         # Appearance embeddings are pixel-derived, so they cannot outlive the
-        # video-feature toggle: grey the row out rather than letting it claim a
+        # video-feature toggle: gray the row out rather than letting it claim a
         # state the extraction run would ignore.
         self._p_use_video.toggled.connect(self._p_use_r3d.setEnabled)
         self._p_use_r3d.setEnabled(self._p_use_video.isChecked())
@@ -362,9 +387,9 @@ class PoseFeaturesTab(QWidget):
             "When enabled, each ROI contributes shape-aware features for every zone you have "
             "defined: whether the animal is inside it, signed distance to its boundary, distance "
             "to the nearest corner, and normalized position along the zone's long and short axes.\n\n"
-            "Without these, an ROI is reduced to its centre point, so a large or elongated zone "
+            "Without these, an ROI is reduced to its center point, so a large or elongated zone "
             "(e.g. a whole EPM open arm) cannot tell the model where inside the zone the animal is "
-            "— the arm tip and the maze centre look alike.\n\n"
+            "- the arm tip and the maze center look alike.\n\n"
             "Disable only to reproduce a pre-0.8 feature set exactly. Changing this rebuilds "
             "context features."
         )
@@ -382,6 +407,13 @@ class PoseFeaturesTab(QWidget):
         self._local_radius.setToolTip(LOCAL_RADIUS_TOOLTIP)
         self._local_radius.valueChanged.connect(self._update_motion_area_preview)
         motion_form.addRow("Local radius (px):", self._local_radius)
+
+        self._bg_threshold = QSpinBox()
+        self._bg_threshold.setRange(BG_VAR_THRESHOLD_MIN, BG_VAR_THRESHOLD_MAX)
+        self._bg_threshold.setValue(DEFAULT_BG_VAR_THRESHOLD)
+        self._bg_threshold.setToolTip(BG_THRESHOLD_TOOLTIP)
+        self._bg_threshold.valueChanged.connect(self._save_bg_threshold)
+        motion_form.addRow("BG sensitivity threshold:", self._bg_threshold)
 
         self._motion_area_label = QLabel("")
         self._motion_area_label.setWordWrap(True)
@@ -444,7 +476,7 @@ class PoseFeaturesTab(QWidget):
         self._feat_egocentric = QCheckBox("Egocentric kinematics (body-frame forward/lateral velocity)")
         self._feat_egocentric.setChecked(True)
         self._feat_egocentric.setToolTip(
-            "Adds forward/lateral velocity in the body-centred frame for every keypoint\n"
+            "Adds forward/lateral velocity in the body-centered frame for every keypoint\n"
             "(tail-base origin, nose→tail forward axis).\n"
             "Makes velocity direction features invariant to camera orientation and animal heading."
         )
@@ -478,7 +510,7 @@ class PoseFeaturesTab(QWidget):
         self._feat_joint_angles = QCheckBox("Joint angles (spine flexion + limb flexion angles)")
         self._feat_joint_angles.setChecked(True)
         self._feat_joint_angles.setToolTip(
-            "Computes angles at joint triplets — e.g. nose-body-tail spine flexion,\n"
+            "Computes angles at joint triplets: e.g. nose-body-tail spine flexion,\n"
             "and elbow/shoulder/knee angles when limb keypoints are present.\n"
             "Rotation-invariant posture descriptors for rearing, grooming, and locomotion.\n"
             "Only triplets where all three keypoints are detected are computed."
@@ -507,7 +539,7 @@ class PoseFeaturesTab(QWidget):
         clipdelta_box.setToolTip(
             "Capture how posture changes across each clip, rather than its average.\n"
             "Computed at the window-aggregation stage from the angle and proximity\n"
-            "features above — they require the relevant robustness features to be enabled."
+            "features above: they require the relevant robustness features to be enabled."
         )
         clipdelta_layout = QVBoxLayout(clipdelta_box)
 
@@ -520,8 +552,8 @@ class PoseFeaturesTab(QWidget):
             "per-window statistics:\n"
             "  • _delta : last-frame minus first-frame value (signed net change)\n"
             "  • _trend : least-squares slope across the clip (noise-robust)\n\n"
-            "Captures posture evolution — e.g. an animal rising from a crouch, or two\n"
-            "body parts drawing together — that mean/std aggregates discard.\n"
+            "Captures posture evolution: e.g. an animal rising from a crouch, or two\n"
+            "body parts drawing together: that mean/std aggregates discard.\n"
             "Requires Relative geometry / Joint angles / Head direction to be enabled\n"
             "so the underlying angle and proximity columns exist."
         )
@@ -611,7 +643,7 @@ class PoseFeaturesTab(QWidget):
         info_label = QLabel(
             "ℹ  Running here also prepares everything Active Learning needs: pose-feature\n"
             "tables, video context (when enabled), and the cached frame/segment\n"
-            "representations. Active Learning then just trains on the cache — so the\n"
+            "representations. Active Learning then just trains on the cache, so the\n"
             "first training run is fast. Re-runs are cheap; only changed clips/settings rebuild."
         )
         info_label.setWordWrap(True)
@@ -673,6 +705,10 @@ class PoseFeaturesTab(QWidget):
                 self._local_radius.setValue(radius)
             except Exception:
                 pass
+            try:
+                self._bg_threshold.setValue(self._rois.bg_var_threshold(project_root))
+            except Exception:
+                logger.debug("Failed to load BG threshold", exc_info=True)
             self._update_motion_area_preview()
             self._load_feature_selection()
             self._load_robustness_feature_selection()
@@ -697,6 +733,7 @@ class PoseFeaturesTab(QWidget):
             return
 
         summaries = {s.session_id: s for s in self._service.load_all_summaries()}
+        stale = set(self._sessions_needing_extraction())
 
         for s in self._manifest.linked_sessions:
             pose = next((p for p in self._manifest.poses if p.asset_id == s.pose_asset_id), None)
@@ -709,10 +746,15 @@ class PoseFeaturesTab(QWidget):
             self._session_table.setItem(row, 0, chk)
             self._session_table.setItem(row, 1, QTableWidgetItem(s.session_id))
             self._session_table.setItem(row, 2, QTableWidgetItem(
-                Path(pose.source_path).name if pose else "—"
+                Path(pose.source_path).name if pose else "-"
             ))
             summary = summaries.get(s.session_id)
-            status = f"✓ {summary.n_windows} windows" if summary else "Not extracted"
+            if s.session_id in stale:
+                # The cache was dropped (identity fix, new pose file) or never
+                # built, so the summary's window count no longer describes it.
+                status = "Needs extraction"
+            else:
+                status = f"✓ {summary.n_windows} windows" if summary else "Not extracted"
             self._session_table.setItem(row, 3, QTableWidgetItem(status))
 
     def _refresh_clicked(self) -> None:
@@ -792,6 +834,7 @@ class PoseFeaturesTab(QWidget):
                 "use_video_features": self._p_use_video.isChecked(),
                 "use_r3d_features": self._p_use_r3d.isChecked(),
                 "advanced_roi_features": self._p_advanced_roi.isChecked(),
+                "auto_refresh_clips": self._auto_refresh_clips.isChecked(),
             }
             write_yaml(path, raw)
         except Exception:
@@ -808,7 +851,7 @@ class PoseFeaturesTab(QWidget):
             # existing: the Active Learning tab write-throughs its copy of
             # ``use_r3d_features`` here, so a legacy project can end up with a
             # one-key block whose absent parameters must NOT read as "default"
-            # — that would silently reset the project's extraction settings.
+            #, that would silently reset the project's extraction settings.
             if "window_duration_sec" not in cfg:
                 # Fall back to legacy keys in behavior_model
                 model = raw.get("behavior_model") or {}
@@ -842,8 +885,9 @@ class PoseFeaturesTab(QWidget):
             self._p_use_video.setChecked(bool(cfg.get("use_video_features", False)))
             self._p_use_r3d.setChecked(bool(cfg.get("use_r3d_features", True)))
             # Default on: projects saved before this setting existed should gain
-            # the advanced ROI features rather than silently stay on centre-only.
+            # the advanced ROI features rather than silently stay on center-only.
             self._p_advanced_roi.setChecked(bool(cfg.get("advanced_roi_features", True)))
+            self._auto_refresh_clips.setChecked(bool(cfg.get("auto_refresh_clips", True)))
 
             for w in widgets:
                 w.blockSignals(False)
@@ -861,7 +905,7 @@ class PoseFeaturesTab(QWidget):
         diameter = radius * 2
         lines: list[str] = [
             f"Sampling area: {diameter} \u00d7 {diameter} px ({diameter**2:,} px\u00b2) square "
-            "around body centre and nose. Background subtraction runs inside "
+            "around body center and nose. Background subtraction runs inside "
             "this window only, not the whole frame."
         ]
 
@@ -876,7 +920,7 @@ class PoseFeaturesTab(QWidget):
                     )
                     break  # show first video with known resolution
             else:
-                lines.append("  (video resolution unknown \u2014 import sessions to see preview)")
+                lines.append("  (video resolution unknown: import sessions to see preview)")
 
         self._motion_area_label.setText("\n".join(lines))
 
@@ -888,6 +932,15 @@ class PoseFeaturesTab(QWidget):
                 self._rois.save(self._project_root, cfg)
             except Exception:
                 pass
+
+    def _save_bg_threshold(self, value: int) -> None:
+        """Persist the MOG2 threshold to the ROI config (extraction reads it there)."""
+        if self._project_root is None or getattr(self, "_suspend_settings_save", False):
+            return
+        try:
+            self._rois.set_bg_var_threshold(self._project_root, int(value))
+        except Exception:
+            logger.warning("Failed to save BG threshold", exc_info=True)
 
     # ------------------------------------------------------------------
     # Feature selection helpers
@@ -1068,7 +1121,7 @@ class PoseFeaturesTab(QWidget):
     # ------------------------------------------------------------------
 
     def _suggest_settings(self) -> None:
-        """Analyse behaviors and imported sessions, then recommend parameters."""
+        """Analyze behaviors and imported sessions, then recommend parameters."""
         if not self._project_root:
             QMessageBox.information(self, "No Project", "Open a project first.")
             return
@@ -1108,7 +1161,7 @@ class PoseFeaturesTab(QWidget):
 
         # ── Compute recommendations ─────────────────────────────────────
         # Window duration: needs to be long enough to *contain* the shortest
-        # target behavior while still being short enough to localise events.
+        # target behavior while still being short enough to localize events.
         # Rule: 2× the shortest min_duration, clamped [0.75 s, 6.0 s],
         # rounded to nearest 0.25 s.
         if shortest_dur is not None:
@@ -1124,7 +1177,7 @@ class PoseFeaturesTab(QWidget):
         rec_stride = round(round(raw_stride / 0.25) * 0.25, 2)
         rec_stride = max(0.25, rec_stride)
 
-        # Smoothing: scale with window frames — roughly 1 frame per 4 frames
+        # Smoothing: scale with window frames, roughly 1 frame per 4 frames
         # of window, kept odd, clamped [3, 15].
         win_frames = int(rec_window * working_fps)
         raw_smooth = max(3, min(15, win_frames // 8 * 2 + 1))
@@ -1142,7 +1195,7 @@ class PoseFeaturesTab(QWidget):
             lines.append(f"<b>Active behaviors ({len(behaviors)}):</b><ul>{dur_rows}</ul>")
         else:
             lines.append(
-                "<i>No behavior definitions found — using defaults. "
+                "<i>No behavior definitions found: using defaults. "
                 "Define behaviors on the Behaviors tab to get tailored recommendations.</i><br><br>"
             )
 
@@ -1165,7 +1218,7 @@ class PoseFeaturesTab(QWidget):
             )
         else:
             lines.append(
-                "<b>Source FPS:</b> Could not detect from pose metadata — "
+                "<b>Source FPS:</b> Could not detect from pose metadata, "
                 f"using current value ({working_fps:.1f} fps).<br><br>"
             )
 
@@ -1268,7 +1321,7 @@ class PoseFeaturesTab(QWidget):
                     wins = max(0, (n - win_f) // stride_f + 1) if n >= win_f else 0
                     lines.append(f"  {s.session_id}: {n} frames → {wins} windows")
                 except Exception as exc:
-                    lines.append(f"  {s.session_id}: error — {exc}")
+                    lines.append(f"  {s.session_id}: error, {exc}")
             else:
                 lines.append(f"  {s.session_id}: pose file not found")
         QMessageBox.information(self, "Estimated Window Counts", "\n".join(lines))
@@ -1276,6 +1329,34 @@ class PoseFeaturesTab(QWidget):
     # ------------------------------------------------------------------
     # Session helpers
     # ------------------------------------------------------------------
+
+    def _sessions_needing_extraction(self) -> list[str]:
+        """Sessions whose feature cache is missing: what Run would rebuild."""
+        if not self._project_root or not self._manifest:
+            return []
+        from abel.services.feature_prep_service import FeaturePrepService  # noqa: PLC0415
+        return FeaturePrepService.sessions_needing_extraction(
+            self._project_root,
+            [s.session_id for s in self._manifest.linked_sessions],
+            # The table can refresh before the prep controls exist.
+            use_video_features=bool(getattr(self, "_p_use_video", None) is not None
+                                    and self._p_use_video.isChecked()),
+        )
+
+    def _select_needing_extraction(self) -> None:
+        stale = set(self._sessions_needing_extraction())
+        for row in range(self._session_table.rowCount()):
+            item = self._session_table.item(row, 0)
+            if item:
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if item.data(Qt.ItemDataRole.UserRole) in stale
+                    else Qt.CheckState.Unchecked
+                )
+        self._append_log(
+            f"{len(stale)} session(s) need extraction."
+            if stale else "Every session already has cached features."
+        )
 
     def _select_all(self) -> None:
         for row in range(self._session_table.rowCount()):
@@ -1387,12 +1468,12 @@ class PoseFeaturesTab(QWidget):
         return results
 
     def _on_finished(self, results: list) -> None:
-        """Phase 1 (.npz extraction) done — record it, then start the heavy prep."""
+        """Phase 1 (.npz extraction) done, record it, then start the heavy prep."""
         self._prep_stage_done.emit(STAGE_KINEMATICS)
         self._sync_behavior_model_segment_settings(self._last_run_preset, results)
         total_windows = sum(r.n_windows for r in results)
         self._progress.setFormat(
-            f"Kinematics done — {len(results)} session(s), {total_windows} windows"
+            f"Kinematics done: {len(results)} session(s), {total_windows} windows"
         )
         self._progress.setValue(self._progress.maximum())
         self._result_table.setRowCount(0)
@@ -1419,7 +1500,7 @@ class PoseFeaturesTab(QWidget):
 
         # ── Phase 2: build the cacheable Active-Learning inputs ───────────
         if self._cancel_flag[0]:
-            self._finish_prep_ui("Cancelled.")
+            self._finish_prep_ui("Canceled.")
             return
         jobs = self._build_prep_jobs(self._last_run_session_ids, self._last_run_preset)
         if not jobs:
@@ -1452,13 +1533,56 @@ class PoseFeaturesTab(QWidget):
     def _on_prep_finished(self, result) -> None:
         self._save_timeline_history()
         msg = (
-            f"Preparation complete — {result.n_segment_rows} segment row(s) ready. "
+            f"Preparation complete: {result.n_segment_rows} segment row(s) ready. "
             f"Reused {result.n_sessions_reused} cached session(s), "
             f"processed {result.n_sessions_processed}."
         )
         self._append_log("✓ " + msg)
         self._finish_prep_ui(msg)
         QTimer.singleShot(0, self._refresh_sessions)
+        self._refresh_clips_for_processed_sessions()
+
+    def _refresh_clips_for_processed_sessions(self) -> None:
+        """Re-cut the clips of the sessions this run rebuilt features for.
+
+        Otherwise a re-tracked session keeps clips cut under the old tracking,
+        old crop boxes, old identity overlays, while its features describe the
+        new one, and the mismatch only shows up later in review.
+        """
+        if not self._project_root or not self._auto_refresh_clips.isChecked():
+            return
+        session_ids = list(self._last_run_session_ids or [])
+        if not session_ids:
+            return
+        from abel.services.preprocessing_service import (  # noqa: PLC0415
+            regenerate_clips_for_sessions,
+        )
+
+        self._append_log(
+            f"Refreshing review clips for {len(session_ids)} re-extracted session(s)…"
+        )
+        worker = TaskWorker(
+            regenerate_clips_for_sessions, self._project_root, session_ids,
+        )
+        worker.signals.finished.connect(self._on_clip_refresh_finished)
+        worker.signals.failed.connect(self._on_clip_refresh_failed)
+        self._pool.start(worker)
+
+    @Slot(object)
+    def _on_clip_refresh_finished(self, summary) -> None:
+        summary = summary or {}
+        extracted = int(summary.get("extracted", 0))
+        if extracted:
+            self._append_log(
+                f"✓ Re-cut {extracted} review clip(s) so they match the new features."
+            )
+        for warning in (summary.get("warnings") or [])[:5]:
+            self._append_log(f"  clip refresh: {warning}")
+
+    @Slot(str)
+    def _on_clip_refresh_failed(self, traceback_text: str) -> None:
+        self._append_log("Clip refresh failed (features are still up to date):")
+        self._append_log(format_task_error(traceback_text))
 
     def _finish_prep_ui(self, status: str) -> None:
         self._run_btn.setEnabled(True)
@@ -1621,6 +1745,8 @@ class PoseFeaturesTab(QWidget):
             get_local_radius_fn=lambda: self._local_radius.value(),
             project_root=self._project_root,
             parent=self,
+            get_bg_threshold_fn=self._bg_threshold.value,
+            set_bg_threshold_fn=self._bg_threshold.setValue,
         )
         self._preview_dialog.show()
 

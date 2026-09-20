@@ -1,8 +1,8 @@
 """Essence extraction over the shipped per-window feature table.
 
 The Essence Miner used to see only the ~22 interpretable pose/ROI clip metrics,
-which have no oscillation, periodicity or angular-velocity terms — exactly where
-behaviours like a wet-dog-shake separate.  It now *also* ranges over
+which have no oscillation, periodicity or angular-velocity terms, exactly where
+behaviors like a wet-dog-shake separate.  It now *also* ranges over
 ``derived/representations/segment_features.parquet``, the same features the
 classifier is trained on.  These tests guard the three things that has to get
 right: the two metric spaces coexist without colliding, the feature space is
@@ -33,7 +33,7 @@ N_ROWS = 400
 def _write_features(root, n=N_ROWS, seed=0):
     """A miniature ``segment_features.parquet``: signal, noise, degenerate, meta.
 
-    Rows ``seg_0…seg_29`` are the "positives" — the only ones high on
+    Rows ``seg_0…seg_29`` are the "positives", the only ones high on
     ``ear_right_acceleration_median``, a column the clip-metric space has no
     equivalent of.
     """
@@ -252,7 +252,7 @@ def test_essence_finds_a_signal_only_the_rich_features_carry(tmp_path):
     assert rich_metric_id("ear_right_acceleration_median") in {c.metric_id for c in crits}
 
     # And the resulting box, evaluated over the whole pool, is dominated by the
-    # planted positives — with the feature columns joined on by the service.
+    # planted positives: with the feature columns joined on by the service.
     all_ids = [f"seg_{i}" for i in range(N_ROWS)]
     pool = svc.attach_rich_columns(_clip_metrics(all_ids),
                                    [c.metric_id for c in crits])

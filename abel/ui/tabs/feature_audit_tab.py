@@ -1,4 +1,4 @@
-"""Feature audit tab — detect bodyparts and dead/weak features before training."""
+"""Feature audit tab: detect bodyparts and dead/weak features before training."""
 
 from __future__ import annotations
 
@@ -165,7 +165,7 @@ class FeatureAuditTab(QWidget):
             return
 
         self._audit_run_btn.setEnabled(False)
-        self._audit_status_label.setText("Running feature audit — scanning pose files and features…")
+        self._audit_status_label.setText("Running feature audit: scanning pose files and features…")
         self._log_panel.append("Feature audit started…")
 
         project_root = self._project_root
@@ -255,7 +255,7 @@ class FeatureAuditTab(QWidget):
         for row, feat in enumerate(sorted_features):
             self._feat_table.setItem(row, 0, QTableWidgetItem(feat.name))
             self._feat_table.setItem(row, 1, QTableWidgetItem(feat.family))
-            self._feat_table.setItem(row, 2, QTableWidgetItem(feat.source_bodypart or "—"))
+            self._feat_table.setItem(row, 2, QTableWidgetItem(feat.source_bodypart or "-"))
             self._feat_table.setItem(row, 3, QTableWidgetItem(f"{feat.nonzero_fraction:.1%}"))
             self._feat_table.setItem(row, 4, QTableWidgetItem(f"{feat.nan_fraction:.1%}"))
 
@@ -278,7 +278,7 @@ class FeatureAuditTab(QWidget):
                 imp_item.setData(Qt.ItemDataRole.DisplayRole, round(imp_val, 4))
                 self._feat_table.setItem(row, 6, imp_item)
             else:
-                self._feat_table.setItem(row, 6, QTableWidgetItem("—"))
+                self._feat_table.setItem(row, 6, QTableWidgetItem("-"))
         self._feat_table.setSortingEnabled(True)
 
         self._audit_status_label.setText(
@@ -326,7 +326,7 @@ class FeatureAuditTab(QWidget):
         if not live_models:
             self._imp_summary_label.setText(
                 "All models have zero feature importance (no splits learned). "
-                "Retrain models with more labelled data."
+                "Retrain models with more labeled data."
             )
             self._imp_table.setRowCount(0)
             return
@@ -376,7 +376,7 @@ class FeatureAuditTab(QWidget):
 
         self._log_panel.append(
             f"Feature importance loaded: {len(all_features)} features from "
-            f"{len(live_models)} model(s) ({len(skipped)} skipped — no splits)."
+            f"{len(live_models)} model(s) ({len(skipped)} skipped, no splits)."
         )
 
     # ------------------------------------------------------------------

@@ -3,7 +3,7 @@
 A :class:`RunTimeline` models a long-running job as an ordered list of named
 :class:`Stage` objects.  As the job runs it records how long each stage actually
 takes *on this machine, this run*, and continuously refines the estimate for the
-remaining stages — so the predicted finish time gets more accurate as work
+remaining stages, so the predicted finish time gets more accurate as work
 progresses instead of relying on a single fixed guess.
 
 Design goals:
@@ -32,8 +32,8 @@ class Stage:
 
     ``weight`` is a relative expected-duration hint used only when no measured
     history exists yet (e.g. the first run ever).  ``total_units`` lets a stage
-    report sub-progress — e.g. one unit per session for per-session
-    preprocessing — so the bar advances smoothly within a long stage.
+    report sub-progress, e.g. one unit per session for per-session
+    preprocessing, so the bar advances smoothly within a long stage.
     """
 
     key: str
@@ -171,7 +171,7 @@ class RunTimeline:
         else:
             base = float(hist.get("seconds", 0.0) or 0.0)
         if base <= 0.0:
-            # No history at all — fall back to the relative weight, anchored to
+            # No history at all: fall back to the relative weight, anchored to
             # whatever per-unit rate we've learned this run (or a 1s default).
             base = max(0.0, st.weight) * self._default_unit_seconds()
         return base * scale

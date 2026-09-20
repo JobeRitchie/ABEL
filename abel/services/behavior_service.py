@@ -25,11 +25,11 @@ NO_BEHAVIOR_NAME = "No Behavior"
 NO_BEHAVIOR_SHORT_NAME = "none"
 
 # Every downstream trainer/scorer decides "is this row a negative?" by
-# normalising the stored label and testing it against these tokens (see
+# normalizing the stored label and testing it against these tokens (see
 # ``abel.services.behavior_representation_service.is_no_behavior_label``).  That
 # makes both the reserved id *and* the reserved name part of the data format:
-# renaming the built-in behaviour, or adding a second one called "No Behavior",
-# silently aliases a real behaviour onto the universal negative class.  The
+# renaming the built-in behavior, or adding a second one called "No Behavior",
+# silently aliases a real behavior onto the universal negative class.  The
 # guards below keep that identity unforgeable; the local copy of the token set
 # avoids importing the pandas/numpy-heavy representation service here.
 _NO_BEHAVIOR_NAME_TOKENS = frozenset({
@@ -64,12 +64,12 @@ def behavior_label(behavior_id: str | None, name_map: dict[str, str] | None = No
 
     Behavior IDs are UUIDs and must never surface in the interface. Callers that
     already hold a ``{behavior_id: name}`` map pass it as *name_map*; anything the
-    map cannot resolve degrades to a labelled short prefix instead of the full
+    map cannot resolve degrades to a labeled short prefix instead of the full
     opaque token, so distinct unknowns stay distinguishable in a plot or table.
     """
     bid = str(behavior_id or "").strip()
     if not bid:
-        return "—"
+        return "-"
     if name_map:
         name = str(name_map.get(bid, "") or "").strip()
         if name:
@@ -83,7 +83,7 @@ def behavior_label(behavior_id: str | None, name_map: dict[str, str] | None = No
 # ---------------------------------------------------------------------------
 # Presets are named starting sets of behavior definitions. The built-in ones are
 # composed from a shared library so that a behavior common to several assays
-# (rear/groom/walk) carries the same operational definition everywhere — labels
+# (rear/groom/walk) carries the same operational definition everywhere, labels
 # stay comparable when a lab runs more than one assay. User-defined presets are
 # saved to GLOBAL_CONFIG_DIR so they are available in every project.
 
@@ -136,18 +136,18 @@ _BEHAVIOR_LIBRARY: dict[str, dict] = {
     },
     "protected_head_dip": {
         "name": "Protected Head Dip", "short_name": "phdip",
-        "description": "Head dip performed from the centre or a closed arm.",
+        "description": "Head dip performed from the center or a closed arm.",
         "operational_definition": (
             "A head dip (nose over the edge and below platform level) performed while the body "
-            "remains in the centre square or a closed arm, i.e. from cover."
+            "remains in the center square or a closed arm, i.e. from cover."
         ),
-        "inclusion_criteria": "Head-dip criteria met with the trunk in the centre platform or a closed arm.",
+        "inclusion_criteria": "Head-dip criteria met with the trunk in the center platform or a closed arm.",
         "exclusion_criteria": "Dips with the trunk on an open arm (those are unprotected head dips).",
         "min_duration_sec": 0.2, "color": "#00838F", "keyboard_shortcut": "p", "review_priority": 1,
     },
     "stretch_attend": {
         "name": "Stretch Attend", "short_name": "sap",
-        "description": "Stretch-attend posture — risk assessment.",
+        "description": "Stretch-attend posture: risk assessment.",
         "operational_definition": (
             "The animal elongates its body forward with the hindpaws planted, keeping the trunk "
             "low, then holds or withdraws without ambulating forward."
@@ -169,7 +169,7 @@ _BEHAVIOR_LIBRARY: dict[str, dict] = {
     },
     "dart": {
         "name": "Dart", "short_name": "dart",
-        "description": "Darting — brief high-velocity forward burst.",
+        "description": "Darting: brief high-velocity forward burst.",
         "operational_definition": (
             "A short, abrupt forward acceleration well above the animal's ordinary locomotor "
             "speed, beginning and ending within roughly a second."
@@ -262,8 +262,8 @@ class BehaviorService:
         """Return the human-readable name for ``behavior_id``.
 
         Behavior IDs are UUIDs, which must never reach the user. Anything the
-        user reads — status text, run logs, dialogs, plot labels — goes through
-        here. Unresolvable UUIDs degrade to a labelled short prefix rather than
+        user reads, status text, run logs, dialogs, plot labels, goes through
+        here. Unresolvable UUIDs degrade to a labeled short prefix rather than
         the full opaque token, so two unknowns stay distinguishable.
         """
         bid = str(behavior_id or "").strip()
@@ -412,7 +412,7 @@ class BehaviorService:
         """Describe a repurposed ``No Behavior`` label, or ``None`` when healthy.
 
         Projects created before the reserved-name guard could rename the built-in
-        negative into a real behaviour (and add a second one called
+        negative into a real behavior (and add a second one called
         "No Behavior"), which makes the ``no_behavior`` token mean two different
         things at once.  The UI surfaces this so the user can repair it.
         """
@@ -441,10 +441,10 @@ class BehaviorService:
         return behavior
 
     def _guard_reserved_name(self, behavior_id: object, name: object) -> None:
-        """Reject any behaviour that claims the reserved negative identity.
+        """Reject any behavior that claims the reserved negative identity.
 
         ``No Behavior`` is the universal negative class: training collapses every
-        alternate label onto it, so a second behaviour wearing that name (or the
+        alternate label onto it, so a second behavior wearing that name (or the
         built-in one renamed to something else) makes the same token mean both a
         positive and a negative and quietly corrupts every model trained after.
         """
@@ -466,16 +466,16 @@ class BehaviorService:
             # A project that already repurposed the label (made before this guard)
             # is left alone here: blocking its edits would only break unrelated
             # dialogs that re-save every definition. The Behaviors tab offers the
-            # repair instead — see :mod:`abel.services.no_behavior_repair`.
+            # repair instead: see :mod:`abel.services.no_behavior_repair`.
             if current is not None and is_no_behavior_name(current.name):
                 if renamed:
                     raise ReservedBehaviorError(
-                        f"The built-in '{NO_BEHAVIOR_NAME}' label cannot be renamed — it is "
+                        f"The built-in '{NO_BEHAVIOR_NAME}' label cannot be renamed, it is "
                         "the universal negative every model is trained against. Add a new "
                         "behavior instead."
                     )
                 # Pin the stored identity even when the name only differs
-                # cosmetically ("no behaviour", "No_Behavior"), so name-based
+                # cosmetically ("no behavior", "No_Behavior"), so name-based
                 # lookups stay exact.
                 updated = updated.model_copy(update={
                     "name": NO_BEHAVIOR_NAME,
@@ -511,12 +511,12 @@ class BehaviorService:
         """Remove trained-model directories bound to a deleted behavior.
 
         Downstream tools (unified UMAP, behavior analytics, apply-models)
-        discover behaviours by scanning ``derived/models`` for
+        discover behaviors by scanning ``derived/models`` for
         ``behavior_model_*`` directories. A leftover directory keeps a removed
-        behaviour visible everywhere, so we delete every model whose
-        ``run_settings.json`` target behaviour matches the id being removed.
-        Directory names are unreliable (custom names vs. behaviour ids), so we
-        match on the recorded target behaviour id rather than the folder name.
+        behavior visible everywhere, so we delete every model whose
+        ``run_settings.json`` target behavior matches the id being removed.
+        Directory names are unreliable (custom names vs. behavior ids), so we
+        match on the recorded target behavior id rather than the folder name.
 
         Returns the list of removed directory names.
         """
@@ -542,13 +542,13 @@ class BehaviorService:
                 try:
                     shutil.rmtree(p)
                     removed.append(p.name)
-                    logger.info("Removed orphaned model directory %s for deleted behaviour %s", p.name, bid)
+                    logger.info("Removed orphaned model directory %s for deleted behavior %s", p.name, bid)
                 except OSError:
                     logger.warning("Failed to remove model directory %s", p, exc_info=True)
                     continue
                 # Also drop the matching per-model evaluation output, which is
                 # keyed by the model directory name and otherwise lingers in
-                # analytics/evaluation views for the removed behaviour.
+                # analytics/evaluation views for the removed behavior.
                 eval_dir = self._project_root / "derived" / "evaluation" / "by_model" / p.name
                 if eval_dir.exists():
                     try:
@@ -562,7 +562,7 @@ class BehaviorService:
         """Remove *dead_id* from a (possibly pipe-joined) behavior label.
 
         Returns the remaining label, or ``None`` if nothing survives (the row
-        referenced only the deleted behaviour and should be dropped).
+        referenced only the deleted behavior and should be dropped).
         """
         parts = [p.strip() for p in str(raw_label).split("|") if p.strip()]
         kept = [p for p in parts if p != dead_id]
@@ -571,15 +571,15 @@ class BehaviorService:
         return "|".join(kept)
 
     def _purge_behavior_references(self, behavior_id: str) -> dict[str, int]:
-        """Cleanse a deleted behaviour from all review/candidate/label stores.
+        """Cleanse a deleted behavior from all review/candidate/label stores.
 
-        A deleted behaviour otherwise lingers in the review-tab filter dropdown
+        A deleted behavior otherwise lingers in the review-tab filter dropdown
         and in training data because candidate windows, review decisions, and
         reviewer labels still carry its id.  This mirrors
-        :meth:`_purge_trained_models`: once a behaviour is gone from the
+        :meth:`_purge_trained_models`: once a behavior is gone from the
         definitions it must be gone everywhere.  Pipe-joined multi-labels have
         only the deleted constituent stripped; rows that referenced the deleted
-        behaviour exclusively are removed.
+        behavior exclusively are removed.
         """
         counts = {"candidates": 0, "decisions": 0, "labels": 0}
         if self._project_root is None:
@@ -639,7 +639,7 @@ class BehaviorService:
                 if len(kept) != len(rows):
                     write_json(dec_path, {**raw, "decisions": kept})
 
-        # 3. Reviewer labels parquet (review_label column — training source).
+        # 3. Reviewer labels parquet (review_label column: training source).
         lbl_path = root / "derived" / "review_labels" / "reviewer_labels.parquet"
         if lbl_path.exists():
             try:
@@ -664,7 +664,7 @@ class BehaviorService:
 
         if any(counts.values()):
             logger.info(
-                "Purged deleted behaviour %s: %d candidate windows, %d decisions, %d reviewer labels",
+                "Purged deleted behavior %s: %d candidate windows, %d decisions, %d reviewer labels",
                 dead, counts["candidates"], counts["decisions"], counts["labels"],
             )
         return counts
@@ -720,7 +720,7 @@ class BehaviorService:
         Behaviors whose name already exists are skipped, so applying a second
         preset that shares rear/groom/walk does not duplicate them. A keyboard
         shortcut already claimed by an existing behavior is dropped rather than
-        duplicated — two behaviors on one key make the soundboard ambiguous.
+        duplicated, two behaviors on one key make the soundboard ambiguous.
         """
         items = self.preset_definitions(preset_name)
         existing_names = {b.name.strip().lower() for b in self._behaviors}

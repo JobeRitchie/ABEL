@@ -1,4 +1,4 @@
-"""Direct Use workflow tab — select new data files, apply a trained snapshot."""
+"""Direct Use workflow tab: select new data files, apply a trained snapshot."""
 
 from __future__ import annotations
 
@@ -271,7 +271,7 @@ class _DirectRunWorker(QThread):
     """Background thread for running the direct-use pipeline."""
 
     progress = Signal(object)  # DirectRunProgress
-    # NB: named ``done`` rather than ``finished`` — QThread already defines a
+    # NB: named ``done`` rather than ``finished``, QThread already defines a
     # built-in ``finished`` signal, and shadowing it interferes with Qt's
     # thread-lifecycle management.
     done = Signal(dict)
@@ -299,8 +299,8 @@ class _DirectRunWorker(QThread):
 class DirectUseTab(QWidget):
     """Three-step Direct Use workflow:
       1. Source project (snapshot / trained model).
-      2. Input data — pick video files + DLC pose files, choose output folder.
-      3. Run pipeline — progress tracking with step cards.
+      2. Input data: pick video files + DLC pose files, choose output folder.
+      3. Run pipeline: progress tracking with step cards.
     """
 
     pipeline_complete = Signal(Path)  # emitted with the output project root
@@ -350,7 +350,7 @@ class DirectUseTab(QWidget):
         desc.setStyleSheet("font-size: 11px; color: #607D8B; padding-bottom: 2px;")
 
         # ── Step 1: Source project ────────────────────────────────────
-        source_box = _CollapsibleSection("Step 1 — Source Project (trained model)")
+        source_box = _CollapsibleSection("Step 1: Source Project (trained model)")
         source_lay = source_box.content_layout
         source_lay.setSpacing(4)
 
@@ -374,7 +374,7 @@ class DirectUseTab(QWidget):
         source_lay.addWidget(self._snap_detail)
 
         # ── Step 2: Input data ────────────────────────────────────────
-        data_box = _CollapsibleSection("Step 2 — Input Data")
+        data_box = _CollapsibleSection("Step 2: Input Data")
         data_lay = data_box.content_layout
         data_lay.setSpacing(6)
 
@@ -447,7 +447,7 @@ class DirectUseTab(QWidget):
 
         # ── Pixel/mm calibration ──────────────────────────────────────
         # px/mm is camera-specific and cannot be inherited from the source
-        # project — it must be measured on the new videos.  Spatial context
+        # project: it must be measured on the new videos.  Spatial context
         # features (distance-to-target) and physical-unit analytics depend
         # on it, so we surface it as an explicit step.
         pxmm_row = QHBoxLayout()
@@ -462,7 +462,7 @@ class DirectUseTab(QWidget):
         self._pxmm_spin.setSpecialValueText("not set")
         self._pxmm_spin.setFixedWidth(110)
         self._pxmm_spin.setToolTip(
-            "Pixels per millimetre for the current subject. 'not set' (0) "
+            "Pixels per millimeter for the current subject. 'not set' (0) "
             "leaves spatial features in pixel units."
         )
         self._pxmm_spin.valueChanged.connect(self._on_pxmm_spin_changed)
@@ -486,7 +486,7 @@ class DirectUseTab(QWidget):
         data_lay.addLayout(pxmm_row)
 
         # ── Step 3: Keypoint Mapping ──────────────────────────────────
-        kp_box = _CollapsibleSection("Step 3 — Keypoint Mapping")
+        kp_box = _CollapsibleSection("Step 3: Keypoint Mapping")
         kp_lay = kp_box.content_layout
         kp_lay.setSpacing(6)
         kp_desc = QLabel(
@@ -530,7 +530,7 @@ class DirectUseTab(QWidget):
         kp_lay.addWidget(self._kp_table)
 
         # ── Step 3: Define ROIs ───────────────────────────────────────
-        roi_box = _CollapsibleSection("Step 4 — Define ROIs")
+        roi_box = _CollapsibleSection("Step 4: Define ROIs")
         roi_lay = roi_box.content_layout
         roi_lay.setSpacing(6)
 
@@ -708,7 +708,7 @@ class DirectUseTab(QWidget):
         self._roi_spins_layout_du.setSpacing(4)
         roi_lay.addWidget(self._roi_spins_container_du)
 
-        # Spinboxes — subject crop / motion side by side
+        # Spinboxes: subject crop / motion side by side
         roi_spins_row = QHBoxLayout()
         roi_spins_row.setSpacing(12)
 
@@ -741,13 +741,16 @@ class DirectUseTab(QWidget):
             "Pixel radius around body parts for local motion features"
         )
         mr_form.addRow("Radius (px):", self._roi_motion_radius)
+        # Carried over from the source project, so new data is background-
+        # subtracted exactly as the model's training data was.
+        self._roi_bg_threshold: int | None = None
 
         roi_spins_row.addWidget(sc_group)
         roi_spins_row.addWidget(mr_group)
         roi_lay.addLayout(roi_spins_row)
 
         # ── Step 4: Run ───────────────────────────────────────────────
-        run_box = _CollapsibleSection("Step 5 — Run Pipeline")
+        run_box = _CollapsibleSection("Step 5: Run Pipeline")
         run_lay = run_box.content_layout
         run_lay.setSpacing(6)
 
@@ -843,7 +846,7 @@ class DirectUseTab(QWidget):
         root.setSpacing(0)
         root.addWidget(scroll)
 
-        # Initialise dynamic ROI spinboxes and draw-mode combo
+        # Initialize dynamic ROI spinboxes and draw-mode combo
         self._rebuild_roi_spinboxes_du(1)
         self._rebuild_draw_mode_du()
 
@@ -856,7 +859,7 @@ class DirectUseTab(QWidget):
 
     def set_project(self, project_root: Path) -> None:
         """Called when the currently open project changes.
-        For Direct Use the target is always chosen explicitly — this is a no-op."""
+        For Direct Use the target is always chosen explicitly, this is a no-op."""
         pass
 
     def set_source_from_current(self, project_root: Path) -> None:
@@ -864,7 +867,7 @@ class DirectUseTab(QWidget):
         self._source_root = project_root
         self._load_snapshot(project_root)
 
-    # ── Step 1 — source project ───────────────────────────────────────
+    # ── Step 1: source project ───────────────────────────────────────
 
     def _select_source_project(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -878,7 +881,7 @@ class DirectUseTab(QWidget):
         snapshot = self._snap_svc.load(project_root)
         if snapshot is None:
             self._source_info.setText(
-                f"{project_root.name} — No workflow snapshot found. "
+                f"{project_root.name}, No workflow snapshot found. "
                 "Create one via Home → Create Snapshot Workflow."
             )
             self._snap_detail.hide()
@@ -890,7 +893,7 @@ class DirectUseTab(QWidget):
         self._snapshot = snapshot
         self._source_info.setText(
             f"{project_root.name}"
-            + (f" — {reason}" if not valid else " — Snapshot loaded.")
+            + (f", {reason}" if not valid else ", Snapshot loaded.")
         )
 
         # Build snapshot summary line
@@ -941,7 +944,7 @@ class DirectUseTab(QWidget):
         self._refresh_keypoint_mapping()
         self._update_run_button()
 
-    # ── Step 2 — input data ────────────────────────────────────────────
+    # ── Step 2: input data ────────────────────────────────────────────
 
     def _add_videos(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1009,10 +1012,10 @@ class DirectUseTab(QWidget):
             rows.append((vn, pn, "✓"))
         for v in tmp.videos:
             if v.asset_id not in matched_vid_ids:
-                rows.append((Path(v.source_path).name, "—", "⚠ no pose"))
+                rows.append((Path(v.source_path).name, "-", "⚠ no pose"))
         for p in tmp.poses:
             if p.asset_id not in matched_pose_ids:
-                rows.append(("—", Path(p.source_path).name, "⚠ no video"))
+                rows.append(("-", Path(p.source_path).name, "⚠ no video"))
 
         self._session_table.setRowCount(len(rows))
         for r, (vname, pname, status) in enumerate(rows):
@@ -1028,7 +1031,7 @@ class DirectUseTab(QWidget):
         n_matched = len(tmp.linked_sessions)
         self._file_status.setText(
             f"{len(self._video_paths)} video(s), {len(self._pose_paths)} pose file(s)"
-            f" — {n_matched} matched session(s)"
+            f", {n_matched} matched session(s)"
         )
         self._refresh_roi_subject_list()
         self._update_pxmm_status()
@@ -1063,7 +1066,7 @@ class DirectUseTab(QWidget):
         )
         self._run_btn.setEnabled(ready)
 
-    # ── Step 3 — ROI scope & subject management ──────────────────────
+    # ── Step 3: ROI scope & subject management ──────────────────────
 
     def _matched_subjects(self) -> list[tuple[str, Path]]:
         """Return sorted (subject_id, video_path) pairs from matched sessions."""
@@ -1333,7 +1336,7 @@ class DirectUseTab(QWidget):
         self._refresh_roi_subject_list()
         logger.info("Copied current ROI to all %d subjects", len(subjects))
 
-    # ── Step 3 — ROI definition ──────────────────────────────────────
+    # ── Step 3: ROI definition ──────────────────────────────────────
 
     def _rebuild_roi_spinboxes_du(self, n: int) -> None:
         """Create exactly *n* ROI spinbox groups in the direct-use container."""
@@ -1501,7 +1504,7 @@ class DirectUseTab(QWidget):
         self._roi_canvas.set_draw_mode(mode)
 
     def _on_roi_n_drawn(self, index: int, roi: dict) -> None:
-        """Canvas emitted a new target zone rectangle — update matching spinbox group."""
+        """Canvas emitted a new target zone rectangle: update matching spinbox group."""
         if index >= len(self._roi_spinbox_groups_du):
             return
         x, y, w, h = self._roi_spinbox_groups_du[index]
@@ -1517,7 +1520,7 @@ class DirectUseTab(QWidget):
             self._roi_subject_dirty = True
 
     def _on_roi_crop_drawn(self, roi: dict) -> None:
-        """Canvas emitted a new subject crop rectangle — update spinboxes."""
+        """Canvas emitted a new subject crop rectangle: update spinboxes."""
         for sp in (self._roi_sc_x, self._roi_sc_y, self._roi_sc_w, self._roi_sc_h):
             sp.blockSignals(True)
         self._roi_sc_x.setValue(roi.get("x", 0))
@@ -1530,7 +1533,7 @@ class DirectUseTab(QWidget):
             self._roi_subject_dirty = True
 
     def _on_roi_spinbox_changed_du(self, roi_index: int) -> None:
-        """ROI spinbox edited — update the matching canvas overlay."""
+        """ROI spinbox edited: update the matching canvas overlay."""
         if roi_index < len(self._roi_spinbox_groups_du):
             x, y, w, h = self._roi_spinbox_groups_du[roi_index]
             roi = {"x": x.value(), "y": y.value(), "w": w.value(), "h": h.value()}
@@ -1539,7 +1542,7 @@ class DirectUseTab(QWidget):
             self._roi_subject_dirty = True
 
     def _on_roi_crop_spins_changed(self) -> None:
-        """Subject crop spinbox edited — update the canvas crop overlay."""
+        """Subject crop spinbox edited: update the canvas crop overlay."""
         sc = {
             "x": self._roi_sc_x.value(),
             "y": self._roi_sc_y.value(),
@@ -1593,6 +1596,7 @@ class DirectUseTab(QWidget):
         self._roi_sc_w.setValue(sc.get("w", 0))
         self._roi_sc_h.setValue(sc.get("h", 0))
         self._roi_motion_radius.setValue(motion.get("local_radius_px", 36))
+        self._roi_bg_threshold = motion.get("bg_var_threshold")
 
     # ── Pixel/mm calibration ─────────────────────────────────────────
 
@@ -1706,7 +1710,7 @@ class DirectUseTab(QWidget):
         )
         return float(val) if val and val > 0 else None
 
-    # ── Step 3 — keypoint mapping ────────────────────────────────────
+    # ── Step 3: keypoint mapping ────────────────────────────────────
 
     _KP_NONE = "(none)"
 
@@ -1731,7 +1735,7 @@ class DirectUseTab(QWidget):
         self._kp_table.setRowCount(len(model_kps))
         if not model_kps:
             self._kp_status.setText(
-                "Snapshot has no keypoint info — re-create it to enable mapping."
+                "Snapshot has no keypoint info: re-create it to enable mapping."
             )
             return
 
@@ -1842,6 +1846,9 @@ class DirectUseTab(QWidget):
             {"x": grp[0].value(), "y": grp[1].value(), "w": grp[2].value(), "h": grp[3].value()}
             for grp in self._roi_spinbox_groups_du
         ]
+        motion: dict = {"local_radius_px": self._roi_motion_radius.value()}
+        if self._roi_bg_threshold is not None:
+            motion["bg_var_threshold"] = self._roi_bg_threshold
         return {
             "schema_version": "0.3.0",
             "roi_count": len(target_zones),
@@ -1855,12 +1862,10 @@ class DirectUseTab(QWidget):
                 },
             },
             "subject_rois": dict(self._subject_rois),
-            "motion": {
-                "local_radius_px": self._roi_motion_radius.value(),
-            },
+            "motion": motion,
         }
 
-    # ── Step 4 — run ──────────────────────────────────────────────────
+    # ── Step 4: run ──────────────────────────────────────────────────
 
     def _start_pipeline(self) -> None:
         if self._snapshot is None or self._source_root is None:
@@ -1951,7 +1956,7 @@ class DirectUseTab(QWidget):
                 "Step 2 for best results."
             )
 
-        # Keypoint mapping: warn if the model's keypoints are not all mapped —
+        # Keypoint mapping: warn if the model's keypoints are not all mapped,
         # unmapped keypoints make their features missing (zero-filled), which
         # severely degrades predictions.
         model_kps = self._model_keypoints()
@@ -1974,7 +1979,7 @@ class DirectUseTab(QWidget):
                 "for this new data. ROIs are not copied over (they're specific to "
                 "each camera setup). Context features (target-zone distance/angle) "
                 "will be zero/incorrect and ROI-dependent behaviors will score "
-                "poorly. Draw them in Step 4 — or use 'Copy from Source' only if "
+                "poorly. Draw them in Step 4, or use 'Copy from Source' only if "
                 "the camera framing is identical."
             )
 
@@ -2018,7 +2023,7 @@ class DirectUseTab(QWidget):
         if self._worker is not None:
             self._worker.cancel()
             self._cancel_btn.setEnabled(False)
-            self._status.setText("Cancelling…")
+            self._status.setText("Canceling…")
 
     def _on_progress(self, state: DirectRunProgress) -> None:
         completed_frac = len(state.completed_steps) / state.total_steps
@@ -2065,7 +2070,7 @@ class DirectUseTab(QWidget):
             self._eta_label.setText("")
             self._status.setStyleSheet("font-size: 11px; color: #66BB6A; padding-top: 2px;")
             self._status.setText(
-                f"Complete — {sessions} session(s), {bouts} bout(s). "
+                f"Complete: {sessions} session(s), {bouts} bout(s). "
                 "Open the output folder or switch to the Analytics tab."
             )
             if self._output_root and self._source_root:
@@ -2074,7 +2079,7 @@ class DirectUseTab(QWidget):
                 )
         elif status == "cancelled":
             self._status.setStyleSheet("font-size: 11px; color: #78909C; padding-top: 2px;")
-            self._status.setText("Pipeline cancelled.")
+            self._status.setText("Pipeline canceled.")
             self._time_label.setText("")
         else:
             error = result.get("error", "Unknown error")

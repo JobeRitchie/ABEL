@@ -226,7 +226,7 @@ class BenchmarkWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ABEL — Ablation Benchmark Suite")
+        self.setWindowTitle("ABEL: Ablation Benchmark Suite")
         self.resize(1100, 780)
         self._results: list[RunResult] = []
         self._output_dir: Path | None = None
@@ -274,7 +274,7 @@ class BenchmarkWindow(QMainWindow):
 
         self._run_btn = QPushButton("Run Benchmark")
         self._run_btn.setObjectName("runBtn")
-        self._run_btn.setToolTip("Start the ablation suite — trains models for every config × behavior × fold combination")
+        self._run_btn.setToolTip("Start the ablation suite: trains models for every config × behavior × fold combination")
         self._run_btn.clicked.connect(self._on_run)
         bottom.addWidget(self._run_btn)
 
@@ -691,7 +691,7 @@ class BenchmarkWindow(QMainWindow):
             for m in models:
                 f1_str = f"F1={m.f1:.3f}" if not (m.f1 != m.f1) else "F1=n/a"  # NaN check
                 short = self._behavior_names.get(m.behavior_id, m.display_name)
-                label = f"{short}  —  {f1_str}  |  {m.classifier}  |  {m.n_features} features"
+                label = f"{short} - {f1_str}  |  {m.classifier}  |  {m.n_features} features"
                 item = QListWidgetItem(label)
                 item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 item.setCheckState(Qt.CheckState.Checked)
@@ -707,7 +707,7 @@ class BenchmarkWindow(QMainWindow):
             self._log(f"Discovered {len(models)} trained model(s)")
         else:
             # Fallback: detect behaviors from training set labels
-            self._log("No trained models found — falling back to behavior detection from training data")
+            self._log("No trained models found: falling back to behavior detection from training data")
             self._fallback_detect_behaviors(project_root)
 
     def _fallback_detect_behaviors(self, project_root: Path) -> None:
@@ -829,8 +829,8 @@ class BenchmarkWindow(QMainWindow):
         self._metrics_df = results_to_dataframe(results)
         self._run_btn.setEnabled(True)
         self._progress.setValue(1000)
-        self._progress.setFormat("100% — Complete")
-        self._status.showMessage(f"Complete — {len(results)} runs finished.")
+        self._progress.setFormat("100%: Complete")
+        self._status.showMessage(f"Complete: {len(results)} runs finished.")
         self._log(f"\nBenchmark complete: {len(results)} configurations evaluated.")
 
         # Populate tables
@@ -919,7 +919,7 @@ class BenchmarkWindow(QMainWindow):
         if df.empty:
             table.clear()
             return
-        # Map behaviour IDs → short names for display
+        # Map behavior IDs → short names for display
         df = apply_behavior_names(df, self._behavior_names)
         table.setSortingEnabled(False)
         table.setRowCount(len(df))
@@ -943,7 +943,7 @@ class BenchmarkWindow(QMainWindow):
                 if isinstance(val, (int, float)):
                     item.setData(Qt.ItemDataRole.UserRole, float(val))
 
-                # Colour deltas
+                # Color deltas
                 if isinstance(val, float) and col.startswith("Δ"):
                     if val < -0.001:
                         item.setForeground(Qt.GlobalColor.red)

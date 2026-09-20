@@ -18,7 +18,7 @@ produces), against the CPU-numpy input we always have:
     300,000          1269.2 ms      155.6 ms   (8.2x)
 
 The transfer dominates; the tree traversal is cheap either way.  Feeding the
-DMatrix explicitly — the earlier workaround for this warning — is just the
+DMatrix explicitly, the earlier workaround for this warning, is just the
 fallback XGBoost was warning about and is no faster (1304 ms at 300k rows).
 
 So prediction runs on the CPU.  Training still uses the GPU, where the cost is
@@ -76,11 +76,11 @@ def ensure_cpu_prediction(model: Any) -> int:
             continue
         try:
             est.get_booster().set_param({"device": "cpu"})
-        except Exception:  # noqa: BLE001 — unfitted or not really XGBoost; leave it alone
+        except Exception:  # noqa: BLE001, unfitted or not really XGBoost; leave it alone
             continue
         try:
             setattr(est, _CPU_MARK, True)
-        except Exception:  # noqa: BLE001 — exotic estimator with __slots__
+        except Exception:  # noqa: BLE001, exotic estimator with __slots__
             pass
         moved += 1
     return moved

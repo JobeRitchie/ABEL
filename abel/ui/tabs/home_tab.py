@@ -55,7 +55,7 @@ class HomeTab(QWidget):
 
         self._project_name = QLabel("Project: Not loaded")
         self._project_name.setStyleSheet("font-size: 16px; font-weight: 800; color: #90CAF9;")
-        self._project_path = QLabel("Path: —")
+        self._project_path = QLabel("Path:,")
         self._project_path.setStyleSheet("font-size: 11px; color: #8FA6B4;")
         self._status = QLabel(
             "Create or open a project to access Active Learning, clip review, temporal refinement, Direct Use, and exports."
@@ -68,10 +68,10 @@ class HomeTab(QWidget):
         stats_grid = QGridLayout(stats_box)
         stats_grid.setSpacing(8)
 
-        self._stat_sessions = _stat_label("—", "Sessions")
-        self._stat_behaviors = _stat_label("—", "Behaviors")
-        self._stat_seeds = _stat_label("—", "Seeds")
-        self._stat_clips = _stat_label("—", "Clips")
+        self._stat_sessions = _stat_label("-", "Sessions")
+        self._stat_behaviors = _stat_label("-", "Behaviors")
+        self._stat_seeds = _stat_label("-", "Seeds")
+        self._stat_clips = _stat_label("-", "Clips")
 
         stats_grid.addWidget(self._stat_sessions, 0, 0)
         stats_grid.addWidget(self._stat_behaviors, 0, 1)
@@ -102,7 +102,7 @@ class HomeTab(QWidget):
             k_lbl = QLabel(f"{label_text}:")
             k_lbl.setStyleSheet(_KV_KEY_STYLE)
             k_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            v_lbl = QLabel("—")
+            v_lbl = QLabel("-")
             v_lbl.setStyleSheet(_KV_VAL_STYLE)
             pipeline_grid.addWidget(k_lbl, row, col_k)
             pipeline_grid.addWidget(v_lbl, row, col_v)
@@ -130,7 +130,7 @@ class HomeTab(QWidget):
             card_layout = QVBoxLayout(card)
             card_layout.setContentsMargins(8, 6, 8, 6)
             card_layout.setSpacing(2)
-            val_lbl = QLabel("—")
+            val_lbl = QLabel("-")
             val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             val_lbl.setStyleSheet(
                 "font-size: 20px; font-weight: 800; color: #66BB6A;"
@@ -165,17 +165,17 @@ class HomeTab(QWidget):
 
         # Actions
         self.create_project_btn = QPushButton("Create New Project")
-        self.open_folder_btn = QPushButton("📂 Open Project Folder")
-        self.open_outputs_btn = QPushButton("📊 Show Output Files")
-        self.open_models_btn = QPushButton("🧠 Open Model Folder")
+        self.open_folder_btn = QPushButton("Open Project Folder")
+        self.open_outputs_btn = QPushButton("Show Output Files")
+        self.open_models_btn = QPushButton("Open Model Folder")
         self.open_folder_btn.setEnabled(False)
         self.open_outputs_btn.setEnabled(False)
         self.open_models_btn.setEnabled(False)
 
-        self._open_project_btn = QPushButton("📁 Open Another Project")
+        self._open_project_btn = QPushButton("Open Another Project")
         self._open_project_btn.setToolTip("Browse for and open an existing ABEL project")
 
-        self._snapshot_btn = QPushButton("📸 Create Snapshot Workflow")
+        self._snapshot_btn = QPushButton("Create Snapshot Workflow")
         self._snapshot_btn.setEnabled(False)
         self._snapshot_btn.setToolTip(
             "Export the current pipeline, model, and settings as a reusable Snapshot Workflow"
@@ -266,24 +266,24 @@ class HomeTab(QWidget):
             str_sec = pipeline.get("stride_sec")
             win_disp = (
                 f"{win_fr} fr  ({win_sec} s)" if win_sec is not None and win_fr
-                else (f"{win_fr} fr" if win_fr else "—")
+                else (f"{win_fr} fr" if win_fr else "-")
             )
             str_disp = (
                 f"{str_fr} fr  ({str_sec} s)" if str_sec is not None and str_fr
-                else (f"{str_fr} fr" if str_fr else "—")
+                else (f"{str_fr} fr" if str_fr else "-")
             )
             self._pipeline_values["window_disp"].setText(win_disp)
             self._pipeline_values["stride_disp"].setText(str_disp)
             self._pipeline_values["fps"].setText(f"{fps} fps")
-            self._pipeline_values["model_version"].setText(str(pipeline.get("model_version") or "—"))
-            self._pipeline_values["classifier"].setText(str(pipeline.get("classifier") or "—"))
-            self._pipeline_values["query_mode"].setText(str(pipeline.get("query_mode") or "—"))
+            self._pipeline_values["model_version"].setText(str(pipeline.get("model_version") or "-"))
+            self._pipeline_values["classifier"].setText(str(pipeline.get("classifier") or "-"))
+            self._pipeline_values["query_mode"].setText(str(pipeline.get("query_mode") or "-"))
 
         # Model performance metrics
         model_metrics = stats.get("model_metrics")
         if model_metrics:
             for key, lbl in self._metric_card_labels.items():
-                lbl.setText(str(model_metrics.get(key) or "—"))
+                lbl.setText(str(model_metrics.get(key) or "-"))
             self._metrics_box.show()
         else:
             self._metrics_box.hide()

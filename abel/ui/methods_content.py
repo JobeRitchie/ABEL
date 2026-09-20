@@ -2,15 +2,15 @@
 
 This module is the single source of truth behind the **Methods** tab. Keeping the
 content as structured data (rather than inline HTML in the widget) makes it testable
-— tests assert every reference URL is well formed and every formula's ``source``
-resolves to a real importable attribute — and lets the same content be exported later.
+and lets the same content be exported later. Tests assert that every reference URL is
+well formed and that every formula's ``source`` resolves to a real importable attribute.
 
 Two public tables:
 
-* :data:`REFERENCES` — the sources behind the non-trivial procedures ABEL performs,
+* :data:`REFERENCES`, the sources behind the non-trivial procedures ABEL performs,
   plus the pose formats it consumes (DeepLabCut, SLEAP), grouped by topic. Most back
   a specific formula; a few are cited for the input format or library ABEL uses.
-* :data:`FORMULAS` — the raw formulas ABEL evaluates, each tagged with the source
+* :data:`FORMULAS`, the raw formulas ABEL evaluates, each tagged with the source
   function so a reviewer can trace equation → code.
 
 Add a formula only when the code actually implements it: a formula here is a claim
@@ -299,8 +299,8 @@ FORMULAS: list[Formula] = [
     Formula(
         "Leave-one-mouse-out CV", "Cross-validation",
         "for each subject s:  train on {all mice ≠ s},  test on {mouse s}",
-        "Leave-One-Group-Out cross-validation — the subject-grouped special case of "
-        "k-fold with k = number of mice — so no mouse appears in both train and test.",
+        "Leave-One-Group-Out cross-validation: the subject-grouped special case of "
+        "k-fold with k = number of mice: so no mouse appears in both train and test.",
         "abel.validation.loso.leave_one_subject_out",
         ("saeb2017", "pedregosa2011", "varoquaux2018"),
     ),
@@ -578,7 +578,7 @@ def render_formulas_html() -> str:
                         names.append(f"{first} {ref.year}")
                 if names:
                     cite = (
-                        "<span style='color:#78909C;'> — "
+                        "<span style='color:#78909C;'>, "
                         + escape("; ".join(names))
                         + "</span>"
                     )

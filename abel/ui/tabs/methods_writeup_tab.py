@@ -11,7 +11,7 @@ Two deliberate design points:
   methods section is a claim about what was actually done.
 * Gathering runs on a worker thread.  Per-behavior metrics come from
   :meth:`ValidationService.model_overview`, which reads every model directory and
-  the saved probability traces — a second or more on a real project, and longer
+  the saved probability traces, a second or more on a real project, and longer
   when validation quizzes are included.
 """
 
@@ -53,9 +53,9 @@ logger = logging.getLogger("abel")
 
 _PLACEHOLDER = (
     "Tick the facts you want covered on the left, then click "
-    "“Generate draft”.\n\n"
-    "Everything ABEL can read from this project — model metrics, the behavior "
-    "list, window sizes, bout thresholds, HMM settings — is filled in from the "
+    "“Generate Draft”.\n\n"
+    "Everything ABEL can read from this project: model metrics, the behavior "
+    "list, window sizes, bout thresholds, HMM settings, is filled in from the "
     "project itself. Everything it cannot know is left as a [FILL IN: ...] "
     "placeholder for you to replace.\n\n"
     "The result is a starting point for your own writing, not text to paste into "
@@ -125,13 +125,13 @@ class MethodsWriteupTab(QWidget):
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(4)
 
-        title = QLabel("⚠  THIS IS A DRAFT — DO NOT COPY IT INTO A MANUSCRIPT")
+        title = QLabel("⚠  THIS IS A DRAFT: DO NOT COPY IT INTO A MANUSCRIPT")
         title.setStyleSheet("font-size: 15px; font-weight: 800; color: #FF8A80;")
         title.setWordWrap(True)
 
         body = QLabel(
             "This tool assembles a suggested write-up from the settings and results "
-            "stored in this project. It is a guide and a checklist — not your methods "
+            "stored in this project. It is a guide and a checklist, not your methods "
             "section. Rewrite every sentence in your own words, verify every number "
             "against your own records, replace every [FILL IN: ...] placeholder, and "
             "delete anything you did not actually do. You are responsible for the "
@@ -200,11 +200,11 @@ class MethodsWriteupTab(QWidget):
         outer.addWidget(scroll, 1)
 
         select_row = QHBoxLayout()
-        all_btn = QPushButton("Select all")
+        all_btn = QPushButton("Select All")
         all_btn.clicked.connect(lambda: self._set_all(True))
-        none_btn = QPushButton("Select none")
+        none_btn = QPushButton("Select None")
         none_btn.clicked.connect(lambda: self._set_all(False))
-        reset_btn = QPushButton("Reset to defaults")
+        reset_btn = QPushButton("Reset to Defaults")
         reset_btn.clicked.connect(self._reset_defaults)
         for btn in (all_btn, none_btn, reset_btn):
             select_row.addWidget(btn)
@@ -219,7 +219,7 @@ class MethodsWriteupTab(QWidget):
         )
         outer.addWidget(self._warning_check)
 
-        self._generate_btn = QPushButton("Generate draft")
+        self._generate_btn = QPushButton("Generate Draft")
         self._generate_btn.setStyleSheet("font-weight: 700; padding: 6px;")
         self._generate_btn.clicked.connect(self._generate)
         outer.addWidget(self._generate_btn)
@@ -238,7 +238,7 @@ class MethodsWriteupTab(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        header = QLabel("Suggested write-up (editable — change it before you use it)")
+        header = QLabel("Suggested write-up (editable: change it before you use it)")
         header.setStyleSheet("font-size: 14px; font-weight: 800; color: #90CAF9;")
         layout.addWidget(header)
 
@@ -255,7 +255,7 @@ class MethodsWriteupTab(QWidget):
         layout.addWidget(self._output, 1)
 
         btn_row = QHBoxLayout()
-        self._copy_btn = QPushButton("Copy to clipboard")
+        self._copy_btn = QPushButton("Copy to Clipboard")
         self._copy_btn.clicked.connect(self._copy)
         self._save_btn = QPushButton("Save as .txt…")
         self._save_btn.clicked.connect(self._save)
@@ -338,7 +338,7 @@ class MethodsWriteupTab(QWidget):
         self._save_btn.setEnabled(True)
         n_models = len([
             r for r in facts.get("model_rows", [])
-            if str(r.get("model_version") or "—") != "—"
+            if str(r.get("model_version") or "-") != "-"
         ])
         self._status.setText(
             f"Draft built from {n_models} trained model(s). Edit it here, then copy or "

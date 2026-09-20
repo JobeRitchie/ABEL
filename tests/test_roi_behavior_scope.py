@@ -157,7 +157,7 @@ def test_inside_and_outside_partition_the_bout():
 
 
 # ----------------------------------------------------------------------
-# Prechop offsets — bouts are rebased, masks are not
+# Prechop offsets: bouts are rebased, masks are not
 # ----------------------------------------------------------------------
 
 def test_prechop_offset_aligns_bouts_with_the_mask():
@@ -171,7 +171,7 @@ def test_prechop_offset_aligns_bouts_with_the_mask():
     assert len(with_off) == 1
     assert int(with_off.iloc[0]["start_frame"]) == 0   # returned still rebased
     assert int(with_off.iloc[0]["end_frame"]) == 49
-    assert without_off.empty  # ignoring the offset finds nothing — the bug this guards
+    assert without_off.empty  # ignoring the offset finds nothing: the bug this guards
 
 
 # ----------------------------------------------------------------------

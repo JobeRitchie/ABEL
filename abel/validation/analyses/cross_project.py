@@ -1,4 +1,4 @@
-"""Cross-project meta-analysis — pure aggregation over ``cells.parquet``.
+"""Cross-project meta-analysis: pure aggregation over ``cells.parquet``.
 
 No new training: consumes the tidy cell table produced by the other analyses and
 rolls it up into per-project / per-behavior / cross-project summaries of
@@ -48,7 +48,7 @@ def _headline_cells(df: pd.DataFrame) -> pd.DataFrame:
 
     Generalization cells (the honest held-out split) plus the full-budget
     all-features ablation cells.  Factored out so the reported confusion counts
-    and the reported F1 can never describe different fits — a table where
+    and the reported F1 can never describe different fits, a table where
     "caught 191 of 214" sits next to an F1 computed over some other selection of
     cells is worse than no table.
     """
@@ -76,7 +76,7 @@ _CONFUSION_OUT_COLS = ["project_id", "behavior_name", *CONFUSION_COLS,
 
 
 def confusion_by_behavior(df: pd.DataFrame) -> pd.DataFrame:
-    """Held-out confusion counts per (project, behavior) — the tangible table.
+    """Held-out confusion counts per (project, behavior), the tangible table.
 
     F1 and PR-AUC compress the result past the point a reader can picture it.
     "Of the 214 held-out windows the reviewer scored as rearing, the model found
@@ -93,7 +93,7 @@ def confusion_by_behavior(df: pd.DataFrame) -> pd.DataFrame:
     * ``precision``/``recall`` are recomputed **from these counts**, not copied
       from the per-cell metric means, so a reader who divides the columns gets
       the printed rate back.
-    * The unit is one **held-out window scored by the reviewer** — never a bout.
+    * The unit is one **held-out window scored by the reviewer**: never a bout.
       Bout-level counts are not identifiable from a sparse labeled subset (see
       :func:`abel.temporal_refinement.refined_eval._refined_bout_counts`), and
       count-framing is exactly the presentation that invites a reader to assume
@@ -143,7 +143,7 @@ def metrics_by_behavior(df: pd.DataFrame) -> pd.DataFrame:
 
     The same cell selection as :func:`accuracy_by_behavior` and
     :func:`confusion_by_behavior` (see :func:`_headline_cells`), widened to every
-    metric so a single table backs all the per-behavior figure panels — a panel
+    metric so a single table backs all the per-behavior figure panels, a panel
     built off its own private selection of cells is how two figures in one paper
     end up disagreeing.
 
@@ -185,7 +185,7 @@ PUBLICATION_METRICS = ["f1", "mcc", "balanced_accuracy", "roc_auc", "cohen_kappa
 def publication_metrics_by_project(df: pd.DataFrame) -> pd.DataFrame:
     """Per-project mean of every publication metric (held-out generalization cells).
 
-    One row per project, one column per metric — the compact "here is how the
+    One row per project, one column per metric, the compact "here is how the
     model does under every standard summary, not just F1" table reviewers expect.
     Prefers generalization cells (the honest held-out split); falls back to the
     full-budget all-features ablation cells when generalization was not run.
@@ -237,7 +237,7 @@ def data_efficiency_summary(knees: list[dict]) -> pd.DataFrame:
 
     ``knees`` items: {project_id, project_name, behavior_name, knee_clips, f1_max}
     plus the bootstrap interval for both (``knee_lo``/``knee_hi``,
-    ``f1_max_lo``/``f1_max_hi``) — see :func:`learning_curve.bootstrap_knee_ci`.
+    ``f1_max_lo``/``f1_max_hi``), see :func:`learning_curve.bootstrap_knee_ci`.
     """
     if not knees:
         return pd.DataFrame(columns=[

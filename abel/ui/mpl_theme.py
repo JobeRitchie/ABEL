@@ -24,7 +24,7 @@ def style_navigation_toolbar(
     fg: str = TOOLBAR_FG,
     bg: str = TOOLBAR_BG,
 ) -> None:
-    """Recolour a matplotlib navigation toolbar's icons and palette in place.
+    """Recolor a matplotlib navigation toolbar's icons and palette in place.
 
     Safe to call with ``None`` and safe to call twice.  Works on the rendered
     pixmaps rather than matplotlib's ``_icon`` internals, so it does not depend
@@ -66,9 +66,9 @@ def style_navigation_toolbar(
 
 
 def _tint_pixmap(pixmap: QPixmap, colour: QColor) -> QPixmap:
-    """Repaint every glyph pixel in *colour*, keeping its alpha.
+    """Repaint every glyph pixel in *color*, keeping its alpha.
 
-    Keyed on alpha rather than on the glyph's current colour: under the native
+    Keyed on alpha rather than on the glyph's current color: under the native
     Windows palette matplotlib has already tinted its icons by the time we run,
     so matching "black" pixels found none and blanked every icon.
     """

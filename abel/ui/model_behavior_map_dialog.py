@@ -1,10 +1,10 @@
-"""Behaviour-mapping helper for importing another project's models.
+"""Behavior-mapping helper for importing another project's models.
 
-Each model predicts a behaviour that may or may not already exist in this
-project.  This dialog lets the user, per source behaviour, either map it onto an
-existing project behaviour, auto-create it (carrying over the source project's
+Each model predicts a behavior that may or may not already exist in this
+project.  This dialog lets the user, per source behavior, either map it onto an
+existing project behavior, auto-create it (carrying over the source project's
 name/definition), or skip the model.  The result is a
-``{source_behavior_id: decision}`` map where ``decision`` is a host behaviour id,
+``{source_behavior_id: decision}`` map where ``decision`` is a host behavior id,
 ``AUTO_CREATE_BEHAVIOR``, or ``SKIP_BEHAVIOR``.
 """
 
@@ -30,16 +30,16 @@ from abel.services.model_refinement_service import (
 
 
 class ModelBehaviorMapDialog(QDialog):
-    """Map each imported model's behaviour onto this project.
+    """Map each imported model's behavior onto this project.
 
     Parameters
     ----------
     source_tag:
         Display name of the source project.
     rows:
-        ``[(source_behavior_id, source_name, suggested_host_id)]`` — one per
-        source behaviour being imported.  ``suggested_host_id`` is "" when the
-        behaviour has no existing match (it then defaults to auto-create).
+        ``[(source_behavior_id, source_name, suggested_host_id)]``, one per
+        source behavior being imported.  ``suggested_host_id`` is "" when the
+        behavior has no existing match (it then defaults to auto-create).
     host_behaviors:
         ``[(host_behavior_id, host_name)]`` available as map targets.
     """
@@ -52,23 +52,23 @@ class ModelBehaviorMapDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Map Model Behaviours — {source_tag}")
+        self.setWindowTitle(f"Map Model Behaviors: {source_tag}")
         self.resize(640, 420)
 
         self._host_behaviors = list(host_behaviors)
         self._combos: list[tuple[str, QComboBox]] = []  # (source_behavior_id, combo)
 
         intro = QLabel(
-            f"Each model from <b>{source_tag}</b> predicts a behaviour. Map it to "
-            "a behaviour in this project, or <i>Auto-create</i> it to add this "
-            "project a copy of the source's behaviour definition (same name). "
+            f"Each model from <b>{source_tag}</b> predicts a behavior. Map it to "
+            "a behavior in this project, or <i>Auto-create</i> it to add this "
+            "project a copy of the source's behavior definition (same name). "
             "Choose <i>skip</i> to not import that model."
         )
         intro.setWordWrap(True)
 
         self._table = QTableWidget(len(rows), 2)
         self._table.setHorizontalHeaderLabels(
-            ["Model behaviour (source)", "Apply as"]
+            ["Model behavior (source)", "Apply as"]
         )
         hdr = self._table.horizontalHeader()
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -83,13 +83,13 @@ class ModelBehaviorMapDialog(QDialog):
             self._table.setItem(r, 0, name_item)
 
             combo = QComboBox()
-            # Option 0: auto-create, carrying the source behaviour name through.
+            # Option 0: auto-create, carrying the source behavior name through.
             combo.addItem(f"Auto-create “{src_name}”", AUTO_CREATE_BEHAVIOR)
             for host_id, host_name in self._host_behaviors:
                 combo.addItem(f"Map to: {host_name}", host_id)
-            combo.addItem("— skip (don't import) —", SKIP_BEHAVIOR)
+            combo.addItem("(skip, do not import)", SKIP_BEHAVIOR)
 
-            # Pre-select the suggested existing behaviour, else auto-create.
+            # Pre-select the suggested existing behavior, else auto-create.
             if suggested_host_id:
                 idx = combo.findData(suggested_host_id)
                 combo.setCurrentIndex(idx if idx >= 0 else 0)

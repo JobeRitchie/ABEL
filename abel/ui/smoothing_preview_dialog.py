@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -36,9 +37,26 @@ from PySide6.QtWidgets import (
 from abel.models.schemas import ImportManifest, PoseSmoothingSettings
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseData, PoseProcessingService
+from abel.services.roi_service import (
+    BG_VAR_THRESHOLD_MAX,
+    BG_VAR_THRESHOLD_MIN,
+    DEFAULT_BG_VAR_THRESHOLD,
+    ROIService,
+)
 from abel.workers.task_worker import TaskWorker
 
 logger = logging.getLogger("abel")
+
+BG_THRESHOLD_TOOLTIP = (
+    "How different a pixel in the local motion window must be from its learned "
+    "background (MOG2 variance threshold) before it counts as foreground. "
+    "Lower = more sensitive: subtle movements and bedding shifts register, but "
+    "so does video noise. Higher = only strong changes register. Default "
+    f"{DEFAULT_BG_VAR_THRESHOLD}.\n\n"
+    "Drives the local/nose surface-motion features (BG energy). This is a "
+    "project setting used by feature extraction: changing it rebuilds context "
+    "features at the next extraction."
+)
 
 _PREVIEW_SEC = 10
 _DISPLAY_HEIGHT = 340   # pixels tall per pane
@@ -48,20 +66,20 @@ _GRAPH_HEIGHT = 100     # height of the graph strip
 
 
 # ---------------------------------------------------------------------------
-# Trace catalog — every plottable trace the preview can compute
+# Trace catalog: every plottable trace the preview can compute
 # ---------------------------------------------------------------------------
 
 @dataclass
 class TraceDef:
     """Metadata for one time-series trace available in the graph strip."""
     key: str            # dict key in PreviewResult.traces
-    label: str          # legend text (ASCII only — OpenCV can't render Unicode)
+    label: str          # legend text (ASCII only: OpenCV can't render Unicode)
     color: tuple[int, int, int]  # BGR
     category: str       # grouping shown in the selector dialog
     default_on: bool = True
 
 
-# Ordered list — defines default draw order and selector list order.
+# Ordered list: defines default draw order and selector list order.
 TRACE_CATALOG: list[TraceDef] = [
     # ── Video / context features ─────────────────────────────────────
     TraceDef("nose_bg_energy",     "Nose BG energy",    (255, 200, 60),   "Video context"),
@@ -94,11 +112,11 @@ class PreviewResult:
 
 
 # ---------------------------------------------------------------------------
-# Rendering helpers (run in worker thread — no Qt calls allowed here)
+# Rendering helpers (run in worker thread: no Qt calls allowed here)
 # ---------------------------------------------------------------------------
 
 def _part_color(part_idx: int) -> tuple[int, int, int]:
-    """Distinct, deterministic BGR colour palette."""
+    """Distinct, deterministic BGR color palette."""
     palette = [
         (60, 180, 255),
         (80, 220, 80),
@@ -145,8 +163,8 @@ def _overlay_pose(
     """Draw body-part dots and centroid trail onto *canvas* in-place.
 
     When *fixed_color* is given, all of this animal's keypoints are drawn in that
-    single colour (used to tell apart multiple animals); otherwise each body part
-    uses its own role colour.
+    single color (used to tell apart multiple animals); otherwise each body part
+    uses its own role color.
     """
     import cv2  # noqa: PLC0415
 
@@ -162,7 +180,7 @@ def _overlay_pose(
         intensity = int(alpha * 180)
         pcx, pcy = centroid_x[prev], centroid_y[prev]
         if not (np.isfinite(pcx) and np.isfinite(pcy)):
-            continue  # animal absent at this past frame — no trail point
+            continue  # animal absent at this past frame: no trail point
         cx = int(pcx * scale)
         cy = int(pcy * scale)
         if 0 <= cx < w and 0 <= cy < h:
@@ -270,6 +288,7 @@ def render_preview_frames(
     fps: float = 30.0,
     extra_raw: list[PoseData] | None = None,
     extra_smooth: list[PoseData] | None = None,
+    bg_var_threshold: int = 0,
 ) -> PreviewResult:
     """Build rendered frames + per-frame trace arrays (worker thread).
 
@@ -279,7 +298,7 @@ def render_preview_frames(
 
     ``extra_raw``/``extra_smooth`` are additional animals (multi-animal sessions);
     their poses are overlaid on the raw/smoothed panes in distinct per-animal
-    colours so the preview shows every tracked animal.  Traces remain focused on
+    colors so the preview shows every tracked animal.  Traces remain focused on
     the primary animal (``raw_pose``/``smooth_pose``).
     """
     import cv2  # noqa: PLC0415
@@ -291,7 +310,7 @@ def render_preview_frames(
     if not cap.isOpened():
         return _empty
 
-    # Distinct BGR colours for additional animals (primary keeps role colours).
+    # Distinct BGR colors for additional animals (primary keeps role colors).
     _EXTRA_COLORS = [
         (255, 160, 80), (180, 90, 240), (90, 230, 230),
         (120, 255, 120), (80, 120, 255), (200, 200, 80),
@@ -343,14 +362,14 @@ def render_preview_frames(
 
     # Matching table: (required_tokens, target_variable_name)
     _match_table: list[tuple[tuple[str, ...], str]] = [
-        # Forelimb / paw — left
+        # Forelimb / paw: left
         (("frontleg", "left"), "fl_l"),
         (("forepaw", "left"), "fl_l"),
         (("paw", "left"), "fl_l"),
         (("paw", "l"), "fl_l"),
         (("left", "paw"), "fl_l"),
         (("front", "left"), "fl_l"),
-        # Forelimb / paw — right
+        # Forelimb / paw: right
         (("frontleg", "right"), "fl_r"),
         (("forepaw", "right"), "fl_r"),
         (("paw", "right"), "fl_r"),
@@ -463,7 +482,9 @@ def render_preview_frames(
         return ContextFeatureService._local_crop(g_ds, nose_lx[fi], nose_ly[fi], ds_radius)
 
     fg_sub = cv2.createBackgroundSubtractorMOG2(
-        history=MOG2_HISTORY, varThreshold=MOG2_VAR_THRESHOLD, detectShadows=False,
+        history=MOG2_HISTORY,
+        varThreshold=bg_var_threshold if bg_var_threshold > 0 else MOG2_VAR_THRESHOLD,
+        detectShadows=False,
     )
     warmup_start = max(0, start_frame - MOG2_WARMUP_FRAMES)
     cap.set(cv2.CAP_PROP_POS_FRAMES, warmup_start)
@@ -558,7 +579,7 @@ def render_preview_frames(
 
         if scaled_radius > 0:
             # The two local-motion windows extraction samples: fixed squares
-            # (side 2 x Local radius) on the body centre and on the nose.
+            # (side 2 x Local radius) on the body center and on the nose.
             overlay = right.copy()
             body_hx, body_hy = ContextFeatureService._hold_last_position(
                 sm_cx[fi:fi + 1], sm_cy[fi:fi + 1]
@@ -651,7 +672,11 @@ class SmoothingPreviewDialog(QDialog):
     get_local_radius_fn:
         Zero-argument callable returning the current local-motion radius in pixels.
     project_root:
-        Project directory for persisting the MOG2 threshold.
+        Project directory.  When given, the BG-subtraction threshold is read
+        from and saved to the project's ROI config (the setting extraction uses).
+    get_bg_threshold_fn / set_bg_threshold_fn:
+        Optional callables bound to the parent UI's own threshold control, so
+        the two stay in step.  They take precedence over *project_root*.
     """
 
     def __init__(
@@ -662,9 +687,11 @@ class SmoothingPreviewDialog(QDialog):
         get_local_radius_fn: Callable[[], int] | None = None,
         project_root: Path | None = None,
         parent: QWidget | None = None,
+        get_bg_threshold_fn: Callable[[], int] | None = None,
+        set_bg_threshold_fn: Callable[[int], None] | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Preview Video Settings — Raw vs Smoothed DLC Tracking")
+        self.setWindowTitle("Preview Video Settings: Raw vs Smoothed DLC Tracking")
         self.setMinimumSize(860, 620)
         self.setModal(False)
 
@@ -726,16 +753,29 @@ class SmoothingPreviewDialog(QDialog):
         trace_btn.clicked.connect(self._open_trace_selector)
 
         # The nose traces reproduce extraction exactly (same window, downsample
-        # and MOG2 settings), so there is deliberately no preview-only knob.
+        # and MOG2 settings).  The threshold control edits the project setting
+        # itself, never a preview-only copy.
+        self._get_bg_threshold = get_bg_threshold_fn
+        self._set_bg_threshold = set_bg_threshold_fn
+        self._bg_threshold = QSpinBox()
+        self._bg_threshold.setRange(BG_VAR_THRESHOLD_MIN, BG_VAR_THRESHOLD_MAX)
+        self._bg_threshold.setValue(self._initial_bg_threshold())
+        self._bg_threshold.setToolTip(BG_THRESHOLD_TOOLTIP)
+        self._bg_threshold.valueChanged.connect(self._on_bg_threshold_changed)
+
         bg_note = QLabel(
             "Nose traces = the extracted nose-window features: background "
-            "subtraction inside the square Local-radius window only."
+            "subtraction inside the square Local-radius window only. Changing "
+            "the threshold rebuilds context features at the next extraction."
         )
         bg_note.setWordWrap(True)
         bg_note.setStyleSheet("color: #90A4AE; font-size: 11px;")
 
         tune_row = QHBoxLayout()
         tune_row.addWidget(trace_btn)
+        tune_row.addSpacing(16)
+        tune_row.addWidget(QLabel("BG sensitivity threshold:"))
+        tune_row.addWidget(self._bg_threshold)
         tune_row.addSpacing(16)
         tune_row.addWidget(bg_note, 1)
 
@@ -761,7 +801,7 @@ class SmoothingPreviewDialog(QDialog):
         self._slider.setEnabled(False)
         self._slider.valueChanged.connect(self._on_slider_moved)
 
-        self._frame_counter = QLabel("— / —")
+        self._frame_counter = QLabel("- / -")
         self._frame_counter.setFixedWidth(72)
         self._frame_counter.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -810,12 +850,33 @@ class SmoothingPreviewDialog(QDialog):
         interp = f"yes (max gap {s.interpolate_max_gap} fr)" if s.interpolate_dropouts else "no"
         radius = self._get_local_radius()
         self._settings_label.setText(
-            f"<b>Current video settings</b> \u2014 "
+            f"<b>Current video settings:</b> "
             f"Smoothing: <b>{s.smoothing_window} frames</b>   |   "
             f"Likelihood: <b>{s.likelihood_threshold:.2f}</b>   |   "
             f"Interpolate: <b>{interp}</b>   |   "
-            f"Local radius: <b>{radius} px</b> ({2 * radius}\u00d7{2 * radius} px windows)"
+            f"Local radius: <b>{radius} px</b> ({2 * radius}\u00d7{2 * radius} px windows)   |   "
+            f"BG threshold: <b>{self._bg_threshold.value()}</b>"
         )
+
+    def _initial_bg_threshold(self) -> int:
+        try:
+            if self._get_bg_threshold is not None:
+                return int(self._get_bg_threshold())
+            if self._project_root is not None:
+                return ROIService().bg_var_threshold(self._project_root)
+        except Exception:
+            logger.debug("Could not read BG threshold", exc_info=True)
+        return DEFAULT_BG_VAR_THRESHOLD
+
+    def _on_bg_threshold_changed(self, value: int) -> None:
+        try:
+            if self._set_bg_threshold is not None:
+                self._set_bg_threshold(int(value))
+            elif self._project_root is not None:
+                ROIService().set_bg_var_threshold(self._project_root, int(value))
+        except Exception:
+            logger.warning("Could not save BG threshold", exc_info=True)
+        self._refresh_settings_label()
 
     def _pick_random_session(self) -> None:
         n = self._session_combo.count()
@@ -844,10 +905,10 @@ class SmoothingPreviewDialog(QDialog):
         pose_path = self._imports.pose_path_for_session(self._manifest, session_id)
 
         if not video_path or not video_path.exists():
-            self._set_status("Video file not found for this session — check import manifest.")
+            self._set_status("Video file not found for this session: check import manifest.")
             return
         if not pose_path or not pose_path.exists():
-            self._set_status("Pose file not found for this session — check import manifest.")
+            self._set_status("Pose file not found for this session: check import manifest.")
             return
 
         # Stop current playback
@@ -865,6 +926,7 @@ class SmoothingPreviewDialog(QDialog):
 
         smoothing = self._get_smoothing()
         local_radius = self._get_local_radius()
+        bg_threshold = self._bg_threshold.value()
 
         # Capture variables for the closure
         _pose_svc = self._pose
@@ -878,6 +940,7 @@ class SmoothingPreviewDialog(QDialog):
                     interpolate=smoothing.interpolate_dropouts,
                     interpolate_max_gap=smoothing.interpolate_max_gap,
                     smoothing_window=smoothing.smoothing_window,
+                    absence_max_fill_frames=smoothing.absence_max_fill_frames,
                 )
 
             # Load every tracked individual; the first is the primary animal
@@ -907,7 +970,7 @@ class SmoothingPreviewDialog(QDialog):
             n_preview = min(int(fps_source * _PREVIEW_SEC), total_vid_frames)
             max_start = max(0, total_vid_frames - n_preview)
 
-            # Prefer a window where at least one animal is actually present —
+            # Prefer a window where at least one animal is actually present,
             # these videos have long stretches with no mouse, which would render
             # an empty (and previously crash-prone) preview.  Presence = any
             # individual has a finite centroid in the window.
@@ -946,6 +1009,7 @@ class SmoothingPreviewDialog(QDialog):
                 fps=fps_source,
                 extra_raw=extra_raw,
                 extra_smooth=extra_smooth,
+                bg_var_threshold=bg_threshold,
             )
 
         worker = TaskWorker(_work)
@@ -991,7 +1055,7 @@ class SmoothingPreviewDialog(QDialog):
     def _on_render_failed(self, traceback_str: str) -> None:
         self._progress.setVisible(False)
         self._generate_btn.setEnabled(True)
-        self._frame_label.setText("Rendering failed — see status below.")
+        self._frame_label.setText("Rendering failed: see status below.")
         self._set_status(f"Error: {traceback_str.splitlines()[-1]}")
         logger.error("SmoothingPreviewDialog render error:\n%s", traceback_str)
 

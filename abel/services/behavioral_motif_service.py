@@ -3,14 +3,14 @@
 Provides three layers of sequential-behavior analysis, all operating on
 the bout sequences produced by the temporal refinement step:
 
-1. **Behavior Transition Matrix** — directed transition probabilities or
+1. **Behavior Transition Matrix**: directed transition probabilities or
    counts between successive bouts within a user-defined gap threshold.
 
-2. **Behavioral Motif Discovery** — recurring behavior sub-sequences
+2. **Behavioral Motif Discovery**: recurring behavior sub-sequences
    discovered via N-gram frequency analysis or session-level sequence
    clustering (UMAP + HDBSCAN).
 
-3. **Hidden Markov Model Analysis** — latent state discovery via a
+3. **Hidden Markov Model Analysis**: latent state discovery via a
    categorical HMM fitted to the pooled behavior sequences, with AIC/BIC
    guided model selection.
 
@@ -18,10 +18,10 @@ All heavy computation is performed in this service layer; the UI widget
 dispatches calls via QThreadPool / TaskWorker and never blocks the event loop.
 
 Optional dependencies (graceful degradation if absent):
-  hmmlearn  — HMM analysis
-  umap-learn / umap — sequence clustering UMAP reduction
-  hdbscan   — sequence clustering density-based clustering
-  openpyxl  — Excel export (falls back to CSV-only)
+  hmmlearn , HMM analysis
+  umap-learn / umap, sequence clustering UMAP reduction
+  hdbscan  , sequence clustering density-based clustering
+  openpyxl , Excel export (falls back to CSV-only)
 """
 
 from __future__ import annotations
@@ -61,9 +61,9 @@ class MotifSettings:
     still be counted as a transition A→B.  Temporal-refinement models run
     independently and can produce bouts that overlap by a fraction of a second;
     without a tolerance those transitions are silently dropped.  Set to 0 to
-    restore the old strict behaviour (B must start after A ends)."""
+    restore the old strict behavior (B must start after A ends)."""
     normalize_rows: bool = True
-    """When True display row-normalised probabilities; when False show raw counts."""
+    """When True display row-normalized probabilities; when False show raw counts."""
     include_self_transitions: bool = False
     """Whether to count A→A transitions (same behavior following itself)."""
 
@@ -96,20 +96,20 @@ class MotifSettings:
     hmm_n_restarts: int = 5
     """Number of random restarts when fitting each HMM (best log-likelihood kept)."""
     hmm_criterion: str = "bic"
-    """'aic' | 'bic' | 'aicc' | 'icl' | 'cv' — criterion used for automatic model
+    """'aic' | 'bic' | 'aicc' | 'icl' | 'cv': criterion used for automatic model
     selection.
 
     - 'bic'/'aic': classical information criteria.  Both are known to over-select
-      states for behavioural sequence data (Pohle et al. 2017, JABES 22:270-293).
+      states for behavioral sequence data (Pohle et al. 2017, JABES 22:270-293).
     - 'aicc': AIC with the small-sample correction; use when N/n_free < ~40.
     - 'icl':  BIC plus twice the entropy of the posterior state assignments
-      (Biernacki, Celeux & Govaert 2000).  Favours states that are actually
+      (Biernacki, Celeux & Govaert 2000).  Favors states that are actually
       separable, which is what makes an emission heatmap interpretable.
     - 'cv':   leave-one-session-out cross-validated held-out log-likelihood with
       a 1-SE parsimony rule.  Slowest, but the only criterion here that measures
-      generalisation to a held-out animal rather than in-sample fit."""
+      generalization to a held-out animal rather than in-sample fit."""
     hmm_random_seed: int = 0
-    """Base seed for HMM EM initialisation.  Restart *r* uses ``seed + r``, so a
+    """Base seed for HMM EM initialization.  Restart *r* uses ``seed + r``, so a
     given (data, settings) pair always reproduces the same fit.  Without this the
     reported state count can change between runs of the same analysis."""
 
@@ -125,7 +125,7 @@ class MotifSettings:
       it.
 
     The two differ most for states whose defining behavior is rare.  Viterbi
-    decoding is a global optimisation, so entering a state for one or two bouts
+    decoding is a global optimization, so entering a state for one or two bouts
     must pay the transition cost twice; when that exceeds the emission gain the
     path stays put and the session reports exactly 0.0 occupancy even though the
     behavior occurred.  Posterior occupancy has no such threshold - it returns a
@@ -322,12 +322,12 @@ def compute_transition_matrix(
     overlap_tolerance_s:
         Seconds of early-start overlap to tolerate.  E.g. 1.0 means a bout B
         that starts up to 1 second *before* bout A ends still counts as a
-        transition A→B.  Set to 0 for the strict (legacy) behaviour where B
+        transition A→B.  Set to 0 for the strict (legacy) behavior where B
         must start strictly after A ends.
 
     Returns
     -------
-    ``{session_id: n x n float64 array}`` — raw counts, NOT normalised.
+    ``{session_id: n x n float64 array}``, raw counts, NOT normalized.
     """
     n = len(behavior_ids)
     bid_idx = {bid: i for i, bid in enumerate(behavior_ids)}
@@ -366,7 +366,7 @@ def compute_transition_matrix(
 
 
 def normalize_transition_matrix(count_mat: np.ndarray) -> np.ndarray:
-    """Row-normalise a count matrix to obtain transition probabilities."""
+    """Row-normalize a count matrix to obtain transition probabilities."""
     prob = np.zeros_like(count_mat)
     row_sums = count_mat.sum(axis=1, keepdims=True)
     mask = row_sums.squeeze() > 0
@@ -760,7 +760,7 @@ def retained_events(
     """The events an HMM fit actually sees, in decode order.
 
     Events whose behavior is not among *behavior_ids* are dropped, and sessions
-    left with nothing are omitted entirely — exactly what
+    left with nothing are omitted entirely, exactly what
     :func:`_encode_sequences` does.  Decoded state sequences are indexed by
     position in this list, so anything that maps states back onto bout times
     must filter through here rather than re-deriving the rule; otherwise a
@@ -915,7 +915,7 @@ def fit_hmm(
         criterion = "icl" if criterion == "cv" else "bic"
 
     for n_states in n_range:
-        # Multiple random restarts — keep best log-likelihood.  Seeds are
+        # Multiple random restarts: keep best log-likelihood.  Seeds are
         # deterministic so the selected state count reproduces across runs.
         best_ll = float("-inf")
         best_run_model = None
@@ -944,7 +944,7 @@ def fit_hmm(
         # AICc: small-sample correction; diverges as n_free approaches N.
         denom = total_obs - n_free - 1
         aicc = aic + (2 * n_free * (n_free + 1) / denom) if denom > 0 else float("inf")
-        # ICL = BIC + 2 * entropy of the posterior state assignments.  Penalises
+        # ICL = BIC + 2 * entropy of the posterior state assignments.  Penalizes
         # models whose states are not cleanly separable.
         icl = bic + 2.0 * _posterior_entropy(best_run_model, observations)
 
@@ -1053,7 +1053,7 @@ def fit_hmm(
 # fixed grid (animal-movement step/turn series).  Two facts drive the design of
 # this routine:
 #
-#   1. AIC and BIC systematically over-select states for behavioural sequence
+#   1. AIC and BIC systematically over-select states for behavioral sequence
 #      data -- Pohle, Langrock, van Beest & Schmidt (2017), "Selecting the
 #      Number of States in Hidden Markov Models: Pitfalls, Practical Challenges
 #      and Pragmatic Solutions", JABES 22:270-293.  Their recommendation is to
@@ -1064,7 +1064,7 @@ def fit_hmm(
 #
 #   2. Our emissions are *discrete behavior labels* and our time axis is the
 #      *bout index*, not a fixed sampling grid.  That makes this a Markov chain
-#      over a bout sequence, so the gap between bouts is not modelled at all.
+#      over a bout sequence, so the gap between bouts is not modeled at all.
 #      It is a deliberate simplification (surfaced as a caveat in the report),
 #      and it means state counts from the movement-HMM literature do not
 #      transfer directly.
@@ -1165,7 +1165,7 @@ def calibrate_hmm_settings(
     range, plus cross-validated held-out log-likelihood when it fits in
     ``time_budget_s``.  The recommendation is the most parsimonious state count
     the criteria support: for CV, the smallest K within one standard error of
-    the best (the standard 1-SE rule); otherwise ICL, which penalises states
+    the best (the standard 1-SE rule); otherwise ICL, which penalizes states
     that are not cleanly separable and so over-selects less than BIC.
 
     Returns a dict with ``proposed`` (settings to apply), ``report`` (text
@@ -1413,8 +1413,8 @@ def calibrate_hmm_settings(
 
     report += [
         "STAGE 4 - NUMBER OF STATES",
-        "  AIC and BIC systematically favour more states than are biologically sensible for",
-        "  behavioural sequence data (Pohle, Langrock, van Beest & Schmidt 2017, JABES",
+        "  AIC and BIC systematically favor more states than are biologically sensible for",
+        "  behavioral sequence data (Pohle, Langrock, van Beest & Schmidt 2017, JABES",
         "  22:270-293; Dupont et al. 2025, Methods Ecol Evol 16:e70025). All four criteria are",
         "  shown so you can see the direction and size of that disagreement rather than",
         "  inherit one criterion's answer.",
@@ -1452,12 +1452,12 @@ def calibrate_hmm_settings(
             "  -> recommending K=%d by %d-fold session-held-out cross-validation with the "
             "1-SE rule: the smallest state count whose held-out likelihood is within one "
             "standard error of the best. This is the only criterion here that measures "
-            "generalisation to an unseen animal rather than in-sample fit." % (rec_k, n_folds)
+            "generalization to an unseen animal rather than in-sample fit." % (rec_k, n_folds)
         )
     else:
         report.append(
             "  -> recommending K=%d by ICL (BIC plus twice the posterior-assignment entropy; "
-            "Biernacki, Celeux & Govaert 2000). ICL penalises state counts whose states are "
+            "Biernacki, Celeux & Govaert 2000). ICL penalizes state counts whose states are "
             "not cleanly separable, so the states it keeps are the ones you can actually read "
             "off the emission heatmap." % rec_k
         )
@@ -1486,7 +1486,7 @@ def calibrate_hmm_settings(
             warnings_out.append(
                 "The held-out likelihood barely separates the candidate state counts "
                 "(spread %.4f nats/bout vs a fold SE of %.4f). K is weakly determined by "
-                "this data \u2014 prefer the smallest state count you can interpret, and do not "
+                "this data: prefer the smallest state count you can interpret, and do not "
                 "present the state count itself as a result." % (spread, typ_sem)
             )
         turns = sum(
@@ -1496,7 +1496,7 @@ def calibrate_hmm_settings(
         if turns > 1:
             report.append(
                 "    The curve changes direction %d times across the range. At this fold "
-                "count that is fold noise, not structure \u2014 do not read the exact optimum "
+                "count that is fold noise, not structure, do not read the exact optimum "
                 "as meaningful." % turns
             )
         report.append("")
@@ -1519,7 +1519,7 @@ def calibrate_hmm_settings(
     report += [
         "MODEL CAVEATS (read before reporting these states)",
         "  1. The time axis is the bout index, not the clock. This is a Markov chain over the",
-        "     ordered bout sequence, so the gap between bouts is not modelled. Two sessions",
+        "     ordered bout sequence, so the gap between bouts is not modeled. Two sessions",
         "     with identical bout orders score identically even if one took twice as long.",
         "     Using gap duration would require a hidden semi-Markov model.",
         "  2. %d/%d (%.0f%%) of consecutive bouts repeat the same behavior. The HMM sees these;"
@@ -1528,7 +1528,7 @@ def calibrate_hmm_settings(
         "     off. The two panels are therefore answering slightly different questions.",
         "  3. Emissions are model predictions, not ground truth. Per-behavior detector errors",
         "     propagate into the state structure; a state can encode a confusable pair of",
-        "     behaviors rather than a behavioural mode.",
+        "     behaviors rather than a behavioral mode.",
         "  4. Hidden states are identified only up to permutation. State 0 in one run is not",
         "     State 0 in another unless the seed is fixed, which is why calibration pins one.",
         "",
@@ -2110,7 +2110,7 @@ def state_frame_matrix(
     stops rather than where the animal last did something.
 
     *no_state_value* replaces the NaNs inside the session with a code of its
-    own - pass ``n_states`` to give the unmodelled frames the next number after
+    own - pass ``n_states`` to give the unmodeled frames the next number after
     the last state.  It fills only frames the session actually covers: the
     pre-assay head in *raw_video_frames* mode stays NaN, because the HMM was
     never shown those frames at all and coding them as observed-but-stateless
@@ -2381,7 +2381,7 @@ def save_hmm_result(project_root: Path, result: dict[str, Any]) -> Path | None:
     """Persist a completed fit.  Returns the path, or None if it could not be written.
 
     A failure here must never break the analysis the user just ran, so the
-    error is logged and swallowed — the result stays live in memory either way.
+    error is logged and swallowed, the result stays live in memory either way.
     """
     path = hmm_result_path(project_root)
     try:

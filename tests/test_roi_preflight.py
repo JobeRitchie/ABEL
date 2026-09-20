@@ -72,7 +72,7 @@ def test_subject_with_no_entry_falls_back_to_zero_area_project_default(tmp_path)
     root = _project(tmp_path, {
         "MS1::s1": {"target_zones": [{"x": 10, "y": 10, "w": 30, "h": 20}]},
     })
-    # nsf1 was never drawn — this is the NSF_LPT failure mode.
+    # nsf1 was never drawn: this is the NSF_LPT failure mode.
     assert ROIService().subjects_without_target_area(
         root, ["MS1::s1", "nsf1::s2"]
     ) == ["nsf1::s2"]

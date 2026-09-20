@@ -333,8 +333,8 @@ class EvaluationService:
         except Exception:
             logger.exception("Failed generating confusion matrix / PR curve")
 
-        # NOTE: Per-behaviour separation plots removed in favour of the unified
-        # UMAP which aggregates all behaviour models in a single embedding.
+        # NOTE: Per-behavior separation plots removed in favor of the unified
+        # UMAP which aggregates all behavior models in a single embedding.
 
         # Lightweight report artifacts for downstream plotting.
         pd.DataFrame(frame_report, index=[0]).to_csv(out_dir / "frame_metrics.csv", index=False)
@@ -377,15 +377,15 @@ class EvaluationService:
         threshold: float = 0.3,
         target_behavior_id: str | None = None,
     ) -> dict[str, Any]:
-        """Build an NxN co-activation matrix across all trained behaviour models.
+        """Build an NxN co-activation matrix across all trained behavior models.
 
         For every segment, each model's prediction probability is collected.
-        A pair of behaviours (A, B) is co-activated when both predict above
+        A pair of behaviors (A, B) is co-activated when both predict above
         *threshold*.  The result is a symmetric matrix of co-activation rates
         plus ranked suggestions for the user.
 
         Additionally computes margin-based confound detection: segments where
-        the top two behaviour predictions are within 0.2 of each other are
+        the top two behavior predictions are within 0.2 of each other are
         flagged as potential confounds even when one is below *threshold*.
 
         Parameters
@@ -395,7 +395,7 @@ class EvaluationService:
         behavior_names:
             Optional mapping ``{behavior_id: display_name}``.
         threshold:
-            Probability cutoff for considering a behaviour "active".
+            Probability cutoff for considering a behavior "active".
 
         Returns
         -------
@@ -406,20 +406,20 @@ class EvaluationService:
         if not models_root.exists():
             return {"error": "No models directory found."}
 
-        # Discover models and their target behaviours.
+        # Discover models and their target behaviors.
         model_dirs: list[Path] = []
         for p in sorted(models_root.iterdir()):
             if p.is_dir() and (p / "model_state.pkl").exists() and p.name.startswith("behavior_model_"):
                 model_dirs.append(p)
 
-        # Keep latest model per behaviour.
+        # Keep latest model per behavior.
         # Use directory name as the canonical key rather than run_settings
         # target_behavior, because saved target_behavior can be wrong
         # (e.g. No_Behavior model may have been saved with another
-        # behaviour's ID).  Directory names are always unique and user-controlled.
+        # behavior's ID).  Directory names are always unique and user-controlled.
         latest_by_behavior: dict[str, Path] = {}
         for md in model_dirs:
-            # Derive behaviour key from directory name: "behavior_model_Freeze" -> "Freeze"
+            # Derive behavior key from directory name: "behavior_model_Freeze" -> "Freeze"
             dir_key = md.name.removeprefix("behavior_model_").strip()
             if not dir_key:
                 settings = read_json(md / "run_settings.json", {})
@@ -429,7 +429,7 @@ class EvaluationService:
             latest_by_behavior[dir_key] = md  # dirs are sorted; last wins (most recent)
 
         if len(latest_by_behavior) < 2:
-            return {"error": "Need at least two behaviour models for confound analysis."}
+            return {"error": "Need at least two behavior models for confound analysis."}
 
         # Load predictions.
         pred_frames: dict[str, pd.DataFrame] = {}
@@ -442,7 +442,7 @@ class EvaluationService:
                 pred_frames[bid] = df[["segment_id", "prediction_prob"]].copy()
 
         if len(pred_frames) < 2:
-            return {"error": "Need prediction files from at least two behaviours."}
+            return {"error": "Need prediction files from at least two behaviors."}
 
         # Merge predictions on segment_id.
         merged: pd.DataFrame | None = None
@@ -504,9 +504,9 @@ class EvaluationService:
                 )
 
         # ── Margin-based confound detection ───────────────────────────────
-        # Find segments where the top two behaviour predictions are close
+        # Find segments where the top two behavior predictions are close
         # (within 0.2), indicating the feature space is ambiguous between
-        # those behaviours even when one doesn't exceed the threshold.
+        # those behaviors even when one doesn't exceed the threshold.
         if n >= 2:
             prob_matrix = merged[prob_cols].to_numpy(dtype=float)
             sorted_probs = np.sort(prob_matrix, axis=1)[:, ::-1]
@@ -536,18 +536,18 @@ class EvaluationService:
             # Still report the max co-activation so the user knows the analysis ran
             max_coact = max((p["coactivation_rate"] for p in pairs), default=0.0)
             suggestions.append(
-                f"No significant between-behaviour confounds detected "
+                f"No significant between-behavior confounds detected "
                 f"(max co-activation rate: {max_coact:.1%}, threshold: {threshold:.0%}). "
                 f"If the UMAP shows overlap, try reviewing clips in the overlapping region."
             )
 
         # Generate heatmap.
-        # Reorder so target behaviour comes first (if specified).
+        # Reorder so target behavior comes first (if specified).
         target_idx: int | None = None
         if target_behavior_id:
             tbid = str(target_behavior_id).strip()
             # bid_list now uses directory-derived keys (e.g. "Freeze").
-            # The caller may pass a UUID or a display name — check both.
+            # The caller may pass a UUID or a display name: check both.
             for idx, bid in enumerate(bid_list):
                 if bid == tbid:
                     target_idx = idx
@@ -575,7 +575,7 @@ class EvaluationService:
             fig, ax = plt.subplots(figsize=(max(4, 1.5 * n), max(3.5, 1.3 * n)))
             im = ax.imshow(coact, cmap="YlOrRd", vmin=0)
 
-            # Bold-face the target behaviour label.
+            # Bold-face the target behavior label.
             x_labels = []
             y_labels = []
             for i, lbl in enumerate(labels):
@@ -588,7 +588,7 @@ class EvaluationService:
 
             ax.set_xticks(range(n), x_labels, rotation=45, ha="right", fontsize=9)
             ax.set_yticks(range(n), y_labels, fontsize=9)
-            # Bold the target-behaviour tick labels
+            # Bold the target-behavior tick labels
             if target_idx is not None:
                 for tick_label in ax.get_xticklabels():
                     if tick_label.get_text().startswith("▸"):
@@ -597,9 +597,9 @@ class EvaluationService:
                     if tick_label.get_text().startswith("▸"):
                         tick_label.set_fontweight("bold")
 
-            title = "Between-Behaviour Co-activation"
+            title = "Between-Behavior Co-activation"
             if target_idx is not None:
-                title = f"Confound Analysis — {labels[0]} vs All Others"
+                title = f"Confound Analysis: {labels[0]} vs All Others"
             ax.set_title(title, fontsize=11)
 
             for i in range(n):
@@ -627,15 +627,15 @@ class EvaluationService:
         return report
 
     # ------------------------------------------------------------------
-    # Unified UMAP across all behaviour models
+    # Unified UMAP across all behavior models
     # ------------------------------------------------------------------
 
     @staticmethod
     def _load_imported_training_rows(project_root: Path) -> pd.DataFrame:
         """Labeled rows imported from other projects (label_source ``imported:*``).
 
-        These live only in the training set — they have no entry in this
-        project's segment_features.parquet or reviewer_labels.parquet — so the
+        These live only in the training set, they have no entry in this
+        project's segment_features.parquet or reviewer_labels.parquet, so the
         unified UMAP must pull them from here to represent them at all.
         """
         ts = project_root / "derived" / "training_sets" / "training_set.parquet"
@@ -659,13 +659,13 @@ class EvaluationService:
         meta_cols: list[str],
         prob_cols: list[str],
     ) -> tuple[pd.DataFrame, dict[str, str]]:
-        """Score imported training rows through every behaviour model.
+        """Score imported training rows through every behavior model.
 
-        Imported rows carry full features (in the model's own representation —
+        Imported rows carry full features (in the model's own representation,
         it is what the model trained on) but no stored predictions, so they are
         absent from the prob-space the unified UMAP embeds in.  Running each
-        binary behaviour model's ``predict_proba(...)[:, 1]`` (P of that
-        behaviour) reconstructs the same ``prob_<bid>`` columns, placing imported
+        binary behavior model's ``predict_proba(...)[:, 1]`` (P of that
+        behavior) reconstructs the same ``prob_<bid>`` columns, placing imported
         examples in the identical coordinate space as this project's segments.
 
         Returns ``(rows, label_map)``: ``rows`` has ``meta_cols + prob_cols`` and
@@ -692,9 +692,9 @@ class EvaluationService:
                     with open(md / "model_state.pkl", "rb") as f:
                         payload = pickle.load(f)
                     clf = payload["model"]
-                    # Canonicalise the model's pairwise-distance feature names onto
+                    # Canonicalize the model's pairwise-distance feature names onto
                     # the data's sorted spelling so models trained before distance
-                    # canonicalisation (v0.5.2) don't reindex every distance column to
+                    # canonicalization (v0.5.2) don't reindex every distance column to
                     # a missing name (silently zero-filled).  See
                     # behavior_representation_service.align_model_feature_columns.
                     from abel.services.behavior_representation_service import (
@@ -705,7 +705,7 @@ class EvaluationService:
                     fcols, nan_fill = align_model_feature_columns(model_cols, data_cols)
                     feats = imported_df.reindex(columns=fcols)
                     x = feats.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-                    # A double-named distance pair keeps its NaN slot — that is what
+                    # A double-named distance pair keeps its NaN slot, that is what
                     # the model was trained on. Everything else is scrubbed as before.
                     keep_nan = np.array(nan_fill, dtype=bool)
                     scrub = ~keep_nan
@@ -740,16 +740,16 @@ class EvaluationService:
         target_behavior_label: str | None = None,
         refined: bool = False,
     ) -> dict[str, Any]:
-        """Generate a single UMAP embedding coloured by dominant behaviour.
+        """Generate a single UMAP embedding colored by dominant behavior.
 
         Loads the shared segment representations and prediction probabilities
-        from every behaviour model, assigns each segment the behaviour with
+        from every behavior model, assigns each segment the behavior with
         the highest probability, and produces one combined UMAP plot.
 
-        Labelled clips (from reviewer_labels.parquet) and examples imported from
+        Labeled clips (from reviewer_labels.parquet) and examples imported from
         other projects (training-set rows tagged ``imported:*``, scored through
         each model into the same prob-space) are always included in full; the
-        remaining unlabelled segments are representatively subsampled (stratified
+        remaining unlabeled segments are representatively subsampled (stratified
         by session) up to *cap*.
 
         Returns
@@ -764,7 +764,7 @@ class EvaluationService:
         if not seg_path.exists():
             return {"error": "segment_features.parquet not found."}
 
-        # Load ONLY metadata columns — segment_features.parquet is 1-2 GB on
+        # Load ONLY metadata columns: segment_features.parquet is 1-2 GB on
         # disk and 10+ GB decompressed. We only need identifier columns here;
         # prediction probabilities are loaded separately per-model below.
         # Skipping raw feature columns also causes _numeric_feature_columns()
@@ -796,12 +796,12 @@ class EvaluationService:
                 logger.debug("Failed loading enriched_segments.parquet", exc_info=True)
 
         # --- Discover model directories ------------------------------------------
-        # Key each model by its *target behaviour id* (not the directory name) so
-        # the embedding's class labels resolve to the current behaviour name via
+        # Key each model by its *target behavior id* (not the directory name) so
+        # the embedding's class labels resolve to the current behavior name via
         # ``behavior_names``.  Keying by directory name leaks stale names into the
-        # plot: a renamed behaviour (e.g. "Protected_Dip" → short "Guard") or an
+        # plot: a renamed behavior (e.g. "Protected_Dip" → short "Guard") or an
         # old pre-rename retrain would each show its directory label instead of
-        # the live short name, so one behaviour appears as several classes.
+        # the live short name, so one behavior appears as several classes.
         latest_by_behavior: dict[str, Path] = {}
         _latest_mtime: dict[str, float] = {}
         _nb_keys = {"no_behavior", "no_behaviour", "nobehavior", "nobehaviour"}
@@ -813,37 +813,37 @@ class EvaluationService:
                 dir_key = p.name.removeprefix("behavior_model_").strip()
                 tb_id = str(settings.get("target_behavior") or settings.get("target_behavior_id") or "").strip()
 
-                # Skip no_behavior models — they are trained with 0 positives and
+                # Skip no_behavior models: they are trained with 0 positives and
                 # produce degenerate predictions that corrupt the embedding via
                 # fillna(0.0). Match on both the directory name and the target id.
                 _norm = (dir_key or tb_id).lower().replace("_", "").replace(" ", "")
                 if _norm in _nb_keys or tb_id.lower() in _nb_keys:
                     continue
 
-                # Resolve the model to a *currently defined* behaviour. When
+                # Resolve the model to a *currently defined* behavior. When
                 # behavior_names is supplied it is the authoritative set of active
-                # behaviour ids, so a model whose target id is missing (legacy
+                # behavior ids, so a model whose target id is missing (legacy
                 # pre-UUID models saved target=None) or no longer present (the
-                # behaviour was deleted) is an orphan and must not inject a stale
+                # behavior was deleted) is an orphan and must not inject a stale
                 # class into the embedding.
                 if behavior_names:
                     if not tb_id or tb_id not in behavior_names:
                         logger.info(
-                            "Skipping orphaned/legacy model %s: target behaviour %r is not a current behaviour.",
+                            "Skipping orphaned/legacy model %s: target behavior %r is not a current behavior.",
                             p.name, tb_id or None,
                         )
                         continue
                     key = tb_id
                 else:
                     # No name map available (e.g. headless call): fall back to the
-                    # directory name and preserve prior behaviour.
+                    # directory name and preserve prior behavior.
                     key = dir_key or tb_id
                 if not key:
                     continue
 
-                # Multiple model directories can target the same behaviour (each
+                # Multiple model directories can target the same behavior (each
                 # retrain/rename leaves its own folder). Keep only the most
-                # recently modified so one behaviour maps to exactly one class.
+                # recently modified so one behavior maps to exactly one class.
                 mtime = p.stat().st_mtime
                 if key in _latest_mtime and _latest_mtime[key] >= mtime:
                     continue
@@ -851,7 +851,7 @@ class EvaluationService:
                 latest_by_behavior[key] = p
 
         if not latest_by_behavior:
-            return {"error": "No behaviour models found."}
+            return {"error": "No behavior models found."}
 
         bname = behavior_names or {}
 
@@ -883,14 +883,14 @@ class EvaluationService:
 
         merged[prob_cols] = merged[prob_cols].fillna(0.0)
 
-        # --- Load reviewer labels for ground-truth colouring ---------------------
+        # --- Load reviewer labels for ground-truth coloring ---------------------
         label_path = project_root / "derived" / "review_labels" / "reviewer_labels.parquet"
         reviewed_labels: dict[str, str] = {}
         if label_path.exists():
             try:
                 lbl_df = pd.read_parquet(label_path)
                 if "segment_id" in lbl_df.columns and "review_label" in lbl_df.columns:
-                    # Keep last review per segment — direct ID matching first.
+                    # Keep last review per segment: direct ID matching first.
                     _rl_vals = lbl_df["review_label"].astype(str).str.strip()
                     _rl_valid = _rl_vals.ne("") & ~_rl_vals.isin({"ambiguous", "boundary_error"})
                     reviewed_labels = dict(zip(
@@ -899,7 +899,7 @@ class EvaluationService:
                     ))
 
                     # Fuzzy-match reviewed segments that don't have a direct ID
-                    # match — reviewer labels often use different segment ID
+                    # match: reviewer labels often use different segment ID
                     # prefixes (e.g. "rand_session_…") than the representation
                     # features (e.g. "seg_m1_session_…"), so we fall back to
                     # matching by (session_id, closest frame range).
@@ -944,7 +944,7 @@ class EvaluationService:
                     _merged_seg_ids = set(merged["segment_id"].astype(str))
 
                     # Resolve all unmatched reviewed segment IDs to the nearest
-                    # feature segment in the same session (no distance cap — the
+                    # feature segment in the same session (no distance cap, the
                     # feature segment grid is sparse relative to the reviewed
                     # windows, so even distant matches are the best available).
                     unmatched_reviews: dict[str, str] = {}
@@ -986,7 +986,7 @@ class EvaluationService:
         # this they would be invisible in the embedding even though the model
         # trains on them.  Scoring them through each model places them in the
         # same prob-space; their imported label is treated as ground truth so
-        # they render as reviewed points of their behaviour.
+        # they render as reviewed points of their behavior.
         try:
             imported_rows = self._load_imported_training_rows(project_root)
             if not imported_rows.empty and bid_list:
@@ -1008,15 +1008,15 @@ class EvaluationService:
         except Exception:
             logger.debug("Failed to embed imported examples in unified UMAP", exc_info=True)
 
-        # Assign dominant behaviour label using all models.
+        # Assign dominant behavior label using all models.
         prob_arr = merged[prob_cols].to_numpy(dtype=float)
 
-        # Optional: colour by the POST-temporal-refinement label instead of raw
-        # argmax. Apply each behaviour's refinement (smoothing + onset threshold +
+        # Optional: color by the POST-temporal-refinement label instead of raw
+        # argmax. Apply each behavior's refinement (smoothing + onset threshold +
         # merge-gap + min-bout) to its probability trace per session and zero out
         # probabilities outside a refined bout. Segments that the deployed pipeline
-        # would not call any behaviour then fall through to "Unclassified", so the
-        # coloured clusters lose the speckle of raw per-window misclassifications.
+        # would not call any behavior then fall through to "Unclassified", so the
+        # colored clusters lose the speckle of raw per-window misclassifications.
         if refined and {"session_id", "start_frame", "end_frame"}.issubset(merged.columns):
             try:
                 from abel.temporal_refinement.refined_eval import (  # noqa: PLC0415
@@ -1044,9 +1044,9 @@ class EvaluationService:
                     )
                     refined_arr[:, _ci] = np.where((_pred == 1) & _valid_fr, _p, 0.0)
                 prob_arr = refined_arr
-                logger.info("Unified UMAP: coloured by refined (post-temporal-refinement) labels.")
+                logger.info("Unified UMAP: colored by refined (post-temporal-refinement) labels.")
             except Exception:
-                logger.debug("Refined UMAP colouring failed; using raw labels.", exc_info=True)
+                logger.debug("Refined UMAP coloring failed; using raw labels.", exc_info=True)
 
         dominant_idx = np.argmax(prob_arr, axis=1)
         dominant_prob = np.max(prob_arr, axis=1)
@@ -1086,7 +1086,7 @@ class EvaluationService:
             "",
         )
         # Threshold of 0.5 (majority-vote confidence) keeps only segments where
-        # one behaviour clearly dominates.  Lower-confidence predictions have
+        # one behavior clearly dominates.  Lower-confidence predictions have
         # ambiguous probability vectors that land near the scaled-feature mean
         # (undefined cosine direction) and scatter randomly in the UMAP.
         _unclassified_mask = (~_has_review) & (dominant_prob < 0.5)
@@ -1103,13 +1103,13 @@ class EvaluationService:
         # patterns far better than raw, behavior-agnostic segment statistics
         # (which can have hundreds of noisy dimensions that dilute separation).
         # Optionally augment with a small number of PCA-derived raw features.
-        feature_cols = prob_cols[:]  # prediction probs from each behaviour model
+        feature_cols = prob_cols[:]  # prediction probs from each behavior model
 
         # Add a few PCA components of the raw segment features to capture
         # additional structure not reflected in model predictions.
         # NOTE: seg_df was loaded with metadata-only columns, so
         # _numeric_feature_columns returns [] and this block is skipped,
-        # which is intentional — prob_cols are already the best features.
+        # which is intentional: prob_cols are already the best features.
         raw_feature_cols = self._numeric_feature_columns(seg_df)
         from abel.utils.feature_exclusions import apply_feature_exclusions
         raw_feature_cols = apply_feature_exclusions(project_root, raw_feature_cols)
@@ -1138,7 +1138,7 @@ class EvaluationService:
                     logger.debug("PCA augmentation failed, using probabilities only", exc_info=True)
             elif resolved_raw:
                 feature_cols.extend(resolved_raw)
-        del seg_df  # no longer needed — free metadata DataFrame
+        del seg_df  # no longer needed: free metadata DataFrame
 
         if not feature_cols:
             return {"error": "No numeric feature columns for UMAP."}
@@ -1184,10 +1184,10 @@ class EvaluationService:
 
         # --- Class-balanced downsampling of PREDICTED segments --------------------
         # Without balancing, the dominant predicted class (often No_Behavior /
-        # Unclassified) can have 5-10x more points than real behaviours,
+        # Unclassified) can have 5-10x more points than real behaviors,
         # drowning out useful structure in the plot.  Cap each predicted class
         # to at most `predicted_to_labeled_ratio` × the largest *reviewed*
-        # class so that the UMAP reflects behaviour diversity rather than
+        # class so that the UMAP reflects behavior diversity rather than
         # background prevalence.
         _labeled_in_work = work["is_labeled"].to_numpy(dtype=bool)
         _labels_in_work = work["dominant_behavior"].to_numpy(dtype=str)
@@ -1210,14 +1210,14 @@ class EvaluationService:
         work = work[_keep_mask].reset_index(drop=True)
 
         # Drop "Unclassified" *predicted* (non-reviewed) segments before embedding.
-        # These are segments where every model's confidence is < 0.3 — their
+        # These are segments where every model's confidence is < 0.3, their
         # probability vectors are nearly uniform and low-magnitude.  After
         # StandardScaler the cosine direction of these vectors is undefined, so
         # UMAP scatters them randomly across the plot rather than placing them
         # in a meaningful cluster.  Since "Unclassified" is a model-uncertainty
-        # bucket (not a real behaviour), removing them from the embedding produces
-        # a cleaner plot that accurately reflects behaviour structure.  Reviewed
-        # segments labelled "Unclassified" are always preserved.
+        # bucket (not a real behavior), removing them from the embedding produces
+        # a cleaner plot that accurately reflects behavior structure.  Reviewed
+        # segments labeled "Unclassified" are always preserved.
         _unclass_pred_mask = (
             (work["dominant_behavior"].to_numpy(dtype=str) == "Unclassified")
             & (~work["is_labeled"].to_numpy(dtype=bool))
@@ -1231,7 +1231,7 @@ class EvaluationService:
                 n_unclass_dropped,
             )
 
-        # Drop segments with all-zero probability vectors — these are segments that
+        # Drop segments with all-zero probability vectors, these are segments that
         # were never scored by any model (they ended up in seg_df but not in any
         # segment_predictions.parquet).  Under cosine distance, a zero vector has
         # undefined similarity to everything else, so UMAP places these points
@@ -1251,7 +1251,7 @@ class EvaluationService:
         # Impute labeled segments that have all-zero feature vectors using the
         # class-mean of non-zero segments with the same behavior label.
         # Zero vectors under cosine distance have undefined similarity, which
-        # causes UMAP to place them at random positions — producing the
+        # causes UMAP to place them at random positions: producing the
         # scattered outlier dots visible when reviewed segments lack predictions
         # (i.e. they were labeled before any model was trained or come from
         # enriched_segments that were never scored by segment_predictions.parquet).
@@ -1263,7 +1263,7 @@ class EvaluationService:
             # can construct a class-specific identity vector instead of the global
             # mean.  The global mean maps to ~zero after StandardScaler (centering
             # subtracts it), which produces an undefined cosine direction and causes
-            # random UMAP placement — the root cause of the scattered outlier dots.
+            # random UMAP placement: the root cause of the scattered outlier dots.
             _cls_to_prob_idx: dict[str, int] = {}
             for _fi, _fc in enumerate(feature_cols):
                 if _fc.startswith("prob_"):
@@ -1296,7 +1296,7 @@ class EvaluationService:
                     if np.linalg.norm(_impute_vec) < 1e-10:
                         # Unknown class with no matching probability column: use a
                         # tiny uniform value so the vector is non-zero after scaling
-                        # (the point will land near the embedding centre, but cosine
+                        # (the point will land near the embedding center, but cosine
                         # similarity will be defined and deterministic).
                         _impute_vec[:] = 1e-4
                 x[_zero_labeled & (labels_arr == _cls)] = _impute_vec
@@ -1305,7 +1305,7 @@ class EvaluationService:
                 int(np.sum(_zero_labeled)),
             )
 
-        # --- Standardise features before UMAP so probability and PCA columns
+        # --- Standardize features before UMAP so probability and PCA columns
         # are on comparable scales. -------------------------------------------
         try:
             from sklearn.preprocessing import StandardScaler
@@ -1318,10 +1318,10 @@ class EvaluationService:
 
         # Safety net: after scaling, any still-zero-norm rows produce undefined
         # cosine similarity and UMAP would place them randomly at the periphery.
-        # For predicted (non-reviewed) segments: drop them entirely — random
+        # For predicted (non-reviewed) segments: drop them entirely, random
         # placement is worse than absence.
         # For labeled segments: must keep, so use a tiny deterministic
-        # perturbation so they at least land near the embedding centre.
+        # perturbation so they at least land near the embedding center.
         _post_norms = np.linalg.norm(x, axis=1)
         _still_zero = _post_norms < 1e-10
         if np.any(_still_zero):
@@ -1357,7 +1357,7 @@ class EvaluationService:
         try:
             import umap as umap_lib  # type: ignore[import]
 
-            # Use cosine metric — works well for probability-based features
+            # Use cosine metric: works well for probability-based features
             # where direction matters more than magnitude.
             n_samples = x.shape[0]
             effective_neighbors = max(5, min(50, int(n_neighbors), n_samples // 4))
@@ -1368,7 +1368,7 @@ class EvaluationService:
                 metric="cosine",
                 random_state=42,
             )
-            # Spectral initialisation can fail with a small eigengap when
+            # Spectral initialization can fail with a small eigengap when
             # probability features cluster tightly along a low-dimensional
             # simplex.  A tiny jitter (1e-3 σ) breaks the degeneracy and
             # lets spectral init succeed, producing the stable round-blob
@@ -1417,7 +1417,7 @@ class EvaluationService:
                 return bname.get(raw_cls, raw_cls)
             display_name: dict[str, str] = {cls: _disp(cls) for cls in classes}
 
-            # Determine rendering order: target behaviour last so it draws on top.
+            # Determine rendering order: target behavior last so it draws on top.
             target_lbl = str(target_behavior_label or "").strip()
             non_target = [c for c in classes if c != target_lbl and c != "Unclassified"]
             render_order = ["Unclassified"] + non_target
@@ -1427,7 +1427,7 @@ class EvaluationService:
                 render_order = ["Unclassified"] + [c for c in classes if c != "Unclassified"]
             render_order = [c for c in render_order if c in set(classes)]
 
-            # Per-behaviour reviewed counts for the subtitle.
+            # Per-behavior reviewed counts for the subtitle.
             reviewed_counts: dict[str, int] = {}
             for cls in classes:
                 reviewed_counts[cls] = int(np.sum(
@@ -1483,7 +1483,7 @@ class EvaluationService:
                 cx_arr = coords[mask, 0]
                 cy_arr = coords[mask, 1]
                 if len(cx_arr) < 3:
-                    # Too few points — fall back to median.
+                    # Too few points: fall back to median.
                     centroids[cls] = (float(np.median(cx_arr)), float(np.median(cy_arr)))
                     continue
                 try:
@@ -1521,7 +1521,7 @@ class EvaluationService:
                     zorder=z_labeled_base + len(render_order) + 1,
                 )
 
-            # Build title with per-behaviour reviewed counts.
+            # Build title with per-behavior reviewed counts.
             n_labeled = int(np.sum(is_labeled_arr))
             n_unlabeled = int(len(is_labeled_arr)) - n_labeled
             review_parts = [
@@ -1534,7 +1534,7 @@ class EvaluationService:
             else:
                 review_summary = ", ".join(review_parts) if review_parts else f"{n_labeled} total"
             ax.set_title(
-                f"Unified Behaviour Embedding ({method}) — "
+                f"Unified Behavior Embedding ({method}), "
                 f"{n_classes} classes  |  reviewed: {review_summary}  |  "
                 f"{n_unlabeled} predicted",
                 fontsize=9,
@@ -1559,7 +1559,7 @@ class EvaluationService:
             fig.savefig(out_svg_path, bbox_inches="tight")
             plt.close(fig)
         except Exception:
-            logger.exception("Failed generating unified behaviour UMAP")
+            logger.exception("Failed generating unified behavior UMAP")
             out_path = None
 
         result = {
@@ -1603,18 +1603,18 @@ class EvaluationService:
     ) -> dict[str, Any]:
         """Generate an *unsupervised* UMAP embedding from raw segment features.
 
-        Unlike :meth:`generate_unified_umap` (which embeds per-behaviour model
+        Unlike :meth:`generate_unified_umap` (which embeds per-behavior model
         prediction probabilities and therefore needs trained models + reviewer
         labels), this method embeds the raw numeric feature columns of
-        ``segment_features.parquet`` directly — no models, no labels required.
-        Points are colour-coded by density-based cluster (HDBSCAN, falling back
+        ``segment_features.parquet`` directly, no models, no labels required.
+        Points are color-coded by density-based cluster (HDBSCAN, falling back
         to KMeans), so latent structure in the data surfaces without any
         supervision.
 
         Writes
         ------
         ``derived/evaluation/unsupervised_umap.png`` (+ ``.svg``)
-        ``derived/evaluation/unsupervised_umap_coordinates.parquet`` — the same
+        ``derived/evaluation/unsupervised_umap_coordinates.parquet``, the same
         schema the interactive "Select from UMAP" dialog consumes
         (``segment_id, session_id, animal_id, start_frame, end_frame, umap_x,
         umap_y, behavior_label, is_labeled``), with ``behavior_label`` holding
@@ -1676,7 +1676,7 @@ class EvaluationService:
         ]
         if "segment_id" not in meta_cols:
             return {"error": "segment_features.parquet has no segment_id column."}
-        # Honour project-level feature exclusions (Active Learning / Feature
+        # Honor project-level feature exclusions (Active Learning / Feature
         # Audit) so the unsupervised embedding uses the same feature set as the
         # rest of the Active Learning workflow.
         from abel.utils.feature_exclusions import apply_feature_exclusions
@@ -1751,8 +1751,8 @@ class EvaluationService:
         x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
         # PCA pre-reduction with whitening: denoises high-dimensional raw
-        # features, speeds up the UMAP neighbour search, and — crucially —
-        # equalises component variance so the embedding isn't dominated by a
+        # features, speeds up the UMAP neighbor search, and, crucially,
+        # equalizes component variance so the embedding isn't dominated by a
         # handful of high-variance features (which collapses everything into one
         # undifferentiated blob).
         pca_components = int(pca_components)
@@ -1764,8 +1764,8 @@ class EvaluationService:
                 logger.debug("PCA pre-reduction failed; using scaled features", exc_info=True)
 
         # --- UMAP --------------------------------------------------------------
-        # min_dist=0.0 packs each neighbourhood tightly, which separates dense
-        # regions into distinct islands instead of one smooth cloud — this is
+        # min_dist=0.0 packs each neighborhood tightly, which separates dense
+        # regions into distinct islands instead of one smooth cloud, this is
         # what lets the downstream clustering find structure.
         _emit(3, "Computing UMAP embedding…")
         coords = None
@@ -1790,7 +1790,7 @@ class EvaluationService:
             except Exception:
                 return {"error": "Neither UMAP nor PCA available."}
 
-        # --- Cluster on the 2-D embedding so colours match visible blobs -------
+        # --- Cluster on the 2-D embedding so colors match visible blobs -------
         _emit(4, "Clustering…")
         cluster_method = "none"
         cluster_ids = np.zeros(n_samples, dtype=int)
@@ -1896,7 +1896,7 @@ class EvaluationService:
                 )
 
             ax.set_title(
-                f"Unsupervised Embedding ({method}) — "
+                f"Unsupervised Embedding ({method}), "
                 f"{n_clusters} clusters ({cluster_method})  |  {n_samples} segments",
                 fontsize=9, wrap=True,
             )

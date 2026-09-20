@@ -2,7 +2,7 @@
 
 The load-bearing test here is ``test_no_deriver_silently_degrades``.  Every
 finding deriver is wrapped in a try/except so a bad summary can never sink a run
-that already has its results safely on disk — which is exactly what let a
+that already has its results safely on disk, which is exactly what let a
 property-vs-method mistake (``result.ece()`` on an ``@property``) ship as a
 "Could not summarize this analysis" warning instead of a crash.  Every deriver is
 therefore driven against REAL result dataclasses and asserted not to have
@@ -211,7 +211,7 @@ def test_derive_findings_survives_an_empty_run():
 
 def test_combined_config_is_not_reported_as_a_single_addition(full_input):
     """'All enhancements' is the union of the others and wins any ranking by
-    construction — it must never be named the most valuable *single* addition."""
+    construction, it must never be named the most valuable *single* addition."""
     items = fmod.derive_findings(full_input)
     single = next(f for f in items
                   if f.analysis == "Ablation (detection)"
@@ -308,12 +308,12 @@ def test_findings_frame_and_markdown(full_input):
     assert list(df.columns) == ["analysis", "kind", "finding", "detail"]
     assert len(df) == len(items)
     md = fmod.findings_markdown("run_x", items)
-    assert "# ABEL Validation — Key Findings" in md
+    assert "# ABEL Validation: Key Findings" in md
     assert "run_x" in md
 
 
 def test_build_summary_html_only_includes_analyses_that_ran(tmp_path):
-    """A section with no findings, no figure and no table must not appear at all —
+    """A section with no findings, no figure and no table must not appear at all,
     an empty 'Throughput' heading in the PDF reads as a failed analysis."""
     items = [fmod.Finding("Generalization", "Agreement is substantial.", "κ = 0.8")]
     html_path = pdf_report.build_summary_html(
@@ -387,15 +387,15 @@ def test_publication_preset_uses_five_seeds_everywhere():
 
 
 def test_publication_preset_excludes_dense_inference():
-    """Dense inference rewrites the real project's traces — it must never be part
+    """Dense inference rewrites the real project's traces, it must never be part
     of an unattended 'run everything' click."""
     assert "infer" not in publication_config().throughput_stages
 
 
 def test_publication_preset_ablates_at_full_data_only():
     """The headline ablation answers one question: what the shipped pipeline buys
-    at full data. A low clip budget answers a different one — whether regularizers
-    pay off when labels are scarce — and mixing the two into one figure made the
+    at full data. A low clip budget answers a different one, whether regularizers
+    pay off when labels are scarce, and mixing the two into one figure made the
     bars unreadable, so it is now opt-in rather than part of the preset."""
     budgets = publication_config().ablation_budgets
     assert budgets == [subsample.ALL_CLIPS]

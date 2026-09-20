@@ -3,8 +3,8 @@
 The Behavior tab offers named starting sets of behavior definitions (Standard
 Rodent, Elevated Plus Maze, Fear Conditioning, Novelty Suppressed Feeding) and
 lets a user save the current project's behaviors as a reusable preset stored
-outside the project. These tests pin the merge semantics — applying a preset
-never duplicates or edits an existing behavior — and the user-preset round trip.
+outside the project. These tests pin the merge semantics, applying a preset
+never duplicates or edits an existing behavior, and the user-preset round trip.
 """
 
 from __future__ import annotations

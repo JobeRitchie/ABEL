@@ -66,7 +66,7 @@ def to_long(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _agg_mean_ci(series: pd.Series) -> tuple[float, float]:
-    """Mean and 95% CI half-width (t-based — see :func:`metrics.ci95`)."""
+    """Mean and 95% CI half-width (t-based: see :func:`metrics.ci95`)."""
     from abel.validation import metrics as vmetrics  # noqa: PLC0415
 
     vals = pd.to_numeric(series, errors="coerce").dropna().to_numpy()
