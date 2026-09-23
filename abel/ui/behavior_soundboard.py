@@ -43,19 +43,22 @@ from abel.services.behavior_service import NO_BEHAVIOR_ID, behavior_label
 
 _SOLO_BTN_QSS = (
     "QPushButton{background:#1E2A36;color:#ECEFF1;border:1px solid #33475B;"
-    "border-radius:8px;padding:6px 10px;font-weight:600;}"
+    "border-radius:6px;padding:3px 8px;font-weight:600;}"
     "QPushButton:hover{background:#26374A;border-color:#4A6377;}"
 )
 _SOCIAL_BTN_QSS = (
     "QPushButton{background:#241E36;color:#ECEFF1;border:1px solid #7E57C2;"
-    "border-radius:8px;padding:6px 10px;font-weight:600;}"
+    "border-radius:6px;padding:3px 8px;font-weight:600;}"
     "QPushButton:hover{background:#2E2547;border-color:#9575CD;}"
 )
 _NONE_BTN_QSS = (
     "QPushButton{background:#263238;color:#CFD8DC;border:1px solid #455A64;"
-    "border-radius:8px;padding:8px 10px;font-weight:700;}"
+    "border-radius:6px;padding:4px 8px;font-weight:700;}"
     "QPushButton:hover{background:#31424B;border-color:#607D8B;}"
 )
+# Key that stages the last committed combo (only when no behavior uses it).
+REPEAT_KEY = "."
+
 _WINDOW_QSS = (
     "#hint{color:#8A97A3;font-size:11px;}"
     "#status{color:#E3F2FD;font-weight:600;font-size:12px;}"
@@ -64,11 +67,14 @@ _WINDOW_QSS = (
     "#chip{background:#16212B;border:1px solid #2A3A47;border-radius:6px;}"
     "#chipRemove{background:transparent;border:none;color:#EF9A9A;font-weight:700;}"
     "#chipRemove:hover{color:#EF5350;}"
-    "#commit{background:#2E7D32;color:#FFFFFF;border:none;border-radius:8px;padding:9px;font-weight:700;}"
+    "#commit{background:#2E7D32;color:#FFFFFF;border:none;border-radius:6px;padding:5px;font-weight:700;}"
     "#commit:hover{background:#388E3C;}"
     "#commit:disabled{background:#33475B;color:#78909C;}"
-    "#clear{background:#3A2429;color:#FFCDD2;border:1px solid #8C4A52;border-radius:8px;padding:7px;font-weight:600;}"
+    "#clear{background:#3A2429;color:#FFCDD2;border:1px solid #8C4A52;border-radius:6px;padding:4px;font-weight:600;}"
     "#clear:hover{background:#4A2C32;border-color:#B71C1C;}"
+    "#repeat{background:#1B2F3A;color:#B3E5FC;border:1px dashed #4FC3F7;border-radius:6px;padding:4px 8px;font-weight:600;text-align:left;}"
+    "#repeat:hover{background:#22404F;}"
+    "#repeat:disabled{color:#8FA6B4;border-color:#33475B;}"
 )
 
 
@@ -80,6 +86,10 @@ class BehaviorSoundboard(QWidget):
         self.setWindowTitle("Behavior Soundboard")
         self.setWindowFlag(Qt.WindowType.Window, True)
         self._columns = max(1, int(columns))
+        # The window itself owns keyboard focus: every child is NoFocus, so
+        # arrows/Enter always reach keyPressEvent (a focusable checkbox or
+        # scroll area would swallow the arrow keys).
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         # Callbacks
         self._on_behavior: Callable[[str], None] = lambda _bid: None          # single-animal path
@@ -95,10 +105,13 @@ class BehaviorSoundboard(QWidget):
         self._selected_animal: str | None = None
         self._pending_social: dict | None = None   # {bid, directionality, picked:[...]}
         self._clip_labels: list[dict] = []
+        # Last committed multi-animal combo, stored by roster position and name
+        # (animal ids are session-scoped, so they differ from clip to clip).
+        self._last_combo: list[dict] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(6)
 
         self._hint = QLabel()
         self._hint.setObjectName("hint")
@@ -106,38 +119,56 @@ class BehaviorSoundboard(QWidget):
         root.addWidget(self._hint)
 
         self._on_top_chk = QCheckBox("Keep window on top")
+        self._on_top_chk.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._on_top_chk.toggled.connect(self._toggle_on_top)
-        root.addWidget(self._on_top_chk)
 
-        # Animal selector row (multi-animal only)
+        # Animal selector (multi-animal only) shares a row with the on-top toggle.
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(6)
         self._animal_bar = QWidget()
         self._animal_bar_layout = QHBoxLayout(self._animal_bar)
         self._animal_bar_layout.setContentsMargins(0, 0, 0, 0)
         self._animal_bar_layout.setSpacing(6)
         self._animal_btns: list[QPushButton] = []
-        root.addWidget(self._animal_bar)
+        top_row.addWidget(self._animal_bar, 1)
+        top_row.addWidget(self._on_top_chk, 0, Qt.AlignmentFlag.AlignRight)
+        root.addLayout(top_row)
 
         # Status line (guides multi-step social designation)
         self._status = QLabel("")
         self._status.setObjectName("status")
         self._status.setMinimumHeight(16)
         root.addWidget(self._status)
+        # Repeat the last committed combo (multi-animal only): stages it on the
+        # current clip so the user only has to commit.
+        self._repeat_btn = QPushButton()
+        self._repeat_btn.setObjectName("repeat")
+        self._repeat_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._repeat_btn.setMinimumHeight(30)
+        self._repeat_btn.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self._repeat_btn.clicked.connect(self._apply_last_combo)
+        root.addWidget(self._repeat_btn)
+        # The universal negative sits above the behavior grid (added below).
+        none_row = QWidget()
+        root.addWidget(none_row)
 
         # Behavior button grid: compact buttons, top-left aligned (stretch
         # absorbers keep them at natural size instead of filling the window).
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
-        self._grid.setSpacing(8)
+        self._grid.setSpacing(6)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._scroll.setWidget(self._grid_host)
-        root.addWidget(self._scroll, 3)
+        root.addWidget(self._scroll, 1)
 
         # Universal negative, two scopes: the whole clip in one click, or just
         # the selected subject (one animal can be idle while another rears).
-        none_row = QWidget()
         none_layout = QHBoxLayout(none_row)
         none_layout.setContentsMargins(0, 0, 0, 0)
         none_layout.setSpacing(8)
@@ -145,17 +176,16 @@ class BehaviorSoundboard(QWidget):
         self._none_btn.setObjectName("noneAll")
         self._none_btn.setStyleSheet(_NONE_BTN_QSS)
         self._none_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._none_btn.setMinimumHeight(40)
+        self._none_btn.setMinimumHeight(32)
         self._none_btn.clicked.connect(self._label_all_no_behavior)
         none_layout.addWidget(self._none_btn, 1)
         self._none_one_btn = QPushButton()
         self._none_one_btn.setObjectName("noneOne")
         self._none_one_btn.setStyleSheet(_NONE_BTN_QSS)
         self._none_one_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._none_one_btn.setMinimumHeight(40)
+        self._none_one_btn.setMinimumHeight(32)
         self._none_one_btn.clicked.connect(self._label_selected_no_behavior)
         none_layout.addWidget(self._none_one_btn, 1)
-        root.addWidget(none_row)
 
         divider = QFrame()
         divider.setObjectName("divider")
@@ -173,15 +203,16 @@ class BehaviorSoundboard(QWidget):
         lbl_scroll = QScrollArea()
         lbl_scroll.setWidgetResizable(True)
         lbl_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        lbl_scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         lbl_scroll.setWidget(self._labels_host)
-        lbl_scroll.setMinimumHeight(150)
+        lbl_scroll.setMinimumHeight(90)
         root.addWidget(lbl_scroll, 2)
 
         # Commit: persist the clip's collected labels via the review tab.
-        self._commit_btn = QPushButton("✓ Commit Labels for This Clip")
+        self._commit_btn = QPushButton("✓ Commit Labels for This Clip   (Enter)")
         self._commit_btn.setObjectName("commit")
         self._commit_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._commit_btn.setMinimumHeight(38)
+        self._commit_btn.setMinimumHeight(32)
         self._commit_btn.clicked.connect(self._commit)
         root.addWidget(self._commit_btn)
 
@@ -191,7 +222,7 @@ class BehaviorSoundboard(QWidget):
         self._clear_btn = QPushButton("✕ Clear Labels for This Clip")
         self._clear_btn.setObjectName("clear")
         self._clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._clear_btn.setMinimumHeight(32)
+        self._clear_btn.setMinimumHeight(28)
         self._clear_btn.setToolTip(
             "Remove every label staged or already saved for this clip and put it "
             "back in the queue as unreviewed. The clip file is kept."
@@ -201,6 +232,7 @@ class BehaviorSoundboard(QWidget):
 
         self.setStyleSheet(_WINDOW_QSS)
         self._sync_none_button()
+        self._sync_repeat_button()
         self._refresh_labels_list()
         self.resize(640, 640)
 
@@ -241,6 +273,7 @@ class BehaviorSoundboard(QWidget):
         }
         self._rebuild_behavior_grid()
         self._sync_none_button()
+        self._sync_repeat_button()
         self._reset_designation()
 
     def set_animals(self, animals: "list[tuple]") -> None:
@@ -252,6 +285,7 @@ class BehaviorSoundboard(QWidget):
         self._selected_animal = self._animals[0][0] if len(self._animals) == 1 else None
         self._rebuild_animal_bar()
         self._sync_none_button()
+        self._sync_repeat_button()
         self._reset_designation()
         self.set_clip_labels([])
 
@@ -312,7 +346,7 @@ class BehaviorSoundboard(QWidget):
             btn = QPushButton(name)
             btn.setCheckable(True)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setMinimumHeight(34)
+            btn.setMinimumHeight(28)
             btn.setStyleSheet(
                 f"QPushButton {{ border:2px solid rgb({r},{g},{b}); border-radius:4px; padding:2px 8px; }}"
                 f"QPushButton:checked {{ background-color: rgb({r},{g},{b}); color:#111; font-weight:700; }}"
@@ -361,15 +395,27 @@ class BehaviorSoundboard(QWidget):
         # Absorb extra space so buttons stay compact at top-left rather than stretching.
         self._grid.setColumnStretch(self._columns, 1)
         self._grid.setRowStretch(row, 1)
+        self._fit_grid()
+
+    def _fit_grid(self) -> None:
+        """Give the behavior grid its natural size so it never scrolls or clips.
+
+        Measured from the laid-out buttons (DPI-safe); the labels list below
+        takes whatever height is left.
+        """
+        hint = self._grid_host.sizeHint()
+        self._scroll.setMinimumWidth(hint.width())
+        self._scroll.setMinimumHeight(hint.height())
 
     def _make_behavior_button(self, entry: tuple) -> QPushButton:
         bid, name, key, is_social, direction = entry
         tag = ""
         if is_social:
             tag = " →" if direction == "directed" else " ⇄"
-        btn = QPushButton(f"{name}{tag}" + (f"   ({key})" if key else ""))
-        btn.setMinimumSize(132, 42)
-        btn.setMaximumHeight(46)
+        btn = QPushButton(f"{name}{tag}" + (f"  ({key})" if key else ""))
+        btn.setMinimumWidth(max(110, btn.fontMetrics().horizontalAdvance(btn.text()) + 24))
+        btn.setMinimumHeight(32)
+        btn.setMaximumHeight(34)
         btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn.setStyleSheet(_SOCIAL_BTN_QSS if is_social else _SOLO_BTN_QSS)
@@ -386,7 +432,7 @@ class BehaviorSoundboard(QWidget):
     def _sync_none_button(self) -> None:
         name = self._no_behavior_name()
         key = next((k for (bid, _n, k, *_r) in self._behaviors if bid == NO_BEHAVIOR_ID and k), "")
-        suffix = f"   ({key})" if key else ""
+        suffix = f"  ({key})" if key else ""
         self._none_one_btn.setVisible(self._multi())
         if self._multi():
             self._none_btn.setText(f"⌀ {name}, all subjects{suffix}")
@@ -514,9 +560,12 @@ class BehaviorSoundboard(QWidget):
 
         The clip-wide button is wrong when only *some* subjects are idle, so
         this one behaves like any other solo behavior: it applies to the
-        designated animal and waits for the commit. Because the negative
-        contradicts that animal's positives, its existing chips are dropped,
-        the other animals' labels are untouched.
+        designated animal and waits for the commit. Only labels that would put
+        a behavior on *this* animal's segment are dropped: its own solo and
+        social labels, and mutual social labels naming it as the partner (those
+        label both animals). A **directed** label naming it as the recipient is
+        kept, the recipient's segment carries no label from it, so "the groomer
+        grooms, the groomee does nothing" is a legal and useful pair.
         """
         if not self._multi():
             self._on_behavior(NO_BEHAVIOR_ID)
@@ -526,10 +575,16 @@ class BehaviorSoundboard(QWidget):
             return
         self._pending_social = None
         focal = self._selected_animal
-        self._clip_labels = [
-            lab for lab in self._clip_labels
-            if lab.get("focal_animal_id") != focal and lab.get("partner_animal_id") != focal
-        ]
+
+        def _labels_this_animal(lab: dict) -> bool:
+            if lab.get("focal_animal_id") == focal:
+                return True
+            if lab.get("partner_animal_id") != focal:
+                return False
+            b = self._behavior(str(lab.get("behavior_id") or ""))
+            return bool(b and b[3]) and (b[4] if b else "none") == "mutual"
+
+        self._clip_labels = [lab for lab in self._clip_labels if not _labels_this_animal(lab)]
         self._sync_animal_buttons()
         self._add_label(NO_BEHAVIOR_ID, focal, None)
 
@@ -555,6 +610,102 @@ class BehaviorSoundboard(QWidget):
             self._clip_labels.pop(idx)
             self._refresh_labels_list()
 
+    def _remember_combo(self, payload: "list[dict]") -> None:
+        """Keep a committed combo for the repeat button.
+
+        All-negative commits are skipped: the ⌀ buttons already do that in one
+        click, and remembering them would overwrite the useful social combo.
+        """
+        if not self._multi() or all(p["behavior_id"] == NO_BEHAVIOR_ID for p in payload):
+            return
+        ids = [aid for (aid, _n, _c) in self._animals]
+
+        def ref(animal_id):
+            if animal_id is None:
+                return None
+            idx = ids.index(animal_id) if animal_id in ids else None
+            return {"index": idx, "name": self._animal_name(animal_id)}
+
+        self._last_combo = [
+            {"behavior_id": p["behavior_id"], "focal": ref(p["focal_animal_id"]),
+             "partner": ref(p.get("partner_animal_id"))}
+            for p in payload
+        ]
+        self._sync_repeat_button()
+
+    def _resolve_ref(self, ref: "dict | None") -> "str | None":
+        """Map a stored animal reference onto the current clip's roster.
+
+        Name first (the same subject in another session), then roster position
+        (track_0 stays track_0 when names differ between sessions).
+        """
+        if ref is None:
+            return None
+        for aid, name, _c in self._animals:
+            if name == ref.get("name"):
+                return aid
+        idx = ref.get("index")
+        if idx is not None and 0 <= idx < len(self._animals):
+            return self._animals[idx][0]
+        return None
+
+    def _combo_text(self) -> str:
+        parts = []
+        for lab in self._last_combo:
+            b = self._behavior(lab["behavior_id"])
+            name = b[1] if b else behavior_label(lab["behavior_id"])
+            focal = (lab["focal"] or {}).get("name", "?")
+            if lab["partner"] is not None:
+                arrow = "→" if (b and b[4] == "directed") else "⇄"
+                parts.append(f"{name}: {focal} {arrow} {lab['partner'].get('name', '?')}")
+            else:
+                parts.append(f"{name}: {focal}")
+        return " + ".join(parts)
+
+    def _sync_repeat_button(self) -> None:
+        self._repeat_btn.setVisible(self._multi())
+        if not self._last_combo:
+            self._repeat_btn.setText("↻ Repeat last combo: nothing committed yet")
+            self._repeat_btn.setToolTip("Commit a clip first; its labels can then be reapplied here.")
+            self._repeat_btn.setEnabled(False)
+            return
+        key = f"  ({REPEAT_KEY})" if REPEAT_KEY not in self._key_to_behavior else ""
+        text = self._combo_text()
+        self._repeat_btn.setText(f"↻ Repeat last: {text}{key}")
+        self._repeat_btn.setToolTip(
+            "Stage the last committed labels on this clip:\n"
+            + text.replace(" + ", "\n")
+            + "\nThen press Enter (or Commit) to save them."
+        )
+        self._repeat_btn.setEnabled(True)
+
+    def _apply_last_combo(self) -> None:
+        """Stage the last committed combo on this clip (skipping duplicates)."""
+        if not self._multi() or not self._last_combo:
+            return
+        self._pending_social = None
+        existing = {
+            (lab["behavior_id"], lab["focal_animal_id"], lab.get("partner_animal_id"))
+            for lab in self._clip_labels
+        }
+        added = missing = 0
+        for lab in self._last_combo:
+            focal = self._resolve_ref(lab["focal"])
+            partner = self._resolve_ref(lab["partner"])
+            if focal is None or (lab["partner"] is not None and partner is None):
+                missing += 1
+                continue
+            if (lab["behavior_id"], focal, partner) in existing:
+                continue
+            self._add_label(lab["behavior_id"], focal, partner)
+            existing.add((lab["behavior_id"], focal, partner))
+            added += 1
+        self._sync_animal_buttons()
+        msg = f"Staged {added} label{'s' if added != 1 else ''} from the last combo."
+        if missing:
+            msg += f" {missing} skipped: animal not in this clip."
+        self._status.setText(msg + " Enter commits.")
+
     def _commit(self) -> None:
         """Persist the clip's collected labels through the review tab."""
         if not self._clip_labels:
@@ -572,6 +723,7 @@ class BehaviorSoundboard(QWidget):
         # Clear the current clip's chips *before* invoking the callback: the
         # commit handler may auto-advance and repopulate this soundboard with the
         # next clip's committed labels, and clearing afterwards would wipe them.
+        self._remember_combo(payload)
         self.set_clip_labels([])
         self._reset_designation()
         self._on_commit(payload)
@@ -585,7 +737,7 @@ class BehaviorSoundboard(QWidget):
                 w.deleteLater()
         if not self._clip_labels:
             empty = QLabel("No labels yet: pick a behavior above.")
-            empty.setStyleSheet("color:#607D8B; font-style:italic;")
+            empty.setStyleSheet("color:#8FA6B4; font-style:italic;")
             self._labels_layout.addWidget(empty)
             self._labels_layout.addStretch(1)
             return
@@ -612,11 +764,9 @@ class BehaviorSoundboard(QWidget):
         self._pending_social = None
         if self._multi():
             self._hint.setText(
-                "Pick a behavior, then the animal(s). Solo: click a behavior for the "
-                "selected animal. Social: click the behavior, then the two animals "
-                "(actor then recipient for directed). Empty clip: the ⌀ all-subjects "
-                "button labels everyone at once; the ⌀ per-subject button marks just "
-                "the selected animal idle. Arrow keys still move clips."
+                "Solo: select an animal, then a behavior. Social: click the behavior, "
+                "then actor → recipient (or both animals). ⌀ marks the whole clip or "
+                "one animal idle. ↻ reapplies the last commit. Enter commits; arrows move clips."
             )
             self._status.setText("")
         else:
@@ -630,6 +780,10 @@ class BehaviorSoundboard(QWidget):
     def _toggle_on_top(self, on: bool) -> None:
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(on))
         self.show()
+
+    def showEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        super().showEvent(event)
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
 
     def _call(self, action: str) -> None:
         fn = self._nav.get(action)
@@ -662,9 +816,16 @@ class BehaviorSoundboard(QWidget):
         if key == Qt.Key.Key_Space:
             self._call("play"); return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self._call("save"); return
+            # Multi-animal: Enter commits the staged chips (same as the button).
+            if self._multi():
+                self._commit()
+            else:
+                self._call("save")
+            return
 
         text = (event.text() or "").lower().strip()
+        if text == REPEAT_KEY and text not in self._key_to_behavior and self._multi():
+            self._apply_last_combo(); return
         if text and text in self._key_to_behavior:
             self._on_behavior_clicked(self._key_to_behavior[text]); return
 

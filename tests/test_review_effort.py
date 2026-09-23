@@ -369,3 +369,27 @@ def test_findings_are_absent_when_no_project_was_measured():
     out = findings_mod.derive_findings(findings_mod.FindingsInput(
         effort_results=[re.ReviewEffortResult(project_id="x", error="boom")]))
     assert not [f for f in out if f.analysis == "Review effort"]
+
+
+# ── per-day breakdown ──────────────────────────────────────────────────────
+
+
+def test_daily_breakdown_splits_by_day_and_matches_project_total(tmp_path):
+    day2 = 2 * 86400
+    _write_decisions(tmp_path, [
+        _decision(0), _decision(2, start=15), _decision(5, start=30),
+        _decision(day2, start=45), _decision(day2 + 3, start=60),
+        _decision(1, reviewer=re.REVIEWER_TEMPORAL, start=75),
+        _decision(4, reviewer=re.IMPORT_PREFIX + "other", start=90),
+    ])
+    daily = re.daily_breakdown(tmp_path)
+
+    assert list(daily["clips_timed"]) == [2, 1]
+    assert list(daily["sittings"]) == [1, 1]
+    assert daily["active_min"].tolist() == pytest.approx([5 / 60, 3 / 60])
+    total = re.measure_project(_project(tmp_path))
+    assert daily["active_min"].sum() / 60 == pytest.approx(total.active_hours)
+
+
+def test_daily_breakdown_empty_without_decisions(tmp_path):
+    assert re.daily_breakdown(tmp_path).empty

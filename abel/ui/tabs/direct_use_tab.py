@@ -347,7 +347,7 @@ class DirectUseTab(QWidget):
             "choose an output folder, then run."
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("font-size: 11px; color: #607D8B; padding-bottom: 2px;")
+        desc.setStyleSheet("font-size: 11px; color: #8FA6B4; padding-bottom: 2px;")
 
         # ── Step 1: Source project ────────────────────────────────────
         source_box = _CollapsibleSection("Step 1: Source Project (trained model)")

@@ -331,7 +331,9 @@ class DirectRunService:
                     continue
                 try:
                     from abel.models.schemas import PoseSmoothingSettings
-                    settings = PoseSmoothingSettings(**snapshot.smoothing_settings) if snapshot.smoothing_settings else PoseSmoothingSettings()
+                    # The target project.yaml carries the source's Pose &
+                    # Features block, the same smoothing pose features use.
+                    settings = PoseSmoothingSettings.load_from_project(target_project_root)
                     pose_data = self._pose.load_and_clean(pp, settings=settings, keypoint_aliases=keypoint_aliases)
                     df = pd.DataFrame({
                         "centroid_x": pose_data.centroid_x,

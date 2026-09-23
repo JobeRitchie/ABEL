@@ -119,22 +119,25 @@ def session_labels(manifest: Any) -> SessionLabels:
 
 
 def current_subjects(df: pd.DataFrame, manifest: Any) -> pd.Series:
-    """Each row's current subject name.
+    """Each row's current subject name, the unit subject splits and LOSO group by.
 
-    A row whose ``(animal_id, session_id)`` is a manifest session's
-    ``(subject_key, session_id)`` gets that session's ``subject_id``.  Every
-    other row, multi-animal individuals, rows imported from other projects,
-    sessions no longer in the manifest, keeps its ``animal_id``.
+    Every row of a manifest session gets that session's ``subject_id``.  In a
+    multi-animal session this includes each tracked individual: ``track_0`` /
+    ``track_1`` are per-video track labels, not mice, so grouping by them would
+    pool different animals across sessions and put a held-out mouse's partner,
+    filmed in the same session, in the training pool.  The session's subject
+    (the dyad or cage) is the independent unit.  Rows imported from other
+    projects and sessions no longer in the manifest keep their ``animal_id``.
     """
     animal = df["animal_id"].astype(str)
     if manifest is None or "session_id" not in df.columns:
         return animal
     name_of = {
-        (str(s.subject_key), str(s.session_id)): str(s.subject_id or s.subject_key)
+        str(s.session_id): str(s.subject_id or s.subject_key)
         for s in manifest.linked_sessions
     }
     return pd.Series(
-        [name_of.get(k, k[0]) for k in zip(animal, df["session_id"].astype(str))],
+        [name_of.get(sid, a) for a, sid in zip(animal, df["session_id"].astype(str))],
         index=df.index,
         dtype=object,
     )

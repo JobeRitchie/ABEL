@@ -62,7 +62,7 @@ from abel.services.behavior_representation_service import (
     align_model_feature_columns,
     resolve_target_class_index,
 )
-from abel.services.behavior_service import BehaviorService, behavior_label
+from abel.services.behavior_service import BehaviorService, behavior_label, label_names_behavior
 from abel.services.behavior_representation_service import BehaviorRepresentationService, RepresentationConfig
 from abel.services.candidate_service import CandidateGenerationService, SegmentCandidateGenerationConfig
 from abel.services.representation_reuse import reuse_or_build_representation
@@ -77,6 +77,7 @@ from abel.services.uncertainty_service import UncertaintyScoringService, Uncerta
 from abel.services.workflow_snapshot_service import WorkflowSnapshot, WorkflowSnapshotService
 from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
 from abel.utils import xgb_predict
+from abel.utils.cancellation import OperationCancelled, cancel_scope, check_cancel, is_cancel_traceback
 from abel.utils.eta_estimator import StageEtaEstimator, blend_whole_run_eta
 from abel.utils.run_timeline import RunTimeline, Stage
 from abel.utils.run_timing_profile import RunTimingProfile
@@ -102,6 +103,10 @@ _AL_PIPELINE_STAGES: tuple[tuple[str, str, float, tuple[str, ...]], ...] = (
 
 logger = logging.getLogger("abel")
 
+# Bump when enriched rows are computed differently, so cached rows are rebuilt.
+# 2: multi-animal windows are summarized per animal, not over both mice.
+_ENRICH_CACHE_VERSION = 2
+
 
 NO_BEHAVIOR_ID = "no_behavior"
 
@@ -122,7 +127,7 @@ _PRED_COLS = frozenset({
 })
 
 
-class PipelineCancelledError(RuntimeError):
+class PipelineCancelledError(OperationCancelled):
     """Raised when the user requests cancellation of the active-learning run."""
 
 
@@ -873,7 +878,13 @@ class ActiveLearningTab(QWidget):
         _al_graph_size_btn.clicked.connect(self._open_al_graph_size_dialog)
         viz_head.addWidget(_al_graph_size_btn)
         viz_layout.addLayout(viz_head)
-        viz_layout.addWidget(self._viz_preview, 1)
+        # Centered: the preview is capped by Graph Size (500 px by default), and
+        # left-aligned it left a dead band between the graph and the log pane.
+        viz_row = QHBoxLayout()
+        viz_row.addStretch(0)
+        viz_row.addWidget(self._viz_preview, 1)
+        viz_row.addStretch(0)
+        viz_layout.addLayout(viz_row, 1)
 
         # Right: progress bar + live telemetry readout + run log.
         log_widget = QWidget()
@@ -3304,7 +3315,7 @@ class ActiveLearningTab(QWidget):
         self._append_log("Starting full active-learning pipeline.")
         self._start_pipeline_timeline()
 
-        worker = TaskWorker(self._run_pipeline_task, self._pipeline_progress_updated.emit, self._cancel_flag)
+        worker = TaskWorker(self._cancel_scoped(self._run_pipeline_task), self._emit_pipeline_progress, self._cancel_flag)
         worker.signals.finished.connect(self._on_pipeline_finished)
         worker.signals.failed.connect(self._on_failed)
         self._pool.start(worker)
@@ -3323,7 +3334,7 @@ class ActiveLearningTab(QWidget):
         self._progress.setFormat("Initializing…")
         self._status.setText("Starting retrain from review labels…")
         self._append_log("Starting retrain from new review labels.")
-        worker = TaskWorker(self._run_retrain_task, self._pipeline_progress_updated.emit)
+        worker = TaskWorker(self._cancel_scoped(self._run_retrain_task), self._emit_pipeline_progress)
         worker.signals.finished.connect(self._on_retrain_finished)
         worker.signals.failed.connect(self._on_failed)
         self._pool.start(worker)
@@ -3398,7 +3409,7 @@ class ActiveLearningTab(QWidget):
         # Capture the clip-generation toggle on the GUI thread for the worker.
         self._batch_generate_clips = self._batch_generate_clips_enabled()
         self._append_log(f"Starting retrain-all for {len(selected)} behavior(s).")
-        worker = TaskWorker(self._run_retrain_all_task, self._pipeline_progress_updated.emit)
+        worker = TaskWorker(self._cancel_scoped(self._run_retrain_all_task), self._emit_pipeline_progress)
         worker.signals.finished.connect(self._on_retrain_all_finished)
         worker.signals.failed.connect(self._on_failed)
         self._pool.start(worker)
@@ -3899,8 +3910,8 @@ class ActiveLearningTab(QWidget):
         self._status.setText(f"Starting pipeline-all for {len(selected)} behavior(s)\u2026")
         self._append_log(f"Starting full pipeline for {len(selected)} behavior(s).")
         worker = TaskWorker(
-            self._run_pipeline_all_behaviors_task,
-            self._pipeline_progress_updated.emit,
+            self._cancel_scoped(self._run_pipeline_all_behaviors_task),
+            self._emit_pipeline_progress,
             self._cancel_flag,
         )
         worker.signals.finished.connect(self._on_pipeline_all_behaviors_finished)
@@ -4357,8 +4368,8 @@ class ActiveLearningTab(QWidget):
         self._status.setText(f"Running models for {len(selected)} behavior(s)…")
         self._append_log(f"Starting model inference for {len(selected)} behavior(s).")
         worker = TaskWorker(
-            self._run_models_selected_task,
-            self._pipeline_progress_updated.emit,
+            self._cancel_scoped(self._run_models_selected_task),
+            self._emit_pipeline_progress,
             self._cancel_flag,
         )
         worker.signals.finished.connect(self._on_run_models_selected_finished)
@@ -4623,8 +4634,8 @@ class ActiveLearningTab(QWidget):
         self._append_log("Generating confound analysis…")
 
         worker = TaskWorker(
-            self._confound_graph_task,
-            self._pipeline_progress_updated.emit,
+            self._cancel_scoped(self._confound_graph_task),
+            self._emit_pipeline_progress,
             self._cancel_flag,
         )
         worker.signals.finished.connect(self._on_confound_graph_finished)
@@ -5095,8 +5106,8 @@ class ActiveLearningTab(QWidget):
         self._append_log("Generating unified UMAP…")
 
         worker = TaskWorker(
-            self._unified_umap_task,
-            self._pipeline_progress_updated.emit,
+            self._cancel_scoped(self._unified_umap_task),
+            self._emit_pipeline_progress,
             self._cancel_flag,
         )
         worker.signals.finished.connect(self._on_unified_umap_finished)
@@ -5207,8 +5218,8 @@ class ActiveLearningTab(QWidget):
         )
 
         worker = TaskWorker(
-            self._unsupervised_umap_task,
-            self._pipeline_progress_updated.emit,
+            self._cancel_scoped(self._unsupervised_umap_task),
+            self._emit_pipeline_progress,
             self._cancel_flag,
         )
         worker.signals.finished.connect(self._on_unsupervised_umap_finished)
@@ -5282,7 +5293,7 @@ class ActiveLearningTab(QWidget):
         self._status.setText(f"Running existing model: {chosen}…")
         self._append_log(f"Starting existing-model run: {chosen}")
 
-        worker = TaskWorker(self._run_existing_model_task, chosen, self._pipeline_progress_updated.emit, self._cancel_flag)
+        worker = TaskWorker(self._cancel_scoped(self._run_existing_model_task), chosen, self._emit_pipeline_progress, self._cancel_flag)
         worker.signals.finished.connect(self._on_existing_model_finished)
         worker.signals.failed.connect(self._on_failed)
         self._pool.start(worker)
@@ -6666,7 +6677,7 @@ class ActiveLearningTab(QWidget):
                     current_step,
                     total_steps,
                     (
-                        f"Pose feature format changed, refreshing pose features for "
+                        f"Pose feature inputs changed (format or smoothing), refreshing pose features for "
                         f"{len(reused_pose_jobs)} cached session(s) so every session "
                         "shares one column set (video context cache is kept)."
                     ),
@@ -6684,6 +6695,10 @@ class ActiveLearningTab(QWidget):
                         video_id=_sid,
                         keypoint_aliases=kp_aliases,
                     )
+                # Same rows and columns, new values (e.g. a smoothing change):
+                # the representation cache can't tell, so drop its manifest.
+                (self._project_root / "derived" / "representations"
+                 / "representations.manifest.json").unlink(missing_ok=True)
                 pose_schema_current = True
 
             def _process_one_session(job: tuple[int, str, str, Path, Path, float]) -> tuple[int, str, float]:
@@ -7385,7 +7400,29 @@ class ActiveLearningTab(QWidget):
         skip_path = cache_path.with_name("enriched_segments_skipped.json")
         cached_enriched_df = pd.DataFrame()
         skipped_ids: set[str] = set()
+        meta_path = cache_path.with_name("enriched_segments_meta.json")
         if cache_path.exists():
+            # Enriched rows used to be written back into segment_features.parquet
+            # by the scoring step. Those copies shadow the cache (the merge keeps
+            # segment_df's row), so every id the cache owns is dropped from
+            # segment_df and served from the cache, or recomputed.
+            try:
+                owned = set(pd.read_parquet(cache_path, columns=["segment_id"])["segment_id"].astype(str))
+            except Exception:
+                owned = set()
+            if owned and not segment_df.empty:
+                leaked = segment_df["segment_id"].astype(str).isin(owned)
+                if leaked.any():
+                    logger.info(
+                        "Enrichment: dropping %d enriched row(s) that had been persisted "
+                        "into the segment feature table.", int(leaked.sum()),
+                    )
+                    segment_df = segment_df.loc[~leaked].reset_index(drop=True)
+        cache_version = int(read_json(meta_path, {}).get("version", 1)) if meta_path.exists() else 1
+        if cache_path.exists() and cache_version < _ENRICH_CACHE_VERSION:
+            # Version 1 summarized multi-animal windows over both animals' frames.
+            logger.info("Enrichment cache: version %d is outdated; recomputing.", cache_version)
+        elif cache_path.exists():
             # Invalidate the cache when frame_pose.parquet or frame_context.parquet
             # is newer than the cache: this happens when the user re-runs feature
             # extraction with new settings, ensuring temporal-review clips that were
@@ -7558,12 +7595,28 @@ class ActiveLearningTab(QWidget):
             # representation builder so the summary statistics are comparable.
             frame_df = _BRS._zscore_by_group(frame_df, available_features)
             frame_df = frame_df.sort_values("frame").reset_index(drop=True)
-            frame_arr = frame_df["frame"].to_numpy(dtype=int)
-            animal_id = str(frame_df["animal_id"].iloc[0]) if "animal_id" in frame_df.columns else ""
+            # The frame table holds one row per (frame, animal). Each window must
+            # be summarized from its own animal's frames: pooling both mice gave
+            # the two tracks one blended, identical feature row, so a dyad's
+            # actor and partner labels landed on the same features.
+            if "animal_id" in frame_df.columns:
+                by_animal = {
+                    str(a): g for a, g in frame_df.groupby(frame_df["animal_id"].astype(str), sort=False)
+                }
+            else:
+                by_animal = {"": frame_df}
 
             for orig_seg_id, start, end in windows:
+                animal_id = self._segment_id_animal(orig_seg_id)
+                if animal_id not in by_animal:
+                    if len(by_animal) != 1:
+                        continue  # multi-animal session: never guess the animal
+                    # Single-animal session: the one animal, whatever the id spells.
+                    animal_id = next(iter(by_animal))
+                animal_df = by_animal[animal_id]
+                frame_arr = animal_df["frame"].to_numpy(dtype=int)
                 mask = (frame_arr >= start) & (frame_arr <= end)
-                window_df = frame_df.loc[mask]
+                window_df = animal_df.loc[mask]
                 if len(window_df) < 2:
                     continue
                 summary = _BRS._segment_summary(window_df, available_features, orig_seg_id)
@@ -7613,6 +7666,7 @@ class ActiveLearningTab(QWidget):
             updated_cache = all_enriched.drop_duplicates(subset=["segment_id"], keep="last")
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             updated_cache.to_parquet(cache_path, index=False)
+            write_json(meta_path, {"version": _ENRICH_CACHE_VERSION})
             logger.info(
                 "Enrichment cache: wrote %d total row(s) to %s (%d newly computed).",
                 len(updated_cache), cache_path, len(new_rows),
@@ -7845,6 +7899,19 @@ class ActiveLearningTab(QWidget):
         return train
 
     @staticmethod
+    def _segment_id_animal(segment_id: str) -> str | None:
+        """The animal a segment id names (``seg_track_1_session_…`` -> ``track_1``).
+
+        Ids are ``<prefix>_<animal_id>_session_<id>_<start>_<end>``; ``None``
+        when the id carries no animal token.
+        """
+        head, sep, _ = str(segment_id or "").partition("_session_")
+        if not sep:
+            return None
+        _prefix, _, animal = head.partition("_")
+        return animal or None
+
+    @staticmethod
     def _parse_segment_id_interval(segment_id: str) -> tuple[str, int, int] | None:
         text = str(segment_id or "").strip()
         if not text:
@@ -7890,18 +7957,39 @@ class ActiveLearningTab(QWidget):
         if window_len <= 0:
             return labels_df
 
-        lookup: dict[tuple[str, int, int], str] = {}
-        session_segments: dict[str, list[tuple[int, int, str]]] = {}
-        for row in segment_df[["segment_id", "session_id", "start_frame", "end_frame"]].itertuples(index=False):
+        # Keyed by animal as well as session: in a multi-animal session a label
+        # must never be snapped onto the other animal's window.
+        lookup: dict[tuple[str, str, int, int], str] = {}
+        session_segments: dict[tuple[str, str], list[tuple[int, int, str]]] = {}
+        animals_by_session: dict[str, set[str]] = {}
+        animal_col = (
+            segment_df["animal_id"].astype(str) if "animal_id" in segment_df.columns
+            else segment_df["segment_id"].map(lambda x: self._segment_id_animal(x) or "")
+        )
+        for row, animal in zip(
+            segment_df[["segment_id", "session_id", "start_frame", "end_frame"]].itertuples(index=False),
+            animal_col,
+        ):
             sid = str(row.session_id)
             start = int(row.start_frame)
             end = int(row.end_frame)
             seg_id = str(row.segment_id)
-            lookup[(sid, start, end)] = seg_id
-            session_segments.setdefault(sid, []).append((start, end, seg_id))
+            lookup[(sid, animal, start, end)] = seg_id
+            session_segments.setdefault((sid, animal), []).append((start, end, seg_id))
+            animals_by_session.setdefault(sid, set()).add(animal)
 
-        def _best_overlap_segment_id(sid: str, start: int, end: int) -> str | None:
-            candidates = session_segments.get(sid, [])
+        def _label_animal(sid: str, seg_id: str) -> str | None:
+            animals = animals_by_session.get(sid, set())
+            animal = self._segment_id_animal(seg_id)
+            if animal in animals:
+                return animal
+            # A single-animal session's windows may spell the animal differently.
+            return next(iter(animals)) if len(animals) == 1 else None
+
+        def _best_overlap_segment_id(sid: str, animal: str | None, start: int, end: int) -> str | None:
+            if animal is None:
+                return None
+            candidates = session_segments.get((sid, animal), [])
             if not candidates:
                 return None
             best_seg: str | None = None
@@ -7944,6 +8032,7 @@ class ActiveLearningTab(QWidget):
                 continue
 
             sid, clip_start, clip_end = parsed
+            animal = _label_animal(sid, seg_id_str)
             original_start = int(clip_start)
             original_end = int(clip_end)
             clip_start = int(min(original_start, original_end))
@@ -7951,7 +8040,7 @@ class ActiveLearningTab(QWidget):
             clip_len = int(clip_end - clip_start + 1)
             n_full = int(clip_len // window_len)
             if n_full <= 0:
-                approx_seg = _best_overlap_segment_id(sid, clip_start, clip_end)
+                approx_seg = _best_overlap_segment_id(sid, animal, clip_start, clip_end)
                 if approx_seg:
                     new_row = dict(item)
                     new_row["segment_id"] = str(approx_seg)
@@ -7965,9 +8054,9 @@ class ActiveLearningTab(QWidget):
             for idx in range(n_full):
                 start = int(clip_start + idx * window_len)
                 end = int(start + window_len - 1)
-                new_seg_id = lookup.get((sid, start, end))
+                new_seg_id = lookup.get((sid, animal or "", start, end)) if animal is not None else None
                 if not new_seg_id:
-                    new_seg_id = _best_overlap_segment_id(sid, start, end)
+                    new_seg_id = _best_overlap_segment_id(sid, animal, start, end)
                 if not new_seg_id:
                     continue
                 new_row = dict(item)
@@ -8057,11 +8146,18 @@ class ActiveLearningTab(QWidget):
         ends = train_df["end_frame"].to_numpy(dtype=int) if "end_frame" in train_df.columns else starts
 
         y = np.full(len(train_df), -1, dtype=int)
-        pos_mask = labels == target_label
+        # A co-occurring row ("allogroom|rear") is a real positive for each
+        # behavior it names, so the target is looked for inside the pipe. Its
+        # *other* behaviors must not then make the same row a negative for them,
+        # so pipe rows that do not name the target are ignored rather than
+        # counted against it (the trainer drops these sibling rows for the same
+        # reason).
+        pos_mask = labels.apply(lambda v: label_names_behavior(v, target_label))
         y[pos_mask.to_numpy()] = 1
 
         ignorable = {"ambiguous", "boundary_error"}
-        neg_mask = (~pos_mask) & (~labels.isin(ignorable))
+        is_sibling = labels.str.contains(r"\|", na=False) & ~pos_mask
+        neg_mask = (~pos_mask) & (~labels.isin(ignorable)) & (~is_sibling)
 
         # Absence-of-others rule with overlap exception.
         for sid in sorted(set(sessions)):
@@ -8312,8 +8408,28 @@ class ActiveLearningTab(QWidget):
                 len(phantom), ", ".join(phantom[:8]),
             )
             scored = scored.drop(columns=phantom)
-        scored.to_parquet(repr_path, index=False)
+        # Same for rows: segment_df carries the enrichment path's reviewed
+        # windows, which live in enriched_segments.parquet. Persisting them here
+        # made them "extracted" rows that the enrichment path never refreshed.
+        foreign = self._enriched_segment_ids()
+        to_write = scored
+        if foreign and "segment_id" in scored.columns:
+            to_write = scored.loc[~scored["segment_id"].astype(str).isin(foreign)]
+        to_write.to_parquet(repr_path, index=False)
         return scored
+
+    def _enriched_segment_ids(self) -> set[str]:
+        """Ids owned by the enrichment cache (never rows of segment_features)."""
+        if self._project_root is None:
+            return set()
+        path = self._project_root / "derived" / "representations" / "enriched_segments.parquet"
+        if not path.exists():
+            return set()
+        try:
+            return set(pd.read_parquet(path, columns=["segment_id"])["segment_id"].astype(str))
+        except Exception:
+            logger.debug("Could not read enriched segment ids", exc_info=True)
+            return set()
 
     def _evaluate_if_possible(
         self,
@@ -8337,7 +8453,9 @@ class ActiveLearningTab(QWidget):
         if merged.empty:
             return
 
-        merged["label_true"] = (merged["review_label"].astype(str) == target_behavior).astype(int)
+        merged["label_true"] = merged["review_label"].astype(str).apply(
+            lambda v: int(label_names_behavior(v, target_behavior))
+        )
         merged["label_pred"] = (merged["prediction_prob"].astype(float) >= 0.5).astype(int)
         if bool(self._all_behavior_aware.isChecked()):
             raw_umap_labels = merged["review_label"].astype(str).str.strip()
@@ -8756,7 +8874,26 @@ class ActiveLearningTab(QWidget):
             f"{threshold_band} (F1={f1:.3f}); {diff_detail}. {improvement}"
         )
 
+    def _emit_pipeline_progress(self, value: int, maximum: int, log_line: str, status: str) -> None:
+        """Worker-thread progress relay; every update is also a Stop checkpoint."""
+        check_cancel(self._cancel_flag, PipelineCancelledError)
+        self._pipeline_progress_updated.emit(value, maximum, log_line, status)
+
+    def _cancel_scoped(self, fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Run ``fn`` with the Stop flag bound, so R3D decoding and dense
+        scoring loops deep inside it can stop between batches too."""
+        flag = self._cancel_flag
+
+        def _run(*args: Any, **kwargs: Any) -> Any:
+            with cancel_scope(flag, PipelineCancelledError):
+                return fn(*args, **kwargs)
+
+        return _run
+
     def _set_busy(self, busy: bool) -> None:
+        if busy:
+            # A Stop pressed as the previous job finished must not cancel this one.
+            self._cancel_flag[0] = False
         self._run_btn.setEnabled(not busy)
         self._run_pipeline_all_btn.setEnabled(not busy)
         self._retrain_btn.setEnabled(not busy)
@@ -8783,15 +8920,18 @@ class ActiveLearningTab(QWidget):
         answer = QMessageBox.question(
             self,
             "Stop Active Learning",
-            "Stop the active-learning run after the current step finishes?",
+            "Stop the active-learning run?\n\n"
+            "It stops at the next progress update. Models and behaviors that "
+            "already finished are kept; the step in progress is discarded.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._cancel_flag[0] = True
-        self._status.setText("Stop requested. Waiting for current step to finish…")
-        self._append_log("Stop requested by user. Canceling after current step.")
+        self._stop_btn.setEnabled(False)
+        self._status.setText("Stop requested. Stopping at the next checkpoint…")
+        self._append_log("Stop requested by user. Stopping at the next checkpoint.")
 
     def _append_log(self, message: str) -> None:
         self._log.append(message)
@@ -9609,6 +9749,11 @@ class ActiveLearningTab(QWidget):
             )
 
         batch_kp_aliases = self._keypoint_aliases()
+        # Batch features are built in a scratch folder with no project.yaml, so
+        # pass this project's pose smoothing explicitly: the model was trained
+        # on features smoothed this way.
+        from abel.models.schemas import PoseSmoothingSettings  # noqa: PLC0415
+        batch_smoothing = PoseSmoothingSettings.load_from_project(self._project_root)
 
         for i, entry in enumerate(sessions):
             if cancel_flag[0]:
@@ -9639,6 +9784,7 @@ class ActiveLearningTab(QWidget):
                     session_id=session_id,
                     video_id=session_id,
                     keypoint_aliases=batch_kp_aliases,
+                    smoothing=batch_smoothing,
                 )
                 step += 1
                 if cancel_flag[0]:
@@ -9654,6 +9800,7 @@ class ActiveLearningTab(QWidget):
                     session_id=session_id,
                     config=ctx_cfg,
                     keypoint_aliases=batch_kp_aliases,
+                    smoothing=batch_smoothing,
                 )
                 step += 1
                 if cancel_flag[0]:
@@ -10469,10 +10616,12 @@ class ActiveLearningTab(QWidget):
         self._pipeline_step_scale = 1
         if self._pipeline_timeline is not None:
             self._pipeline_panel.stop()
-        if "PIPELINE_CANCELLED_BY_USER" in traceback_text:
+        if is_cancel_traceback(traceback_text):
             self._status.setText("Active-learning run stopped.")
             self._progress.setFormat("Stopped")
-            self._append_log("Pipeline stopped by user.")
+            self._append_log("Pipeline stopped by user. Models that finished before the stop are kept.")
+            # Pipeline All / Retrain All may have finished some behaviors.
+            self._refresh_saved_model_options()
             return
         self._status.setText("Active-learning pipeline failed. Check logs for traceback details.")
         self._progress.setFormat("Failed")
@@ -10482,6 +10631,11 @@ class ActiveLearningTab(QWidget):
 
     def _on_task_error(self, task_name: str, traceback_text: str) -> None:
         self._set_busy(False)
+        if is_cancel_traceback(traceback_text):
+            self._cancel_flag[0] = False
+            self._status.setText(f"{task_name} stopped.")
+            self._append_log(f"{task_name} stopped by user.")
+            return
         self._status.setText(f"{task_name} failed.")
         self._append_log(f"ERROR: {task_name} failed.")
         self._append_log(format_task_error(traceback_text))

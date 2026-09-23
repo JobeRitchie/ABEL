@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
+from abel.services.behavior_service import label_names_behavior
 from abel.services.subject_rename_service import SUBJECT_GROUP_COL, add_subject_groups
 from abel.temporal_refinement.refined_eval import (
     _frames_from_segment_ids,
@@ -36,6 +37,18 @@ from abel.validation.datamodel import ProjectRef
 from abel.validation.engine import run_one_config
 
 logger = logging.getLogger("abel.validation.loso")
+
+
+class LosoCancelled(Exception):
+    """Raised between folds when the caller's ``should_cancel`` returns True."""
+
+
+def _emit(progress: Callable[[dict[str, Any]], None] | None, **event: Any) -> None:
+    if progress is not None:
+        try:
+            progress(event)
+        except Exception:  # a broken UI callback must never kill the run
+            logger.debug("LOSO progress callback failed", exc_info=True)
 
 # Labels that train the model but must never be evaluated on: temporal-review
 # corrections and cross-project imports (see the trainer split for the rationale).
@@ -263,6 +276,8 @@ def leave_one_subject_out(
     subjects: Sequence[str] | None = None,
     n_boot: int = 2000,
     progress_cb: Callable[[str], None] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """Run LOSO CV for one behavior and return pooled raw+refined metrics.
 
@@ -278,6 +293,10 @@ def leave_one_subject_out(
     ``per_subject`` table, the per-fold F1s, and fold bookkeeping including how
     many folds were skipped and why. ``error`` is set instead when the run
     cannot proceed (too few subjects, no target positives, etc.).
+
+    ``progress`` receives structured events (``stage`` = ``"fold"`` before each
+    fold, ``"scoring"`` before pooled refinement/bootstrap). ``should_cancel`` is
+    polled before each fold; returning True raises :class:`LosoCancelled`.
     """
     trainer = trainer or ActiveLearningTrainerService()
     if df is None:
@@ -333,15 +352,21 @@ def leave_one_subject_out(
     used_subjects: list[str] = []
 
     for i, subj in enumerate(selected, 1):
+        if should_cancel is not None and should_cancel():
+            raise LosoCancelled()
         if progress_cb:
             progress_cb(f"LOSO {project.behavior_label(target)}: fold {i}/{len(selected)} (hold out {subj})")
+        _emit(progress, stage="fold", fold=i, n_folds=len(selected), subject=subj)
         holdout = df[(grp == subj) & ~refine_only]
         pool = df[grp != subj]
         if holdout.empty or pool.empty:
             per_fold.append({"subject": subj, "skipped": "empty holdout or training pool"})
             continue
         # Need at least one target-positive in the held-out subject to score recall.
-        if (holdout["label"].astype(str) == target).sum() == 0:
+        # Co-occurring labels name the target inside a pipe-joined string, so an
+        # exact comparison would skip folds that do hold positives.
+        _held = holdout["label"].astype(str).apply(lambda v: label_names_behavior(v, target))
+        if int(_held.sum()) == 0:
             per_fold.append({"subject": subj, "skipped": "no target positives in holdout"})
             continue
 
@@ -414,6 +439,7 @@ def leave_one_subject_out(
             "n_folds_skipped": len(selected),
         }
 
+    _emit(progress, stage="scoring", fold=len(selected), n_folds=len(selected), subject="")
     # Disk name, not behavior_label(): refinement settings are stored on disk under
     # the project's own behavior name, which a display rename must not follow.
     settings = load_temporal_settings(project.root, project.behavior_disk_name(target))
@@ -504,21 +530,40 @@ def leave_one_subject_out_all(
     subjects: Sequence[str] | None = None,
     n_boot: int = 2000,
     progress_cb: Callable[[str], None] | None = None,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Run LOSO CV for every (non-no_behavior) behavior. Loads the frame once.
 
     ``subjects`` restricts every behavior's run to the same set of mice; ``None``
-    uses all of them.
+    uses all of them. ``progress`` events carry ``behavior_index`` /
+    ``n_behaviors`` / ``behavior_name`` on top of the per-fold fields (``stage``
+    ``"loading"`` is sent while the training set is read). When ``should_cancel``
+    fires, the behaviors finished so far are returned and the last entry is
+    ``{"cancelled": True}``.
     """
     trainer = ActiveLearningTrainerService()
+    _emit(progress, stage="loading")
     df = pd.read_parquet(project.training_set_path) if project.training_set_path.exists() else None
     bids = behavior_ids or [b for b in project.behavior_names if str(b) != "no_behavior"]
     out: list[dict[str, Any]] = []
-    for bid in bids:
-        out.append(
-            leave_one_subject_out(
-                project, bid, trainer=trainer, seed=seed, df=df,
-                subjects=subjects, n_boot=n_boot, progress_cb=progress_cb,
+    for b_i, bid in enumerate(bids, 1):
+        name = project.behavior_label(str(bid))
+
+        def _tagged(event: dict[str, Any], b_i: int = b_i, name: str = name) -> None:
+            _emit(progress, behavior_index=b_i, n_behaviors=len(bids), behavior_name=name, **event)
+
+        try:
+            out.append(
+                leave_one_subject_out(
+                    project, bid, trainer=trainer, seed=seed, df=df,
+                    subjects=subjects, n_boot=n_boot, progress_cb=progress_cb,
+                    progress=_tagged if progress is not None else None,
+                    should_cancel=should_cancel,
+                )
             )
-        )
+        except LosoCancelled:
+            logger.info("LOSO cancelled after %d of %d behaviors", len(out), len(bids))
+            out.append({"cancelled": True, "n_behaviors_done": len(out), "n_behaviors": len(bids)})
+            break
     return out

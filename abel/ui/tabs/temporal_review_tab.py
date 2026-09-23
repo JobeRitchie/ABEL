@@ -51,6 +51,12 @@ from abel.temporal_refinement.bout_postprocess import (
     smooth_probabilities,
     threshold_probabilities,
 )
+from abel.temporal_refinement.onset_autotune import (
+    RECALL_BETA,
+    project_fps,
+    suggest_bout_cleanup,
+    suggest_onset_thresholds,
+)
 from abel.temporal_refinement.temporal_refinement_service import TemporalRefinementConfig
 from abel.ui.tabs.review_tab import CandidateVideoPlayer
 from abel.workers.task_worker import TaskWorker
@@ -192,7 +198,7 @@ class TemporalReviewTab(QWidget):
         ]))
 
         self._player = CandidateVideoPlayer(self)
-        self._player.setMinimumHeight(260)
+        self._player.setMinimumHeight(200)
 
         preview_group = QGroupBox("Session Video Preview")
         preview_layout = QVBoxLayout(preview_group)
@@ -2999,9 +3005,81 @@ class TemporalReviewTab(QWidget):
 
         apply_btn.clicked.connect(_apply_and_run)
 
+        autotune_btn = QPushButton("Auto-Tune Settings", dlg)
+        autotune_btn.setToolTip(
+            "Suggest each behavior's positive threshold from its model's held-out "
+            "validation predictions, plus audited min bout and merge gap. Fills the "
+            "table only; nothing is saved until you click Apply + Process."
+        )
+        favor_recall_cb = QCheckBox("Favor recall (fewer missed bouts)", dlg)
+        favor_recall_cb.setToolTip(
+            "Tune for F-beta 1.5 instead of F1. Thresholds come out lower, so fewer real "
+            "bouts are missed and more false bouts are called. In a leak-free test this cost "
+            "about 0.01 F1 for about 8% more recall."
+        )
+
+        def _autotune() -> None:
+            if self._project_root is None:
+                return
+            spins: dict[str, QDoubleSpinBox] = {}
+            for row in range(table.rowCount()):
+                item = table.item(row, 0)
+                widget = table.cellWidget(row, 1)
+                if item is not None and isinstance(widget, QDoubleSpinBox):
+                    spins[str(item.data(0x0100) or "")] = widget
+            suggestions = suggest_onset_thresholds(
+                self._project_root,
+                behavior_rows,
+                {bid: float(w.value()) for bid, w in spins.items()},
+                recall_beta=RECALL_BETA if favor_recall_cb.isChecked() else 1.0,
+            )
+            changed: list[str] = []
+            unchanged: list[str] = []
+            for s in suggestions:
+                if s.is_change and s.behavior_id in spins:
+                    spins[s.behavior_id].setValue(float(s.suggested))
+                    line = (
+                        f"{s.behavior_name}: {s.current:.3f} → {s.suggested:.3f} "
+                        f"(F1 {s.f1_current:.2f} → {s.f1_suggested:.2f})"
+                    )
+                    changed.append(f"{line}. {s.note}" if s.note else line)
+                else:
+                    unchanged.append(f"{s.behavior_name}: {s.note}")
+            fps = project_fps(self._project_root)
+            min_bout, merge_gap = suggest_bout_cleanup(fps)
+            for row in range(table.rowCount()):
+                mb_widget = table.cellWidget(row, 2)
+                mg_widget = table.cellWidget(row, 3)
+                if isinstance(mb_widget, QSpinBox):
+                    mb_widget.setValue(min_bout)
+                if isinstance(mg_widget, QSpinBox):
+                    mg_widget.setValue(merge_gap)
+            parts = [
+                "Suggested settings are filled in. Review them, then click "
+                "Apply + Process All Behaviors to save.",
+                "",
+                f"Min bout {min_bout} frames (0.4 s) and merge gap {merge_gap} frames (0.2 s) "
+                "for every behavior. These come from a leak-free audit of 108 behaviors: "
+                "results barely change between 0 and 0.6 s min bout, and a min bout of "
+                "1 s or more loses real bouts. Sparse window labels cannot fit these per behavior.",
+                "",
+                f"Changed ({len(changed)}):",
+                *(changed or ["none"]),
+                "",
+                f"Left as is ({len(unchanged)}):",
+                *(unchanged or ["none"]),
+            ]
+            QMessageBox.information(dlg, "Auto-Tune Thresholds", "\n".join(parts))
+
+        autotune_btn.clicked.connect(_autotune)
+
         layout = QVBoxLayout(dlg)
         layout.addWidget(hint)
         layout.addWidget(table)
+        tune_row = QHBoxLayout()
+        tune_row.addWidget(autotune_btn, 1)
+        tune_row.addWidget(favor_recall_cb)
+        layout.addLayout(tune_row)
         layout.addWidget(apply_btn)
         layout.addWidget(close_btns)
         dlg.exec()
@@ -3083,7 +3161,7 @@ class TemporalReviewTab(QWidget):
         axes.set_ylabel("Probability")
         axes.set_ylim(0.0, 1.0)
         canvas = FigureCanvas(fig)
-        canvas.setMinimumHeight(230)
+        canvas.setMinimumHeight(170)
         toolbar = NavigationToolbar2QT(canvas, self)
         toolbar.setMovable(False)
         style_navigation_toolbar(toolbar)

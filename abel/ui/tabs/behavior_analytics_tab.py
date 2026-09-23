@@ -172,6 +172,26 @@ def is_pseudo_behavior_id(bid: str) -> bool:
     return bid == DISTANCE_BEHAVIOR_ID or is_roi_behavior_id(bid)
 
 
+def _fit_controls_pane(scroll: QScrollArea) -> int:
+    """Keep a controls scroll pane at least as wide as its content needs.
+
+    A fixed initial splitter width (320 px) left these panes narrower than
+    their rows, so buttons and spin boxes were cut off at the right edge
+    behind a horizontal scrollbar. Returns the width to open the pane at.
+    """
+    inner = scroll.widget()
+    if inner is None:
+        return 320
+    need = (
+        inner.minimumSizeHint().width()
+        + scroll.verticalScrollBar().sizeHint().width()
+        + 2 * scroll.frameWidth()
+    )
+    scroll.setMinimumWidth(max(scroll.minimumWidth(), need))
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    return max(320, need)
+
+
 class _AutoDoubleSpinBox(QDoubleSpinBox):
     """A QDoubleSpinBox whose "auto" state is an *empty* field (== minimum()).
 
@@ -793,6 +813,10 @@ class BehaviorAnalyticsTab(QWidget):
         # Merged external projects
         self._merge_service = ProjectMergeService()
         self._pose_cache: dict[str, Any] = {}  # session_id → PoseData
+        # Which tracked animal a multi-animal project's analytics describe:
+        # "" is the per-session maximum across animals (either animal doing
+        # the behavior); an animal id ("track_0") is that animal alone.
+        self._animal_scope: str = ""
         self._pose_vel_cache: dict[str, "np.ndarray"] = {}  # session_id → centroid_velocity array
         # Per-refresh caches: invalidated at the start of each _refresh call.
         self._manifest_cache: Any = _MANIFEST_UNSET  # ImportManifest | None
@@ -900,6 +924,23 @@ class BehaviorAnalyticsTab(QWidget):
         top_row.addWidget(self._roi_attr_combo)
         self._set_roi_scope_controls_visible(False)
 
+        # A multi-animal session holds two subjects; without this every chart
+        # shows the per-session maximum across both animals.
+        self._animal_scope_label = QLabel("Animal:")
+        self._animal_combo = QComboBox()
+        self._animal_combo.setToolTip(
+            "Which animal of a multi-animal session the analysis describes.\n"
+            "Either animal: a behavior counts when either animal does it\n"
+            "(per-frame maximum across animals).\n"
+            "One animal: bouts, distance, ROI and pose-based graphs come\n"
+            "from that animal's own track only."
+        )
+        self._animal_combo.currentIndexChanged.connect(self._on_animal_scope_changed)
+        top_row.addWidget(self._animal_scope_label)
+        top_row.addWidget(self._animal_combo)
+        self._animal_scope_label.hide()
+        self._animal_combo.hide()
+
         # -- Merge Projects button (opens a popup panel) --------------
         self._merge_btn = QPushButton("\u229e Merge Projects\u2026")
         self._merge_btn.setToolTip(
@@ -970,7 +1011,8 @@ class BehaviorAnalyticsTab(QWidget):
         self._relationships_tab = _BehaviorMotifWidget(self)
         self._sections_tab = _SessionSectionsWidget(self)
         self._velocity_tab = _VelocityWidget(self)
-        self._social_tab = _SocialInteractionWidget(self)
+        from abel.ui.tabs.social_interaction_panel import SocialInteractionWidget
+        self._social_tab = SocialInteractionWidget(self)
         self._tabs.addTab(self._summary_tab, "Summary && Statistics")
         self._tabs.addTab(self._graphs_tab, "Graphs")
         self._tabs.addTab(self._heatmap_tab, "Spatial Heatmap")
@@ -1020,6 +1062,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._pose_vel_cache.clear()
         self._roi_mask_cache.clear()
         self._raw_bouts_unscoped.clear()
+        self._animal_scope = ""
         self._manifest_cache = _MANIFEST_UNSET
         self._fps_cache = None
         self._tr_bouts_cache = None
@@ -1041,6 +1084,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._graphs_tab._refresh_until_behavior_combo()
         self._refresh_behavior_filter()
         self._refresh_roi_scope_combo()
+        self._refresh_animal_combo()
         self._heatmap_tab._refresh_lists()
         self._density_tab.refresh_selectors()
         self._relationships_tab.set_project(self._project_root)
@@ -1597,6 +1641,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._graphs_tab._refresh_factor_selector()
         self._sections_tab.on_groups_updated()
         self._velocity_tab.on_groups_updated()
+        self._social_tab.on_groups_updated()
 
     def _session_groups_for_controls(
         self, controls: dict[str, str]
@@ -1944,7 +1989,12 @@ class BehaviorAnalyticsTab(QWidget):
     # ------------------------------------------------------------------
 
     def _analytics_cache_dir(self, project_root: Path) -> Path:
-        return project_root / "derived" / "analytics_cache"
+        root = project_root / "derived" / "analytics_cache"
+        # One cache per animal, so switching animals never serves the other
+        # animal's rows and switching back does not rebuild from scratch.
+        if self._animal_scope:
+            return root / f"animal_{self._safe_name(self._animal_scope)}"
+        return root
 
     def _compute_source_fingerprint(
         self, project_root: Path, behavior_list: list,
@@ -2132,6 +2182,7 @@ class BehaviorAnalyticsTab(QWidget):
             self._refresh_behavior_filter()
             self._roi_mask_cache.clear()
             self._refresh_roi_scope_combo()
+            self._refresh_animal_combo()
             self._graphs_tab._refresh_until_behavior_combo()
             previous_labels = self._session_labels
             self._subject_by_session = self._build_subject_map()
@@ -2220,6 +2271,8 @@ class BehaviorAnalyticsTab(QWidget):
         merged_sessions = result.get("merged_sessions", 0)
         from_cache = result.get("from_cache", False)
         cache_tag = " (cached)" if from_cache else ""
+        if self._animal_scope:
+            cache_tag += f" Animal: {self.animal_scope_label()}."
         if merged_sessions:
             self._status.setText(
                 f"Loaded {rows_loaded} row(s) + {merged_sessions} merged "
@@ -2503,10 +2556,20 @@ class BehaviorAnalyticsTab(QWidget):
                         })
             return out_summary, out_raw, bid
 
+        # Postprocessed bouts come from the session trace (max across animals).
+        # With one animal selected, its multi-animal sessions are instead
+        # rebuilt from that animal's own trace in Source 2.
+        max_only_sids: set[str] = (
+            set(self._animal_trace_index()) if self._animal_scope else set()
+        )
+
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {pool.submit(_load_tr_behavior, b): b for b in behavior_list}
             for fut in as_completed(futures):
                 s_rows, r_rows, bid = fut.result()
+                if max_only_sids:
+                    s_rows = [r for r in s_rows if r["session_id"] not in max_only_sids]
+                    r_rows = [r for r in r_rows if r["session_id"] not in max_only_sids]
                 for r in s_rows:
                     loaded_keys.add((bid, r["session_id"]))
                 summary_rows.extend(s_rows)
@@ -3040,6 +3103,107 @@ class BehaviorAnalyticsTab(QWidget):
         )
         return f"{self._roi_scope_combo.currentText()} ({attr.lower()})"
 
+    # ------------------------------------------------------------------
+    # Animal scope (multi-animal sessions)
+    # ------------------------------------------------------------------
+
+    def _animal_trace_index(self) -> dict[str, dict[str, str]]:
+        """Per-animal dense-inference trace paths, ``{session_id: {animal_id: path}}``.
+
+        Read from the active target_behavior inference run.  Empty for
+        single-animal projects and for inference runs made before per-animal
+        traces were written.
+        """
+        if self._project_root is None:
+            return {}
+        inf_dir = self._get_active_target_behavior_inference_dir()
+        if not inf_dir:
+            return {}
+        path = Path(inf_dir) / "inference_manifest.json"
+        if not path.exists():
+            return {}
+        try:
+            im = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return {
+            str(sid): {str(a): str(p) for a, p in (by_animal or {}).items()}
+            for sid, by_animal in (im.get("animal_trace_paths", {}) or {}).items()
+            if by_animal
+        }
+
+    @staticmethod
+    def _animal_display_name(animal_id: str) -> str:
+        """``track_0`` -> ``Mouse 1 (track_0)``; other ids are shown as-is."""
+        aid = str(animal_id)
+        prefix, _, idx = aid.rpartition("_")
+        if prefix == "track" and idx.isdigit():
+            return f"Mouse {int(idx) + 1} ({aid})"
+        return aid
+
+    def animal_scope_label(self) -> str:
+        """Human-readable animal scope, for status text, titles and exports."""
+        if not self._animal_scope:
+            return "Either animal (max)"
+        return self._animal_display_name(self._animal_scope)
+
+    def _refresh_animal_combo(self) -> None:
+        """Offer each tracked animal; hidden when no session has two animals."""
+        index = self._animal_trace_index()
+        animals = sorted({a for by_animal in index.values() for a in by_animal})
+        if self._animal_scope and self._animal_scope not in animals:
+            self._animal_scope = ""
+        self._animal_combo.blockSignals(True)
+        self._animal_combo.clear()
+        self._animal_combo.addItem("Either animal (max)", "")
+        for aid in animals:
+            self._animal_combo.addItem(self._animal_display_name(aid), aid)
+        pos = self._animal_combo.findData(self._animal_scope)
+        self._animal_combo.setCurrentIndex(pos if pos >= 0 else 0)
+        self._animal_combo.blockSignals(False)
+        visible = len(animals) > 1
+        self._animal_scope_label.setVisible(visible)
+        self._animal_combo.setVisible(visible)
+        self._apply_animal_scope_styling()
+
+    def _apply_animal_scope_styling(self) -> None:
+        self._animal_combo.setStyleSheet(
+            "QComboBox{background:#1565c0;color:#fff;font-weight:bold;}"
+            if self._animal_scope else ""
+        )
+
+    def _on_animal_scope_changed(self, _index: int = 0) -> None:
+        scope = str(self._animal_combo.currentData() or "")
+        if scope == self._animal_scope:
+            return
+        self._animal_scope = scope
+        self._apply_animal_scope_styling()
+        # Everything pose-derived was loaded for the previous animal.
+        self._pose_cache.clear()
+        self._pose_vel_cache.clear()
+        self._roi_mask_cache.clear()
+        self._refresh()
+
+    def _load_pose_file(self, path: Path) -> Any:
+        """Load a pose file as the animal the analysis is scoped to.
+
+        A multi-animal file otherwise collapses to its first individual.  With
+        an animal selected, that animal's track is used; a single-animal file
+        uses its only track.  A multi-animal file without that animal raises,
+        rather than silently standing in the other animal's track.
+        """
+        if self._animal_scope:
+            multi = self._pose.load_multi(Path(path))
+            if self._animal_scope in multi.per_individual:
+                return multi.per_individual[self._animal_scope]
+            if len(multi.individuals) == 1:
+                return multi.per_individual[multi.individuals[0]]
+            raise ValueError(
+                f"{Path(path).name} has no track '{self._animal_scope}' "
+                f"(tracks: {', '.join(multi.individuals)})"
+            )
+        return self._pose.load(Path(path))
+
     def _on_roi_scope_changed(self) -> None:
         data = self._roi_scope_combo.currentData()
         if isinstance(data, tuple) and len(data) == 2:
@@ -3545,7 +3709,7 @@ class BehaviorAnalyticsTab(QWidget):
         if not pp.exists():
             return None
         try:
-            pose = self._pose.load(pp)
+            pose = self._load_pose_file(pp)
             self._pose_cache[session_id] = pose
             return pose
         except Exception:
@@ -3817,6 +3981,25 @@ class BehaviorAnalyticsTab(QWidget):
 
         return {bid: pd.DataFrame(rows) for bid, rows in result.items() if rows}
 
+    def _scope_trace_paths_to_animal(
+        self, trace_paths: dict[str, str], animal_trace_paths: dict,
+    ) -> dict[str, str]:
+        """Replace each session trace with the selected animal's own trace.
+
+        The session trace is the per-frame maximum across animals.  A session
+        with per-animal traces but none for this animal is dropped (the animal
+        is not in it); a session with no per-animal traces is single-animal
+        and keeps its session trace.
+        """
+        out: dict[str, str] = {}
+        for sid, path in trace_paths.items():
+            by_animal = animal_trace_paths.get(sid) or {}
+            if not by_animal:
+                out[sid] = path
+            elif self._animal_scope in by_animal:
+                out[sid] = str(by_animal[self._animal_scope])
+        return out
+
     def _get_tr_trace_paths_and_smoothing(self) -> tuple[dict[str, str], str, int]:
         """Load trace paths and smoothing params from target_behavior TR manifests.
 
@@ -3849,6 +4032,10 @@ class BehaviorAnalyticsTab(QWidget):
                         str(k): str(v)
                         for k, v in (im.get("trace_paths", {}) or {}).items()
                     }
+                    if self._animal_scope:
+                        trace_paths = self._scope_trace_paths_to_animal(
+                            trace_paths, im.get("animal_trace_paths", {}) or {},
+                        )
                 except Exception:
                     pass
 
@@ -3966,11 +4153,23 @@ class BehaviorAnalyticsTab(QWidget):
             return np.array([], dtype=np.float64)
         try:
             import pandas as _pd
-            df = _pd.read_parquet(pq_path, columns=["frame", "centroid_velocity"])
+            try:
+                df = _pd.read_parquet(
+                    pq_path, columns=["frame", "centroid_velocity", "animal_id"],
+                )
+            except Exception:
+                df = _pd.read_parquet(pq_path, columns=["frame", "centroid_velocity"])
         except Exception:
             return np.array([], dtype=np.float64)
         if df.empty or "centroid_velocity" not in df.columns:
             return np.array([], dtype=np.float64)
+        # A multi-animal frame table holds one row per (frame, animal); keep one
+        # animal's rows so a positional slice is a frame slice of that animal.
+        if "animal_id" in df.columns and df["animal_id"].nunique() > 1:
+            animals = sorted(df["animal_id"].astype(str).unique())
+            keep = self._animal_scope if self._animal_scope in animals else animals[0]
+            df = df.loc[df["animal_id"].astype(str) == keep]
+        df = df[["frame", "centroid_velocity"]]
         # Sort by frame so positional slice == frame-indexed slice
         df = df.sort_values("frame").reset_index(drop=True)
         vel_arr = df["centroid_velocity"].to_numpy(dtype=np.float64)
@@ -5287,6 +5486,8 @@ class _SummaryStatsWidget(QWidget):
         # Stamp the ROI scope so an in-zone export is never mistaken for
         # whole-arena data once it leaves the app.
         df["roi_scope"] = self._host.roi_scope_label()
+        if self._host._animal_scope:
+            df["animal"] = self._host.animal_scope_label()
         df.to_csv(path, index=False, encoding="utf-8-sig")
         self._host._status.setText(f"Exported summary CSV to {path}")
 
@@ -5591,11 +5792,11 @@ class _GraphsWidget(QWidget):
             "color:#cfd8dc;font-size:10px;}"
         )
         self._ethogram_check_all_btn = QPushButton("All")
-        self._ethogram_check_all_btn.setMaximumWidth(40)
+        self._ethogram_check_all_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._ethogram_check_all_btn.setStyleSheet(self._BTN_STYLE)
         self._ethogram_check_all_btn.clicked.connect(self._check_all_ethogram_sessions)
         self._ethogram_check_none_btn = QPushButton("None")
-        self._ethogram_check_none_btn.setMaximumWidth(48)
+        self._ethogram_check_none_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._ethogram_check_none_btn.setStyleSheet(self._BTN_STYLE)
         self._ethogram_check_none_btn.clicked.connect(self._uncheck_all_ethogram_sessions)
 
@@ -6179,6 +6380,11 @@ class _GraphsWidget(QWidget):
                 ax = self._figure.add_subplot(111)
                 ax.text(0.5, 0.5, "Unknown chart type", ha="center", va="center",
                         transform=ax.transAxes)
+            if self._host._animal_scope:
+                self._figure.suptitle(
+                    f"Animal: {self._host.animal_scope_label()}",
+                    x=0.01, ha="left", fontsize=self._gs()["axis_fontsize"],
+                )
             try:
                 if _use_rect_layout:
                     self._figure.tight_layout(pad=1.2, rect=[0, 0, _subplot_right_ratio, 1])
@@ -8478,6 +8684,8 @@ class _GraphsWidget(QWidget):
         # whole-arena data once it leaves the app.
         if self._host._roi_scope_zone > 0:
             data.insert(0, "roi_scope", self._host.roi_scope_label())
+        if self._host._animal_scope:
+            data.insert(0, "animal", self._host.animal_scope_label())
 
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Graph Data", "",
@@ -9230,7 +9438,7 @@ class _HeatmapWidget(QWidget):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 1000])
+        splitter.setSizes([_fit_controls_pane(scroll), 1000])
 
         root = QVBoxLayout(self)
         root.addWidget(splitter, 1)
@@ -9515,7 +9723,7 @@ class _HeatmapWidget(QWidget):
             self._host._status.setText(f"Pose file not found: {pose_path}")
             return
         try:
-            bg_pose = self._host._pose.load(pose_path)
+            bg_pose = self._host._load_pose_file(pose_path)
         except Exception as exc:
             self._host._status.setText(f"Failed to load pose: {exc}")
             return
@@ -9671,7 +9879,7 @@ class _HeatmapWidget(QWidget):
             if not pp.exists():
                 continue
             try:
-                poses_by_sid[sid] = self._host._pose.load(pp)
+                poses_by_sid[sid] = self._host._load_pose_file(pp)
             except Exception:
                 pass
         if bg_session_id not in poses_by_sid:
@@ -10775,7 +10983,7 @@ class _DensityAnalysisWidget(QWidget):
         splitter.addWidget(right_w)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 1000])
+        splitter.setSizes([_fit_controls_pane(ctrl_scroll), 1000])
 
         root_l = QVBoxLayout(w)
         root_l.setContentsMargins(0, 0, 0, 0)
@@ -11098,7 +11306,7 @@ class _DensityAnalysisWidget(QWidget):
         splitter.addWidget(right_w)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 1000])
+        splitter.setSizes([_fit_controls_pane(ctrl_scroll), 1000])
 
         root_l = QVBoxLayout(w)
         root_l.setContentsMargins(0, 0, 0, 0)
@@ -11377,7 +11585,7 @@ class _DensityAnalysisWidget(QWidget):
         if pose_path is None:
             return None
         try:
-            pose = self._host._pose.load(pose_path)
+            pose = self._host._load_pose_file(pose_path)
         except Exception:
             return None
         self._host._pose_cache[sid] = pose
@@ -12198,7 +12406,7 @@ class _DensityAnalysisWidget(QWidget):
         export_dpi_spin.setSuffix(" dpi")
         export_dpi_spin.setValue(int(self._settings["export_dpi"]))
 
-        canvas_grp = QGroupBox("Canvas & Export")
+        canvas_grp = QGroupBox("Canvas && Export")
         canvas_f = QFormLayout(canvas_grp)
         canvas_f.setSpacing(5)
         canvas_f.addRow("Initial width:", max_w_spin)
@@ -12521,10 +12729,10 @@ class _BehaviorMotifWidget(QWidget):
         )
         _tng_layout.addWidget(self._tr_net_group_list, 1)
         _tng_all = QPushButton("All")
-        _tng_all.setMaximumWidth(40)
+        _tng_all.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _tng_all.clicked.connect(self._tr_net_group_check_all)
         _tng_none = QPushButton("None")
-        _tng_none.setMaximumWidth(48)
+        _tng_none.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _tng_none.clicked.connect(self._tr_net_group_check_none)
         _tng_layout.addWidget(_tng_all)
         _tng_layout.addWidget(_tng_none)
@@ -12705,15 +12913,15 @@ class _BehaviorMotifWidget(QWidget):
         )
         _ugf_layout.addWidget(self._umap_group_list, 1)
         _ugf_all = QPushButton("All")
-        _ugf_all.setMaximumWidth(40)
+        _ugf_all.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _ugf_all.clicked.connect(self._umap_check_all_groups)
         _ugf_none = QPushButton("None")
-        _ugf_none.setMaximumWidth(48)
+        _ugf_none.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _ugf_none.clicked.connect(self._umap_uncheck_all_groups)
         _ugf_layout.addWidget(_ugf_all)
         _ugf_layout.addWidget(_ugf_none)
         _ugf_apply = QPushButton("Apply \u25ba")
-        _ugf_apply.setMaximumWidth(60)
+        _ugf_apply.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _ugf_apply.setToolTip("Re-run UMAP using only the checked groups.")
         _ugf_apply.clicked.connect(self._run_motifs)
         _ugf_layout.addWidget(_ugf_apply)
@@ -17448,7 +17656,7 @@ class _SessionSectionsWidget(QWidget):
         )
         self._load_preset_btn = QPushButton("Load")
         self._load_preset_btn.setStyleSheet(self._BTN_STYLE)
-        self._load_preset_btn.setMaximumWidth(52)
+        self._load_preset_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._load_preset_btn.setToolTip("Replace current sections with the selected preset.")
         self._load_preset_btn.clicked.connect(self._load_selected_preset)
         self._save_preset_btn = QPushButton("Save as Preset\u2026")
@@ -17459,7 +17667,7 @@ class _SessionSectionsWidget(QWidget):
         self._save_preset_btn.clicked.connect(self._save_current_as_preset)
         self._delete_preset_btn = QPushButton("Delete")
         self._delete_preset_btn.setStyleSheet(self._BTN_STYLE)
-        self._delete_preset_btn.setMaximumWidth(54)
+        self._delete_preset_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._delete_preset_btn.setToolTip("Delete the selected custom preset (built-ins cannot be deleted).")
         self._delete_preset_btn.clicked.connect(self._delete_selected_preset)
 
@@ -17552,11 +17760,11 @@ class _SessionSectionsWidget(QWidget):
             "border-radius:3px;color:#cfd8dc;font-size:10px;}"
         )
         _beh_all = QPushButton("All")
-        _beh_all.setMaximumWidth(40)
+        _beh_all.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _beh_all.setStyleSheet(self._BTN_STYLE)
         _beh_all.clicked.connect(self._check_all_behaviors)
         _beh_none = QPushButton("None")
-        _beh_none.setMaximumWidth(48)
+        _beh_none.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _beh_none.setStyleSheet(self._BTN_STYLE)
         _beh_none.clicked.connect(self._uncheck_all_behaviors)
 
@@ -17587,11 +17795,11 @@ class _SessionSectionsWidget(QWidget):
             "border-radius:3px;color:#cfd8dc;font-size:10px;}"
         )
         _sec_all = QPushButton("All")
-        _sec_all.setMaximumWidth(40)
+        _sec_all.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _sec_all.setStyleSheet(self._BTN_STYLE)
         _sec_all.clicked.connect(self._check_all_sections)
         _sec_none = QPushButton("None")
-        _sec_none.setMaximumWidth(48)
+        _sec_none.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _sec_none.setStyleSheet(self._BTN_STYLE)
         _sec_none.clicked.connect(self._uncheck_all_sections)
 
@@ -17617,7 +17825,7 @@ class _SessionSectionsWidget(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._section_type_add_btn = QPushButton("Select Type")
-        self._section_type_add_btn.setMaximumWidth(84)
+        self._section_type_add_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._section_type_add_btn.setStyleSheet(self._BTN_STYLE)
         self._section_type_add_btn.setToolTip(
             "Check all sections of the selected type while preserving existing checks."
@@ -17626,7 +17834,7 @@ class _SessionSectionsWidget(QWidget):
             lambda: self._select_sections_by_type(only=False)
         )
         self._section_type_only_btn = QPushButton("Only Type")
-        self._section_type_only_btn.setMaximumWidth(74)
+        self._section_type_only_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._section_type_only_btn.setStyleSheet(self._BTN_STYLE)
         self._section_type_only_btn.setToolTip(
             "Check only sections of the selected type and uncheck all others."
@@ -19714,6 +19922,8 @@ class _SessionSectionsWidget(QWidget):
         # whole-arena data once it leaves the app.
         if self._host._roi_scope_zone > 0:
             out.insert(0, "ROI Scope", self._host.roi_scope_label())
+        if self._host._animal_scope:
+            out.insert(0, "Animal", self._host.animal_scope_label())
         return out
 
     def _export_subject_slots(
@@ -19787,8 +19997,11 @@ class _SessionSectionsWidget(QWidget):
         section_names = [n for n, _ in sections]
         slots = self._export_subject_slots(df)
         grouped = any(g for g, _ in slots)
-        scope = (
-            self._host.roi_scope_label() if self._host._roi_scope_zone > 0 else ""
+        scope = ", ".join(
+            s for s in (
+                self._host.roi_scope_label() if self._host._roi_scope_zone > 0 else "",
+                self._host.animal_scope_label() if self._host._animal_scope else "",
+            ) if s
         )
         # Behaviors in the selector's order, the order the chart lists them.
         present_bids = set(df["behavior_id"].astype(str))
@@ -19910,262 +20123,6 @@ class _SessionSectionsWidget(QWidget):
 
 # Number of normalized time-points used for the Profile chart.
 _N_NORM_POINTS: int = 50
-
-
-class _SocialInteractionWidget(QWidget):
-    """Social-interaction analytics sub-tab (multi-animal projects).
-
-    Two views over the per-frame ``social_*`` features:
-
-    * **Summary**: per (subject, session) dyadic metrics: mean inter-animal
-      distance, time in contact, contact bouts, net approach, advance/yield
-      balance, and orientation.
-    * **Dominance (HMM)**: a Gaussian HMM fit over continuous social + movement
-      features (pooled across the cohort so states are comparable), from which a
-      spatial-displacement dominance score is derived per subject: the animal
-      that advances into the other's space while the other yields ranks as more
-      dominant.  Subjects are ranked within each session.
-
-    All computation is on-demand via the buttons; nothing runs until the user
-    asks, so opening the tab is cheap.
-    """
-
-    _SUMMARY_COLS = [
-        ("Subject", "animal_id"),
-        ("Session", "session_id"),
-        ("Group", "group"),
-        ("Frames", "n_frames"),
-        ("Mean dist (norm)", "mean_distance_norm"),
-        ("Contact %", "contact_fraction"),
-        ("Contact bouts", "n_contact_bouts"),
-        ("Mean bout (s)", "mean_contact_bout_s"),
-        ("Mean approach", "mean_approach_velocity"),
-        ("Advance %", "advance_fraction"),
-        ("Heading align", "mean_heading_alignment"),
-    ]
-
-    _DOM_COLS = [
-        ("Session", "session_id"),
-        ("Subject", "animal_id"),
-        ("Group", "group"),
-        ("Rank", "dominance_rank"),
-        ("Dominance score", "dominance_score"),
-        ("Mean advance", "mean_advance"),
-        ("Yield %", "yield_fraction"),
-        ("Interaction (s)", "interaction_time_s"),
-        ("Dominant?", "is_dominant"),
-    ]
-
-    def __init__(self, host: "BehaviorAnalyticsTab") -> None:
-        super().__init__()
-        self._host = host
-        self._frames_cache = None  # cached per-frame social DataFrame
-
-        from abel.services.social_analysis_service import SocialAnalysisService
-        self._svc = SocialAnalysisService()
-
-        # ── Controls ──────────────────────────────────────────────────────
-        self._status = QLabel("Open a multi-animal project, then click Compute.")
-        self._status.setWordWrap(True)
-        self._status.setStyleSheet("color:#90a4ae;font-size:11px;")
-
-        self._compute_btn = QPushButton("Compute Social Metrics")
-        self._compute_btn.setToolTip(
-            "Load the per-frame social features and summarize the dyadic "
-            "relationship for every subject / session."
-        )
-        self._compute_btn.clicked.connect(self._compute_summary)
-
-        self._n_states_spin = QSpinBox()
-        self._n_states_spin.setRange(2, 8)
-        self._n_states_spin.setValue(4)
-        self._n_states_spin.setToolTip("Number of latent interaction states for the dominance HMM.")
-
-        self._hmm_btn = QPushButton("Run Dominance HMM")
-        self._hmm_btn.setToolTip(
-            "Fit a Gaussian HMM over social + movement features (pooled across "
-            "the cohort) and rank subjects by spatial-displacement dominance."
-        )
-        self._hmm_btn.clicked.connect(self._run_dominance_hmm)
-
-        ctrl = QHBoxLayout()
-        ctrl.addWidget(self._compute_btn)
-        ctrl.addSpacing(12)
-        ctrl.addWidget(QLabel("States:"))
-        ctrl.addWidget(self._n_states_spin)
-        ctrl.addWidget(self._hmm_btn)
-        ctrl.addStretch(1)
-
-        # ── Summary table ─────────────────────────────────────────────────
-        self._summary_table = self._make_table([c[0] for c in self._SUMMARY_COLS])
-
-        # ── Dominance table + state-profile text ──────────────────────────
-        self._dom_table = self._make_table([c[0] for c in self._DOM_COLS])
-        self._profile_text = QTextEdit()
-        self._profile_text.setReadOnly(True)
-        self._profile_text.setPlaceholderText(
-            "Run the dominance HMM to see latent-state feature profiles, which "
-            "states count as interaction, and the dominance ranking rationale."
-        )
-
-        dom_split = QSplitter(Qt.Orientation.Horizontal)
-        dom_split.addWidget(self._dom_table)
-        dom_split.addWidget(self._profile_text)
-        dom_split.setStretchFactor(0, 3)
-        dom_split.setStretchFactor(1, 2)
-
-        inner = QTabWidget()
-        inner.addTab(self._summary_table, "Summary")
-        _dom_holder = QWidget()
-        _dom_v = QVBoxLayout(_dom_holder)
-        _dom_v.setContentsMargins(0, 0, 0, 0)
-        _dom_v.addWidget(dom_split, 1)
-        inner.addTab(_dom_holder, "Dominance (HMM)")
-
-        root = QVBoxLayout(self)
-        root.setSpacing(4)
-        root.addLayout(ctrl)
-        root.addWidget(self._status)
-        root.addWidget(inner, 1)
-
-    # ── Helpers ───────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _make_table(headers: list[str]) -> QTableWidget:
-        t = QTableWidget(0, len(headers))
-        t.setHorizontalHeaderLabels(headers)
-        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        t.verticalHeader().setVisible(False)
-        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        t.horizontalHeader().setStretchLastSection(True)
-        return t
-
-    def _group_map(self) -> dict[str, str]:
-        # Best-effort session_id → group label; missing keys fall back to "".
-        try:
-            return dict(getattr(self._host, "_session_groups", {}) or {})
-        except Exception:
-            return {}
-
-    def on_project_reloaded(self) -> None:
-        """Clear cached results when the host switches projects."""
-        self._frames_cache = None
-        self._summary_table.setRowCount(0)
-        self._dom_table.setRowCount(0)
-        self._profile_text.clear()
-        self._status.setText("Open a multi-animal project, then click Compute.")
-
-    def _load_frames(self):
-        if self._frames_cache is not None:
-            return self._frames_cache
-        root = getattr(self._host, "_project_root", None)
-        if root is None:
-            return None
-        df = self._svc.load_social_frames(root)
-        self._frames_cache = df
-        return df
-
-    @staticmethod
-    def _fmt(value: object) -> str:
-        if isinstance(value, bool):
-            return "yes" if value else ""
-        if isinstance(value, float):
-            if not np.isfinite(value):
-                return "-"
-            return f"{value:.3f}"
-        return str(value)
-
-    def _fill_table(self, table: QTableWidget, cols, rows: list[dict]) -> None:
-        table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            for c, (_label, key) in enumerate(cols):
-                val = row.get(key, "")
-                # Percent-style columns stored as fractions.
-                if key in ("contact_fraction", "advance_fraction", "yield_fraction") and isinstance(val, (int, float)) and np.isfinite(val):
-                    text = f"{val * 100:.1f}%"
-                else:
-                    text = self._fmt(val)
-                item = QTableWidgetItem(text)
-                if isinstance(val, (int, float)) and not isinstance(val, bool):
-                    item.setData(Qt.ItemDataRole.UserRole, float(val) if np.isfinite(val) else float("nan"))
-                table.setItem(r, c, item)
-        table.resizeColumnsToContents()
-
-    # ── Actions ─────────────────────────────────────────────────────────────
-
-    def _compute_summary(self) -> None:
-        df = self._load_frames()
-        if df is None:
-            self._status.setText(
-                "No social features found. This tab needs a multi-animal project "
-                "with 'Interaction features' extracted in the Pose Features tab."
-            )
-            return
-        fps = self._host._project_fps()
-        rows = self._svc.compute_social_summary(df, fps, self._group_map())
-        self._fill_table(self._summary_table, self._SUMMARY_COLS, rows)
-        n_subj = len({(r["animal_id"], r["session_id"]) for r in rows})
-        self._status.setText(
-            f"Summarized {n_subj} subject/session record(s) from "
-            f"{len(df):,} frames. Run the dominance HMM for latent-state ranking."
-        )
-
-    def _run_dominance_hmm(self) -> None:
-        df = self._load_frames()
-        if df is None:
-            self._status.setText(
-                "No social features found. Extract 'Interaction features' first."
-            )
-            return
-        fps = self._host._project_fps()
-        self._hmm_btn.setEnabled(False)
-        self._hmm_btn.setText("Fitting…")
-        self._status.setText("Fitting dominance HMM… (this may take a moment)")
-        QGuiApplication.processEvents()
-        try:
-            res = self._svc.fit_dominance_hmm(
-                df, fps=fps, n_states=int(self._n_states_spin.value()),
-                group_map=self._group_map(),
-            )
-        finally:
-            self._hmm_btn.setEnabled(True)
-            self._hmm_btn.setText("Run Dominance HMM")
-
-        if res.get("error"):
-            self._status.setText(res["error"])
-            return
-
-        self._fill_table(self._dom_table, self._DOM_COLS, res.get("dominance", []))
-        self._profile_text.setPlainText(self._format_profiles(res))
-        n_dom = sum(1 for r in res.get("dominance", []) if r.get("is_dominant"))
-        self._status.setText(
-            f"Fit {res['n_states']}-state HMM over {len(res['feature_cols'])} features; "
-            f"identified dominant subject in {n_dom} session(s). "
-            f"log-likelihood {res.get('log_likelihood', float('nan')):.0f}."
-        )
-
-    @staticmethod
-    def _format_profiles(res: dict) -> str:
-        lines: list[str] = []
-        inter = set(res.get("interaction_states", []))
-        lines.append("Latent-state feature profiles (raw means):")
-        lines.append(f"Interaction states (close proximity): {sorted(inter) or '-'}")
-        lines.append("")
-        feats = res.get("feature_cols", [])
-        for state, prof in sorted(res.get("state_profiles", {}).items()):
-            tag = "  [interaction]" if state in inter else ""
-            lines.append(f"State {state}{tag}:")
-            for f in feats:
-                v = prof.get(f, float("nan"))
-                vs = f"{v:.3f}" if isinstance(v, float) and np.isfinite(v) else "-"
-                lines.append(f"    {f}: {vs}")
-            lines.append("")
-        lines.append(
-            "Dominance = mean radial velocity toward the other during interaction "
-            "states minus the fraction of those frames spent yielding. Higher = the "
-            "subject advances into contested space while the other gives ground."
-        )
-        return "\n".join(lines)
 
 
 class _VelocityWidget(QWidget):
@@ -20293,7 +20250,7 @@ class _VelocityWidget(QWidget):
         self._context_s_spin.setSuffix(" s")
         self._context_s_spin.setSingleStep(0.5)
         self._context_s_spin.setDecimals(1)
-        self._context_s_spin.setMaximumWidth(72)
+        self._context_s_spin.setMaximumWidth(self.fontMetrics().horizontalAdvance("30.0 s") + 44)
         self._context_s_spin.setToolTip("Duration of context window shown before and after each bout.")
         self._context_s_spin.editingFinished.connect(self._update)
         _ctx_inner = QHBoxLayout()
@@ -20316,7 +20273,8 @@ class _VelocityWidget(QWidget):
         self._context_widget.setVisible(False)
 
         # ── Axis limits widget (all chart types) ──────────────────────
-        _AL_SPIN_W = 70
+        # Measured, not fixed: the stacked spin buttons take ~20 px of a 70 px box.
+        _AL_SPIN_W = self.fontMetrics().horizontalAdvance("-0000.000") + 34
         _AL_DEC = 3
         _AL_RANGE = (-1e5, 1e5)
         self._xlim_chk = QCheckBox("X lim:")
@@ -20491,7 +20449,7 @@ class _VelocityWidget(QWidget):
         self._outlier_thresh_spin.setValue(1.5)
         self._outlier_thresh_spin.setSingleStep(0.5)
         self._outlier_thresh_spin.setDecimals(1)
-        self._outlier_thresh_spin.setMaximumWidth(64)
+        self._outlier_thresh_spin.setMaximumWidth(self.fontMetrics().horizontalAdvance("10.0") + 44)
         self._outlier_thresh_spin.setToolTip(
             "Threshold multiplier.\n"
             "IQR: 1.5 = mild outliers, 3.0 = extreme outliers.\n"
@@ -20584,11 +20542,11 @@ class _VelocityWidget(QWidget):
             "border-radius:3px;color:#cfd8dc;font-size:10px;}"
         )
         self._sess_all_btn = QPushButton("All")
-        self._sess_all_btn.setMaximumWidth(40)
+        self._sess_all_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._sess_all_btn.setStyleSheet(self._BTN_STYLE)
         self._sess_all_btn.clicked.connect(self._check_all_sessions)
         self._sess_none_btn = QPushButton("None")
-        self._sess_none_btn.setMaximumWidth(48)
+        self._sess_none_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._sess_none_btn.setStyleSheet(self._BTN_STYLE)
         self._sess_none_btn.clicked.connect(self._uncheck_all_sessions)
 
@@ -20643,7 +20601,7 @@ class _VelocityWidget(QWidget):
         self._scale_spin.setSuffix("%")
         self._scale_spin.setSingleStep(10)
         self._scale_spin.setToolTip("Scale the figure size as a percentage of the base max_w × max_h.")
-        self._scale_spin.setMaximumWidth(72)
+        self._scale_spin.setMaximumWidth(self.fontMetrics().horizontalAdvance("300%") + 44)
         self._scale_spin.editingFinished.connect(self._on_scale_changed)
 
         action_row1 = QHBoxLayout()
@@ -20796,7 +20754,7 @@ class _VelocityWidget(QWidget):
         splitter.addWidget(right_widget)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([320, 1000])
+        splitter.setSizes([_fit_controls_pane(left_widget), 1000])
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

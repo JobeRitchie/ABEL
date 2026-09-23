@@ -257,6 +257,85 @@ class ClipExtractionService:
 
 
     @staticmethod
+    def identity_marker_radius(out_w: int, scale: float = 1.0) -> float:
+        """Radius in clip pixels of a per-animal identity dot.
+
+        The default (scale 1.0) is 1/70 of the clip width, never below 3 px;
+        the scale shrinks or grows that, never below 0.75 px.  Fractional:
+        small clips have only a few pixels to work with, so the dots are drawn
+        with sub-pixel precision rather than rounded to whole pixels.
+        """
+        base = max(3, int(out_w) // 70)
+        try:
+            s = float(scale)
+        except (TypeError, ValueError):
+            s = 1.0
+        if not math.isfinite(s) or s <= 0:
+            s = 1.0
+        return max(0.75, base * s)
+
+    def render_preview_frame(
+        self,
+        video_path: Path,
+        preset: PreprocessingPreset,
+        start_frame: int,
+        end_frame: int,
+        pose_centroid_x=None,
+        pose_centroid_y=None,
+        individual_overlays=None,
+        frame_offset: int | None = None,
+    ):
+        """Render one frame of a clip exactly as extraction would write it.
+
+        Runs the real clip writer with the same crop and overlays, but keeps the
+        frame in memory instead of encoding a file.  ``frame_offset`` counts from
+        ``start_frame`` (default: the middle of the window).  Returns a BGR array,
+        or ``None`` when the video cannot be read.
+        """
+        import cv2  # noqa: PLC0415
+        import numpy as np  # noqa: PLC0415
+
+        start_frame = max(0, int(start_frame))
+        end_frame = max(start_frame, int(end_frame))
+        target = (end_frame - start_frame) // 2 if frame_offset is None else int(frame_offset)
+        target = min(max(0, target), end_frame - start_frame)
+
+        # Same crop center as extract_selected_clips: the clip-mean centroid.
+        cx = cy = float("nan")
+        if pose_centroid_x is not None and pose_centroid_y is not None:
+            n_pose = min(len(pose_centroid_x), len(pose_centroid_y))
+            if n_pose > 0:
+                sf = max(0, min(start_frame, n_pose - 1))
+                ef = max(sf + 1, min(end_frame + 1, n_pose))
+                import warnings  # noqa: PLC0415
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN window
+                    cx = float(np.nanmean(np.asarray(pose_centroid_x[sf:ef], dtype=float)))
+                    cy = float(np.nanmean(np.asarray(pose_centroid_y[sf:ef], dtype=float)))
+
+        # Keep the latest frame so a video that ends early still previews.
+        captured: list = []
+
+        def _sink(idx: int, frame) -> bool:
+            captured[:] = [frame]
+            return idx >= target
+
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return None
+        try:
+            self._write_clip(
+                cap, start_frame, end_frame, Path(""), cx, cy, preset,
+                pose_centroid_x=pose_centroid_x,
+                pose_centroid_y=pose_centroid_y,
+                individual_overlays=individual_overlays,
+                frame_sink=_sink,
+            )
+        finally:
+            cap.release()
+        return captured[0] if captured else None
+
+    @staticmethod
     def build_individual_overlays(
         pose_svc, pose_path, settings=None, individual_subject_map=None,
         identity_corrections=None,
@@ -836,6 +915,8 @@ class ClipExtractionService:
 
         individual_overlays=None,
 
+        frame_sink=None,
+
     ) -> str | None:
 
         """Write a single video clip cropped around (cx, cy). Returns error string or None.
@@ -844,6 +925,10 @@ class ClipExtractionService:
         callers pass as the clip-mean centroid, so the view does not jitter when the
         per-frame centroid is noisy. ``individual_overlays`` draws a colored dot per
         animal plus a legend so reviewers can tell the animals apart.
+
+        ``frame_sink(idx, frame)`` replaces the video file: each finished frame is
+        handed to it instead of being written, and a truthy return stops early.
+        The preview uses this so it shows exactly what extraction would write.
         """
 
         import cv2  # noqa: PLC0415
@@ -912,13 +997,17 @@ class ClipExtractionService:
 
 
 
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
+        writer = None
 
-        writer = cv2.VideoWriter(str(out_path), fourcc, out_fps, (out_w, out_h))
+        if frame_sink is None:
 
-        if not writer.isOpened():
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # type: ignore[attr-defined]
 
-            return f"Cannot create output file {out_path}"
+            writer = cv2.VideoWriter(str(out_path), fourcc, out_fps, (out_w, out_h))
+
+            if not writer.isOpened():
+
+                return f"Cannot create output file {out_path}"
 
 
 
@@ -1070,7 +1159,9 @@ class ClipExtractionService:
                     sx = out_w / float(cw)
                     sy = out_h / float(ch)
                     fidx = start_frame + idx
-                    dot_r = max(3, out_w // 70)
+                    dot_r = ClipExtractionService.identity_marker_radius(
+                        out_w, getattr(preset, "identity_marker_scale", 1.0)
+                    )
                     for ov in individual_overlays:
                         ocx = ov.get("cx")
                         ocy = ov.get("cy")
@@ -1084,12 +1175,14 @@ class ClipExtractionService:
                         ay = float(ocy[fi])
                         if not (np.isfinite(ax) and np.isfinite(ay)):
                             continue
-                        px = int(round((ax - x1) * sx))
-                        py = int(round((ay - y1) * sy))
+                        px = (ax - x1) * sx
+                        py = (ay - y1) * sy
                         if 0 <= px < out_w and 0 <= py < out_h:
                             color = ov.get("color", (0, 0, 255))
-                            cv2.circle(crop, (px, py), dot_r + 1, (0, 0, 0), -1, cv2.LINE_AA)
-                            cv2.circle(crop, (px, py), dot_r, color, -1, cv2.LINE_AA)
+                            # shift=4: coordinates in 1/16 px, so fractional radii render.
+                            c16 = (int(round(px * 16)), int(round(py * 16)))
+                            cv2.circle(crop, c16, int(round((dot_r + 1) * 16)), (0, 0, 0), -1, cv2.LINE_AA, 4)
+                            cv2.circle(crop, c16, int(round(dot_r * 16)), color, -1, cv2.LINE_AA, 4)
 
                     # The legend is a margin note, not part of the picture: size
                     # it against the frame so long track names can't swallow the
@@ -1162,11 +1255,21 @@ class ClipExtractionService:
 
                     )
 
-                writer.write(crop)
+                if frame_sink is not None:
+
+                    if frame_sink(idx, crop):
+
+                        break
+
+                else:
+
+                    writer.write(crop)
 
         finally:
 
-            writer.release()
+            if writer is not None:
+
+                writer.release()
 
 
 
@@ -1446,6 +1549,8 @@ def regenerate_clips_for_windows(
         overrides["full_frame"] = bool(ui.get("full_frame"))
     if "include_all_animals" in ui:
         overrides["include_all_animals"] = bool(ui.get("include_all_animals"))
+    if "identity_marker_percent" in ui:
+        overrides["identity_marker_scale"] = max(0.1, float(ui.get("identity_marker_percent") or 100.0) / 100.0)
     if overrides:
         preset = PreprocessingPreset.model_validate(
             preset.model_dump(mode="python") | overrides

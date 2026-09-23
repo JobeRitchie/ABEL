@@ -195,3 +195,53 @@ def test_probe_handles_a_project_with_no_multi_animal_sessions():
 
     out = probe_project_appearance(_Manifest(), object(), object())
     assert out["verdict"] == "none" and out["sessions"] == []
+
+
+def _obs_and_path(ga, gb, sa=None, sb=None):
+    from abel.services.appearance_identity_service import (  # noqa: PLC0415
+        GLOVE_PAD_FRAMES, OBS_ERROR, SWITCH_PROB, _observations, _viterbi,
+    )
+    ga, gb = np.asarray(ga, float), np.asarray(gb, float)
+    sa = np.zeros_like(ga) if sa is None else np.asarray(sa, float)
+    sb = np.zeros_like(gb) if sb is None else np.asarray(sb, float)
+    frames = np.arange(len(ga))
+    obs = _observations(frames, ga, gb, sa, sb, pad_frames=GLOVE_PAD_FRAMES)
+    path = _viterbi(obs, eps=OBS_ERROR, p_switch=SWITCH_PROB)
+    return obs, (np.flatnonzero(np.diff(path) != 0) + 1).tolist()
+
+
+def test_a_brief_swap_and_swap_back_keeps_both_flips():
+    # A 0.5 s exchange during contact used to be dropped with both of its flips.
+    ga = np.full(600, 5.0); gb = np.full(600, 170.0)
+    ga[300:315], gb[300:315] = 170.0, 5.0
+    _, flips = _obs_and_path(ga, gb)
+    assert flips == [300, 315]
+
+
+def test_single_frame_noise_is_not_a_swap():
+    ga = np.full(600, 5.0); gb = np.full(600, 170.0)
+    ga[300:302], gb[300:302] = 170.0, 5.0
+    _, flips = _obs_and_path(ga, gb)
+    assert flips == []
+
+
+def test_a_coloured_glove_carries_no_identity_evidence():
+    ga = np.full(600, 5.0); gb = np.full(600, 170.0)
+    sa = np.zeros(600)
+    # Track b lands on a dark blue glove for 20 frames: dark but strongly saturated.
+    gb[300:320], sa_b = 30.0, np.zeros(600)
+    sa_b[300:320] = 250.0
+    ga[300:320] = 160.0
+    obs, flips = _obs_and_path(ga, gb, sa, sa_b)
+    assert flips == []
+    assert (obs[300:320] == 0).all()
+
+
+def test_a_lone_dark_track_is_the_dark_animal():
+    # Before the second animal enters, the tracker files the dark resident under b.
+    ga = np.full(900, 5.0); gb = np.full(900, 170.0)
+    ga[100:250], gb[:100] = np.nan, np.nan
+    gb[100:250] = 5.0
+    ga[:100] = 5.0
+    obs, flips = _obs_and_path(ga, gb)
+    assert flips == [100, 250]

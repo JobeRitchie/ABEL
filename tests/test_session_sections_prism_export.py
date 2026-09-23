@@ -74,6 +74,7 @@ def _host(raw_bouts, summary_rows, groups=None, order=None):
         _project_fps=lambda: 10.0,
         _summary_tab=SimpleNamespace(_checked_subjects=lambda: set()),
         _roi_scope_zone=0,
+        _animal_scope="",
         roi_scope_label=lambda: "Whole arena",
         ordered_session_labels=lambda: list(order or sorted(set(labels.values()))),
         _ordered_group_list=lambda avail, _split=None: sorted(avail),

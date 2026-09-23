@@ -26,7 +26,6 @@ from PySide6.QtWidgets import (
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, Signal
 
-from abel.ui.flow_layout import flow_row
 from abel.models.schemas import ImportManifest, ImportNameSettings, SourceMode
 from abel.services import keypoint_mapping
 from abel.services.import_service import ImportService
@@ -189,22 +188,16 @@ class DataImportTab(QWidget):
         )
         copy_pxmm_selected_btn.clicked.connect(self._apply_pxmm_to_selected_sessions)
 
-        # Nine variable-width buttons in one QHBoxLayout clipped their own
-        # labels below ~1400 px; a flow layout wraps instead of squeezing.
+        # Three fixed rows grouped by purpose (import | pose setup | file
+        # locations). A flow layout wrapped these into five rows at the page's
+        # minimum width, which set the whole window's minimum height to 800+ px.
+        remove_session_btn.setObjectName("destructive")
         button_row = QHBoxLayout()
-        button_row.addWidget(flow_row([
-            import_video_btn,
-            import_pose_btn,
-            auto_match_btn,
-            pattern_import_btn,
-            save_manifest_btn,
-            remove_session_btn,
-            calibrate_scale_btn,
-            keypoint_map_btn,
-            rename_parts_btn,
-            identity_map_btn,
-            scan_swaps_btn,
-        ]))
+        for btn in (import_video_btn, import_pose_btn, auto_match_btn,
+                    pattern_import_btn, save_manifest_btn):
+            button_row.addWidget(btn)
+        button_row.addStretch(1)
+        button_row.addWidget(remove_session_btn)
 
         # Keypoint-consistency warning banner (hidden unless a mismatch exists).
         self._keypoint_warning = QLabel("")
@@ -216,8 +209,10 @@ class DataImportTab(QWidget):
         self._keypoint_warning.hide()
 
         pxmm_row = QHBoxLayout()
-        pxmm_row.addWidget(copy_pxmm_all_btn)
-        pxmm_row.addWidget(copy_pxmm_selected_btn)
+        for btn in (calibrate_scale_btn, copy_pxmm_all_btn, copy_pxmm_selected_btn,
+                    keypoint_map_btn, rename_parts_btn, identity_map_btn,
+                    scan_swaps_btn):
+            pxmm_row.addWidget(btn)
         pxmm_row.addStretch(1)
 
         copy_files_btn = QPushButton("Copy Files to Project")

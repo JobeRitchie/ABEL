@@ -440,9 +440,14 @@ FORMULAS: list[Formula] = [
     Formula(
         "Gaussian HMM log-likelihood", "Calibration & models",
         "log P(O | λ) via forward algorithm;&nbsp; "
-        "occupancy<sub>k</sub> = (#frames in state k) / T",
-        "Diagonal-covariance Gaussian HMM (EM-fit) over standardized social features; "
-        "state occupancy summarizes dominance dynamics.",
+        "occupancy<sub>k</sub> = (#frames in state k) / T;&nbsp; "
+        "DI = (won − lost) / (won + lost)",
+        "Diagonal-covariance Gaussian HMM (EM-fit, best of several restarts) over "
+        "social features clipped to their 0.5–99.5 percentiles and standardized; "
+        "frames without a tracked partner are left out. In interaction states, a "
+        "displacement is one animal advancing while the other retreats, both faster "
+        "than a body-length threshold; the dominance index DI counts displacements "
+        "won and lost, with a two-sided binomial test per dyad.",
         "abel.services.social_analysis_service",
         ("rabiner1989",),
     ),
@@ -588,7 +593,7 @@ def render_formulas_html() -> str:
                 f"<div style='font-family: Consolas, monospace; color:#B2FF59; "
                 f"margin:3px 0; font-size:14px;'>{f.formula_html}</div>"
                 f"<div style='color:#B0BEC5;'>{escape(f.description)}</div>"
-                f"<div style='color:#607D8B; font-size:11px;'>Source: "
+                f"<div style='color:#8FA6B4; font-size:11px;'>Source: "
                 f"<code>{escape(f.source)}</code></div>"
                 "</div>"
             )

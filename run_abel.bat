@@ -73,7 +73,7 @@ if "%NEED_RECREATE%"=="0" (
 
 if "%NEED_RECREATE%"=="1" (
   if exist ".venv" rmdir /s /q ".venv"
-  echo [INFO] Running: %CREATOR_PY% -m venv .venv
+  echo [INFO] Creating virtual environment with %CREATOR_PY% ^(about 30 seconds^)...
   "%CREATOR_PY%" -m venv .venv
   if errorlevel 1 (
     echo [ERROR] Could not create virtual environment.
@@ -108,6 +108,7 @@ REM A stamp file under .venv records the last successful install; if it is
 REM at least as new as pyproject.toml and abel still imports, we skip.
 set "INSTALL_STAMP=.venv\.abel_install_stamp"
 set "NEED_INSTALL=1"
+echo [INFO] Checking whether ABEL needs installing or updating...
 "%PY_EXE%" -m abel._install_check >nul 2>nul
 if not errorlevel 1 set "NEED_INSTALL=0"
 
@@ -116,8 +117,7 @@ if "%NEED_INSTALL%"=="0" goto SKIP_INSTALL
 REM Pip/setuptools/wheel only need upgrading on a freshly created venv; on a
 REM routine reinstall (e.g. a version bump) they are already current.
 if "%NEED_RECREATE%"=="1" (
-  echo [INFO] Preparing pip tooling...
-  "%PY_EXE%" -m pip install --quiet --upgrade pip setuptools wheel >> "%RUN_LOG%" 2>&1
+  "%PY_EXE%" -m abel._pip_progress --log "%RUN_LOG%" --label "Updating pip tooling (pip, setuptools, wheel)..." -- install --upgrade pip setuptools wheel
   if errorlevel 1 (
     echo [ERROR] Failed to upgrade pip tooling. See %RUN_LOG%.
     pause
@@ -125,8 +125,9 @@ if "%NEED_RECREATE%"=="1" (
   )
 )
 
-echo [INFO] Installing/updating ABEL ^(first run may take a few minutes^)...
-"%PY_EXE%" -m pip install --quiet -e . >> "%RUN_LOG%" 2>&1
+echo [INFO] Installing ABEL and its dependencies. The first run downloads several hundred MB
+echo [INFO] ^(Qt, NumPy, pandas, scikit-learn, ...^) and can take several minutes.
+"%PY_EXE%" -m abel._pip_progress --log "%RUN_LOG%" --label "Installing ABEL..." -- install -e .
 if errorlevel 1 (
   echo [ERROR] Failed to install project dependencies. See %RUN_LOG%.
   pause
@@ -145,10 +146,11 @@ echo [INFO] ABEL is up to date.
 REM For runtime, force a clean PATH so Qt DLL resolution does not pick up Anaconda/system Qt binaries.
 set "PATH=%CD%\.venv\Scripts;%SystemRoot%\system32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0\"
 
+echo [INFO] Checking the Qt GUI runtime...
 "%PY_EXE%" -c "from PySide6 import QtWidgets" >nul 2>> "%RUN_LOG%"
 if errorlevel 1 (
   echo [WARN] PySide6 self-test failed. Trying stable fallback PySide6==6.7.3...
-  "%PY_EXE%" -m pip install --force-reinstall "PySide6==6.7.3" "PySide6_Addons==6.7.3" "PySide6_Essentials==6.7.3" "shiboken6==6.7.3"
+  "%PY_EXE%" -m abel._pip_progress --log "%RUN_LOG%" --label "Reinstalling PySide6 6.7.3..." -- install --force-reinstall "PySide6==6.7.3" "PySide6_Addons==6.7.3" "PySide6_Essentials==6.7.3" "shiboken6==6.7.3"
   if errorlevel 1 (
     echo [ERROR] Failed to install PySide6 fallback.
     pause

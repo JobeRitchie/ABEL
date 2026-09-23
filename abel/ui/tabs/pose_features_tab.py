@@ -56,6 +56,7 @@ from abel.services.feature_prep_service import (
     STAGE_PREPROCESS,
     STAGE_REPRESENTATIONS,
     FeaturePrepService,
+    PrepCancelledError,
     PrepConfig,
     SessionJob,
 )
@@ -70,6 +71,7 @@ from abel.services.roi_service import (
 from abel.storage.file_store import read_json, read_yaml, write_yaml
 from abel.ui.smoothing_preview_dialog import BG_THRESHOLD_TOOLTIP, SmoothingPreviewDialog
 from abel.ui.widgets.progress_panel import ProgressPanel
+from abel.utils.cancellation import is_cancel_traceback
 from abel.utils.run_timeline import RunTimeline, Stage
 from abel.workers.task_worker import TaskWorker
 from abel.utils.error_text import format_task_error
@@ -215,18 +217,23 @@ class PoseFeaturesTab(QWidget):
         sel_none_btn.clicked.connect(self._select_none)
         refresh_btn.clicked.connect(self._refresh_clicked)
         clear_cache_btn.clicked.connect(self._clear_cached_features)
+        # Selection on one row, maintenance on the next: five buttons on one
+        # row made the left pane ~180 px wider than its splitter share.
         sel_row = QHBoxLayout()
-        sel_row.addWidget(QLabel("Sessions to process:"))
-        sel_row.addStretch()
-        sel_row.addWidget(clear_cache_btn)
-        sel_row.addWidget(refresh_btn)
-        sel_row.addWidget(sel_stale_btn)
+        sel_row.addWidget(QLabel("Select:"))
         sel_row.addWidget(sel_all_btn)
         sel_row.addWidget(sel_none_btn)
+        sel_row.addWidget(sel_stale_btn)
+        sel_row.addStretch()
+        maint_row = QHBoxLayout()
+        maint_row.addStretch()
+        maint_row.addWidget(refresh_btn)
+        maint_row.addWidget(clear_cache_btn)
 
-        session_box = QGroupBox("Sessions")
+        session_box = QGroupBox("Sessions to process")
         session_layout = QVBoxLayout(session_box)
         session_layout.addLayout(sel_row)
+        session_layout.addLayout(maint_row)
         session_layout.addWidget(self._session_table)
 
         # ── Preset selector ─────────────────────────────────────────────
@@ -641,9 +648,9 @@ class PoseFeaturesTab(QWidget):
 
         # Feature explanation banner
         info_label = QLabel(
-            "ℹ  Running here also prepares everything Active Learning needs: pose-feature\n"
-            "tables, video context (when enabled), and the cached frame/segment\n"
-            "representations. Active Learning then just trains on the cache, so the\n"
+            "ℹ  Running here also prepares everything Active Learning needs: pose-feature "
+            "tables, video context (when enabled), and the cached frame/segment "
+            "representations. Active Learning then just trains on the cache, so the "
             "first training run is fast. Re-runs are cheap; only changed clips/settings rebuild."
         )
         info_label.setWordWrap(True)
@@ -664,7 +671,12 @@ class PoseFeaturesTab(QWidget):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_scroll)
         splitter.addWidget(right_widget)
-        splitter.setSizes([440, 440])
+        # Open the settings pane at the width its rows need, so nothing sits
+        # behind a horizontal scrollbar.
+        left_need = (left_content.minimumSizeHint().width()
+                     + left_scroll.verticalScrollBar().sizeHint().width() + 4)
+        left_scroll.setMinimumWidth(left_need)
+        splitter.setSizes([max(440, left_need), 440])
         self._splitter = splitter
 
         root = QVBoxLayout(self)
@@ -1487,7 +1499,12 @@ class PoseFeaturesTab(QWidget):
             bp_item = QTableWidgetItem(bp_text)
             bp_item.setToolTip(bp_text)
             self._result_table.setItem(row, 3, bp_item)
-            status = "✓ Complete" if r.success else "✗ Failed"
+            if r.success:
+                status = "✓ Complete"
+            elif "Canceled by user." in r.warnings:
+                status = "Canceled"
+            else:
+                status = "✗ Failed"
             self._result_table.setItem(row, 4, QTableWidgetItem(status))
             for w in r.warnings:
                 self._append_log(f"  ⚠ [{r.session_id}] {w}")
@@ -1525,12 +1542,20 @@ class PoseFeaturesTab(QWidget):
 
     def _run_prep_task(self, jobs: list, cfg: PrepConfig):
         observer = _SignalPrepObserver(self)
-        return self._prep.prepare(
-            self._project_root, jobs, cfg,
-            observer=observer, cancel_flag=self._cancel_flag,
-        )
+        try:
+            return self._prep.prepare(
+                self._project_root, jobs, cfg,
+                observer=observer, cancel_flag=self._cancel_flag,
+            )
+        except PrepCancelledError:
+            return None
 
     def _on_prep_finished(self, result) -> None:
+        if result is None:
+            self._append_log("Feature preparation canceled. Sessions finished before the cancel are kept.")
+            self._finish_prep_ui("Canceled.")
+            QTimer.singleShot(0, self._refresh_sessions)
+            return
         self._save_timeline_history()
         msg = (
             f"Preparation complete: {result.n_segment_rows} segment row(s) ready. "
@@ -1593,6 +1618,10 @@ class PoseFeaturesTab(QWidget):
         self._progress.setFormat(status)
 
     def _on_error(self, traceback_text: str) -> None:
+        if is_cancel_traceback(traceback_text):
+            self._append_log("Feature extraction canceled.")
+            self._finish_prep_ui("Canceled.")
+            return
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
         self._progress.setFormat("Error")
@@ -1708,7 +1737,9 @@ class PoseFeaturesTab(QWidget):
 
     def _cancel(self) -> None:
         self._cancel_flag[0] = True
-        self._append_log("Cancellation requested…")
+        self._cancel_btn.setEnabled(False)
+        self._progress.setFormat("Canceling…")
+        self._append_log("Cancellation requested. Stopping at the next checkpoint…")
 
     def _append_log(self, msg: str) -> None:
         self._log.append(msg)

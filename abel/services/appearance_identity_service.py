@@ -26,6 +26,16 @@ logger = logging.getLogger(__name__)
 
 #: Gray levels (0-255) by which two tracks must differ to count as distinguishable.
 CONFIDENT_DIFF = 25.0
+#: A lone track reading darker than this is the dark animal.
+LONE_DARK = 50.0
+#: Saturation / grey levels that mark a colored glove rather than an animal.
+GLOVE_SAT = 200.0
+GLOVE_MIN_GREY = 15.0
+#: Frames around a glove sighting that carry no identity evidence.
+GLOVE_PAD_FRAMES = 15
+#: Per-sample chance that a confident reading is wrong, and per-sample switch prior.
+OBS_ERROR = 0.05
+SWITCH_PROB = 1e-4
 
 
 @dataclass
@@ -55,18 +65,21 @@ def analyze_appearance_identity(
     video_path: "Path | str",
     multi,
     *,
-    sample_every: int = 15,
+    sample_every: int = 1,
     patch_radius: int = 4,
     min_run_samples: int = 5,
-    max_samples: int = 4000,
+    max_samples: int = 200_000,
     progress_cb=None,
 ) -> AppearanceIdentityResult:
     """Sample coat brightness at each track's centroid and derive swap corrections.
 
     ``sample_every`` frames are decoded (the rest are skipped without decoding),
-    so the cost is roughly a fast-forward pass over the video.  ``min_run_samples``
-    is the shortest run of a consistent assignment that counts as real, which is
-    what keeps a one-second occlusion from being reported as two swaps.
+    so the cost is roughly a fast-forward pass over the video.  Every frame is
+    read by default: swaps during contact often last well under a second.  A
+    brief contrary reading only becomes a swap when it outweighs the switch
+    penalty (about 7 consistent frames at the default settings), which keeps
+    single-frame noise from being reported.  ``min_run_samples`` only sets the
+    minimum number of samples needed to judge the session at all.
     """
     import cv2  # noqa: PLC0415
 
@@ -92,6 +105,7 @@ def analyze_appearance_identity(
 
     frames: list[int] = []
     values: dict[str, list[float]] = {i: [] for i in inds}
+    sats: dict[str, list[float]] = {i: [] for i in inds}
     try:
         idx = 0
         while idx < n:
@@ -100,12 +114,13 @@ def analyze_appearance_identity(
             if idx % step == 0:
                 ok, img = cap.retrieve()
                 if ok:
-                    grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    h, w = grey.shape
+                    h, w = img.shape[:2]
                     frames.append(idx)
                     for i in inds:
-                        values[i].append(_patch_mean(grey, cx[i], cy[i], idx, w, h, patch_radius))
-                    if progress_cb is not None and len(frames) % 50 == 0:
+                        g, s = _patch_grey_sat(img, cx[i], cy[i], idx, w, h, patch_radius)
+                        values[i].append(g)
+                        sats[i].append(s)
+                    if progress_cb is not None and len(frames) % 500 == 0:
                         progress_cb(idx, n)
             idx += 1
     finally:
@@ -116,7 +131,9 @@ def analyze_appearance_identity(
         return res
 
     f = np.asarray(frames, dtype=int)
-    diff = np.asarray(values[inds[0]], dtype=float) - np.asarray(values[inds[1]], dtype=float)
+    ga, gb = np.asarray(values[inds[0]], dtype=float), np.asarray(values[inds[1]], dtype=float)
+    sa, sb = np.asarray(sats[inds[0]], dtype=float), np.asarray(sats[inds[1]], dtype=float)
+    diff = ga - gb
     res.frames = f.tolist()
     res.diff = [float(v) for v in diff]
 
@@ -131,14 +148,22 @@ def analyze_appearance_identity(
         )
         return res
 
-    f_ok, sign = f[confident], np.sign(diff[confident])
-    flips = _sustained_sign_changes(f_ok, sign, min_run_samples)
+    obs = _observations(f, ga, gb, sa, sb, pad_frames=GLOVE_PAD_FRAMES)
+    # Real swaps during contact last a fraction of a second, so the assignment
+    # is decoded frame by frame with a switch penalty instead of dropping short
+    # runs (which merged the runs around a brief swap and lost both flips).
+    path = _viterbi(obs, eps=OBS_ERROR, p_switch=SWITCH_PROB)
+    flips = [int(f[k]) for k in (np.flatnonzero(np.diff(path) != 0) + 1)]
     res.corrections = [
         {"frame": int(fr), "a": inds[0], "b": inds[1]} for fr in flips
     ]
+    informative = obs != 0
+    sign = obs[informative]
     res.consistency_before = _consistency(sign)
-    parity = np.array([(-1.0) ** sum(1 for c in flips if c <= t) for t in f_ok])
-    res.consistency_after = _consistency(sign * parity)
+    parity = np.ones(len(f))
+    for fr in flips:
+        parity[f >= fr] *= -1
+    res.consistency_after = _consistency(sign * parity[informative])
     res.message = (
         f"{len(flips)} swap(s) found. The animals are distinguishable in "
         f"{res.separability:.0%} of frames; applying these puts "
@@ -146,6 +171,68 @@ def analyze_appearance_identity(
         f"(now {res.consistency_before:.0%})."
     )
     return res
+
+
+def _patch_grey_sat(img, cx, cy, idx: int, w: int, h: int, radius: int) -> "tuple[float, float]":
+    """Mean grey level and HSV saturation of a small patch at a track's centroid."""
+    import cv2  # noqa: PLC0415
+
+    if idx >= len(cx) or idx >= len(cy):
+        return float("nan"), float("nan")
+    x, y = cx[idx], cy[idx]
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return float("nan"), float("nan")
+    x0, x1 = max(0, int(x) - radius), min(w, int(x) + radius + 1)
+    y0, y1 = max(0, int(y) - radius), min(h, int(y) + radius + 1)
+    patch = img[y0:y1, x0:x1]
+    if not patch.size:
+        return float("nan"), float("nan")
+    grey = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    sat = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)[..., 1]
+    return float(grey.mean()), float(sat.mean())
+
+
+def _observations(frames, ga, gb, sa, sb, *, pad_frames: int) -> np.ndarray:
+    """Per-sample identity evidence: +1 track a lighter, -1 track b lighter, 0 unknown.
+
+    A gloved hand is strongly colored where the animals are not, so samples near
+    a saturated patch are discarded.  When only one track is visible a dark
+    reading still identifies it: only the dark animal is that dark.
+    """
+    diff = ga - gb
+    glove_at = frames[((sa > GLOVE_SAT) & (ga > GLOVE_MIN_GREY)) | ((sb > GLOVE_SAT) & (gb > GLOVE_MIN_GREY))]
+    glove = np.zeros(len(frames), dtype=bool)
+    for g in glove_at:
+        glove |= np.abs(frames - g) <= pad_frames
+    obs = np.where(np.isfinite(diff) & (np.abs(diff) > CONFIDENT_DIFF), np.sign(diff), 0.0)
+    fa, fb = np.isfinite(ga), np.isfinite(gb)
+    obs = np.where(fa & ~fb & (np.where(fa, ga, 255) < LONE_DARK), -1.0, obs)
+    obs = np.where(fb & ~fa & (np.where(fb, gb, 255) < LONE_DARK), 1.0, obs)
+    obs[glove] = 0.0
+    return obs
+
+
+def _viterbi(obs: np.ndarray, *, eps: float, p_switch: float) -> np.ndarray:
+    """Most likely assignment (+1/-1 per sample) under a two-state switching model."""
+    n = len(obs)
+    if n == 0:
+        return np.zeros(0)
+    states = np.array([1.0, -1.0])
+    l_ok, l_bad = np.log(1 - eps), np.log(eps)
+    l_sw, l_stay = np.log(p_switch), np.log(1 - p_switch)
+    back = np.zeros((n, 2), dtype=np.int8)
+    v = np.where(states == obs[0], l_ok, l_bad) if obs[0] != 0 else np.zeros(2)
+    for t in range(1, n):
+        stay = v + l_stay
+        swap = v[::-1] + l_sw
+        back[t] = np.where(stay >= swap, [0, 1], [1, 0])
+        em = np.where(states == obs[t], l_ok, l_bad) if obs[t] != 0 else 0.0
+        v = np.maximum(stay, swap) + em
+    path = np.zeros(n, dtype=np.int8)
+    path[-1] = int(np.argmax(v))
+    for t in range(n - 1, 0, -1):
+        path[t - 1] = back[t, path[t]]
+    return states[path]
 
 
 def _patch_mean(grey, cx, cy, idx: int, w: int, h: int, radius: int) -> float:
@@ -261,9 +348,11 @@ def scan_sessions(
         )
         # Compare on *parity*, not on the exact frames: two corrections a few
         # frames apart cancel out, so a different list can still be the same
-        # assignment.  Only a real disagreement is worth the user's attention.
+        # assignment.  The slack is a few sampling steps only: real swaps can
+        # last half a second, and a wider window hid them as "already matches".
+        step = max(1, int(analyze_kwargs.get("sample_every", 1)))
         row["agrees"] = (not result.usable) or _same_assignment(
-            saved, row["detected"], tolerance=45
+            saved, row["detected"], tolerance=max(5, 3 * step)
         )
     if progress_cb is not None:
         progress_cb(len(sessions), len(sessions), "")

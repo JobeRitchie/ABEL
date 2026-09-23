@@ -342,3 +342,60 @@ def test_mean_std_sem_matches_formula() -> None:
     # NaNs are dropped; a single finite value gives 0 spread.
     m, s, e = loso._mean_std_sem([float("nan"), 0.7])
     assert m == pytest.approx(0.7) and s == 0.0 and e == 0.0
+
+
+# ----------------------------------------------------------------------
+# Progress events and cancellation
+# ----------------------------------------------------------------------
+
+
+def _write_training_set(project: ProjectRef, df: pd.DataFrame) -> None:
+    project.training_set_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(project.training_set_path)
+
+
+def test_all_emits_fold_and_scoring_events(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(loso, "run_one_config", _fake_run_one_config(strong=True))
+    project = _project(tmp_path)
+    _write_training_set(project, _training_df())
+    events: list[dict] = []
+    res = loso.leave_one_subject_out_all(project, n_boot=50, progress=events.append)
+
+    assert len(res) == 1 and "error" not in res[0]
+    assert events[0] == {"stage": "loading"}
+    folds = [e for e in events if e.get("stage") == "fold"]
+    assert [e["fold"] for e in folds] == [1, 2, 3, 4]
+    assert all(e["n_folds"] == 4 and e["behavior_index"] == 1 and e["n_behaviors"] == 1
+               and e["behavior_name"] == "Approach" for e in folds)
+    assert [e["subject"] for e in folds] == ["MS1", "MS2", "MS3", "MS4"]
+    assert events[-1]["stage"] == "scoring"
+
+
+def test_all_cancel_stops_before_next_fold(tmp_path, monkeypatch) -> None:
+    calls: list[str] = []
+    inner = _fake_run_one_config(strong=True)
+
+    def _counting(*args, **kwargs):
+        calls.append("fold")
+        return inner(*args, **kwargs)
+
+    monkeypatch.setattr(loso, "run_one_config", _counting)
+    project = _project(tmp_path)
+    _write_training_set(project, _training_df())
+    res = loso.leave_one_subject_out_all(
+        project, n_boot=50, should_cancel=lambda: len(calls) >= 2
+    )
+    assert len(calls) == 2
+    assert res == [{"cancelled": True, "n_behaviors_done": 0, "n_behaviors": 1}]
+
+
+def test_broken_progress_callback_does_not_kill_run(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(loso, "run_one_config", _fake_run_one_config(strong=True))
+
+    def _boom(_event):
+        raise RuntimeError("ui gone")
+
+    res = loso.leave_one_subject_out(
+        _project(tmp_path), TARGET, df=_training_df(), n_boot=50, progress=_boom
+    )
+    assert "error" not in res

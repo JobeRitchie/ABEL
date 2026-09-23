@@ -57,14 +57,17 @@ class ClipPlayer(QWidget):
 
         self._play_btn = QPushButton("▶")
         self._play_btn.setFixedWidth(36)
+        self._play_btn.setStyleSheet("padding: 4px 0px;")
         self._play_btn.clicked.connect(self.toggle_play)
 
         self._prev_btn = QPushButton("◀")
         self._prev_btn.setFixedWidth(36)
+        self._prev_btn.setStyleSheet("padding: 4px 0px;")
         self._prev_btn.clicked.connect(lambda: self.seek(self._cur_frame - 1))
 
         self._next_btn = QPushButton("▶▶")
         self._next_btn.setFixedWidth(36)
+        self._next_btn.setStyleSheet("padding: 4px 0px;")
         self._next_btn.clicked.connect(lambda: self.seek(self._cur_frame + 1))
 
         self._frame_label = QLabel("Frame: 0 / 0")

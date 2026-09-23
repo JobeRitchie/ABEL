@@ -131,3 +131,49 @@ def test_delete_purges_candidate_decision_and_label_references(tmp_path: Path) -
     df = pd.read_parquet(lbl_path)
     got = dict(zip(df["segment_id"], df["review_label"]))
     assert got == {"seg1": keep_id, "seg3": keep_id}
+
+
+def test_delete_purges_soundboard_training_set_settings_and_bouts(tmp_path: Path) -> None:
+    svc = BehaviorService()
+    svc.set_project(tmp_path)
+    keep_id = _add(svc, "Attack")
+    drop_id = _add(svc, "Submit")
+
+    sb = tmp_path / "derived" / "review_labels" / "soundboard_labels.json"
+    write_json(sb, {"windows": {
+        "w1": [{"behavior_id": drop_id, "focal_animal_id": "track_0"}],
+        "w2": [
+            {"behavior_id": drop_id, "focal_animal_id": "track_0"},
+            {"behavior_id": keep_id, "focal_animal_id": "track_1"},
+        ],
+    }})
+    ts = tmp_path / "derived" / "training_sets" / "training_set.parquet"
+    ts.parent.mkdir(parents=True)
+    pd.DataFrame({
+        "segment_id": ["a", "b", "c"],
+        "label": [drop_id, f"{keep_id}|{drop_id}", keep_id],
+    }).to_parquet(ts, index=False)
+    trs = tmp_path / "config" / "temporal_review_settings.json"
+    write_json(trs, {"by_behavior": {drop_id: {"onset_threshold": 0.2}, keep_id: {"onset_threshold": 0.3}}})
+    ref = tmp_path / "config" / "temporal_refinement_settings.json"
+    write_json(ref, {"by_behavior": {"target_behavior": {"selected_behavior_models": {
+        drop_id: "behavior_model_Submit", keep_id: "behavior_model_Attack"}}}})
+    cands = tmp_path / "derived" / "review_tables" / "candidate_segments.json"
+    write_json(cands, {"candidates": [{"behavior_id": keep_id, "behavior_ids": [keep_id, drop_id]}]})
+    bouts = tmp_path / "derived" / "behavior_bouts" / f"{drop_id}_bouts.parquet"
+    bouts.parent.mkdir(parents=True)
+    bouts.write_bytes(b"x")
+
+    assert svc.delete(drop_id) is True
+
+    windows = read_json(sb)["windows"]
+    assert "w1" not in windows
+    assert windows["w2"] == [{"behavior_id": keep_id, "focal_animal_id": "track_1"}]
+    df = pd.read_parquet(ts)
+    assert df["segment_id"].tolist() == ["b", "c"]
+    assert df["label"].tolist() == [keep_id, keep_id]
+    assert list(read_json(trs)["by_behavior"]) == [keep_id]
+    assert read_json(ref)["by_behavior"]["target_behavior"]["selected_behavior_models"] == {
+        keep_id: "behavior_model_Attack"}
+    assert read_json(cands)["candidates"][0]["behavior_ids"] == [keep_id]
+    assert not bouts.exists()

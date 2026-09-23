@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 import re
 import threading
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -18,6 +18,9 @@ from abel.services.provenance_service import ProvenanceService
 from abel.services.roi_service import DEFAULT_BG_VAR_THRESHOLD, ROIService
 from abel.storage.file_store import read_json, write_json
 from abel.utils import roi_geometry
+
+if TYPE_CHECKING:
+    from abel.models.schemas import PoseSmoothingSettings
 
 
 # threading is retained for the gpu_flow_lock parameter used in frame-chunk
@@ -474,6 +477,7 @@ class ContextFeatureService:
         mog2_warmup_frames: int = MOG2_WARMUP_FRAMES,
         mog2_var_threshold: int = MOG2_VAR_THRESHOLD,
         _cv2_cuda_algo: "Any | None" = None,
+        cancel_check: "Callable[[], None] | None" = None,
     ) -> dict[str, list]:
         """Process a contiguous range of video frames, returning per-column value lists.
 
@@ -588,6 +592,8 @@ class ContextFeatureService:
             flow_mag_extras: list[list[float]] = [[] for _ in range(_n_extra)]
 
             for frame_idx in range(frame_start, frame_end):
+                if cancel_check is not None and not frame_idx & 63:
+                    cancel_check()
                 ok, frame = cap.read()
                 if not ok:
                     break
@@ -813,6 +819,7 @@ class ContextFeatureService:
         gpu_batch_size: int = 0,
         gpu_lock_timeout: float = 120.0,
         warning_cb: "Callable[[str], None] | None" = None,
+        cancel_check: "Callable[[], None] | None" = None,
     ) -> dict[str, list]:
         """Process a video chunk using batched GPU optical flow.
 
@@ -919,6 +926,8 @@ class ContextFeatureService:
 
             total_frames = frame_end - frame_start
             for batch_off in range(0, total_frames, SUB_BATCH):
+                if cancel_check is not None:
+                    cancel_check()
                 batch_n = min(SUB_BATCH, total_frames - batch_off)
 
                 # Phase 1: read frames ────────────────────────────────────────
@@ -1233,6 +1242,8 @@ class ContextFeatureService:
         roi_subject_id: str | None = None,
         identity_corrections: "list[dict] | None" = None,
         save: bool = True,
+        smoothing: "PoseSmoothingSettings | None" = None,
+        cancel_check: "Callable[[], None] | None" = None,
     ) -> pd.DataFrame:
         """Compute per-frame context features, optionally across parallel frame chunks.
 
@@ -1267,9 +1278,14 @@ class ContextFeatureService:
         except Exception as exc:
             raise ImportError("opencv-python is required for ContextFeatureService") from exc
 
+        # Same pose smoothing as the pose features (the project's Pose &
+        # Features settings unless the caller passes them explicitly).
+        if smoothing is None:
+            from abel.models.schemas import PoseSmoothingSettings as _S  # noqa: PLC0415
+            smoothing = _S.load_from_project(project_root)
         if individual_id is not None:
             _multi = self._pose.load_and_clean_multi(
-                pose_path, keypoint_aliases=keypoint_aliases,
+                pose_path, settings=smoothing, keypoint_aliases=keypoint_aliases,
                 identity_corrections=identity_corrections,
             )
             pose = _multi.per_individual.get(individual_id)
@@ -1278,7 +1294,9 @@ class ContextFeatureService:
             if pose is None:
                 raise ValueError(f"No pose for individual '{individual_id}' in {pose_path}")
         else:
-            pose = self._pose.load_and_clean(pose_path, keypoint_aliases=keypoint_aliases)
+            pose = self._pose.load_and_clean(
+                pose_path, settings=smoothing, keypoint_aliases=keypoint_aliases,
+            )
         _roi_key = f"{roi_subject_id or animal_id}::{session_id}"
         target_rois = self._rois.resolve_target_rois(project_root, _roi_key)
         # How many ROI slots this project defines.  Captured *before* the
@@ -1416,6 +1434,7 @@ class ContextFeatureService:
             config=config,
             extra_rois=target_rois[1:],
             mog2_var_threshold=self._rois.bg_var_threshold(project_root),
+            cancel_check=cancel_check,
         )
 
         # Select chunk processor based on detected backend.
@@ -1444,6 +1463,8 @@ class ContextFeatureService:
         def _make_chunk_runner(start_f: int, end_f: int, chunk_idx: int):
             """Wrap chunk_fn to fire a start-of-chunk progress message."""
             def _run() -> dict:
+                if cancel_check is not None:
+                    cancel_check()
                 if progress_cb is not None:
                     progress_cb(
                         0,
@@ -1667,6 +1688,8 @@ class ContextFeatureService:
         warning_cb: Callable[[str], None] | None = None,
         keypoint_aliases: "dict[str, str] | None" = None,
         identity_corrections: "list[dict] | None" = None,
+        smoothing: "PoseSmoothingSettings | None" = None,
+        cancel_check: "Callable[[], None] | None" = None,
     ) -> pd.DataFrame:
         """Multi-animal context: compute per-individual context and write one
         combined per-session parquet whose ``animal_id`` matches the per-individual
@@ -1693,6 +1716,8 @@ class ContextFeatureService:
                 roi_subject_id=roi_subject_id,
                 identity_corrections=identity_corrections,
                 save=False,
+                smoothing=smoothing,
+                cancel_check=cancel_check,
             )
             parts.append(d)
 

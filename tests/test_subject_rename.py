@@ -243,7 +243,20 @@ def test_current_subjects_maps_frozen_keys_to_current_names(tmp_path: Path) -> N
         "animal_id": ["m1_cond1", "m1_ext", "m1_cond1:mouse1", "imported_x"],
         "session_id": [s1, s2, s1, "session_elsewhere"],
     })
-    assert current_subjects(df, manifest).tolist() == ["m1", "m1", "m1_cond1:mouse1", "imported_x"]
+    assert current_subjects(df, manifest).tolist() == ["m1", "m1", "m1", "imported_x"]
+
+
+def test_current_subjects_groups_multi_animal_tracks_by_session(tmp_path: Path) -> None:
+    # track_0/track_1 are per-video labels: each session's pair is its own unit,
+    # never pooled with the same track label from another session.
+    manifest = _fear_manifest(tmp_path, ["pairA", "pairB"])
+    sa, sb = _sid(manifest, "pairA"), _sid(manifest, "pairB")
+    df = pd.DataFrame({
+        "animal_id": ["track_0", "track_1", "track_0", "track_1"],
+        "session_id": [sa, sa, sb, sb],
+    })
+    out = current_subjects(df, manifest).tolist()
+    assert out[0] == out[1] and out[2] == out[3] and out[0] != out[2]
 
 
 def test_subject_split_keeps_a_subjects_sessions_together(tmp_path: Path) -> None:

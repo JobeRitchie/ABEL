@@ -85,7 +85,7 @@ class InfoTab(QWidget):
 
         inner = QTabWidget()
         inner.setTabPosition(QTabWidget.TabPosition.North)
-        inner.addTab(self._build_about_tab(), "About & Updates")
+        inner.addTab(self._build_about_tab(), "About && Updates")
         inner.addTab(self.methods_tab, "Methods")
         inner.addTab(self._build_history_tab(), "Version History")
 
@@ -104,7 +104,7 @@ class InfoTab(QWidget):
         title = QLabel("ABEL")
         title.setStyleSheet("font-size: 20px; font-weight: 800; color: #90CAF9;")
         subtitle = QLabel("Active-learning Behavior Estimation and Labeling")
-        subtitle.setStyleSheet("font-size: 12px; color: #607D8B;")
+        subtitle.setStyleSheet("font-size: 12px; color: #8FA6B4;")
         version = QLabel(f"Version {__version__}   •   {VERSION_DATE}")
         version.setStyleSheet("font-size: 13px; font-weight: 700; color: #B0BEC5;")
 
@@ -126,7 +126,7 @@ class InfoTab(QWidget):
             "update and restarts the app."
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("font-size: 11px; color: #607D8B;")
+        desc.setStyleSheet("font-size: 11px; color: #8FA6B4;")
         layout.addWidget(desc)
 
         status_row = QHBoxLayout()

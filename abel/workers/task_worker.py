@@ -7,11 +7,14 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
+from abel.utils.cancellation import OperationCancelled
+
 
 class WorkerSignals(QObject):
     finished = Signal(object)
     failed = Signal(str)
     line_emitted = Signal(str)  # live stdout/stderr lines from long-running subprocesses
+    progress = Signal(object)  # structured progress events (dicts) from the task
 
 
 class TaskWorker(QRunnable):
@@ -29,5 +32,7 @@ class TaskWorker(QRunnable):
         try:
             result = self.fn(*self.args, **self.kwargs)
             self.signals.finished.emit(result)
-        except Exception:
+        except (Exception, OperationCancelled):
+            # A cancel reaches ``failed`` too; handlers tell it apart with
+            # ``is_cancel_traceback``.
             self.signals.failed.emit(traceback.format_exc())

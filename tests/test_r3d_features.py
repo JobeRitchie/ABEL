@@ -315,6 +315,38 @@ def test_cache_reuse_ignores_segments_of_a_different_length(tmp_path):
     assert set(found) == {0}, "only the 15-frame segment is a valid anchor"
 
 
+def test_cache_reuse_keeps_each_animal_its_own_crop(tmp_path):
+    """Two mice share start frames but not crops; one must never get the other's embedding."""
+    reps = tmp_path / "derived" / "representations"
+    reps.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "segment_id": ["a0", "a1"],
+            "session_id": ["s1", "s1"],
+            "animal_id": ["track_0", "track_1"],
+            "start_frame": [0, 0],
+            "end_frame": [14, 14],
+        }
+    ).to_parquet(reps / "segment_features.parquet", index=False)
+    cache_dir = tmp_path / "derived" / "r3d_features"
+    cache_dir.mkdir(parents=True)
+    rows = pd.DataFrame(np.vstack([np.zeros(R3D_DIMS), np.ones(R3D_DIMS)]).astype(np.float32),
+                        columns=r3d_columns())
+    rows.insert(0, "segment_id", ["a0", "a1"])
+    rows.to_parquet(cache_dir / "s1.parquet", index=False)
+
+    svc = R3DFeatureService()
+    assert np.all(svc._cached_by_start(tmp_path, "s1", 15, animal_id="track_0")[0] == 0)
+    assert np.all(svc._cached_by_start(tmp_path, "s1", 15, animal_id="track_1")[0] == 1)
+
+
+def test_dense_anchors_are_cached_per_animal(tmp_path):
+    svc, _video, _pose, sig, anchors, emb = _dense_fixture(tmp_path)
+    svc._store_dense_anchors(tmp_path, "s1", 15, sig, anchors, emb, lambda _m: None, animal_id="track_1")
+    assert svc._load_dense_anchors(tmp_path, "s1", 15, sig, animal_id="track_0") == {}
+    assert set(svc._load_dense_anchors(tmp_path, "s1", 15, sig, animal_id="track_1")) == {0, 15, 30}
+
+
 def test_cache_reuse_is_empty_without_a_cache(tmp_path):
     assert R3DFeatureService()._cached_by_start(tmp_path, "s1", window_frames=15) == {}
 

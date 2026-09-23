@@ -7,10 +7,87 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 20, 2026"
+VERSION_DATE = "September 23, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.23.0", "September 23, 2026", [
+        "Multi-animal projects get a Social Interaction subtab in Behavior "
+        "Analytics. Summary shows per-session distance, time in contact, "
+        "contact bouts, approach and orientation. Dominance fits a Gaussian "
+        "HMM over social and movement features pooled across the cohort and "
+        "scores a displacement dominance index per subject, with charts for "
+        "the hierarchy per session and over time, group steepness, state "
+        "profiles, dwell times and a per-session ethogram. The fit runs in "
+        "the background and is restored when the project reopens.",
+        "Behavior Analytics can be scoped to one tracked animal. By default a "
+        "multi-animal session reports the maximum across its animals; "
+        "choosing an animal rebuilds every chart from that animal's own "
+        "trace and pose. Behavior colors no longer repeat past 20 behaviors, "
+        "and negative classes are drawn in grey.",
+        "Appearance-based swap detection reads every frame and decodes the "
+        "identity assignment frame by frame, so swaps shorter than a second "
+        "during contact are found instead of being merged away. Frames near "
+        "a colored glove are ignored, and a lone dark track still counts as "
+        "the dark animal.",
+        "Clip Mining can hunt coverage gaps: a toggle limits a batch to the "
+        "subjects that still lack examples of a behavior, counted the way "
+        "leave-one-subject-out validation counts them. A subject screened "
+        "many times without a hit is reported as likely absent and dropped.",
+        "Clip Mining gains a Label Needs test. For each chosen behavior it "
+        "runs a leak-free ablation (fewer positives, positives from fewer "
+        "animals, no hard negatives, fewer No Behavior negatives) and says "
+        "which kind of new label would help that model most.",
+        "Temporal Refinement gains Auto-Tune Settings. It suggests each "
+        "behavior's onset threshold from its model's held-out predictions, "
+        "picks the middle of the flat part of the F1 curve rather than its "
+        "noisy peak, and caps it so most labeled bouts still peak above it. "
+        "'Favor recall' tunes for fewer missed bouts. Nothing is saved until "
+        "Apply.",
+        "Long jobs can be canceled. Active learning, inference, bout "
+        "generation and leave-one-subject-out validation stop at the next "
+        "checkpoint and keep the previous results; nothing half written is "
+        "saved. LOSO shows live progress with the current fold, held-out "
+        "subject and ETA.",
+        "The Pose & Features smoothing settings now reach feature "
+        "extraction. Before this fix every project was extracted with the "
+        "default 5-frame smoothing whatever the tab said. Changing the "
+        "settings now marks pose and context features for refresh.",
+        "Model training fixes. The validation split searches many subject "
+        "draws so a rare behavior's held-out set gets its fair share of "
+        "positives. The deployed model's calibrator is no longer fit with "
+        "class weights, which had inflated its probabilities about twofold; "
+        "retrain affected models. Multi-animal windows added from review are "
+        "summarized per animal instead of blending both mice. Leave-one-"
+        "subject-out and subject splits group a dyad's two tracks under the "
+        "session's subject. Co-occurring labels count as positives for each "
+        "behavior they name in review and temporal feedback.",
+        "Dense inference in multi-animal sessions used the other animal's "
+        "video features for every animal after the first. Video features are "
+        "now cached per animal. Rerun inference on multi-animal projects.",
+        "Deleting a behavior also removes it from the soundboard store, the "
+        "training set, per-behavior settings and its bout tables, so it can "
+        "no longer come back or keep training.",
+        "The soundboard is fully keyboard driven: arrows and Enter always "
+        "reach it, Enter commits, and in multi-animal projects a Repeat Last "
+        "button re-stages the previous clip's labels.",
+        "Clip extraction has an identity dot size setting with a Preview "
+        "button that renders one clip frame exactly as it will be written. "
+        "Candidate extraction counts and clip padding carry clearer "
+        "tooltips.",
+        "Validation gains a Review Effort subtab that measures how much "
+        "reviewer time the project's clip review took, per day.",
+        "Interface: the mouse wheel no longer changes a setting while you "
+        "scroll past it; combo boxes and spin boxes draw proper arrows in "
+        "the dark theme; muted text is easier to read; Data Import, Pose & "
+        "Features, Seed Examples and Clip Extraction layouts fit a 768 px "
+        "screen.",
+        "Installation shows its progress. run_abel.bat reports what pip is "
+        "resolving, downloading and installing, with a download bar, instead "
+        "of sitting silent for minutes, and the launcher says what startup "
+        "is doing. The README notes that Microsoft Visual C++ 14.0 or later "
+        "is needed to install dependencies.",
+    ]),
     ("0.22.0", "September 20, 2026", [
         "Identity swaps can now be found from the video itself. When two "
         "animals differ in coat color, a scan samples the pixels under each "

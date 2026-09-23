@@ -89,14 +89,17 @@ class _FramePlayer(QWidget):
 
         self._play_btn = QPushButton("▶")
         self._play_btn.setFixedWidth(36)
+        self._play_btn.setStyleSheet("padding: 4px 0px;")
         self._play_btn.clicked.connect(self.toggle_play)
 
         self._prev_btn = QPushButton("◀")
         self._prev_btn.setFixedWidth(36)
+        self._prev_btn.setStyleSheet("padding: 4px 0px;")
         self._prev_btn.clicked.connect(lambda: self.seek(self._cur_frame - 1))
 
         self._next_btn = QPushButton("▶▶")
         self._next_btn.setFixedWidth(36)
+        self._next_btn.setStyleSheet("padding: 4px 0px;")
         self._next_btn.clicked.connect(lambda: self.seek(self._cur_frame + 1))
 
         self._frame_label = QLabel("Frame: 0 / 0")
@@ -254,11 +257,11 @@ class SeedExamplesTab(QWidget):
         self._session_combo = QComboBox()
         self._session_combo.currentIndexChanged.connect(self._on_session_changed)
         refresh_btn = QPushButton("⟳ Refresh")
-        refresh_btn.setFixedWidth(80)
+        refresh_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         refresh_btn.setToolTip("Reload sessions from the import manifest")
         refresh_btn.clicked.connect(self.refresh)
         load_video_btn = QPushButton("▶ Load Video")
-        load_video_btn.setFixedWidth(100)
+        load_video_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         load_video_btn.setToolTip("Load the selected session's video into the player")
         load_video_btn.clicked.connect(self._load_current_session)
 
@@ -391,12 +394,19 @@ class SeedExamplesTab(QWidget):
 
         ann_layout.addRow("Behavior:", self._behavior_combo)
         ann_layout.addRow(self._co_occurring_label, self._behavior_list)
-        ann_layout.addRow("Start frame:", self._start_spin)
-        ann_layout.addRow("End frame:", self._end_spin)
-        ann_layout.addRow("", mark_start_btn)
-        ann_layout.addRow("", mark_end_btn)
+        # Each frame field sits beside its Mark button, and Add Seed ends the
+        # Label row: three fewer rows keeps this tab inside a 768 px screen.
+        start_row = QHBoxLayout()
+        start_row.addWidget(self._start_spin, 1)
+        start_row.addWidget(mark_start_btn)
+        end_row = QHBoxLayout()
+        end_row.addWidget(self._end_spin, 1)
+        end_row.addWidget(mark_end_btn)
+        label_row.addStretch(1)
+        label_row.addWidget(add_btn)
+        ann_layout.addRow("Start frame:", start_row)
+        ann_layout.addRow("End frame:", end_row)
         ann_layout.addRow("Label:", label_row)
-        ann_layout.addRow("", add_btn)
         ann_layout.addRow("", self._assume_neg_btn)
 
         right_layout = QVBoxLayout()

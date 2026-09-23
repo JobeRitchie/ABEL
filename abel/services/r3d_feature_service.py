@@ -58,6 +58,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import threading
 import warnings
 from pathlib import Path
@@ -69,6 +70,7 @@ import pandas as pd
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.storage.file_store import atomic_write_parquet, read_json, write_json
+from abel.utils.cancellation import checkpoint
 
 logger = logging.getLogger("abel")
 
@@ -416,6 +418,8 @@ class R3DFeatureService:
             cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
             frame_no = lo
             while frame_no <= hi:
+                if not frame_no & 255:
+                    checkpoint()
                 ok, frame = cap.read()
                 if not ok:
                     break
@@ -500,6 +504,15 @@ class R3DFeatureService:
             # Dense windows for a session are built from a single animal's frame
             # table, so one crop track covers them all.
             cx, cy, side = tracks[int(animal_row[0]) if len(animal_row) else 0]
+            # Each animal's crop gives a different embedding for the same start
+            # frame, so a multi-animal session caches and reuses per animal.
+            # Keyed by session alone, every animal after the first was scored
+            # with the other mouse's video features.
+            animal_key = (
+                str(dense_df["animal_id"].iloc[0])
+                if len(tracks) > 1 and "animal_id" in dense_df.columns
+                else None
+            )
 
             starts = dense_df["start_frame"].to_numpy(dtype=int)
             n_pose = int(min(len(cx), len(cy)))
@@ -511,10 +524,12 @@ class R3DFeatureService:
                 manifest, Path(video_path), Path(pose_path), session_id
             )
             cached = self._load_dense_anchors(
-                project_root, session_id, window_frames, signature
+                project_root, session_id, window_frames, signature, animal_id=animal_key
             )
             # Training rows are the canonical value for the anchors they cover.
-            cached.update(self._cached_by_start(project_root, session_id, window_frames))
+            cached.update(self._cached_by_start(
+                project_root, session_id, window_frames, animal_id=animal_key
+            ))
             fresh_needed = any(int(a) not in cached for a in anchors)
             emb = self._anchor_embeddings(
                 Path(video_path), anchors, cx, cy, side, window_frames, cached, _log,
@@ -522,7 +537,8 @@ class R3DFeatureService:
             )
             if fresh_needed:
                 self._store_dense_anchors(
-                    project_root, session_id, window_frames, signature, anchors, emb, _log
+                    project_root, session_id, window_frames, signature, anchors, emb, _log,
+                    animal_id=animal_key,
                 )
         except Exception as exc:
             logger.warning("R3D dense features skipped for %s: %s", session_id, exc)
@@ -562,23 +578,32 @@ class R3DFeatureService:
         return anchors
 
     def _cached_by_start(
-        self, project_root: Path, session_id: str, window_frames: int
+        self,
+        project_root: Path,
+        session_id: str,
+        window_frames: int,
+        animal_id: "str | None" = None,
     ) -> dict[int, np.ndarray]:
         """Cached training embeddings keyed by their window's start frame.
 
         Only segments whose window is exactly ``window_frames`` long qualify: a
         training set can hold more than one segment length, and a 30-frame
-        embedding is not the same quantity as a 15-frame one.
+        embedding is not the same quantity as a 15-frame one.  With
+        ``animal_id``, only that animal's segments qualify: two animals share
+        start frames but not crops.
         """
         cache_path = self._cache_path(project_root, session_id)
         seg_path = project_root / "derived" / "representations" / "segment_features.parquet"
         if not cache_path.exists() or not seg_path.exists():
             return {}
         try:
-            seg = pd.read_parquet(
-                seg_path, columns=["segment_id", "session_id", "start_frame", "end_frame"]
-            )
+            cols = ["segment_id", "session_id", "start_frame", "end_frame"]
+            if animal_id is not None:
+                cols.append("animal_id")
+            seg = pd.read_parquet(seg_path, columns=cols)
             seg = seg[seg["session_id"].astype(str) == str(session_id)]
+            if animal_id is not None:
+                seg = seg[seg["animal_id"].astype(str) == str(animal_id)]
             lengths = seg["end_frame"].to_numpy(dtype=int) - seg["start_frame"].to_numpy(dtype=int) + 1
             seg = seg[lengths == int(window_frames)]
             if seg.empty:
@@ -604,10 +629,16 @@ class R3DFeatureService:
 
     # ── Dense anchor cache ───────────────────────────────────────────────
     def _dense_cache_paths(
-        self, project_root: Path, session_id: str, window_frames: int
+        self,
+        project_root: Path,
+        session_id: str,
+        window_frames: int,
+        animal_id: "str | None" = None,
     ) -> tuple[Path, Path]:
         base = project_root / "derived" / "r3d_features" / "dense_anchors"
-        stem = f"{session_id}__w{int(window_frames)}"
+        # Single-animal sessions keep the original name so their caches stay valid.
+        animal = f"__{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(animal_id))}" if animal_id else ""
+        stem = f"{session_id}{animal}__w{int(window_frames)}"
         return base / f"{stem}.parquet", base / f"{stem}.json"
 
     @staticmethod
@@ -683,10 +714,11 @@ class R3DFeatureService:
         session_id: str,
         window_frames: int,
         signature: dict[str, Any],
+        animal_id: "str | None" = None,
     ) -> dict[int, np.ndarray]:
         """Previously embedded dense anchors, keyed by start frame."""
         parquet_path, meta_path = self._dense_cache_paths(
-            project_root, session_id, window_frames
+            project_root, session_id, window_frames, animal_id
         )
         if not parquet_path.exists() or not meta_path.exists():
             return {}
@@ -716,10 +748,11 @@ class R3DFeatureService:
         anchors: np.ndarray,
         emb: np.ndarray,
         log: Callable[[str], None],
+        animal_id: "str | None" = None,
     ) -> None:
         """Persist this run's anchor embeddings for the next one."""
         parquet_path, meta_path = self._dense_cache_paths(
-            project_root, session_id, window_frames
+            project_root, session_id, window_frames, animal_id
         )
         try:
             df = pd.DataFrame(emb, columns=r3d_columns())
@@ -728,6 +761,7 @@ class R3DFeatureService:
             atomic_write_parquet(df, parquet_path, index=False)
             write_json(meta_path, {
                 "session_id": str(session_id),
+                "animal_id": animal_id,
                 "window_frames": int(window_frames),
                 "n_anchors": int(len(df)),
                 "signature": signature,
@@ -837,6 +871,8 @@ class R3DFeatureService:
             cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
             n_track = int(min(len(cx), len(cy)))
             for k in range(hi - lo + 1):
+                if not k & 255:
+                    checkpoint()
                 ok, frame = cap.read()
                 if not ok:
                     break
@@ -866,6 +902,7 @@ class R3DFeatureService:
         device_name = "cuda" if torch.cuda.is_available() else "cpu"
         out: list[np.ndarray] = []
         for start in range(0, len(clips), _BATCH):
+            checkpoint()
             batch = clips[start : start + _BATCH]
             acquired = False
             try:

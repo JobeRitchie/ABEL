@@ -67,8 +67,8 @@ def test_grid_groups_solo_and_social_and_omits_no_behavior():
     texts = _grid_texts(sb)
     assert not any("No Behavior" in t for t in texts)  # lives on its own button
     solo_hdr, social_hdr = texts.index("SOLO  (2)"), texts.index("SOCIAL  (2)")
-    assert solo_hdr < texts.index("Rearing   (r)") < social_hdr
-    assert social_hdr < texts.index("Sniffing \u21c4   (s)")
+    assert solo_hdr < texts.index("Rearing  (r)") < social_hdr
+    assert social_hdr < texts.index("Sniffing \u21c4  (s)")
 
 
 def test_solo_only_project_gets_no_group_headers():
@@ -78,7 +78,7 @@ def test_solo_only_project_gets_no_group_headers():
         [("rearing", "Rearing", "r", False, "none"), (NO_BEHAVIOR_ID, "No Behavior", "n", False, "none")],
         lambda _b: None, {},
     )
-    assert _grid_texts(sb) == ["Rearing   (r)"]
+    assert _grid_texts(sb) == ["Rearing  (r)"]
 
 
 def test_none_button_text_tracks_mode():

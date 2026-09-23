@@ -11,7 +11,13 @@ import sys
 faulthandler.enable()
 
 
+def _startup_step(message: str) -> None:
+    """Tell the launcher window what startup is doing; the first launch is slow."""
+    print(f"[INFO] {message}", flush=True)
+
+
 def run() -> int:
+    _startup_step("Loading Qt...")
     try:
         from PySide6.QtCore import Qt
         from PySide6.QtGui import QGuiApplication, QIcon
@@ -29,6 +35,7 @@ def run() -> int:
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
+    _startup_step("Loading ABEL modules...")
     from abel.ui.assets import icon_path
     from abel.ui.main_window import MainWindow
 
@@ -45,8 +52,13 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(icon_path())))
     app.setStyleSheet(_STYLESHEET)
+    from abel.ui.wheel_guard import install_wheel_guard
+
+    install_wheel_guard(app)
+    _startup_step("Building the main window...")
     win = MainWindow()
     win.showMaximized()
+    _startup_step("ABEL is running. Keep this window open; close ABEL to exit.")
     return app.exec()
 
 
@@ -159,8 +171,72 @@ QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus {
     border-color: #42A5F5;
 }
+/* Styling ::drop-down replaces the native arrow, so the arrow glyph and the
+   spin-box buttons must be drawn here too. Without them, combo boxes read as
+   plain text fields and the platform spin buttons sat on top of the value. */
+QComboBox {
+    padding-right: 22px;
+}
 QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 18px;
     border-left: 1px solid #1565C0;
+}
+QComboBox::down-arrow {
+    image: url(@ASSETS@/arrow_down.svg);
+    width: 10px;
+    height: 10px;
+}
+QComboBox::down-arrow:disabled {
+    image: url(@ASSETS@/arrow_down_disabled.svg);
+}
+/* Stacked buttons make a spin box's natural height taller than the other
+   inputs; trimming the vertical padding brings it back in line with combos. */
+QSpinBox, QDoubleSpinBox {
+    padding-top: 2px;
+    padding-bottom: 2px;
+    padding-right: 20px;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    width: 16px;
+    border-left: 1px solid #1565C0;
+    background: #102E52;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: 4px;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: 4px;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background: #163D6E;
+}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(@ASSETS@/arrow_up.svg);
+    width: 8px;
+    height: 8px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(@ASSETS@/arrow_down.svg);
+    width: 8px;
+    height: 8px;
+}
+QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
+QSpinBox::up-arrow:off, QDoubleSpinBox::up-arrow:off {
+    image: url(@ASSETS@/arrow_up_disabled.svg);
+}
+QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled,
+QSpinBox::down-arrow:off, QDoubleSpinBox::down-arrow:off {
+    image: url(@ASSETS@/arrow_down_disabled.svg);
+}
+QSpinBox[buttonSymbols="2"], QDoubleSpinBox[buttonSymbols="2"] {
+    padding-right: 7px;
 }
 QComboBox QAbstractItemView {
     background-color: #0F2744;
@@ -197,10 +273,18 @@ QHeaderView::section {
 }
 
 /* ── Scrollbars ────────────────────────────────────────── */
-QScrollBar:vertical, QScrollBar:horizontal {
+QScrollBar:vertical {
     background: #0D1B2A;
     width: 10px;
     border: none;
+}
+QScrollBar:horizontal {
+    background: #0D1B2A;
+    height: 10px;
+    border: none;
+}
+QScrollBar::handle:horizontal {
+    min-width: 20px;
 }
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
     background: #1565C0;
@@ -225,6 +309,52 @@ QCheckBox::indicator {
 }
 QCheckBox::indicator:checked {
     background: #1565C0;
+    border-color: #42A5F5;
+    image: url(@ASSETS@/check.svg);
+}
+QCheckBox::indicator:hover {
+    border-color: #42A5F5;
+}
+QCheckBox::indicator:disabled {
+    border-color: #263238;
+    background: #1A2A3A;
+}
+QCheckBox::indicator:checked:disabled {
+    background: #263B52;
+}
+
+/* ── Radio ─────────────────────────────────────────────── */
+QRadioButton {
+    color: #90CAF9;
+    spacing: 6px;
+}
+QRadioButton::indicator {
+    width: 12px; height: 12px;
+    border: 1px solid #1565C0;
+    background: #0F2744;
+    border-radius: 7px;
+}
+QRadioButton::indicator:checked {
+    background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+                                stop:0 #FFFFFF, stop:0.4 #FFFFFF,
+                                stop:0.5 #1565C0, stop:1 #1565C0);
+    border-color: #42A5F5;
+}
+QRadioButton::indicator:hover {
+    border-color: #42A5F5;
+}
+
+/* ── Progress bar ──────────────────────────────────────── */
+QProgressBar {
+    background: #0F2744;
+    border: 1px solid #163D6E;
+    border-radius: 4px;
+    color: #E0E8F0;
+    text-align: center;
+}
+QProgressBar::chunk {
+    background: #1565C0;
+    border-radius: 3px;
 }
 
 /* ── Status bar / separators ───────────────────────────── */
@@ -243,3 +373,13 @@ QToolTip {
     padding: 4px;
 }
 """
+
+
+def _assets_url_root() -> str:
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parent / "ui" / "assets").as_posix()
+
+
+# QSS url() needs an absolute path to the bundled arrow/check glyphs.
+_STYLESHEET = _STYLESHEET.replace("@ASSETS@", _assets_url_root())

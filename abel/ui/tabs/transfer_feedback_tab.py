@@ -68,7 +68,7 @@ class TransferFeedbackTab(QWidget):
             "use the Analytics tab) so the numbers are current."
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("font-size: 11px; color: #607D8B;")
+        desc.setStyleSheet("font-size: 11px; color: #8FA6B4;")
 
         # ── Project selection row ─────────────────────────────────────
         row = QHBoxLayout()

@@ -59,6 +59,7 @@ from abel.temporal_refinement.temporal_metrics import (
     probability_histogram,
 )
 from abel.utils import xgb_predict
+from abel.utils.cancellation import checkpoint, propagate_scope
 
 logger = logging.getLogger("abel")
 
@@ -1287,6 +1288,7 @@ class TemporalRefinementService:
             # efficiently within each booster.predict(DMatrix) call.
             pred_results: dict[str, np.ndarray] = {}
             for bid in active_bids:
+                checkpoint()
                 bid_res, pred_prob = _predict_bid(bid)
                 pred_results[bid_res] = pred_prob
 
@@ -1539,7 +1541,10 @@ class TemporalRefinementService:
         else:
             done = 0
             with cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="temporal-infer") as executor:
-                futures = {executor.submit(_run_session, sid): sid for sid in target_sessions}
+                futures = {
+                    executor.submit(propagate_scope(_run_session), sid): sid
+                    for sid in target_sessions
+                }
                 for future in cf.as_completed(futures):
                     done += 1
                     sid = futures[future]

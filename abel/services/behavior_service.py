@@ -8,7 +8,7 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from abel.core.constants import GLOBAL_CONFIG_DIR
 from abel.models.schemas import BehaviorDefinition
@@ -45,6 +45,24 @@ def normalize_behavior_token(value: object) -> str:
 def is_no_behavior_name(value: object) -> bool:
     """True if *value* reads as the reserved universal-negative label."""
     return normalize_behavior_token(value) in _NO_BEHAVIOR_NAME_TOKENS
+
+
+def split_co_occurring(review_label: object) -> list[str]:
+    """The behavior ids a review label names.
+
+    Co-occurring labels are stored pipe-joined on one animal-segment
+    (``"allogroom|rear"``) because one animal really can do two things at once.
+    Every consumer that asks "is this row a positive for behavior X?" has to
+    look inside the pipe rather than compare the whole string, or a genuine
+    positive is silently counted as a negative.
+    """
+    return [part.strip() for part in str(review_label or "").split("|") if part.strip()]
+
+
+def label_names_behavior(review_label: object, behavior_id: str) -> bool:
+    """True if *review_label* names *behavior_id*, pipe-joined or alone."""
+    target = str(behavior_id or "").strip()
+    return bool(target) and target in split_co_occurring(review_label)
 
 
 class ReservedBehaviorError(ValueError):
@@ -353,13 +371,37 @@ class BehaviorService:
             if partner and b and b.is_social and str(b.directionality) == "mutual":
                 _apply(bid, partner, focal)
 
+        def _merge_fields(field_list: list[dict]) -> dict:
+            """Structured columns for a segment carrying several behaviors.
+
+            The focal animal is never ambiguous (the segment is keyed by it), so
+            it is always kept. The partner and role are only kept when every
+            social behavior on the segment agrees on them, otherwise there is no
+            single honest value for a one-value column.
+            """
+            if len(field_list) == 1:
+                return field_list[0]
+            merged = {
+                "focal_animal_id": field_list[0].get("focal_animal_id"),
+                "partner_animal_id": None,
+                "social_role": "none",
+            }
+            social = [f for f in field_list if f.get("social_role", "none") != "none"]
+            partners = {f.get("partner_animal_id") for f in social}
+            roles = {f.get("social_role") for f in social}
+            if len(partners) == 1 and len(roles) == 1:
+                merged["partner_animal_id"] = partners.pop()
+                merged["social_role"] = roles.pop()
+            return merged
+
         out: list[dict] = []
         for seg_id, entry in by_segment.items():
-            bids = sorted(set(entry["bids"]))
+            order = sorted(range(len(entry["bids"])), key=lambda i: entry["bids"][i])
+            bids = [entry["bids"][i] for i in order]
             out.append({
                 "segment_id": seg_id,
                 "review_label": "|".join(bids),
-                "fields": entry["fields"][0] if len(bids) == 1 else {},
+                "fields": _merge_fields([entry["fields"][i] for i in order]),
             })
         return out
 
@@ -581,7 +623,15 @@ class BehaviorService:
         only the deleted constituent stripped; rows that referenced the deleted
         behavior exclusively are removed.
         """
-        counts = {"candidates": 0, "decisions": 0, "labels": 0}
+        counts = {
+            "candidates": 0,
+            "decisions": 0,
+            "labels": 0,
+            "soundboard": 0,
+            "training_rows": 0,
+            "settings": 0,
+            "bouts": 0,
+        }
         if self._project_root is None:
             return counts
         dead = str(behavior_id).strip()
@@ -614,8 +664,11 @@ class BehaviorService:
                     continue
                 if new_label != str(row.get("behavior_id", "")):
                     row = {**row, "behavior_id": new_label}
+                ids = row.get("behavior_ids")
+                if isinstance(ids, list) and dead in ids:
+                    row = {**row, "behavior_ids": [i for i in ids if i != dead]}
                 kept.append(row)
-            if len(kept) != len(rows):
+            if kept != rows:
                 write_json(path, {**raw, key: kept})
 
         # 2. Review decisions (behavior_label field).
@@ -662,12 +715,103 @@ class BehaviorService:
             except Exception:
                 logger.warning("Failed to purge reviewer labels for %s", dead, exc_info=True)
 
+        # 4. Soundboard store. The soundboard re-shows these entries and
+        #    re-saves them into reviewer labels, which would resurrect the label.
+        sb_path = root / "derived" / "review_labels" / "soundboard_labels.json"
+        if sb_path.exists():
+            raw = read_json(sb_path, {"windows": {}})
+            windows = raw.get("windows")
+            if isinstance(windows, dict):
+                new_windows: dict = {}
+                for wid, entries in windows.items():
+                    if not isinstance(entries, list):
+                        new_windows[wid] = entries
+                        continue
+                    kept_entries = [
+                        e for e in entries
+                        if not (isinstance(e, dict) and str(e.get("behavior_id", "")).strip() == dead)
+                    ]
+                    counts["soundboard"] += len(entries) - len(kept_entries)
+                    if kept_entries:
+                        new_windows[wid] = kept_entries
+                if counts["soundboard"]:
+                    write_json(sb_path, {**raw, "windows": new_windows})
+
+        # 5. Training set. It accumulates across runs (merge keeps old rows), so
+        #    rows labelled with the deleted behavior would otherwise train forever.
+        ts_path = root / "derived" / "training_sets" / "training_set.parquet"
+        if ts_path.exists():
+            try:
+                import pandas as pd
+
+                df = pd.read_parquet(ts_path)
+                if "label" in df.columns and not df.empty:
+                    original = df["label"]
+                    stripped = original.map(
+                        lambda v: self._strip_label(v, dead) if v is not None else v
+                    )
+                    drop_mask = stripped.isna() & original.notna()
+                    counts["training_rows"] = int(drop_mask.sum())
+                    if counts["training_rows"] or bool((stripped.notna() & (stripped != original)).any()):
+                        df.assign(label=stripped)[~drop_mask].to_parquet(ts_path, index=False)
+            except Exception:
+                logger.warning("Failed to purge training set rows for %s", dead, exc_info=True)
+
+        # 6. Per-behavior settings keyed by behavior id (thresholds, model picks,
+        #    suppression matrix).
+        for rel in (
+            "config/temporal_review_settings.json",
+            "config/temporal_refinement_settings.json",
+        ):
+            path = root / rel
+            if not path.exists():
+                continue
+            raw = read_json(path, {})
+            removed = [0]
+            cleaned = self._drop_behavior_keys(raw, dead, removed)
+            if removed[0]:
+                counts["settings"] += removed[0]
+                write_json(path, cleaned)
+
+        # 7. Bout tables named after the behavior.
+        for path in (
+            root / "derived" / "behavior_bouts" / f"{dead}_bouts.parquet",
+            *(root / "derived" / "analytics_cache").rglob(f"bouts_{dead}.parquet"),
+        ):
+            if path.exists():
+                try:
+                    path.unlink()
+                    counts["bouts"] += 1
+                except OSError:
+                    logger.warning("Failed to remove %s", path, exc_info=True)
+        refinement_dir = root / "derived" / "temporal_refinement" / dead
+        if refinement_dir.is_dir():
+            shutil.rmtree(refinement_dir, ignore_errors=True)
+
         if any(counts.values()):
-            logger.info(
-                "Purged deleted behavior %s: %d candidate windows, %d decisions, %d reviewer labels",
-                dead, counts["candidates"], counts["decisions"], counts["labels"],
-            )
+            logger.info("Purged deleted behavior %s: %s", dead, counts)
         return counts
+
+    @classmethod
+    def _drop_behavior_keys(cls, value: Any, dead: str, removed: list[int]) -> Any:
+        """Remove *dead* wherever it appears as a dict key or list item, at any depth."""
+        if isinstance(value, dict):
+            out = {}
+            for key, sub in value.items():
+                if key == dead:
+                    removed[0] += 1
+                    continue
+                out[key] = cls._drop_behavior_keys(sub, dead, removed)
+            return out
+        if isinstance(value, list):
+            out_list = []
+            for item in value:
+                if item == dead:
+                    removed[0] += 1
+                    continue
+                out_list.append(cls._drop_behavior_keys(item, dead, removed))
+            return out_list
+        return value
 
     def get(self, behavior_id: str) -> BehaviorDefinition | None:
         return next((b for b in self._behaviors if b.behavior_id == behavior_id), None)

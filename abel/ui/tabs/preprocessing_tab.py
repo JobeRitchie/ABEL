@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -92,26 +93,31 @@ class ClipExtractionTab(QWidget):
         self._top_n = QSpinBox()
         self._top_n.setRange(0, 2000)
         self._top_n.setValue(5)
+        self._top_n.setToolTip("Highest-scoring candidates to extract per subject (and per behavior when all behaviors are targeted).")
 
         self._bottom_n = QSpinBox()
         self._bottom_n.setRange(0, 2000)
         self._bottom_n.setValue(0)
+        self._bottom_n.setToolTip("Lowest-scoring candidates to extract per subject (and per behavior when all behaviors are targeted).")
 
         self._median_n = QSpinBox()
         self._median_n.setRange(0, 2000)
         self._median_n.setValue(0)
+        self._median_n.setToolTip("Candidates nearest the median score to extract per subject (and per behavior when all behaviors are targeted).")
 
         self._before_sec = QDoubleSpinBox()
         self._before_sec.setRange(0.0, 10.0)
         self._before_sec.setSingleStep(0.1)
         self._before_sec.setDecimals(2)
         self._before_sec.setValue(0.0)
+        self._before_sec.setToolTip("Seconds of video added before each clip.")
 
         self._after_sec = QDoubleSpinBox()
         self._after_sec.setRange(0.0, 10.0)
         self._after_sec.setSingleStep(0.1)
         self._after_sec.setDecimals(2)
         self._after_sec.setValue(0.0)
+        self._after_sec.setToolTip("Seconds of video added after each clip.")
 
         self._crop_area_percent = QDoubleSpinBox()
         self._crop_area_percent.setRange(50.0, 1000.0)
@@ -142,6 +148,23 @@ class ClipExtractionTab(QWidget):
             "than crops: see the note below."
         )
         self._full_frame_chk.toggled.connect(self._on_full_frame_toggled)
+
+        self._id_marker_percent = QSpinBox()
+        self._id_marker_percent.setRange(10, 400)
+        self._id_marker_percent.setSingleStep(10)
+        self._id_marker_percent.setValue(100)
+        self._id_marker_percent.setSuffix(" %")
+        self._id_marker_percent.setToolTip(
+            "Size of the colored dot drawn on each animal in multi-animal clips, "
+            "relative to the default. Lower it if the dots hide body parts you "
+            "need to see. Takes effect on the next extraction."
+        )
+        self._id_marker_preview_btn = QPushButton("Preview…")
+        self._id_marker_preview_btn.setToolTip(
+            "Render one frame of the selected candidate (or the first one in the "
+            "table) exactly as the extracted clip will look."
+        )
+        self._id_marker_preview_btn.clicked.connect(self._preview_identity_markers)
 
         self._clip_quality_note = QLabel(
             "Clips are downsampled preview copies for review. Your source videos are "
@@ -229,20 +252,41 @@ class ClipExtractionTab(QWidget):
         self._progress.setFormat("Idle")
         self._refresh_btn = refresh_btn
 
+        # Two columns (what to extract | how to cut it) so the settings take half
+        # the height and the candidate table below keeps its rows visible at 768 px.
         params = QGroupBox("Extraction Settings")
-        form = QFormLayout(params)
-        form.addRow("Subject:", self._session_combo)
-        form.addRow("Behavior target:", self._behavior_combo)
-        form.addRow("Preset:", self._preset_combo)
-        form.addRow("Top candidates:", self._top_n)
-        form.addRow("Bottom candidates:", self._bottom_n)
-        form.addRow("Median candidates:", self._median_n)
-        form.addRow("Crop area:", self._crop_area_percent)
-        form.addRow("", self._all_animals_chk)
-        form.addRow("", self._full_frame_chk)
-        form.addRow("", self._clip_quality_note)
-        form.addRow("Before (sec):", self._before_sec)
-        form.addRow("After (sec):", self._after_sec)
+        params_grid = QGridLayout(params)
+        params_grid.setHorizontalSpacing(24)
+        select_form = QFormLayout()
+        select_form.addRow("Subject:", self._session_combo)
+        select_form.addRow("Behavior target:", self._behavior_combo)
+        select_form.addRow("Preset:", self._preset_combo)
+        counts_row = QHBoxLayout()
+        for caption, spin in (("Top", self._top_n), ("Bottom", self._bottom_n), ("Median", self._median_n)):
+            counts_row.addWidget(QLabel(caption))
+            counts_row.addWidget(spin, 1)
+        select_form.addRow("Candidates:", counts_row)
+        cut_form = QFormLayout()
+        crop_row = QHBoxLayout()
+        crop_row.addWidget(self._crop_area_percent, 1)
+        crop_row.addWidget(self._all_animals_chk)
+        crop_row.addWidget(self._full_frame_chk)
+        cut_form.addRow("Crop area:", crop_row)
+        id_marker_row = QHBoxLayout()
+        id_marker_row.addWidget(self._id_marker_percent, 1)
+        id_marker_row.addWidget(self._id_marker_preview_btn)
+        cut_form.addRow("ID marker size:", id_marker_row)
+        pad_row = QHBoxLayout()
+        pad_row.addWidget(QLabel("before"))
+        pad_row.addWidget(self._before_sec, 1)
+        pad_row.addWidget(QLabel("after"))
+        pad_row.addWidget(self._after_sec, 1)
+        cut_form.addRow("Padding (s):", pad_row)
+        params_grid.addLayout(select_form, 0, 0)
+        params_grid.addLayout(cut_form, 0, 1)
+        params_grid.addWidget(self._clip_quality_note, 1, 0, 1, 2)
+        params_grid.setColumnStretch(0, 1)
+        params_grid.setColumnStretch(1, 1)
 
         row = QHBoxLayout()
         row.addWidget(refresh_btn)
@@ -361,6 +405,7 @@ class ClipExtractionTab(QWidget):
         self._crop_area_percent.setValue(125.0)
         self._all_animals_chk.setChecked(True)
         self._full_frame_chk.setChecked(False)
+        self._id_marker_percent.setValue(100)
         self._before_sec.setValue(0.0)
         self._after_sec.setValue(0.0)
         self._hide_reviewed_chk.setChecked(False)
@@ -375,6 +420,7 @@ class ClipExtractionTab(QWidget):
         self._crop_area_percent.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._full_frame_chk.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
         self._all_animals_chk.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
+        self._id_marker_percent.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._before_sec.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._after_sec.valueChanged.connect(lambda _v: self._persist_ui_settings_to_project())
         self._hide_reviewed_chk.toggled.connect(lambda _v: self._persist_ui_settings_to_project())
@@ -404,6 +450,7 @@ class ClipExtractionTab(QWidget):
             "crop_area_percent": float(self._crop_area_percent.value()),
             "full_frame": bool(self._full_frame_chk.isChecked()),
             "include_all_animals": bool(self._all_animals_chk.isChecked()),
+            "identity_marker_percent": int(self._id_marker_percent.value()),
             "before_sec": float(self._before_sec.value()),
             "after_sec": float(self._after_sec.value()),
             "hide_reviewed": bool(self._hide_reviewed_chk.isChecked()),
@@ -453,6 +500,7 @@ class ClipExtractionTab(QWidget):
             self._full_frame_chk.setChecked(bool(ui.get("full_frame", False)))
             self._all_animals_chk.setChecked(bool(ui.get("include_all_animals", True)))
             self._on_full_frame_toggled(self._full_frame_chk.isChecked())
+            self._id_marker_percent.setValue(int(ui.get("identity_marker_percent", 100) or 100))
             self._before_sec.setValue(float(ui.get("before_sec", 0.0)))
             self._after_sec.setValue(float(ui.get("after_sec", 0.0)))
             self._hide_reviewed_chk.setChecked(bool(ui.get("hide_reviewed", False)))
@@ -1156,7 +1204,9 @@ class ClipExtractionTab(QWidget):
             end_item = QTableWidgetItem()
             end_item.setData(Qt.ItemDataRole.DisplayRole, int(c.end_frame))
 
-            self._table.setItem(row_idx, 0, QTableWidgetItem(subject))
+            subject_item = QTableWidgetItem(subject)
+            subject_item.setData(Qt.ItemDataRole.UserRole, c)
+            self._table.setItem(row_idx, 0, subject_item)
             self._table.setItem(row_idx, 1, QTableWidgetItem(bname))
             self._table.setItem(row_idx, 2, occ_item)
             self._table.setItem(row_idx, 3, start_item)
@@ -1212,14 +1262,7 @@ class ClipExtractionTab(QWidget):
                 QMessageBox.warning(self, "Missing inputs", "Select subject and preset.")
                 return
 
-            runtime_crop_area_scale = float(self._crop_area_percent.value()) / 100.0
-            runtime_preset = PreprocessingPreset.model_validate(
-                preset.model_dump(mode="python") | {
-                    "crop_area_scale": runtime_crop_area_scale,
-                    "full_frame": bool(self._full_frame_chk.isChecked()),
-                    "include_all_animals": bool(self._all_animals_chk.isChecked()),
-                }
-            )
+            runtime_preset = self._runtime_preset(preset)
 
             subject_map = self._subject_by_session()
             subject_label = "all subjects" if session_id == self._ALL_SUBJECTS_KEY else (subject_map.get(session_id, session_id) or session_id)
@@ -1495,8 +1538,127 @@ class ClipExtractionTab(QWidget):
         self._crop_area_percent.setEnabled(not busy and not self._full_frame_chk.isChecked())
         self._full_frame_chk.setEnabled(not busy)
         self._all_animals_chk.setEnabled(not busy and not self._full_frame_chk.isChecked())
+        self._id_marker_percent.setEnabled(not busy)
+        self._id_marker_preview_btn.setEnabled(not busy)
         self._before_sec.setEnabled(not busy)
         self._after_sec.setEnabled(not busy)
+
+    def _runtime_preset(
+        self, preset: PreprocessingPreset, marker_percent: int | None = None,
+    ) -> PreprocessingPreset:
+        """The selected preset with this tab's crop and marker overrides applied."""
+        pct = self._id_marker_percent.value() if marker_percent is None else marker_percent
+        return PreprocessingPreset.model_validate(
+            preset.model_dump(mode="python") | {
+                "crop_area_scale": float(self._crop_area_percent.value()) / 100.0,
+                "full_frame": bool(self._full_frame_chk.isChecked()),
+                "include_all_animals": bool(self._all_animals_chk.isChecked()),
+                "identity_marker_scale": float(pct) / 100.0,
+            }
+        )
+
+    def _preview_candidate(self) -> CandidateWindow | None:
+        """The selected table row's candidate, else the first row's."""
+        rows = sorted({i.row() for i in self._table.selectedIndexes()})
+        if not rows and self._table.rowCount() > 0:
+            rows = [0]
+        for r in rows:
+            item = self._table.item(r, 0)
+            cand = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+            if isinstance(cand, CandidateWindow):
+                return cand
+        return None
+
+    def _preview_identity_markers(self) -> None:
+        """Open a preview of one clip frame at the chosen identity-dot size."""
+        if self._project_root is None:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        if not self._service.can_decode_video():
+            QMessageBox.warning(self, "OpenCV Not Available", "Video decoding is not available.")
+            return
+        preset = self._preset_combo.currentData()
+        cand = self._preview_candidate()
+        if preset is None or cand is None:
+            QMessageBox.information(
+                self, "Nothing to preview",
+                "Select a preset and load at least one candidate window first.",
+            )
+            return
+        manifest = self._imports.load_manifest(self._project_root)
+        if not manifest:
+            QMessageBox.warning(self, "No import manifest", "Run Data Import first.")
+            return
+        sid = str(cand.session_id)
+        if sid not in {s.session_id for s in manifest.linked_sessions}:
+            sid = self._imports.resolve_session_id(self._project_root, sid, manifest)
+        video_path = self._imports.video_path_for_session(manifest, sid)
+        if not video_path or not video_path.exists():
+            QMessageBox.warning(
+                self, "Video not found",
+                f"The source video for this candidate is not reachable:\n{video_path or sid}",
+            )
+            return
+
+        pose_cx = pose_cy = None
+        overlays = None
+        pose_path = self._imports.pose_path_for_session(manifest, sid)
+        self.setCursor(Qt.CursorShape.WaitCursor)
+        try:
+            if pose_path and pose_path.exists():
+                try:
+                    pose = self._pose_processing.clean_pose(
+                        self._pose_processing.load(pose_path),
+                        likelihood_threshold=0.2, interpolate=True, smoothing_window=5,
+                    )
+                    pose_cx, pose_cy = pose.centroid_x, pose.centroid_y
+                except Exception:
+                    pass
+                _sess = next((s for s in manifest.linked_sessions if s.session_id == sid), None)
+                overlays = ClipExtractionService.build_individual_overlays(
+                    self._pose_processing, pose_path,
+                    getattr(manifest, "smoothing_settings", None),
+                    dict(getattr(_sess, "individual_subject_map", {}) or {}) if _sess else {},
+                    list(getattr(_sess, "identity_corrections", None) or []) if _sess else None,
+                )
+        finally:
+            self.unsetCursor()
+
+        if not overlays:
+            QMessageBox.information(
+                self, "Single-animal session",
+                "Identity dots are only drawn in multi-animal sessions, and this "
+                "candidate's session has one tracked animal (or its pose file is "
+                "not reachable). Select a candidate from a multi-animal session.",
+            )
+            return
+
+        win = self._build_extraction_window(cand, self._source_fps())
+
+        def _render(percent: int, offset: int):
+            return self._service.render_preview_frame(
+                video_path, self._runtime_preset(preset, percent),
+                win.start_frame, win.end_frame,
+                pose_centroid_x=pose_cx, pose_centroid_y=pose_cy,
+                individual_overlays=overlays, frame_offset=offset,
+            )
+
+        from abel.ui.identity_marker_preview_dialog import IdentityMarkerPreviewDialog  # noqa: PLC0415
+
+        subject = self._subject_by_session().get(cand.session_id, cand.session_id)
+        dlg = IdentityMarkerPreviewDialog(
+            _render,
+            int(self._id_marker_percent.value()),
+            n_frames=int(win.end_frame) - int(win.start_frame) + 1,
+            radius_fn=lambda w, pct: ClipExtractionService.identity_marker_radius(w, pct / 100.0),
+            caption=(
+                f"{subject}, frames {win.start_frame}-{win.end_frame}, rendered with "
+                "the current preset and crop settings."
+            ),
+            parent=self,
+        )
+        if dlg.exec():
+            self._id_marker_percent.setValue(dlg.percent())
 
     def _build_extraction_window(self, cand: CandidateWindow, source_fps: float) -> CandidateWindow:
         """Return a copy expanded by user-defined static before/after time."""

@@ -65,3 +65,50 @@ def test_review_filter_matches_any_nomination():
     cand = cand.model_copy(update={"behavior_ids": ["chase", "attack"]})
     ids = ReviewTab._nominating_behavior_ids(tab, cand)
     assert ids == {"chase", "attack"}
+
+
+def _queue_tab(filtered: str, decisions: dict | None = None):
+    from abel.ui.tabs.review_tab import ReviewTab
+
+    tab = type("T", (), {})()
+    tab._decision_by_clip_id = decisions or {}
+    tab._normalize_behavior_id = staticmethod(lambda b: str(b or "").strip())
+    tab._behavior_filter_combo = type("C", (), {"currentData": lambda self: filtered})()
+    tab._effective_behavior_id = lambda c: ReviewTab._effective_behavior_id(tab, c)
+    tab._nominating_behavior_ids = lambda c: ReviewTab._nominating_behavior_ids(tab, c)
+    return tab, ReviewTab._queue_behavior_id
+
+
+def test_shared_window_takes_the_filtered_behavior():
+    # Primary nominator is allogroom, but the user is reviewing the attack queue:
+    # the row must show and pre-label as attack, not allogroom.
+    cand = _win("allogroom").model_copy(update={"behavior_ids": ["allogroom", "attack"]})
+    tab, fn = _queue_tab("attack")
+    assert fn(tab, cand) == "attack"
+    tab, fn = _queue_tab("all")
+    assert fn(tab, cand) == "allogroom"
+
+
+def test_reviewed_window_keeps_its_saved_label():
+    from types import SimpleNamespace
+
+    cand = _win("allogroom").model_copy(update={"behavior_ids": ["allogroom", "attack"]})
+    dec = SimpleNamespace(behavior_label="allogroom")
+    tab, fn = _queue_tab("attack", {cand.window_id: dec})
+    assert fn(tab, cand) == "allogroom"
+
+
+def test_reviewed_clip_matches_every_per_animal_label():
+    # Soundboard: track_0 attacks, track_1 submits. The decision keeps only the
+    # first label (attack), but the clip must also appear under the submit filter.
+    from types import SimpleNamespace
+
+    from abel.ui.tabs.review_tab import ReviewTab
+
+    cand = _win("attack")
+    tab = type("T", (), {})()
+    tab._normalize_behavior_id = staticmethod(lambda b: str(b or "").strip())
+    tab._decision_by_clip_id = {cand.window_id: SimpleNamespace(behavior_label="attack")}
+    tab._segment_labels_by_window = {("sessA", 0, 14): {"attack", "submit|groom"}}
+    ids = ReviewTab._nominating_behavior_ids(tab, cand)
+    assert ids == {"attack", "submit", "groom"}

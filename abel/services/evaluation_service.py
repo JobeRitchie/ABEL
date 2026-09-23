@@ -1010,6 +1010,7 @@ class EvaluationService:
 
         # Assign dominant behavior label using all models.
         prob_arr = merged[prob_cols].to_numpy(dtype=float)
+        raw_prob_arr = prob_arr
 
         # Optional: color by the POST-temporal-refinement label instead of raw
         # argmax. Apply each behavior's refinement (smoothing + onset threshold +
@@ -1064,13 +1065,34 @@ class EvaluationService:
         def _canon(label: str) -> str:
             return _label_canon.get(label.lower(), label)
 
-        def _resolve_label(raw: str) -> str:
-            """Resolve a raw behavior label (including pipe-separated multi-labels) to a display name."""
+        # Prob-column index per behavior, reachable by id or by name, so a
+        # multi-label review can be attributed to one of its components.
+        _prob_idx: dict[str, int] = {}
+        for _i, _b in enumerate(bid_list):
+            _prob_idx[_b.lower()] = _i
+            _prob_idx[_canon(bname.get(_b, _b)).lower()] = _i
+
+        def _resolve_label(raw: str, row: int) -> str:
+            """Resolve a raw review label to ONE display name.
+
+            Co-occurring labels are stored pipe-joined ("A|B"). Plotting each
+            combination as its own class gave dozens of tiny classes with
+            recycled colors, so the segment is colored by the component its
+            models score highest (that is also what places it in the embedding).
+            """
             raw = raw.strip()
-            if "|" in raw:
-                parts = sorted(p.strip() for p in raw.split("|") if p.strip())
-                return " + ".join(bname.get(p, p) for p in parts)
-            return _canon(bname.get(raw, raw))
+            if "|" not in raw:
+                return _canon(bname.get(raw, raw))
+            parts = [p.strip() for p in raw.split("|") if p.strip()]
+            if not parts:
+                return ""
+            best = parts[0]
+            best_p = -1.0
+            for p in parts:
+                ci = _prob_idx.get(p.lower(), _prob_idx.get(_canon(bname.get(p, p)).lower()))
+                if ci is not None and raw_prob_arr[row, ci] > best_p:
+                    best, best_p = p, float(raw_prob_arr[row, ci])
+            return _canon(bname.get(best, best))
 
         # Build label for each segment: prefer reviewer label, else use model prediction.
         # Vectorized to avoid O(N) pandas iloc lookups.
@@ -1080,11 +1102,10 @@ class EvaluationService:
         _has_review = ~pd.isnull(_rev_mapped)
         _pred_bids = np.array([bid_list[i] for i in dominant_idx])
         _pred_labels = np.array([_canon(bname.get(b, b)) for b in _pred_bids])
-        _review_labels_canon = np.where(
-            _has_review,
-            np.array([_resolve_label(str(v)) if v is not None else "" for v in _rev_mapped]),
-            "",
-        )
+        _review_labels_canon = np.array([
+            _resolve_label(str(v), _r) if _h else ""
+            for _r, (v, _h) in enumerate(zip(_rev_mapped, _has_review))
+        ], dtype=object)
         # Threshold of 0.5 (majority-vote confidence) keeps only segments where
         # one behavior clearly dominates.  Lower-confidence predictions have
         # ambiguous probability vectors that land near the scaled-feature mean
@@ -1404,8 +1425,26 @@ class EvaluationService:
             fig, ax = plt.subplots(figsize=(fig_w, fig_h))
             fig.subplots_adjust(right=1.0 - legend_ncol * legend_col_width / fig_w)
 
-            cmap = plt.get_cmap("tab10" if n_classes <= 10 else "tab20", max(1, n_classes))
-            color_map = {cls: cmap(i) for i, cls in enumerate(classes)}
+            # Negative/uncertain classes are grey so they don't compete with
+            # real behaviors; the rest get distinct colors (tab10, then tab20
+            # and tab20b) instead of a resampled map that repeats past 20.
+            _neutral = {"unclassified", "none", "no_behavior", "no behavior", "nobehavior"}
+            _palette = [
+                c for c in (
+                    list(plt.get_cmap("tab10").colors)
+                    + list(plt.get_cmap("tab20").colors[1::2])
+                    + list(plt.get_cmap("tab20b").colors)
+                )
+                if max(c[:3]) - min(c[:3]) > 0.05  # drop greys, reserved for neutral
+            ]
+            color_map: dict[str, Any] = {}
+            _ci = 0
+            for cls in classes:
+                if str(cls).strip().lower() in _neutral:
+                    color_map[cls] = (0.6, 0.6, 0.6, 1.0)
+                else:
+                    color_map[cls] = _palette[_ci % len(_palette)]
+                    _ci += 1
 
             # Map each raw class value → friendly display name.
             # Multi-label classes (pipe-separated) are already resolved in dominant_behavior,
@@ -1414,6 +1453,8 @@ class EvaluationService:
                 if "|" in raw_cls:
                     parts = sorted(p.strip() for p in raw_cls.split("|") if p.strip())
                     return " + ".join(bname.get(p, p) for p in parts)
+                if str(raw_cls).strip().lower() in {"none", "no_behavior", "no_behaviour", "nobehavior"}:
+                    return "No behavior"
                 return bname.get(raw_cls, raw_cls)
             display_name: dict[str, str] = {cls: _disp(cls) for cls in classes}
 

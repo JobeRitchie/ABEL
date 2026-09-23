@@ -64,7 +64,7 @@ class StartupWidget(QWidget):
             "font-size: 13px; font-weight: 600; color: #64B5F6;"
         )
 
-        meta = QLabel("v0.22.0  ·  9/20/26")
+        meta = QLabel("v0.23.0  ·  9/23/26")
         meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
         meta.setStyleSheet(
             "font-size: 11px; font-weight: 600; color: #8FA6B4; padding-bottom: 10px;"

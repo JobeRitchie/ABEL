@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "abel"
-version = "0.22.0"
+version = "0.23.0"
 description = "ABEL (Active-learning Behavior Estimation and Labeling): local-first desktop app for behavioral modeling, review, and export from DLC-tracked rodent videos."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -67,7 +67,7 @@ abel-benchmark = "abel.benchmark.gui:launch_benchmark_gui"
 include-package-data = true
 
 [tool.setuptools.package-data]
-abel = ["ui/assets/*.ico", "ui/assets/*.png"]
+abel = ["ui/assets/*.ico", "ui/assets/*.png", "ui/assets/*.svg"]
 
 [tool.setuptools.packages.find]
 where = ["."]

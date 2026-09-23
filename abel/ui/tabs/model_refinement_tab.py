@@ -171,7 +171,7 @@ class ModelRefinementTab(QWidget):
             "compatible: others are detected and blocked automatically."
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("font-size: 11px; color: #607D8B; padding-bottom: 4px;")
+        desc.setStyleSheet("font-size: 11px; color: #8FA6B4; padding-bottom: 4px;")
 
         # ── Source list ───────────────────────────────────────────────
         btn_row = QHBoxLayout()

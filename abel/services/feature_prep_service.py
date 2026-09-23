@@ -47,6 +47,7 @@ from abel.services.context_feature_service import (
 )
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.storage.file_store import read_json, write_json
+from abel.utils.cancellation import OperationCancelled, cancel_scope, cancellable
 
 logger = logging.getLogger("abel")
 
@@ -56,7 +57,7 @@ STAGE_CONSOLIDATE = "consolidate"
 STAGE_REPRESENTATIONS = "representations"
 
 
-class PrepCancelledError(RuntimeError):
+class PrepCancelledError(OperationCancelled):
     """Raised when a caller's cancel flag is set mid-prep."""
 
 
@@ -213,7 +214,8 @@ class FeaturePrepService:
     # The per-session caches embed the inputs they were built from, so they go
     # stale when those inputs change and must be rebuilt, otherwise re-running
     # feature extraction silently reuses the old result:
-    #   • pose features depend on the body-part rename map.
+    #   • pose features depend on the body-part rename map and the pose
+    #     smoothing settings (Pose & Features tab).
     #   • context features additionally depend on the ROI config (target zones,
     #     subject crop, local-motion radius) and the flow stride.
     # We record a signature for each so a change to either is detected and only
@@ -264,12 +266,27 @@ class FeaturePrepService:
             spine = False
         # Spine curvature adds a column too, so toggling it must rebuild the
         # cache or old and new sessions would disagree on the schema.
-        return cls._hash({
+        sig = {
             "v": cls._POSE_SCHEMA_VERSION,
             "aliases": aliases or {},
             "social": social,
             "spine": spine,
-        })
+        }
+        smoothing = cls._smoothing_signature(project_root)
+        if smoothing:
+            sig["smoothing"] = smoothing
+        return cls._hash(sig)
+
+    @staticmethod
+    def _smoothing_signature(project_root: Path) -> dict:
+        """Pose smoothing settings that differ from the defaults.
+
+        Only added to a signature when non-empty: every cache built before
+        extraction honored these settings was built at the defaults, so those
+        caches stay valid and only a real change triggers a rebuild.
+        """
+        from abel.models.schemas import PoseSmoothingSettings  # noqa: PLC0415
+        return PoseSmoothingSettings.load_from_project(project_root).cache_signature()
 
     @classmethod
     def _context_signature(
@@ -280,7 +297,7 @@ class FeaturePrepService:
             roi_blob = roi_path.read_text(encoding="utf-8") if roi_path.exists() else ""
         except Exception:
             roi_blob = ""
-        return cls._hash({
+        sig = {
             "v": cls._CONTEXT_SCHEMA_VERSION,
             "aliases": aliases or {},
             "roi": roi_blob,
@@ -289,7 +306,12 @@ class FeaturePrepService:
             # it must invalidate the cache: otherwise enabling it would leave
             # the new columns missing until an unrelated ROI edit forced a rebuild.
             "advanced_roi": bool(getattr(config, "advanced_roi_features", True)),
-        })
+        }
+        # ROI occupancy and the local motion window follow the smoothed pose.
+        smoothing = cls._smoothing_signature(project_root)
+        if smoothing:
+            sig["smoothing"] = smoothing
+        return cls._hash(sig)
 
     @staticmethod
     def _alias_sig_path(project_root: Path) -> Path:
@@ -607,12 +629,23 @@ class FeaturePrepService:
         reuse = config.reuse_cached
         if reuse and pose_changed:
             obs.log(
-                "Pose feature inputs changed (body-part renames or an updated "
-                "feature format): rebuilding pose features for a consistent, "
-                "cross-project-compatible schema."
+                "Pose feature inputs changed (body-part renames, pose smoothing "
+                "or an updated feature format): rebuilding pose features."
             )
         if reuse and ctx_changed:
-            obs.log("ROI configuration changed: rebuilding context features for the new ROIs.")
+            obs.log(
+                "Context feature inputs changed (ROIs or pose smoothing): "
+                "rebuilding context features."
+            )
+        if reuse and (pose_changed or ctx_changed):
+            # The representation cache is keyed on row counts and columns, and
+            # e.g. a smoothing change alters values without changing either, so
+            # drop its manifest or the old segment features would be reused.
+            try:
+                (project_root / "derived" / "representations"
+                 / "representations.manifest.json").unlink(missing_ok=True)
+            except OSError as exc:  # pragma: no cover - locked file
+                logger.warning("Could not drop the representation manifest: %s", exc)
         cached_pose = (
             self.cached_pose_sessions(project_root) if reuse and not pose_changed else set()
         )
@@ -680,20 +713,22 @@ class FeaturePrepService:
         # Build the full project-wide cache (session_ids=None).  ``ensure_only``
         # avoids re-reading the multi-GB cache just to hand back dataframes the
         # prep step does not need: we read row counts from the parquet footers.
-        frame_df, segment_df = repr_svc.build(
-            project_root=project_root,
-            frame_pose_path=pose_mono,
-            frame_context_path=result.frame_context_path,
-            config=RepresentationConfig(
-                window_size_frames=int(config.segment_window_frames),
-                window_stride_frames=int(config.segment_stride_frames),
-                excluded_feature_cols=frozenset(config.excluded_feature_cols),
-                use_r3d_features=bool(config.use_r3d_features),
-            ),
-            session_ids=None,
-            progress_cb=lambda msg: obs.log(msg),
-            ensure_only=True,
-        )
+        # Every progress message, and every R3D decode batch, is a cancel point.
+        with cancel_scope(cancel_flag, PrepCancelledError):
+            frame_df, segment_df = repr_svc.build(
+                project_root=project_root,
+                frame_pose_path=pose_mono,
+                frame_context_path=result.frame_context_path,
+                config=RepresentationConfig(
+                    window_size_frames=int(config.segment_window_frames),
+                    window_stride_frames=int(config.segment_stride_frames),
+                    excluded_feature_cols=frozenset(config.excluded_feature_cols),
+                    use_r3d_features=bool(config.use_r3d_features),
+                ),
+                session_ids=None,
+                progress_cb=cancellable(lambda msg: obs.log(msg), cancel_flag, PrepCancelledError),
+                ensure_only=True,
+            )
         repr_dir = project_root / "derived" / "representations"
         result.n_frame_rows = (
             int(len(frame_df)) if len(frame_df)
@@ -789,6 +824,7 @@ class FeaturePrepService:
             return _cb
 
         def _process_one(job: SessionJob) -> str:
+            check_cancel()
             sid = str(job.session_id)
             animal_key = job.subject_key or job.subject_id or sid
             # Per-individual animal_id mapping (used by BOTH pose and context so
@@ -823,6 +859,7 @@ class FeaturePrepService:
                         video_id=job.session_id,
                         keypoint_aliases=aliases,
                     )
+            check_cancel()
             if (
                 config.use_video_features
                 and job.video_path is not None
@@ -847,6 +884,7 @@ class FeaturePrepService:
                         warning_cb=_collect_warning,
                         keypoint_aliases=aliases,
                         identity_corrections=list(job.identity_corrections or []),
+                        cancel_check=check_cancel,
                     )
                 else:
                     ContextFeatureService().compute_frame_context(
@@ -861,6 +899,7 @@ class FeaturePrepService:
                         intra_session_workers=plan.intra_session_workers,
                         warning_cb=_collect_warning,
                         keypoint_aliases=aliases,
+                        cancel_check=check_cancel,
                     )
             return str(job.session_id)
 

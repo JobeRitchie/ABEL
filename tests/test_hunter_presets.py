@@ -195,11 +195,12 @@ def _dialog(tmp_path, frame):
     return ClipMiningDialog(tmp_path, lambda: [], "test scope", lambda refs, sc: None)
 
 
-def test_dialog_has_both_tabs(tmp_path, _app):
+def test_dialog_has_all_tabs(tmp_path, _app):
     dlg = _dialog(tmp_path, _synthetic_pool())
     assert [dlg._tabs.tabText(i) for i in range(dlg._tabs.count())] == [
         "Criteria",
         "Auto Hunter",
+        "Label Needs",
     ]
 
 

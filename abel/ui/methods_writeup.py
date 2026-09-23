@@ -355,8 +355,14 @@ def _gather_recordings(root: Path) -> dict[str, Any]:
         "pose_formats": sorted({str(p.get("format") or "") for p in poses} - {""}),
         "keypoints": keypoints,
         "individuals": individuals,
-        "smoothing": raw.get("smoothing_settings", {}) or {},
+        # What extraction actually applied: the Pose & Features settings.
+        "smoothing": _smoothing_used(root),
     }
+
+
+def _smoothing_used(root: Path) -> dict[str, Any]:
+    from abel.models.schemas import PoseSmoothingSettings  # noqa: PLC0415
+    return PoseSmoothingSettings.load_from_project(root).model_dump()
 
 
 def _gather_roi(root: Path) -> dict[str, Any]:
@@ -674,7 +680,8 @@ def _r_pose(f: dict[str, Any]) -> str:
             f"gaps of up to {int(sm.get('interpolate_max_gap') or 0)} frames were "
             f"linearly interpolated"
         )
-    if sm.get("smoothing_window"):
+    # A 1-frame window is no smoothing at all.
+    if int(sm.get("smoothing_window") or 0) > 1:
         bits.append(
             f"and coordinates were smoothed with a {int(sm['smoothing_window'])}-frame "
             f"rolling window"

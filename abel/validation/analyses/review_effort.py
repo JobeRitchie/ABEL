@@ -348,6 +348,52 @@ def run_review_effort(
     return results
 
 
+def daily_breakdown(
+    project_root: Path, *, break_sec: float = BREAK_SEC, batch_sec: float = BATCH_SEC,
+) -> pd.DataFrame:
+    """Per-day clip-review effort, one row per local calendar date.
+
+    Uses the same gap classes as :func:`measure_project`.  A gap is charged to the
+    day of the decision that closes it.  Stamps are naive UTC, so they are shifted
+    to the machine's local zone before taking the date.
+    """
+    columns = ["date", "clips_timed", "active_min", "median_sec", "sittings",
+               "first_local", "last_local"]
+    rows = [r for r in _load_decisions(project_root) if _channel(r) == "clip_review"]
+    stamps = _timestamps(rows)
+    if not stamps:
+        return pd.DataFrame(columns=columns)
+    from datetime import timezone  # noqa: PLC0415
+
+    local = [s.replace(tzinfo=timezone.utc).astimezone() for s in stamps]
+    by_day: dict[Any, dict[str, Any]] = {}
+    for i, when in enumerate(local):
+        day = by_day.setdefault(when.date(), {"gaps": [], "sittings": 0,
+                                              "first": when, "last": when})
+        day["last"] = when
+        if i == 0:
+            day["sittings"] += 1
+            continue
+        gap = (stamps[i] - stamps[i - 1]).total_seconds()
+        if gap > break_sec or local[i - 1].date() != when.date():
+            day["sittings"] += 1
+        if batch_sec <= gap <= break_sec:
+            day["gaps"].append(gap)
+    out = []
+    for date, day in sorted(by_day.items()):
+        gaps = np.asarray(day["gaps"], dtype=float)
+        out.append({
+            "date": date.isoformat(),
+            "clips_timed": int(gaps.size),
+            "active_min": float(gaps.sum() / 60.0),
+            "median_sec": float(np.median(gaps)) if gaps.size else float("nan"),
+            "sittings": int(day["sittings"]),
+            "first_local": day["first"].strftime("%H:%M"),
+            "last_local": day["last"].strftime("%H:%M"),
+        })
+    return pd.DataFrame(out, columns=columns)
+
+
 # ── pooling ─────────────────────────────────────────────────────────────────
 
 

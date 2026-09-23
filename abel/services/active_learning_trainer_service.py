@@ -89,6 +89,11 @@ class TrainEvalResult:
     degenerate_val: bool
 
 
+# Validation floor for rare behaviors (see ``_split``).
+MIN_VAL_POSITIVES = 10
+MAX_VAL_FRACTION = 0.30
+
+
 class ActiveLearningTrainerService:
     """Maintains training snapshots, model state, and model cards."""
 
@@ -274,7 +279,16 @@ class ActiveLearningTrainerService:
         test_size: float,
         random_state: int,
         project_root: Path | None = None,
+        positive_mask: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """Group-aware train/validation split.
+
+        With ``positive_mask`` (rows of the target behavior) the held-out groups
+        are chosen from many group draws so validation gets its share of
+        the target's positives. A plain group shuffle draws whole subjects
+        blind to the label: with 30 dyads and a 10% split, a rare behavior's
+        validation set routinely held 0-3 positives and its metrics were noise.
+        """
         from sklearn.model_selection import GroupShuffleSplit
 
         if strategy.endswith("subject"):
@@ -300,6 +314,34 @@ class ActiveLearningTrainerService:
             val_idx = perm[:n_test]
             train_idx = perm[n_test:]
             return train_idx.astype(int), val_idx.astype(int)
+
+        if positive_mask is not None:
+            pos = np.asarray(positive_mask, dtype=bool)
+            n_pos = int(pos.sum())
+            if n_pos and int(pd.Series(groups[pos]).nunique()) >= 2:
+                # A rare behavior's 10% is a handful of clips, so the held-out
+                # share grows until it can hold ~MIN_VAL_POSITIVES (capped).
+                # Rows and positives grow together, so validation prevalence
+                # stays the project's. Only the evaluation model trains on
+                # less: the shipped model is refit on every row.
+                frac = float(test_size)
+                frac = min(max(frac, MIN_VAL_POSITIVES / n_pos), max(frac, MAX_VAL_FRACTION))
+                # Many seeded group draws; keep the one closest to that share of
+                # both the rows and the target's positives. Deterministic for a
+                # given random_state.
+                search = GroupShuffleSplit(
+                    n_splits=256, test_size=frac, random_state=random_state
+                )
+                best: tuple[float, np.ndarray, np.ndarray] | None = None
+                for tr, va in search.split(df, groups=groups):
+                    n_val_pos = int(pos[va].sum())
+                    if n_val_pos == 0 or n_val_pos == n_pos:
+                        continue
+                    cost = abs(n_val_pos / n_pos - frac) + abs(len(va) / n_rows - frac)
+                    if best is None or cost < best[0]:
+                        best = (cost, tr, va)
+                if best is not None:
+                    return best[1], best[2]
 
         splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
         train_idx, val_idx = next(splitter.split(df, groups=groups))
@@ -1117,8 +1159,14 @@ class ActiveLearningTrainerService:
                 f"examples, training on all data. Metrics are in-sample, not held-out."
             )
         else:
+            # Multi-labels were expanded above, so a positive is an exact match.
+            _pos_mask = (
+                df["label"].astype(str).eq(target_label).to_numpy()
+                if target_label and "label" in df.columns else None
+            )
             train_idx, val_idx = self._split(
-                df, cfg.split_strategy, cfg.test_size, cfg.random_state, project_root=project_root
+                df, cfg.split_strategy, cfg.test_size, cfg.random_state,
+                project_root=project_root, positive_mask=_pos_mask,
             )
         if "_eval_split_role" in df.columns:
             df = df.drop(columns=["_eval_split_role"])
@@ -1454,7 +1502,13 @@ class ActiveLearningTrainerService:
                         try:
                             fresh = self._make_estimator(cfg.classifier_family, params, cfg.random_state)
                             d_cal = CalibratedClassifierCV(estimator=fresh, method=method, cv=n_cv)
-                            d_cal.fit(d_x, d_y_full, sample_weight=d_weights_noaug)
+                            # No class weights here: sklearn passes sample_weight to the
+                            # calibrator too, which then learns the reweighted base rate
+                            # and inflates every probability (Sniff Body: mean 0.154 vs a
+                            # true rate of 0.060). The held-out calibrator is unweighted,
+                            # so weighting here also put the deployed model on a different
+                            # probability scale from the one thresholds are tuned on.
+                            d_cal.fit(d_x, d_y_full)
                             deploy_clf = d_cal
                         except Exception as cal_exc:
                             logger.warning(
@@ -1564,6 +1618,9 @@ class ActiveLearningTrainerService:
         _log: "Callable[[str], None]",
     ) -> dict[str, Any]:
         """Persist model + metrics artifacts from a TrainEvalResult (unchanged layout)."""
+        # Log before the first write: a progress callback can raise a user
+        # cancel, and it must not land between files and leave a half model.
+        _log("Saving model artifacts…")
         model_dir = project_root / "derived" / "models" / cfg.model_version
         model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1587,7 +1644,6 @@ class ActiveLearningTrainerService:
             pred_df["target_index"] = int(result.target_idx)
         pred_df.to_parquet(model_dir / "validation_predictions.parquet", index=False)
 
-        _log("Saving model artifacts…")
         with open(model_dir / "model_state.pkl", "wb") as f:
             pickle.dump(
                 {

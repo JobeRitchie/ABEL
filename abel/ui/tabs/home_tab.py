@@ -55,7 +55,7 @@ class HomeTab(QWidget):
 
         self._project_name = QLabel("Project: Not loaded")
         self._project_name.setStyleSheet("font-size: 16px; font-weight: 800; color: #90CAF9;")
-        self._project_path = QLabel("Path:,")
+        self._project_path = QLabel("Path: -")
         self._project_path.setStyleSheet("font-size: 11px; color: #8FA6B4;")
         self._status = QLabel(
             "Create or open a project to access Active Learning, clip review, temporal refinement, Direct Use, and exports."

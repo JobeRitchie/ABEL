@@ -234,7 +234,7 @@ class ProgressPanel(QWidget):
 
     def _make_stat(self, grid: QGridLayout, col: int, caption: str) -> QLabel:
         cap = QLabel(caption)
-        cap.setStyleSheet("font-size: 10px; color: #607D8B;")
+        cap.setStyleSheet("font-size: 10px; color: #8FA6B4;")
         val = QLabel("-")
         val.setStyleSheet(
             "font-family: Consolas, monospace; font-size: 13px;"

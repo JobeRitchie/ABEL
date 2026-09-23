@@ -980,8 +980,17 @@ class PoseProcessingService:
         video_id: str,
         invariant_config: "InvariantFeatureConfig | None" = None,
         keypoint_aliases: "dict[str, str] | None" = None,
+        smoothing: "PoseSmoothingSettings | None" = None,
     ) -> pd.DataFrame:
-        pose = self.load_and_clean(pose_path, keypoint_aliases=keypoint_aliases)
+        # ``smoothing`` defaults to the project's own Pose & Features settings.
+        # Pass it explicitly when ``project_root`` is a scratch folder (batch
+        # inference) so features match the ones the model was trained on.
+        if smoothing is None:
+            from abel.models.schemas import PoseSmoothingSettings as _S
+            smoothing = _S.load_from_project(project_root)
+        pose = self.load_and_clean(
+            pose_path, settings=smoothing, keypoint_aliases=keypoint_aliases,
+        )
         df = self.compute_frame_pose_features(
             pose=pose,
             fps=fps,
@@ -1451,6 +1460,7 @@ class PoseProcessingService:
         keypoint_aliases: "dict[str, str] | None" = None,
         enable_social_features: bool = False,
         identity_corrections: "list[dict] | None" = None,
+        smoothing: "PoseSmoothingSettings | None" = None,
     ) -> pd.DataFrame:
         """Extract per-frame features for every individual in a multi-animal file.
 
@@ -1462,8 +1472,12 @@ class PoseProcessingService:
         per-session parquet so the downstream (animal_id, session_id)-keyed
         pipeline handles each animal as an independent group.
         """
+        if smoothing is None:
+            from abel.models.schemas import PoseSmoothingSettings as _S
+            smoothing = _S.load_from_project(project_root)
         multi = self.load_and_clean_multi(
             pose_path,
+            settings=smoothing,
             keypoint_aliases=keypoint_aliases,
             identity_corrections=identity_corrections,
         )

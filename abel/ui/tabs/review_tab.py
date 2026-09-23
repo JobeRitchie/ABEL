@@ -62,7 +62,7 @@ from abel.models.schemas import (
     ReviewerLabelRecord,
     SeedExample,
 )
-from abel.services.behavior_service import BehaviorService, behavior_label
+from abel.services.behavior_service import BehaviorService, behavior_label, label_names_behavior
 from abel.services.candidate_service import CandidateGenerationService
 from abel.services.seed_service import SeedService
 from abel.services.import_service import ImportService
@@ -175,14 +175,17 @@ class CandidateVideoPlayer(QWidget):
         # Controls
         self._play_btn = QPushButton("▶")
         self._play_btn.setFixedWidth(36)
+        self._play_btn.setStyleSheet("padding: 4px 0px;")
         self._play_btn.clicked.connect(self.toggle_play)
 
         self._prev_btn = QPushButton("◀")
         self._prev_btn.setFixedWidth(36)
+        self._prev_btn.setStyleSheet("padding: 4px 0px;")
         self._prev_btn.clicked.connect(lambda: self.seek(self._cur_frame - 1))
 
         self._next_btn = QPushButton("▶▶")
         self._next_btn.setFixedWidth(36)
+        self._next_btn.setStyleSheet("padding: 4px 0px;")
         self._next_btn.clicked.connect(lambda: self.seek(self._cur_frame + 1))
 
         self._frame_label = QLabel("Frame: 0 / 0")
@@ -492,7 +495,7 @@ class _BulkAssignDialog(QDialog):
             if allow_multi
             else "Select one behavior."
         )
-        hint.setStyleSheet("color: #607D8B; font-size: 11px;")
+        hint.setStyleSheet("color: #8FA6B4; font-size: 11px;")
         layout.addWidget(hint)
 
         host = QWidget()
@@ -581,6 +584,7 @@ class ReviewTab(QWidget):
         # refresh sees clips added or pruned since the last one.
         self._clip_index: set[str] | None = None
         self._decision_by_clip_id: dict[str, ReviewDecision] = {}
+        self._segment_labels_by_window: dict[tuple[str, int, int], set[str]] = {}
         # Seed examples keyed by their review-row id (SEED_ROW_PREFIX + seed_id).
         self._seed_by_row_id: dict[str, SeedExample] = {}
         self._current_candidate_idx = -1
@@ -737,7 +741,7 @@ class ReviewTab(QWidget):
         _close_row = QHBoxLayout()
         _close_row.addStretch()
         _close_panel_btn = QPushButton("Close")
-        _close_panel_btn.setFixedWidth(70)
+        _close_panel_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         _close_panel_btn.clicked.connect(self._filter_panel.hide)
         _close_row.addWidget(_close_panel_btn)
         panel_layout.addLayout(_close_row)
@@ -1096,7 +1100,7 @@ class ReviewTab(QWidget):
         self._pending_labels_display.setVisible(False)
         self._clear_pending_btn = QPushButton("Clear Labels")
         self._clear_pending_btn.setToolTip("Remove all pending behavior labels for this clip")
-        self._clear_pending_btn.setFixedWidth(100)
+        self._clear_pending_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self._clear_pending_btn.clicked.connect(self._clear_pending_labels)
         self._clear_pending_btn.setVisible(False)
 
@@ -1485,6 +1489,11 @@ class ReviewTab(QWidget):
         if committed == 0:
             return
 
+        # Keep the behavior filter's view of this clip in step with what was saved.
+        index = getattr(self, "_segment_labels_by_window", None)
+        if index is not None:
+            index[(str(cand.session_id), start, end)] = {r["review_label"] for r in records}
+
         # Mark the whole window reviewed so it leaves the queue on refresh.
         rec = self._review_service.upsert_decision(
             clip_id=cand.window_id,
@@ -1624,7 +1633,7 @@ class ReviewTab(QWidget):
                 else "None yet"
             )
             self._saved_labels_display.setText(
-                f'<span style="color:#78909C;">{hint}</span>'
+                f'<span style="color:#B0BEC5;">{hint}</span>'
             )
             self._saved_labels_display.setStyleSheet(
                 "background: #37474F; border: 1px solid #8FA6B4; border-radius: 4px; "
@@ -1720,6 +1729,23 @@ class ReviewTab(QWidget):
         bid = self._normalize_behavior_id(getattr(candidate, "behavior_id", ""))
         return bid or UNASSIGNED_BEHAVIOR_ID
 
+    def _queue_behavior_id(self, candidate) -> str:
+        """The behavior an unreviewed row stands for in the current queue.
+
+        A window nominated by several behaviors appears under each of their
+        filters. When filtered to one of them, the row is shown and pre-labeled
+        as that behavior, not its primary nominator, so reviewing the Attack
+        queue never offers Allogroom as the default label.
+        """
+        effective = self._effective_behavior_id(candidate)
+        if candidate.window_id in self._decision_by_clip_id:
+            return effective
+        combo = getattr(self, "_behavior_filter_combo", None)
+        filtered = str(combo.currentData() or "all") if combo is not None else "all"
+        if filtered != "all" and filtered in self._nominating_behavior_ids(candidate):
+            return filtered
+        return effective
+
     def _nominating_behavior_ids(self, candidate) -> "set[str]":
         """Every behavior whose queue this window belongs to.
 
@@ -1728,11 +1754,27 @@ class ReviewTab(QWidget):
         all), so a window can sit in several behaviors' queues at once. Filtering
         by behavior must match any nomination, not just the primary one,
         otherwise every behavior but the last in the batch looks empty. A
-        reviewed window answers with its decision label instead.
+        reviewed window answers with every behavior it was labeled with: its
+        decision label plus the per-animal soundboard labels on the same frames
+        (a clip labeled "track_0 Attack, track_1 Submit" belongs to both
+        filters). Co-occurring "a|b" labels count as each of their parts.
         """
         decision = self._decision_by_clip_id.get(candidate.window_id)
         if decision and decision.behavior_label:
-            return {self._normalize_behavior_id(str(decision.behavior_label)) or UNASSIGNED_BEHAVIOR_ID}
+            labels = {str(decision.behavior_label)}
+            index = getattr(self, "_segment_labels_by_window", None) or {}
+            labels |= index.get(
+                (str(candidate.session_id), int(candidate.start_frame), int(candidate.end_frame)),
+                set(),
+            )
+            ids = {
+                self._normalize_behavior_id(part)
+                for lab in labels
+                for part in lab.split("|")
+                if part.strip()
+            }
+            ids.discard("")
+            return ids or {UNASSIGNED_BEHAVIOR_ID}
         ids = {
             self._normalize_behavior_id(str(b))
             for b in (getattr(candidate, "behavior_ids", None) or [])
@@ -1743,6 +1785,25 @@ class ReviewTab(QWidget):
             self._normalize_behavior_id(getattr(candidate, "behavior_id", ""))
             or UNASSIGNED_BEHAVIOR_ID
         }
+
+    _SEG_WINDOW_RE = re.compile(r"^seg_.+_(session_[^_]+)_(\d+)_(\d+)$")
+
+    def _load_segment_label_index(self) -> "dict[tuple[str, int, int], set[str]]":
+        """Reviewer labels grouped by the (session, start, end) window they cover.
+
+        Soundboard labels are stored per animal (``seg_{animal}_{session}_{s}_{e}``)
+        while the clip's review decision keeps only the first label, so this is
+        what lets the behavior filter find every behavior in a reviewed clip.
+        """
+        index: dict[tuple[str, int, int], set[str]] = {}
+        for rec in self._review_service.load_segment_labels():
+            label = str(rec.review_label or "").strip()
+            m = self._SEG_WINDOW_RE.match(str(rec.segment_id))
+            if not label or not m:
+                continue
+            key = (m.group(1), int(m.group(2)), int(m.group(3)))
+            index.setdefault(key, set()).add(label)
+        return index
 
     def _resolve_behavior_display_name(self, behavior_id_str: str) -> str:
         """Resolve a behavior ID string (possibly pipe-separated) to display names."""
@@ -1787,6 +1848,7 @@ class ReviewTab(QWidget):
         self._all_candidates = self._candidate_service.load_candidates()
         decisions = self._review_service.load_decisions()
         self._decision_by_clip_id = {d.clip_id: d for d in decisions}
+        self._segment_labels_by_window = self._load_segment_label_index()
         self._seed_by_row_id = self._load_seed_rows()
         self._rebuild_display_maps()
         self._refresh_behavior_filter_options()
@@ -1835,9 +1897,16 @@ class ReviewTab(QWidget):
             if b
         }
         for decision in self._decision_by_clip_id.values():
-            bid = self._normalize_behavior_id(str(decision.behavior_label or ""))
-            if bid:
-                behavior_ids.add(self._canonical_multi_label(bid))
+            for part in str(decision.behavior_label or "").split("|"):
+                bid = self._normalize_behavior_id(part)
+                if bid:
+                    behavior_ids.add(bid)
+        for labels in (getattr(self, "_segment_labels_by_window", None) or {}).values():
+            for lab in labels:
+                for part in lab.split("|"):
+                    bid = self._normalize_behavior_id(part)
+                    if bid:
+                        behavior_ids.add(bid)
         behavior_ids = sorted(behavior_ids)
         self._behavior_filter_combo.blockSignals(True)
         self._behavior_filter_combo.clear()
@@ -1964,7 +2033,14 @@ class ReviewTab(QWidget):
                 logger.debug("_load_al_fp_fn_ids: %s inner join returned 0 rows", model_dir.name)
                 continue
 
-            label_true = (merged["review_label"].astype(str) == target_behavior).astype(int)
+            # Co-occurring labels name several behaviors on one animal-segment,
+            # so the target is looked for inside the pipe. Comparing the whole
+            # string made a genuine positive read as a false positive here, and
+            # temporal-review feedback then re-injected it into training as a
+            # negative for a behavior it actually contains.
+            label_true = merged["review_label"].astype(str).apply(
+                lambda v: int(label_names_behavior(v, target_behavior))
+            )
             label_pred = (merged["prediction_prob"].astype(float) >= 0.5).astype(int)
 
             # Skip degenerate models. A behavior trained with no (or near-zero)
@@ -2616,7 +2692,7 @@ class ReviewTab(QWidget):
             row = self._candidate_table.rowCount()
             self._candidate_table.insertRow(row)
             subject = self._display_subject_map.get(cand.session_id, cand.session_id) or cand.session_id
-            effective_bid = self._effective_behavior_id(cand)
+            effective_bid = self._queue_behavior_id(cand)
             bname = self._resolve_behavior_display_name(effective_bid) if effective_bid else "-"
             occ_item = QTableWidgetItem(str(self._display_occurrence.get(cand.window_id, "")))
             occ_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3738,7 +3814,7 @@ class ReviewTab(QWidget):
                 )
                 fallback_label = target_ids[0] if target_ids else self._default_behavior_id()
             else:
-                fallback_label = self._effective_behavior_id(candidate)
+                fallback_label = self._queue_behavior_id(candidate)
                 if fallback_label == UNASSIGNED_BEHAVIOR_ID:
                     fallback_label = self._default_behavior_id()
             label_idx = self._label_combo.findData(fallback_label)

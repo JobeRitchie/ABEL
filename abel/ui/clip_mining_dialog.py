@@ -35,10 +35,17 @@ behind this modeless window drops out of the batch about to load), and the
 capped batch is filled by taking turns between *subjects* rather than by raw
 score, otherwise the one animal whose recording scores highest can fill it
 alone, and the mined sample says nothing about the rest of the cohort.
+
+A third, opt-in toggle aims the batch at *coverage gaps*: it keeps only matches
+from subjects with fewer than k reviewed examples of a chosen behavior (see
+:mod:`abel.services.behavior_coverage_service`), so the hunt goes to the mice
+leave-one-mouse-out CV cannot score yet.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -51,6 +58,7 @@ from PySide6.QtWidgets import (
     QCompleter,
     QDialog,
     QFrame,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -65,12 +73,21 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
-from PySide6.QtGui import QDoubleValidator
+from PySide6.QtGui import QColor, QDoubleValidator
 
+from abel.services.behavior_coverage_service import (
+    DEFAULT_ABSENT_AFTER,
+    DEFAULT_MIN_POSITIVES,
+    BehaviorCoverageService,
+    CoverageReport,
+)
+from abel.services.behavior_service import NO_BEHAVIOR_ID, BehaviorService
 from abel.services.clip_metrics_service import (
     ClipMetricsService,
     ClipRef,
@@ -88,7 +105,12 @@ from abel.services.hunter_presets import (
     fit_preset,
     preset_by_id,
 )
+from abel.services.label_needs_service import MEANINGFUL_GAIN, LabelNeedsConfig, analyze_label_needs
+from abel.utils.cancellation import CANCEL_MARKER
 from abel.workers.task_worker import TaskWorker
+
+logger = logging.getLogger(__name__)
+
 
 def _fmt(v: float) -> str:
     if v is None or not np.isfinite(v):
@@ -253,6 +275,7 @@ class ClipMiningDialog(QDialog):
     """Interactive criteria builder + essence extractor over a clip set."""
 
     _progress_sig = Signal(int, int)
+    _needs_progress_sig = Signal(str, int, int)
 
     def __init__(
         self,
@@ -320,6 +343,13 @@ class ClipMiningDialog(QDialog):
         # Matches dropped from the last count because they already carry a review
         # decision: reported in the count label so the shrink is never silent.
         self._skipped_reviewed = 0
+        # Coverage-gap hunt: when on, matches are kept only from the sessions of
+        # subjects still short of examples of the chosen behavior (None = off).
+        self._coverage = BehaviorCoverageService(project_root)
+        self._coverage_report: CoverageReport | None = None
+        self._gap_sessions: set[str] | None = None
+        self._skipped_gap = 0
+        self._gap_behavior_picked = False  # the user chose one; stop auto-defaulting
 
         root = QVBoxLayout(self)
         root.setSpacing(10)
@@ -330,7 +360,7 @@ class ClipMiningDialog(QDialog):
             "start from a ready-made hunt under Auto Hunter."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color: #607D8B;")
+        intro.setStyleSheet("color: #8FA6B4;")
         root.addWidget(intro)
 
         scope = QLabel(f"Scope: {scope_label}")
@@ -472,6 +502,7 @@ class ClipMiningDialog(QDialog):
             crit.addLayout(flag_row)
 
         self._tabs.addTab(self._build_auto_hunter_tab(), "Auto Hunter")
+        self._tabs.addTab(self._build_label_needs_tab(), "Label Needs")
 
         # What comes back: skip work already done, and spread it over the animals.
         opts = QHBoxLayout()
@@ -496,6 +527,7 @@ class ClipMiningDialog(QDialog):
         opts.addWidget(self._balance_subjects_chk)
         opts.addStretch(1)
         root.addLayout(opts)
+        self._build_gap_row(root)
 
         # Mine trigger + progress.
         mine_row = QHBoxLayout()
@@ -550,11 +582,144 @@ class ClipMiningDialog(QDialog):
 
         # Marshal worker-thread progress onto the UI thread (connected once).
         self._progress_sig.connect(self._on_compute_progress)
+        self._needs_progress_sig.connect(self._on_needs_progress)
         # Restore the project's saved criteria, or seed one row to start from, no
         # scoring happens until Find matches is clicked.
         self._restore_or_seed()
         self.refresh_exemplar_count()
         self._update_count()
+
+    # -- coverage gaps -------------------------------------------------------
+
+    def _build_gap_row(self, root: QVBoxLayout) -> None:
+        """Toggle that aims the batch at subjects lacking examples of a behavior."""
+        gap = QHBoxLayout()
+        self._gap_chk = QCheckBox("Only subjects lacking examples of")
+        self._gap_chk.setToolTip(
+            "Keep only matches from subjects that have fewer than this many reviewed\n"
+            "examples of the chosen behavior, so the batch goes to the animals the\n"
+            "model has not seen do it yet. Counted from your own review labels, the\n"
+            "same way Leave-one-mouse-out counts mice.\n"
+            f"A subject with no examples whose last {DEFAULT_ABSENT_AFTER} gap-mined clips were\n"
+            "all reviewed without showing the behavior is treated as likely absent\n"
+            "and skipped, since some animals never do it."
+        )
+        gap.addWidget(self._gap_chk)
+        self._gap_behavior = QComboBox()
+        self._gap_behavior.setToolTip("The behavior to find more subjects for.")
+        self._behavior_names: dict[str, str] = {}
+        try:
+            beh = BehaviorService()
+            beh.set_project(self._project_root)
+            for b in beh.behaviors:
+                bid = str(b.behavior_id)
+                if bid == NO_BEHAVIOR_ID:
+                    continue
+                self._behavior_names[bid] = str(b.name)
+                self._gap_behavior.addItem(str(b.name), bid)
+        except Exception:
+            logger.debug("Clip mining: behaviors unavailable", exc_info=True)
+        gap.addWidget(self._gap_behavior)
+        gap.addWidget(QLabel("with fewer than"))
+        self._gap_min = QSpinBox()
+        self._gap_min.setRange(1, 1000)
+        self._gap_min.setValue(DEFAULT_MIN_POSITIVES)
+        self._gap_min.setToolTip(
+            "A subject counts as covered once it has this many reviewed examples."
+        )
+        gap.addWidget(self._gap_min)
+        gap.addWidget(QLabel("examples"))
+        gap.addStretch(1)
+        root.addLayout(gap)
+        self._gap_label = QLabel("")
+        self._gap_label.setWordWrap(True)
+        self._gap_label.setStyleSheet("color: #8FA6B4;")
+        self._gap_label.setVisible(False)
+        root.addWidget(self._gap_label)
+
+        if self._gap_behavior.count() == 0:
+            self._gap_chk.setEnabled(False)
+            self._gap_chk.setToolTip("Define behaviors in this project first.")
+        self._gap_chk.toggled.connect(self._on_gap_toggled)
+        self._gap_behavior.activated.connect(self._on_gap_behavior_picked)
+        self._gap_behavior.currentIndexChanged.connect(lambda _i: self._update_count())
+        self._gap_min.valueChanged.connect(lambda _v: self._update_count())
+
+    def _on_gap_toggled(self, on: bool) -> None:
+        if on and not self._gap_behavior_picked:
+            # Default to what the highlighted exemplars are labeled: the usual
+            # "find more of these, from other animals" case.
+            try:
+                exemplars = self._exemplar_provider() or []
+            except Exception:
+                exemplars = []
+            bid = self._coverage.dominant_behavior([c.window_id for c in exemplars])
+            idx = self._gap_behavior.findData(bid) if bid else -1
+            if idx >= 0:
+                self._gap_behavior.setCurrentIndex(idx)
+        self._update_count()
+
+    def _on_gap_behavior_picked(self, _index: int) -> None:
+        self._gap_behavior_picked = True
+
+    def _gap_behavior_id(self) -> str | None:
+        bid = self._gap_behavior.currentData()
+        return str(bid) if bid else None
+
+    def _refresh_coverage(self) -> None:
+        """Re-read coverage (live: labels change behind this modeless window)."""
+        bid = self._gap_behavior_id()
+        if not self._gap_chk.isChecked() or bid is None:
+            self._coverage_report = None
+            self._gap_sessions = None
+            self._gap_label.setVisible(False)
+            return
+        rep = self._coverage.report(bid, int(self._gap_min.value()), DEFAULT_ABSENT_AFTER)
+        self._coverage_report = rep
+        self._gap_sessions = rep.gap_sessions()
+        name = self._behavior_names.get(bid, bid)
+        k = rep.min_positives
+        gaps = rep.gap_subjects()
+        absent = rep.likely_absent()
+        if not rep.subjects:
+            text = "No subjects found in this project's sessions."
+        elif not gaps:
+            text = f"Every subject has at least {k} examples of {name}: no gaps to fill."
+        else:
+            text = (
+                f"{name}: {len(gaps)} of {len(rep.subjects)} subjects have fewer "
+                f"than {k} examples."
+            )
+        if absent:
+            text += (
+                f" {len(absent)} skipped as likely absent (no examples, and "
+                f"{DEFAULT_ABSENT_AFTER}+ gap-mined clips reviewed without one)."
+            )
+        self._gap_label.setText(text)
+        lines = []
+        for subj in sorted(rep.subjects, key=lambda x: (rep.subjects[x].positives, x)):
+            if subj not in gaps and subj not in absent:
+                continue
+            cov = rep.subjects[subj]
+            line = f"{subj}: {cov.positives} example(s)"
+            if cov.screened:
+                line += f", {cov.screened} gap clip(s) reviewed"
+            if subj in absent:
+                line += " (likely absent)"
+            lines.append(line)
+        self._gap_label.setToolTip("\n".join(lines))
+        self._gap_label.setVisible(True)
+
+    def _gap_note(self) -> str:
+        """Count-label suffix saying the batch is limited to gap subjects."""
+        if self._gap_sessions is None or self._coverage_report is None:
+            return ""
+        n = len(self._coverage_report.gap_subjects())
+        left_out = (
+            f" ({self._skipped_gap} match(es) from covered subjects left out)"
+            if self._skipped_gap else ""
+        )
+        return f" Limited to {n} subject(s) lacking examples{left_out}."
 
     # -- auto hunter (preset hunts) ------------------------------------------
 
@@ -576,7 +741,7 @@ class ClipMiningDialog(QDialog):
             "on this project's own spread: pick one, then click Find matches."
         )
         blurb.setWordWrap(True)
-        blurb.setStyleSheet("color: #607D8B;")
+        blurb.setStyleSheet("color: #8FA6B4;")
         lay.addWidget(blurb)
 
         body = QHBoxLayout()
@@ -637,6 +802,296 @@ class ClipMiningDialog(QDialog):
             self._preset_list.setCurrentRow(0)
         return tab
 
+    # -- label needs --------------------------------------------------------
+
+    _NEEDS_COLUMNS = (
+        "Behavior", "Verdict", "PR-AUC", "Pos", "Sessions",
+        "+Pos", "+Spread", "+Hard neg", "+No Beh",
+        "What to label next",
+    )
+    _NEEDS_TIPS = {
+        "PR-AUC": "Held-out PR-AUC with all current labels (sessions split into folds).",
+        "Pos": "Labeled positive windows.",
+        "Sessions": "Sessions with at least one positive, of all labeled sessions.",
+        "+Pos": "How much PR-AUC the second half of the positives adds.\n"
+                            "Still large = the model is still learning from more examples.",
+        "+Spread": "Half the positives drawn across many sessions minus half drawn\n"
+                                  "from a few whole sessions. Large = examples from new animals help.",
+        "+Hard neg": "PR-AUC lost when the look-alike behaviors' labels are removed.\n"
+                            "Large = correcting look-alike clips is worth your time.",
+        "+No Beh": "How much PR-AUC the second half of the No Behavior negatives adds.",
+    }
+
+    def _build_label_needs_tab(self) -> QWidget:
+        """Per-behavior ablation: which kind of new label would improve each model."""
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setSpacing(8)
+        blurb = QLabel(
+            "Find out what each model needs before you spend review time. For every "
+            "chosen behavior, models are retrained on held-out session folds with part "
+            "of one kind of label removed (positives, positives from fewer animals, "
+            "look-alike negatives, No Behavior negatives). The accuracy each removal "
+            "costs is what that kind of label is worth. Gains under "
+            f"{MEANINGFUL_GAIN:.2f} are treated as run-to-run noise. Nothing in the project is changed."
+        )
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet("color: #8FA6B4;")
+        lay.addWidget(blurb)
+
+        body = QHBoxLayout()
+        left = QVBoxLayout()
+        left.addWidget(QLabel("Behaviors to test:"))
+        self._needs_list = QListWidget()
+        em = self.fontMetrics().horizontalAdvance("M")
+        self._needs_list.setMinimumWidth(12 * em)
+        self._needs_list.setMaximumWidth(16 * em)
+        try:
+            beh = BehaviorService()
+            beh.set_project(self._project_root)
+            for b in beh.behaviors:
+                if str(b.behavior_id) == NO_BEHAVIOR_ID:
+                    continue
+                item = QListWidgetItem(str(b.name))
+                item.setData(Qt.ItemDataRole.UserRole, str(b.behavior_id))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(Qt.CheckState.Checked)
+                self._needs_list.addItem(item)
+        except Exception:
+            logger.debug("Label needs: behaviors unavailable", exc_info=True)
+        left.addWidget(self._needs_list, 1)
+        sel = QHBoxLayout()
+        for text, state in (("All", Qt.CheckState.Checked), ("None", Qt.CheckState.Unchecked)):
+            btn = QPushButton(text)
+            btn.clicked.connect(lambda _c=False, st=state: self._set_needs_checks(st))
+            sel.addWidget(btn)
+        left.addLayout(sel)
+        body.addLayout(left)
+
+        right = QVBoxLayout()
+        self._needs_table = QTableWidget(0, len(self._NEEDS_COLUMNS))
+        self._needs_table.setHorizontalHeaderLabels(list(self._NEEDS_COLUMNS))
+        for i, name in enumerate(self._NEEDS_COLUMNS):
+            tip = self._NEEDS_TIPS.get(name)
+            if tip:
+                self._needs_table.horizontalHeaderItem(i).setToolTip(tip)
+        hdr = self._needs_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(len(self._NEEDS_COLUMNS) - 1, QHeaderView.ResizeMode.Stretch)
+        self._needs_table.setWordWrap(True)
+        # Wrapped action text: row heights must follow the final column widths.
+        hdr.sectionResized.connect(lambda *_: self._needs_table.resizeRowsToContents())
+        self._needs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._needs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._needs_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        right.addWidget(self._needs_table, 1)
+        body.addLayout(right, 1)
+        lay.addLayout(body, 1)
+
+        opts = QHBoxLayout()
+        opts.addWidget(QLabel("Folds:"))
+        self._needs_folds = QSpinBox()
+        self._needs_folds.setRange(3, 10)
+        self._needs_folds.setValue(5)
+        self._needs_folds.setToolTip("Session-grouped folds. Every held-out fold contains whole sessions.")
+        opts.addWidget(self._needs_folds)
+        opts.addSpacing(12)
+        opts.addWidget(QLabel("Repeats:"))
+        self._needs_repeats = QSpinBox()
+        self._needs_repeats.setRange(1, 5)
+        self._needs_repeats.setValue(2)
+        self._needs_repeats.setToolTip(
+            "Random draws per removal. More repeats = less noise, proportionally longer run."
+        )
+        opts.addWidget(self._needs_repeats)
+        opts.addSpacing(12)
+        opts.addWidget(QLabel("Trees:"))
+        self._needs_trees = QSpinBox()
+        self._needs_trees.setRange(50, 500)
+        self._needs_trees.setSingleStep(50)
+        self._needs_trees.setValue(150)
+        self._needs_trees.setToolTip("XGBoost trees per test model. Fewer = faster, slightly noisier.")
+        opts.addWidget(self._needs_trees)
+        opts.addStretch(1)
+        lay.addLayout(opts)
+
+        run = QHBoxLayout()
+        self._needs_run_btn = QPushButton("Run Label Needs Test")
+        self._needs_run_btn.setStyleSheet(
+            "background-color: #4527A0; color: white; font-weight: 600; padding: 6px 12px;"
+        )
+        self._needs_run_btn.clicked.connect(self._run_label_needs)
+        run.addWidget(self._needs_run_btn)
+        self._needs_cancel_btn = QPushButton("Cancel")
+        self._needs_cancel_btn.setEnabled(False)
+        self._needs_cancel_btn.clicked.connect(self._cancel_label_needs)
+        run.addWidget(self._needs_cancel_btn)
+        self._needs_progress = QProgressBar()
+        self._needs_progress.setVisible(False)
+        run.addWidget(self._needs_progress, 1)
+        self._needs_gap_btn = QPushButton("Hunt Coverage Gaps for Selected")
+        self._needs_gap_btn.setToolTip(
+            "Turn on 'Only subjects lacking examples of' for the selected behavior and go\n"
+            "to Criteria, so the next Find Matches only returns animals without examples."
+        )
+        self._needs_gap_btn.setEnabled(False)
+        self._needs_gap_btn.clicked.connect(self._needs_hunt_gaps)
+        run.addWidget(self._needs_gap_btn)
+        lay.addLayout(run)
+        self._needs_table.itemSelectionChanged.connect(
+            lambda: self._needs_gap_btn.setEnabled(bool(self._needs_table.selectedItems()))
+        )
+
+        self._needs_status = QLabel("")
+        self._needs_status.setWordWrap(True)
+        self._needs_status.setStyleSheet("color: #00695C; font-weight: 600;")
+        lay.addWidget(self._needs_status)
+        self._needs_cancel: list[bool] = [False]
+        self._needs_busy = False
+        return tab
+
+    def _set_needs_checks(self, state) -> None:
+        for i in range(self._needs_list.count()):
+            self._needs_list.item(i).setCheckState(state)
+
+    def _run_label_needs(self) -> None:
+        from PySide6.QtCore import QThreadPool
+
+        if self._needs_busy:
+            return
+        chosen = []
+        for i in range(self._needs_list.count()):
+            item = self._needs_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                chosen.append((str(item.data(Qt.ItemDataRole.UserRole)), item.text()))
+        if not chosen:
+            self._needs_status.setText("Tick at least one behavior to test.")
+            return
+        cfg = LabelNeedsConfig(
+            folds=int(self._needs_folds.value()),
+            repeats=int(self._needs_repeats.value()),
+            n_estimators=int(self._needs_trees.value()),
+        )
+        # Confusers are named among every behavior, not just the tested ones.
+        all_behaviors = [
+            (str(self._needs_list.item(i).data(Qt.ItemDataRole.UserRole)), self._needs_list.item(i).text())
+            for i in range(self._needs_list.count())
+        ]
+        self._needs_busy = True
+        self._needs_cancel = [False]
+        self._needs_run_btn.setEnabled(False)
+        self._needs_cancel_btn.setEnabled(True)
+        self._needs_progress.setVisible(True)
+        self._needs_progress.setRange(0, 0)
+        self._needs_status.setText(f"Testing {len(chosen)} behaviors…")
+        self._needs_started = time.monotonic()
+        worker = TaskWorker(self._label_needs_job, chosen, all_behaviors, cfg, self._needs_cancel)
+        worker.signals.finished.connect(self._on_label_needs_ready)
+        worker.signals.failed.connect(self._on_label_needs_failed)
+        QThreadPool.globalInstance().start(worker)
+
+    def _label_needs_job(self, chosen, all_behaviors, cfg, cancel_flag) -> list:
+        """Worker-thread half: no widget access in here."""
+        names = dict(all_behaviors)
+        tested = [(bid, names.get(bid, name)) for bid, name in chosen]
+        # Pass every behavior so confusers can be named; only the chosen ones run.
+        return analyze_label_needs(
+            self._project_root, tested, cfg,
+            progress_cb=lambda name, done, total: self._needs_progress_sig.emit(name, done, total),
+            cancel_flag=cancel_flag, behavior_names=names,
+        )
+
+    def _on_needs_progress(self, name: str, done: int, total: int) -> None:
+        self._needs_progress.setRange(0, total)
+        self._needs_progress.setValue(done)
+        eta = ""
+        if done >= 3:
+            left = (time.monotonic() - self._needs_started) / done * (total - done)
+            eta = f", about {max(1, round(left / 60))} min left"
+        self._needs_progress.setFormat(f"{name}: %p%{eta}")
+
+    def _cancel_label_needs(self) -> None:
+        self._needs_cancel[0] = True
+        self._needs_status.setText("Stopping after the current model…")
+
+    def _label_needs_done(self) -> None:
+        self._needs_busy = False
+        self._needs_run_btn.setEnabled(True)
+        self._needs_cancel_btn.setEnabled(False)
+        self._needs_progress.setVisible(False)
+
+    def _on_label_needs_failed(self, tb: str) -> None:
+        self._label_needs_done()
+        if CANCEL_MARKER in tb:
+            self._needs_status.setText("Label needs test cancelled.")
+            return
+        logger.error("Label needs test failed:\n%s", tb)
+        last = tb.strip().splitlines()[-1] if tb.strip() else "unknown error"
+        self._needs_status.setText(f"Label needs test failed: {last}")
+
+    def _on_label_needs_ready(self, results: list) -> None:
+        self._label_needs_done()
+
+        def fmt(v) -> str:
+            return "" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{v:+.3f}"
+
+        colors = {"Label more": "#EF6C00", "Flat": "#C62828", "Saturated": "#2E7D32", "Too few": "#6D4C41"}
+        self._needs_table.setRowCount(len(results))
+        for r, n in enumerate(results):
+            cells = [
+                n.behavior_name, n.verdict,
+                "" if n.prauc_full is None else f"{n.prauc_full:.3f}",
+                str(n.positives), f"{n.sessions_with_positives}/{n.sessions_total}",
+                fmt(n.gain_positives), fmt(n.gain_spread), fmt(n.gain_hard), fmt(n.gain_no_behavior),
+                "\n".join(n.actions),
+            ]
+            for c, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if c == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, n.behavior_id)
+                if c == 1 and n.verdict in colors:
+                    item.setForeground(QColor(colors[n.verdict]))
+                self._needs_table.setItem(r, c, item)
+        self._needs_table.resizeRowsToContents()
+        # The stretched action column settles after layout, and resizing it emits no signal.
+        QTimer.singleShot(0, self._needs_table.resizeRowsToContents)
+        saved = self._save_label_needs(results)
+        self._needs_status.setText(
+            f"Done: {len(results)} behaviors." + (f" Saved to {saved}." if saved else "")
+        )
+
+    def _save_label_needs(self, results: list) -> str | None:
+        from datetime import datetime
+
+        try:
+            out_dir = Path(self._project_root) / "derived" / "label_needs"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            path = out_dir / f"label_needs_{datetime.now():%Y%m%d_%H%M%S}.csv"
+            pd.DataFrame([n.as_row() for n in results]).to_csv(path, index=False)
+            return str(path.relative_to(self._project_root))
+        except Exception:
+            logger.warning("Label needs: could not save results", exc_info=True)
+            return None
+
+    def _needs_hunt_gaps(self) -> None:
+        rows = self._needs_table.selectionModel().selectedRows()
+        if not rows:
+            return
+        item = self._needs_table.item(rows[0].row(), 0)
+        bid = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        idx = self._gap_behavior.findData(bid)
+        if idx < 0 or not self._gap_chk.isEnabled():
+            self._needs_status.setText(f"{item.text()} is not available for coverage-gap hunting.")
+            return
+        self._gap_behavior.setCurrentIndex(idx)
+        self._gap_behavior_picked = True
+        self._gap_chk.setChecked(True)
+        self._tabs.setCurrentIndex(0)
+        self._count_label.setText(
+            f"Coverage-gap hunt set to {item.text()}. Add criteria, extract an essence or pick "
+            "an Auto Hunter preset, then Find Matches."
+        )
+
     def _on_filter_mode_chosen(self) -> None:
         self._prefer_ranked = False
 
@@ -657,7 +1112,7 @@ class ClipMiningDialog(QDialog):
         )
         self._preset_detail.setHtml(
             f"<h3 style='margin-bottom:2px;'>{p.name}</h3>"
-            f"<p style='color:#607D8B;margin-top:0;'><i>{p.tagline}</i></p>"
+            f"<p style='color:#8FA6B4;margin-top:0;'><i>{p.tagline}</i></p>"
             f"{body}"
             f"<p><b>Needs:</b> {p.requires}</p>"
             f"<p><b>What it measures:</b></p><ul>{rows}</ul>"
@@ -1385,6 +1840,8 @@ class ClipMiningDialog(QDialog):
             c for c in self._current_criteria()
             if c.enabled and (c.low is not None or c.high is not None)
         ]
+        # Before the scored check, so the gap summary shows ahead of Find matches.
+        self._refresh_coverage()
         if self._df is None:
             # Not scored yet: nothing to count against.
             self._last_matches = []
@@ -1410,6 +1867,16 @@ class ClipMiningDialog(QDialog):
                 kept = [w for w in matched if w not in reviewed]
                 self._skipped_reviewed = len(matched) - len(kept)
                 matched = kept
+        self._skipped_gap = 0
+        if self._gap_sessions is not None:
+            gap_sessions = self._gap_sessions
+            kept = [
+                w for w in matched
+                if (ref := self._clip_by_id.get(w)) is not None
+                and str(ref.session_id) in gap_sessions
+            ]
+            self._skipped_gap = len(matched) - len(kept)
+            matched = kept
         self._last_matches = matched
         self._last_scores = res.scores
         if ranked:
@@ -1423,11 +1890,13 @@ class ClipMiningDialog(QDialog):
                 f"Ranked {len(matched)} of {res.n_evaluated} segment(s) by "
                 f"{self._rank_source}, will load the top {len(selected)}."
                 f"{skipped} The {len(active)} criteria below describe the behavior "
-                "but aren't filtering."
+                "but aren't filtering." + self._gap_note()
             )
             self._apply_btn.setEnabled(bool(matched))
         elif not active:
-            self._count_label.setText(f"No active criteria: {res.n_evaluated} segment(s) in scope.")
+            self._count_label.setText(
+                f"No active criteria: {res.n_evaluated} segment(s) in scope." + self._gap_note()
+            )
             self._apply_btn.setEnabled(False)
         else:
             n_match = len(matched)
@@ -1454,7 +1923,7 @@ class ClipMiningDialog(QDialog):
                 )
             self._count_label.setText(
                 f"{n_match} of {res.n_evaluated} segment(s) match "
-                f"{len(active)} criteria.{skipped}{load}"
+                f"{len(active)} criteria.{skipped}{load}" + self._gap_note()
             )
             self._apply_btn.setEnabled(bool(matched))
 
@@ -1493,6 +1962,15 @@ class ClipMiningDialog(QDialog):
         n = len(refs)
         # Persist the working criteria so this feature set survives a reload.
         self._persist_criteria()
+        # A gap hunt logs what it loaded, so reviewing those clips counts as
+        # screening the subject (and enough misses mark it likely absent).
+        bid = self._gap_behavior_id()
+        if self._gap_sessions is not None and bid is not None:
+            self._coverage.register_windows({r.window_id: r.session_id for r in refs})
+            try:
+                self._coverage.record_mined(bid, [r.window_id for r in refs])
+            except Exception:
+                logger.warning("Clip mining: could not log gap-mined clips", exc_info=True)
         self._on_apply(refs, dict(self._last_scores))
         # Stay open (modeless) so criteria can be refined and re-applied while the
         # mined queue updates behind the window.

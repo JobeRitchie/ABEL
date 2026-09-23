@@ -2,7 +2,7 @@
 
 **ABEL - Active-learning Behavior Estimation and Labeling**
 
-Version 0.22.0 · Python ≥ 3.10 · UNC academic-use license (UNC Ref. No. 26-0187)
+Version 0.23.0 · Python ≥ 3.10 · UNC academic-use license (UNC Ref. No. 26-0187)
 
 ABEL is a graphical user interface (GUI)-based, no-coding required platform for
 human-in-the-loop annotation and training of predictive models for behavior
@@ -41,6 +41,12 @@ computation.
 
 ABEL requires **Python 3.10 or newer** and an installation of **Git**.
 
+**Microsoft Visual C++ 14.0 or greater is required** to install some of ABEL's
+dependencies. If it is missing, dependency installation fails with an error
+like `Microsoft Visual C++ 14.0 or greater is required`. Get it from the
+[Microsoft C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+installer and select the **Desktop development with C++** workload.
+
 Install the latest NVIDIA graphics drivers and CUDA drivers that are compatible
 with your graphics drivers. If you already have drivers installed and working
 for GPU compute in other software, you should be good to go.
@@ -51,8 +57,10 @@ for GPU compute in other software, you should be good to go.
    install ABEL.
 2. Double-click **`run_abel.bat`**. It creates a virtual environment, installs
    the app, and launches the GUI.
-3. Once the GUI opens, click **Dependencies** and check that all dependencies
-   are installed. If any are not, click **Install All Dependencies**.
+3. **Install the dependencies.** Do this once before first use. Once the GUI
+   opens, click **Dependencies** and check that all dependencies are
+   installed. If any are not, click **Install All Dependencies**. This step
+   needs Microsoft Visual C++ 14.0 or greater (see above).
 
 That's it! ABEL is now ready for use by double-clicking `run_abel.bat`.
 

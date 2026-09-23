@@ -277,8 +277,10 @@ class PoseFeaturesService:
 
         for i, sf in enumerate(starts):
             if cancel_flag and cancel_flag[0]:
+                # Unfilled rows are zeros: saving them would cache a truncated
+                # session that later runs treat as complete.
                 result.warnings.append("Canceled by user.")
-                break
+                return result
             ef = sf + win_frames
             s = speed[sf:ef]
             d = disp[sf:ef]

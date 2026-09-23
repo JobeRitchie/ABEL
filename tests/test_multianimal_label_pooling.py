@@ -88,9 +88,104 @@ def test_co_occurring_merge_not_ambiguous(svc):
     assert by_seg[f"seg_track_0_{SESS}_30_59"] == "fighting|sniffing"
     # The mutual sniff still reaches the partner's segment.
     assert by_seg[f"seg_track_1_{SESS}_30_59"] == "sniffing"
-    # Merged multi-behavior record drops per-behavior structured fields.
+    # The merged record keeps the structured columns that are unambiguous. The
+    # focal animal always is (the segment is keyed by it); the partner survives
+    # here because both behaviors name the same one. The role does not, because
+    # track_0 is the *actor* of the fight and a *mutual* sniffer, and the column
+    # holds one value.
     merged = next(r for r in recs if r["review_label"] == "fighting|sniffing")
-    assert merged["fields"] == {}
+    assert merged["fields"]["focal_animal_id"] == "track_0"
+    assert merged["fields"]["partner_animal_id"] is None
+    assert merged["fields"]["social_role"] == "none"
+
+
+def test_merged_fields_keep_partner_when_roles_agree(svc):
+    """A social + solo pair leaves exactly one social role, so it is kept."""
+    recs = svc.aggregate_clip_labels(
+        [
+            {"behavior_id": "fighting", "focal_animal_id": "track_0", "partner_animal_id": "track_1"},
+            {"behavior_id": "rearing", "focal_animal_id": "track_0", "partner_animal_id": None},
+        ],
+        SESS, 30, 59,
+    )
+    merged = next(r for r in recs if "|" in r["review_label"])
+    assert merged["review_label"] == "fighting|rearing"
+    assert merged["fields"] == {
+        "focal_animal_id": "track_0",
+        "partner_animal_id": "track_1",
+        "social_role": "actor",
+    }
+
+
+def test_directed_recipient_can_be_labeled_no_behavior(svc):
+    """The groomee doing nothing is a legal pair, not a contradiction.
+
+    A directed behavior writes no row for the recipient, so marking that animal
+    as the universal negative must leave the actor's label alone. Regression:
+    the soundboard dropped any staged label naming the selected animal as the
+    *partner*, which deleted the directed label outright, so the clip committed
+    as two negatives and the interaction was never seen by training.
+    """
+    from PySide6.QtWidgets import QApplication
+
+    from abel.services.behavior_service import NO_BEHAVIOR_ID
+    from abel.ui.behavior_soundboard import BehaviorSoundboard
+
+    QApplication.instance() or QApplication([])
+    sb = BehaviorSoundboard()
+    sb.configure(
+        [("fighting", "Fighting", "f", True, "directed"),
+         ("sniffing", "Sniffing", "s", True, "mutual"),
+         (NO_BEHAVIOR_ID, "No Behavior", "n", False, "none")],
+        lambda _b: None, {},
+    )
+    sb.set_animals([("m0", "black", (200, 0, 0)), ("m1", "green", (0, 200, 0))])
+
+    sb._on_behavior_clicked("fighting")
+    sb._on_animal_clicked("m0")  # actor
+    sb._on_animal_clicked("m1")  # recipient
+    sb._selected_animal = "m1"
+    sb._label_selected_no_behavior()
+    staged = [(l["behavior_id"], l["focal_animal_id"]) for l in sb._clip_labels]
+    assert ("fighting", "m0") in staged   # the actor's label survives
+    assert (NO_BEHAVIOR_ID, "m1") in staged
+
+    # A mutual behavior genuinely labels the partner's segment, so negating that
+    # animal must still drop it.
+    sb._clip_labels = []
+    sb._on_behavior_clicked("sniffing")
+    sb._on_animal_clicked("m0")
+    sb._on_animal_clicked("m1")
+    sb._selected_animal = "m1"
+    sb._label_selected_no_behavior()
+    assert [l["behavior_id"] for l in sb._clip_labels] == [NO_BEHAVIOR_ID]
+
+
+def test_co_occurring_row_is_positive_not_negative():
+    """A pipe-joined row is a positive for each behavior it names.
+
+    Regression: the uncertainty ensemble compared the whole label string to the
+    target, so "fighting|rearing" trained as a *negative* for both fighting and
+    rearing, the exact opposite of what the reviewer recorded.
+    """
+    train_df = pd.DataFrame({
+        "label": ["fighting|rearing", "grooming", "no_behavior"],
+        "session_id": ["s1", "s1", "s1"],
+        "start_frame": [0, 100, 200],
+        "end_frame": [8, 108, 208],
+    })
+    keep, y = ActiveLearningTab._build_binary_target_with_overlap_guard(train_df, "fighting")
+    assert dict(zip(train_df["label"].iloc[keep], y)) == {
+        "fighting|rearing": 1, "grooming": 0, "no_behavior": 0,
+    }
+    keep, y = ActiveLearningTab._build_binary_target_with_overlap_guard(train_df, "rearing")
+    assert dict(zip(train_df["label"].iloc[keep], y))["fighting|rearing"] == 1
+
+    # A pipe row that does not name the target is dropped, not counted against
+    # it: the same clip must not be a positive for one behavior and a negative
+    # for another it also contains.
+    keep, y = ActiveLearningTab._build_binary_target_with_overlap_guard(train_df, "grooming")
+    assert "fighting|rearing" not in set(train_df["label"].iloc[keep])
 
 
 def test_end_to_end_pooling_join(svc, tmp_path):

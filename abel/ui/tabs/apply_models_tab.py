@@ -112,7 +112,7 @@ class ApplyModelsTab(QWidget):
             "are used. Only models whose features this project covers can be imported."
         )
         desc.setWordWrap(True)
-        desc.setStyleSheet("font-size: 11px; color: #607D8B; padding-bottom: 4px;")
+        desc.setStyleSheet("font-size: 11px; color: #8FA6B4; padding-bottom: 4px;")
 
         btn_row = QHBoxLayout()
         self._add_btn = QPushButton("+ Select Source Project…")

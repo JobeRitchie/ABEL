@@ -8,15 +8,19 @@ Three subtabs share one :class:`ValidationService` and one assembled
   auto-advance, and an "Unsure" option.  Answers are stored per named reviewer.
 * **Results & Suggestions**: user-vs-machine + inter-rater metrics and
   rule-based guidance, with an opt-in write-back into training labels.
+* **Review Effort**: total annotation time and seconds per clip, measured from
+  the review decision timestamps.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import threading
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThreadPool, Signal
+from PySide6.QtCore import Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -46,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from abel.ui.flow_layout import flow_row, labelled
 from abel.ui.tabs.feature_audit_tab import FeatureAuditTab
+from abel.ui.tabs.review_effort_panel import ReviewEffortPanel
 from abel.models.schemas import ValidationAnswerRecord, ValidationRun, ValidationSettings
 from abel.services.behavior_service import BehaviorService
 from abel.services.validation_service import NO_BEHAVIOR_ID, ValidationService
@@ -207,6 +212,123 @@ class LosoSubjectDialog(QDialog):
             for item in self._items()
             if item.checkState() == Qt.CheckState.Checked
         ]
+
+
+# ===========================================================================
+# Leave-one-mouse-out progress
+# ===========================================================================
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h {m:02d}m" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
+
+
+class LosoProgressDialog(QDialog):
+    """Live LOSO progress: behavior, fold, held-out subject, elapsed and ETA.
+
+    Fed by the structured events of :func:`leave_one_subject_out_all`. Cancel
+    sets a flag the run polls before each fold, so it stops after the fold in
+    flight and the behaviors already finished are still shown.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Leave-one-mouse-out CV: running")
+        self.setModal(False)
+        em = max(8, self.fontMetrics().averageCharWidth())
+        self.setMinimumWidth(em * 60)
+        self.cancel_event = threading.Event()
+        self._t0 = time.monotonic()
+        self._fraction = 0.0
+
+        layout = QVBoxLayout(self)
+        self._stage = QLabel("Loading training set…")
+        self._stage.setWordWrap(True)
+        self._stage.setStyleSheet("font-weight: 600;")
+        layout.addWidget(self._stage)
+        self._detail = QLabel("")
+        self._detail.setWordWrap(True)
+        self._detail.setStyleSheet("color: #B0BEC5;")
+        layout.addWidget(self._detail)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)  # busy until the first fold reports
+        layout.addWidget(self._bar)
+
+        self._time = QLabel("")
+        self._time.setStyleSheet("color: #90A4AE; font-size: 12px;")
+        row = QHBoxLayout()
+        row.addWidget(self._time, 1)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        row.addWidget(self._cancel_btn)
+        layout.addLayout(row)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._update_time)
+        self._timer.start(1000)
+        self._update_time()
+
+    def _on_cancel(self) -> None:
+        self.cancel_event.set()
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.setText("Cancelling…")
+        self._stage.setText("Cancelling after the current fold…")
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        # Closing the window means stop, never "keep running invisibly".
+        if not self.cancel_event.is_set():
+            self._on_cancel()
+        event.ignore()
+
+    def finish(self) -> None:
+        self._timer.stop()
+        self.cancel_event.set()
+        self.hide()
+        self.deleteLater()
+
+    def on_event(self, event: object) -> None:
+        if not isinstance(event, dict) or self.cancel_event.is_set():
+            return
+        stage = event.get("stage")
+        if stage == "loading":
+            self._stage.setText("Loading training set…")
+            return
+        b_i = int(event.get("behavior_index", 1) or 1)
+        n_b = max(1, int(event.get("n_behaviors", 1) or 1))
+        fold = int(event.get("fold", 0) or 0)
+        n_f = max(1, int(event.get("n_folds", 1) or 1))
+        self._stage.setText(f"Behavior {b_i} of {n_b}: {event.get('behavior_name', '')}")
+        if stage == "scoring":
+            self._detail.setText(
+                f"All {n_f} folds done. Pooling held-out predictions, temporal "
+                "refinement and subject bootstrap…"
+            )
+            done = b_i - 1 + (n_f - 0.5) / n_f
+        else:
+            self._detail.setText(
+                f"Fold {fold} of {n_f}: holding out {event.get('subject', '')}, "
+                f"training on the other {max(0, n_f - 1)}"
+            )
+            done = b_i - 1 + (fold - 1) / n_f
+        self._fraction = min(1.0, max(0.0, done / n_b))
+        self._bar.setRange(0, 1000)
+        self._bar.setValue(int(round(self._fraction * 1000)))
+        self._bar.setFormat(f"{self._fraction:.0%}")
+        self._update_time()
+
+    def _update_time(self) -> None:
+        elapsed = time.monotonic() - self._t0
+        text = f"Elapsed {_fmt_duration(elapsed)}"
+        # Folds skipped for lack of positives finish instantly, so the estimate
+        # is shown only once some real training has been timed.
+        if self._fraction >= 0.02 and elapsed >= 15:
+            remaining = elapsed * (1.0 - self._fraction) / self._fraction
+            text += f"  ·  about {_fmt_duration(remaining)} left"
+        else:
+            text += "  ·  estimating time left…"
+        self._time.setText(text)
 
 
 # ===========================================================================
@@ -835,27 +957,58 @@ class ValidationOverviewPanel(QWidget):
 
         self._loso_btn.setEnabled(False)
         self._loso_btn.setText("Running LOSO…")
+        progress_dlg = LosoProgressDialog(self)
+        self._loso_progress = progress_dlg
+        cancel_event = progress_dlg.cancel_event
 
         def _task() -> list:
             from abel.validation.datamodel import ProjectRef  # noqa: PLC0415
             from abel.validation.loso import leave_one_subject_out_all  # noqa: PLC0415
 
-            return leave_one_subject_out_all(ProjectRef.load(root), subjects=subject_arg)
+            return leave_one_subject_out_all(
+                ProjectRef.load(root),
+                subjects=subject_arg,
+                progress=worker.signals.progress.emit,
+                should_cancel=cancel_event.is_set,
+            )
 
         worker = TaskWorker(_task)
+        worker.signals.progress.connect(progress_dlg.on_event)
         worker.signals.finished.connect(self._on_loso_done)
         worker.signals.failed.connect(self._on_loso_failed)
+        progress_dlg.show()
         self._pool.start(worker)
 
-    def _on_loso_failed(self, msg: str) -> None:
+    def _end_loso_progress(self) -> None:
         self._loso_btn.setEnabled(True)
         self._loso_btn.setText("Leave-one-mouse-out CV")
+        dlg = getattr(self, "_loso_progress", None)
+        self._loso_progress = None
+        if dlg is not None:
+            dlg.finish()
+
+    def _on_loso_failed(self, msg: str) -> None:
+        self._end_loso_progress()
         logger.error("LOSO CV failed: %s", msg)
         QMessageBox.critical(self, "Leave-one-mouse-out CV", f"LOSO CV failed:\n{msg}")
 
     def _on_loso_done(self, results: list) -> None:
-        self._loso_btn.setEnabled(True)
-        self._loso_btn.setText("Leave-one-mouse-out CV")
+        self._end_loso_progress()
+        results = list(results or [])
+        marker = next((r for r in results if isinstance(r, dict) and r.get("cancelled")), None)
+        results = [r for r in results if r is not marker]
+        if marker is not None:
+            if not results:
+                QMessageBox.information(
+                    self, "Leave-one-mouse-out CV",
+                    "LOSO cancelled before any behavior finished.",
+                )
+                return
+            QMessageBox.information(
+                self, "Leave-one-mouse-out CV",
+                f"LOSO cancelled. Showing the {len(results)} of "
+                f"{marker.get('n_behaviors', '?')} behaviors that finished.",
+            )
         LosoResultsDialog(results, self).exec()
 
 
@@ -1648,7 +1801,7 @@ class ValidationResultsPanel(QWidget):
     def _bar(value: float | None, color: str) -> str:
         """Render a horizontal metric bar (0–1) as an HTML cell."""
         if value is None:
-            return "<span style='color:#607D8B;'>-</span>"
+            return "<span style='color:#8FA6B4;'>-</span>"
         pct = max(0.0, min(1.0, float(value))) * 100.0
         return (
             "<table cellpadding='0' cellspacing='0' style='width:130px; border-collapse:collapse;'><tr>"
@@ -2301,7 +2454,7 @@ class BehaviorGridPanel(QWidget):
 # Container
 # ===========================================================================
 class ValidationTab(QWidget):
-    """Top-level Validation tab hosting Overview / Quiz / Results / Grid / Feature Audit subtabs."""
+    """Top-level Validation tab hosting Overview / Quiz / Results / Grid / Feature Audit / Review Effort subtabs."""
 
     # The inspector runs on Temporal Review's loaded traces, so the main window
     # routes this to that tab rather than duplicating its loading here.
@@ -2323,14 +2476,16 @@ class ValidationTab(QWidget):
         self.results_panel = ValidationResultsPanel(service)
         self.behavior_grid_panel = BehaviorGridPanel(service)
         self.feature_audit_panel = FeatureAuditTab()
+        self.review_effort_panel = ReviewEffortPanel()
 
         self._tabs = QTabWidget()
         self._tabs.setTabPosition(QTabWidget.TabPosition.North)
         self._tabs.addTab(self.overview_panel, "Overview")
         self._tabs.addTab(self.quiz_panel, "Validation Quiz")
-        self._tabs.addTab(self.results_panel, "Results & Suggestions")
+        self._tabs.addTab(self.results_panel, "Results && Suggestions")
         self._tabs.addTab(self.behavior_grid_panel, "Behavior Grid")
         self._tabs.addTab(self.feature_audit_panel, "Feature Audit")
+        self._tabs.addTab(self.review_effort_panel, "Review Effort")
         self._tabs.currentChanged.connect(self._on_sub_changed)
 
         layout = QVBoxLayout(self)
@@ -2353,6 +2508,9 @@ class ValidationTab(QWidget):
         self.results_panel.refresh()
         self.behavior_grid_panel.set_project(self._project_root)
         self.feature_audit_panel.set_project(self._project_root)
+        self.review_effort_panel.set_project(self._project_root)
+        if self._tabs.currentWidget() is self.review_effort_panel:
+            self.review_effort_panel.refresh_if_stale()
 
     def _on_sub_changed(self, index: int) -> None:
         widget = self._tabs.widget(index)
@@ -2360,3 +2518,5 @@ class ValidationTab(QWidget):
             self.overview_panel.refresh()
         elif widget is self.results_panel:
             self.results_panel.refresh()
+        elif widget is self.review_effort_panel:
+            self.review_effort_panel.refresh_if_stale()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field, model_validator
@@ -165,6 +165,42 @@ class PoseSmoothingSettings(BaseModel):
    , a phantom that also fabricates social contact for the animals that were
     already there.  0 disables the bound (fill everything, the pre-0.22 behavior).
     """
+
+    # The Pose & Features tab edits these three and saves them to
+    # ``project.yaml`` under ``feature_extraction``.
+    PROJECT_KEYS: ClassVar[tuple[str, ...]] = (
+        "likelihood_threshold", "interpolate_dropouts", "smoothing_window",
+    )
+
+    @classmethod
+    def load_from_project(cls, project_root: "Path") -> "PoseSmoothingSettings":
+        """The smoothing that feature extraction uses for a project.
+
+        Reads the Pose & Features tab's values from ``project.yaml``
+        (``feature_extraction``).  Missing file or keys fall back to field
+        defaults.  Never raises, returns defaults on any error.
+        """
+        from abel.storage.file_store import read_yaml  # noqa: PLC0415
+
+        try:
+            fx = (read_yaml(project_root / "project.yaml", {}) or {}).get("feature_extraction") or {}
+            values = {k: fx[k] for k in cls.PROJECT_KEYS if fx.get(k) is not None}
+            return cls(**values)
+        except Exception:
+            return cls()
+
+    def cache_signature(self) -> dict:
+        """The settings that differ from the defaults, for feature-cache keys.
+
+        Every cache built before extraction honored these settings was built
+        at the defaults, so an empty dict keeps those caches valid and only a
+        real change forces a rebuild.
+        """
+        default = type(self)()
+        return {
+            k: getattr(self, k) for k in type(self).model_fields
+            if getattr(self, k) != getattr(default, k)
+        }
 
 
 class BehaviorModelConfig(BaseModel):
@@ -586,6 +622,10 @@ class PreprocessingPreset(BaseModel):
     that animal is in the arena and what the other animals are doing.  With this
     on, the clip keeps the full field of view (aspect ratio preserved) and the
     crop settings are ignored."""
+    identity_marker_scale: float = 1.0
+    """Size of the per-animal identity dots in multi-animal clips, relative to
+    the default (1.0 = a radius of 1/70 of the clip width).  Smaller dots hide
+    less of the animal."""
     likelihood_threshold: float = 0.2
     interpolate_dropouts: bool = True
     smoothing_window: int = 5

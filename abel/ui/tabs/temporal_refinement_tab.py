@@ -122,6 +122,7 @@ from abel.ui.suppression_helper_dialog import SuppressionHelperDialog
 
 from abel.ui.widgets.session_selection_dialog import SessionOption, choose_sessions
 
+from abel.utils.cancellation import cancel_scope, cancellable, is_cancel_traceback
 from abel.workers.task_worker import TaskWorker
 
 
@@ -161,6 +162,8 @@ class TemporalRefinementTab(QWidget):
         self._selected_session_ids: set[str] | None = None
 
         self._current_worker: TaskWorker | None = None  # keep alive until job finishes
+
+        self._cancel_flag: list[bool] = [False]  # set by Cancel, read by the worker
 
         self._viz_worker: TaskWorker | None = None  # keep graph-gen worker alive
 
@@ -425,6 +428,15 @@ class TemporalRefinementTab(QWidget):
 
         self._clear_cache_btn = QPushButton("Clear Temporal Cache")
 
+        self._cancel_btn = QPushButton("■ Cancel")
+
+        self._cancel_btn.setToolTip(
+            "Stop the running inference or bout generation. The previous "
+            "results stay in place; nothing from the canceled run is used."
+        )
+
+        self._cancel_btn.setEnabled(False)
+
 
 
         self._infer_btn.clicked.connect(self._run_infer)
@@ -434,6 +446,8 @@ class TemporalRefinementTab(QWidget):
         self._refresh_results_btn.clicked.connect(self._refresh_results_view)
 
         self._clear_cache_btn.clicked.connect(self._clear_temporal_cache)
+
+        self._cancel_btn.clicked.connect(self._cancel)
 
 
 
@@ -677,6 +691,8 @@ class TemporalRefinementTab(QWidget):
         btn_row.addWidget(self._infer_btn)
 
         btn_row.addWidget(self._refine_btn)
+
+        btn_row.addWidget(self._cancel_btn)
 
         btn_row.addWidget(self._test_single_session)
 
@@ -1748,6 +1764,12 @@ class TemporalRefinementTab(QWidget):
 
         self._auto_clear_cache.setEnabled(not busy)
 
+        self._cancel_btn.setEnabled(busy)
+
+        if busy:
+
+            self._cancel_flag[0] = False
+
 
 
     # ==================================================================
@@ -1895,21 +1917,24 @@ class TemporalRefinementTab(QWidget):
 
         manager = self._require_manager()
 
-        return manager.run_temporal_refinement_inference(
+        # Every progress line and every scoring / R3D batch is a Cancel checkpoint.
+        with cancel_scope(self._cancel_flag):
 
-            concept_id=concept_id or self._current_behavior_id(),
+            return manager.run_temporal_refinement_inference(
 
-            sessions=sessions,
+                concept_id=concept_id or self._current_behavior_id(),
 
-            config=config or self._config(),
+                sessions=sessions,
 
-            mode="dense",
+                config=config or self._config(),
 
-            max_sessions=max_sessions,
+                mode="dense",
 
-            progress_cb=progress_cb,
+                max_sessions=max_sessions,
 
-        )
+                progress_cb=cancellable(progress_cb, self._cancel_flag),
+
+            )
 
 
 
@@ -1929,17 +1954,19 @@ class TemporalRefinementTab(QWidget):
 
         manager = self._require_manager()
 
-        return manager.run_temporal_refinement_postprocess(
+        with cancel_scope(self._cancel_flag):
 
-            concept_id=concept_id or self._current_behavior_id(),
+            return manager.run_temporal_refinement_postprocess(
 
-            sessions=sessions,
+                concept_id=concept_id or self._current_behavior_id(),
 
-            config=config or self._config(),
+                sessions=sessions,
 
-            progress_cb=progress_cb,
+                config=config or self._config(),
 
-        )
+                progress_cb=cancellable(progress_cb, self._cancel_flag),
+
+            )
 
 
 
@@ -2079,6 +2106,18 @@ class TemporalRefinementTab(QWidget):
 
 
 
+    def _cancel(self) -> None:
+
+        self._cancel_flag[0] = True
+
+        self._cancel_btn.setEnabled(False)
+
+        self._status.setText("Canceling… stopping at the next checkpoint.")
+
+        self._append_log("Cancel requested. Stopping at the next checkpoint…")
+
+
+
     def _on_failed(self, traceback_text: str) -> None:
 
         self._set_busy(False)
@@ -2086,6 +2125,14 @@ class TemporalRefinementTab(QWidget):
         self._active_job = None
 
         self._current_worker = None
+
+        if is_cancel_traceback(traceback_text):
+
+            self._status.setText("Canceled. Previous results are unchanged.")
+
+            self._append_log("Canceled by user. Previous results are unchanged.")
+
+            return
 
         self._status.setText("Temporal refinement failed.")
 
