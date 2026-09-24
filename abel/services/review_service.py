@@ -9,7 +9,25 @@ from pathlib import Path
 import pandas as pd
 
 from abel.models.schemas import ReviewDecision, ReviewDecisionType, ReviewerLabelRecord
-from abel.storage.file_store import read_json, write_json
+from abel.storage.file_store import atomic_write_parquet, read_json, write_json
+
+
+def _read_existing_labels(path: Path) -> pd.DataFrame:
+    """Read the reviewer-label table before adding to it.
+
+    Refuses to continue when the file exists but cannot be read (a network
+    drive dropping out, or a file damaged before writes were atomic).  Treating
+    that as "no labels yet" would save only the new rows over every label the
+    user has made.
+    """
+    try:
+        return pd.read_parquet(path)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not read the saved labels in {path} ({exc}). Nothing was changed. "
+            "If the project is on a network or external drive, check that it is "
+            "connected and try again."
+        ) from exc
 
 
 @dataclass
@@ -166,15 +184,12 @@ class ReviewService:
         seg_ids = {str(r.segment_id) for r in records}
         new_df = pd.DataFrame([r.model_dump(mode="json") for r in records])
         if path.exists():
-            try:
-                existing = pd.read_parquet(path)
-                existing = existing[~existing["segment_id"].astype(str).isin(seg_ids)]
-                merged = pd.concat([existing, new_df], ignore_index=True)
-            except Exception:
-                merged = new_df
+            existing = _read_existing_labels(path)
+            existing = existing[~existing["segment_id"].astype(str).isin(seg_ids)]
+            merged = pd.concat([existing, new_df], ignore_index=True)
         else:
             merged = new_df
-        merged.to_parquet(path, index=False)
+        atomic_write_parquet(merged, path, index=False)
 
     @staticmethod
     def summary(decisions: list[ReviewDecision]) -> ReviewSummary:
@@ -224,7 +239,7 @@ class ReviewService:
             try:
                 df = pd.read_parquet(lbl_path)
                 df = df[~df["segment_id"].isin(id_set)]
-                df.to_parquet(lbl_path, index=False)
+                atomic_write_parquet(df, lbl_path, index=False)
             except Exception:
                 pass
         # Drop any round-trip soundboard payloads for these windows.
@@ -257,7 +272,7 @@ class ReviewService:
         df = df[~df["segment_id"].isin(id_set)]
         removed = before - len(df)
         if removed:
-            df.to_parquet(path, index=False)
+            atomic_write_parquet(df, path, index=False)
         return removed
 
     # --- Soundboard structured-label round-trip store ---------------------
@@ -304,12 +319,8 @@ class ReviewService:
         path.parent.mkdir(parents=True, exist_ok=True)
         row = pd.DataFrame([record.model_dump(mode="json")])
         if path.exists():
-            try:
-                existing = pd.read_parquet(path)
-                merged = pd.concat([existing, row], ignore_index=True)
-            except Exception:
-                # File is corrupted or empty: start fresh
-                merged = row
+            existing = _read_existing_labels(path)
+            merged = pd.concat([existing, row], ignore_index=True)
         else:
             merged = row
-        merged.to_parquet(path, index=False)
+        atomic_write_parquet(merged, path, index=False)

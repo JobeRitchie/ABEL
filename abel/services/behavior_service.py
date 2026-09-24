@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from abel.core.constants import GLOBAL_CONFIG_DIR
 from abel.models.schemas import BehaviorDefinition
-from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
+from abel.storage.file_store import atomic_write_parquet, read_json, read_yaml, write_json, write_yaml
 
 
 logger = logging.getLogger(__name__)
@@ -711,7 +711,7 @@ class BehaviorService:
                     )
                     if changed:
                         df = df.assign(review_label=stripped)[~drop_mask].copy()
-                        df.to_parquet(lbl_path, index=False)
+                        atomic_write_parquet(df, lbl_path, index=False)
             except Exception:
                 logger.warning("Failed to purge reviewer labels for %s", dead, exc_info=True)
 
@@ -753,7 +753,7 @@ class BehaviorService:
                     drop_mask = stripped.isna() & original.notna()
                     counts["training_rows"] = int(drop_mask.sum())
                     if counts["training_rows"] or bool((stripped.notna() & (stripped != original)).any()):
-                        df.assign(label=stripped)[~drop_mask].to_parquet(ts_path, index=False)
+                        atomic_write_parquet(df.assign(label=stripped)[~drop_mask], ts_path, index=False)
             except Exception:
                 logger.warning("Failed to purge training set rows for %s", dead, exc_info=True)
 

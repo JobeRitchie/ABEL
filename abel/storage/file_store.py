@@ -64,6 +64,33 @@ def atomic_write_parquet(df: "Any", path: Path, **to_parquet_kwargs: Any) -> Non
                 pass
 
 
+def atomic_write_pickle(obj: Any, path: Path) -> None:
+    """Pickle *obj* to *path* atomically (temp file + ``os.replace``).
+
+    A trained model written in place and cut off mid-write (app closed during
+    training) leaves a truncated ``model_state.pkl`` that no longer loads.
+    """
+    import os
+    import pickle
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}.", suffix=".pkl.tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            pickle.dump(obj, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(tmp_path), str(path))
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 def read_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
     if not path.exists():
         return {} if default is None else default

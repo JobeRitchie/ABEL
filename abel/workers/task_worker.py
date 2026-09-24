@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import traceback
 from typing import Any, Callable
 
@@ -17,6 +18,16 @@ class WorkerSignals(QObject):
     progress = Signal(object)  # structured progress events (dicts) from the task
 
 
+_active_lock = threading.Lock()
+_active_count = 0
+
+
+def active_task_count() -> int:
+    """Number of TaskWorker jobs currently running (for the close guard)."""
+    with _active_lock:
+        return _active_count
+
+
 class TaskWorker(QRunnable):
     """Runs blocking callables without freezing the UI."""
 
@@ -29,6 +40,9 @@ class TaskWorker(QRunnable):
 
     @Slot()
     def run(self) -> None:
+        global _active_count
+        with _active_lock:
+            _active_count += 1
         try:
             result = self.fn(*self.args, **self.kwargs)
             self.signals.finished.emit(result)
@@ -36,3 +50,6 @@ class TaskWorker(QRunnable):
             # A cancel reaches ``failed`` too; handlers tell it apart with
             # ``is_cancel_traceback``.
             self.signals.failed.emit(traceback.format_exc())
+        finally:
+            with _active_lock:
+                _active_count -= 1

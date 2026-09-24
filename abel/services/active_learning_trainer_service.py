@@ -17,7 +17,7 @@ from abel.models.schemas import ModelCard
 from abel.services.import_service import ImportService
 from abel.services.provenance_service import ProvenanceService
 from abel.services.subject_rename_service import SUBJECT_GROUP_COL, current_subjects
-from abel.storage.file_store import write_json, write_yaml
+from abel.storage.file_store import atomic_write_parquet, atomic_write_pickle, write_json, write_yaml
 from abel.utils import xgb_predict
 
 logger = logging.getLogger("abel")
@@ -448,9 +448,9 @@ class ActiveLearningTrainerService:
         # windows before this, 25k after).
         merged = self._canonicalize_training_distances(merged)
 
-        merged.to_parquet(current_path, index=False)
+        atomic_write_parquet(merged, current_path, index=False)
         snap_path = snap_dir / f"training_set_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.parquet"
-        merged.to_parquet(snap_path, index=False)
+        atomic_write_parquet(merged, snap_path, index=False)
         return snap_path
 
     def train(
@@ -1642,17 +1642,16 @@ class ActiveLearningTrainerService:
         ):
             pred_df["prediction_prob"] = np.asarray(result.val_probs)[:, int(result.target_idx)].astype(float)
             pred_df["target_index"] = int(result.target_idx)
-        pred_df.to_parquet(model_dir / "validation_predictions.parquet", index=False)
+        atomic_write_parquet(pred_df, model_dir / "validation_predictions.parquet", index=False)
 
-        with open(model_dir / "model_state.pkl", "wb") as f:
-            pickle.dump(
-                {
-                    "model": result.calibrated_model,
-                    "feature_cols": result.feature_cols,
-                    "label_map": result.label_map,
-                },
-                f,
-            )
+        atomic_write_pickle(
+            {
+                "model": result.calibrated_model,
+                "feature_cols": result.feature_cols,
+                "label_map": result.label_map,
+            },
+            model_dir / "model_state.pkl",
+        )
 
         prov = self._provenance.make_provenance(
             project_root=project_root,

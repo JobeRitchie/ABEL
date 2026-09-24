@@ -49,6 +49,15 @@ CHANGELOG: list[tuple[str, str, list[str]]] = [
         "checkpoint and keep the previous results; nothing half written is "
         "saved. LOSO shows live progress with the current fold, held-out "
         "subject and ETA.",
+        "Closing ABEL during training no longer loses models. Retrain All "
+        "used to delete each old model before building its replacement. Now "
+        "the old model is kept aside until the new one finishes, and is put "
+        "back if the retrain fails, is stopped, or ABEL is closed or crashes "
+        "(restored the next time the project opens). Closing while a job "
+        "runs asks first and stops the job at a safe point. Models, labels "
+        "and the training set are written so an interrupted save can never "
+        "leave a broken file, and an unreadable label file is no longer "
+        "replaced by only the newest labels.",
         "The Pose & Features smoothing settings now reach feature "
         "extraction. Before this fix every project was extracted with the "
         "default 5-frame smoothing whatever the tab said. Changing the "

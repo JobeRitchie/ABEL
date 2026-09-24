@@ -28,8 +28,24 @@ class OperationCancelled(BaseException):
         super().__init__(message)
 
 
+_shutdown = threading.Event()
+
+
+def request_shutdown() -> None:
+    """Ask every running job to stop, as if its Stop button were pressed.
+
+    Used when the app is closing, so a job ends at one of its safe stop points
+    (never between the writes of a model) instead of being killed mid-write.
+    """
+    _shutdown.set()
+
+
+def shutdown_requested() -> bool:
+    return _shutdown.is_set()
+
+
 def is_cancelled(flag: "list[bool] | None") -> bool:
-    return bool(flag) and bool(flag[0])
+    return _shutdown.is_set() or (bool(flag) and bool(flag[0]))
 
 
 def check_cancel(flag: "list[bool] | None", exc_type: type = OperationCancelled) -> None:
@@ -98,6 +114,8 @@ def checkpoint() -> None:
     binding = getattr(_scope, "binding", None)
     if binding is not None:
         check_cancel(binding[0], binding[1])
+    elif _shutdown.is_set():
+        raise OperationCancelled()
 
 
 def is_cancel_traceback(traceback_text: str) -> bool:

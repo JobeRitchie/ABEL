@@ -79,7 +79,7 @@ from abel.services.behavior_representation_service import (
 )
 from abel.services.candidate_service import CandidateGenerationService
 from abel.services.review_service import ReviewService
-from abel.storage.file_store import read_json, write_json
+from abel.storage.file_store import atomic_write_parquet, atomic_write_pickle, read_json, write_json
 
 logger = logging.getLogger("abel")
 
@@ -735,11 +735,11 @@ class ModelRefinementService:
                 removed_rows = int(mask.sum())
                 if removed_rows:
                     df = df[~mask].reset_index(drop=True)
-                    df.to_parquet(ts_path, index=False)
+                    atomic_write_parquet(df, ts_path, index=False)
                     snap_dir = ts_path.parent / "snapshots"
                     snap_dir.mkdir(parents=True, exist_ok=True)
                     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                    df.to_parquet(snap_dir / f"training_set_{stamp}.parquet", index=False)
+                    atomic_write_parquet(df, snap_dir / f"training_set_{stamp}.parquet", index=False)
         result["removed_rows"] = removed_rows
 
         # 2. External review candidates tagged with this source.
@@ -2056,8 +2056,7 @@ class ModelRefinementService:
                     ]
                     changed = True
             if changed:
-                with open(dst / "model_state.pkl", "wb") as f:
-                    pickle.dump(payload, f)
+                atomic_write_pickle(payload, dst / "model_state.pkl")
         except Exception:
             logger.exception(
                 "Could not rewrite imported model state for %s; it may not score "
@@ -2153,8 +2152,7 @@ class ModelRefinementService:
                         continue
                     label_map[key] = host_bid
                     payload["label_map"] = label_map
-                    with open(state_path, "wb") as f:
-                        pickle.dump(payload, f)
+                    atomic_write_pickle(payload, state_path)
                     repaired.append(model_dir)
                 except Exception:
                     logger.exception("Could not repair label_map for %s", model_dir)

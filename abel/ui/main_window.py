@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtCore import Qt, QTimer, QThreadPool
+from PySide6.QtCore import QEventLoop, Qt, QTimer, QThreadPool
 from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -64,6 +65,8 @@ from abel.ui.tabs.model_refinement_tab import ModelRefinementTab
 from abel.ui.tabs.validation_tab import ValidationTab
 from abel.services.validation_service import ValidationService
 from abel.services.workflow_snapshot_service import WorkflowSnapshotService
+from abel.utils.cancellation import request_shutdown
+from abel.workers.task_worker import active_task_count
 
 
 class MainWindow(QMainWindow):
@@ -459,6 +462,18 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._close_open_popup()
             self._error(f"Could not open project: {exc}")
+            return
+        restored = list(self._project_service.restored_models)
+        if restored:
+            names = "\n".join(f"  • {n.removeprefix('behavior_model_')}" for n in restored)
+            QMessageBox.information(
+                self,
+                "Previous Models Restored",
+                "A retrain did not finish last time (ABEL was closed or stopped "
+                "while it was running).\n\nThe models it was replacing have been "
+                f"restored, so nothing was lost:\n{names}\n\n"
+                "Run the retrain again to update them.",
+            )
 
     def _close_open_popup(self) -> None:
         close_busy(self._open_popup)
@@ -830,6 +845,12 @@ class MainWindow(QMainWindow):
         which terminates the process abnormally and leaves file handles
         (including the launcher's 2>> log redirect) unreleased.
         """
+        # 0. A job still running (training, extraction...) must stop at a safe
+        #    point first; killing it mid-write is how models were lost.
+        if not self._stop_running_jobs_for_close():
+            event.ignore()
+            return
+
         # 1. Stop MKL/OpenMP from creating new threads; request idle exit.
         _shutdown_mkl_threads()
 
@@ -841,6 +862,52 @@ class MainWindow(QMainWindow):
         logging.shutdown()
 
         super().closeEvent(event)
+
+    def _stop_running_jobs_for_close(self) -> bool:
+        """Confirm, then stop running jobs cleanly. False keeps ABEL open."""
+        if active_task_count() == 0:
+            return True
+        reply = QMessageBox.warning(
+            self,
+            "ABEL Is Still Working",
+            "A job is still running (for example training or feature extraction).\n\n"
+            "ABEL will stop it at a safe point before closing. Saved labels and "
+            "models are kept; the unfinished job will need to be run again.\n\n"
+            "Stop the job and close ABEL?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+
+        self._logger.info("Close requested while a job was running; stopping it first.")
+        request_shutdown()
+        popup = show_busy(self, "Closing ABEL", "Stopping the running job safely…")
+        pool = QThreadPool.globalInstance()
+        deadline = time.monotonic() + 120.0
+        try:
+            while active_task_count() > 0:
+                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+                pool.waitForDone(100)
+                if time.monotonic() < deadline:
+                    continue
+                force = QMessageBox.question(
+                    self,
+                    "Still Stopping",
+                    "The job has not stopped yet. It may be in the middle of a long "
+                    "step.\n\nKeep waiting? Choose No to close now. If a retrain is cut "
+                    "off, the previous model is restored the next time the project is "
+                    "opened.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if force != QMessageBox.StandardButton.Yes:
+                    self._logger.warning("Closing with a job still running (user chose not to wait).")
+                    break
+                deadline = time.monotonic() + 120.0
+        finally:
+            close_busy(popup)
+        return True
 
     def _error(self, message: str) -> None:
         self._logger.error(message)

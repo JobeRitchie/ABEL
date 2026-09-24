@@ -61,6 +61,7 @@ from abel.temporal_refinement.temporal_refinement_service import TemporalRefinem
 from abel.ui.tabs.review_tab import CandidateVideoPlayer
 from abel.workers.task_worker import TaskWorker
 from abel.utils.error_text import format_task_error
+from abel.storage.file_store import atomic_write_parquet
 
 
 class TemporalReviewTab(QWidget):
@@ -984,7 +985,7 @@ class TemporalReviewTab(QWidget):
             merged = pd.concat([existing_full, new_df], ignore_index=True)
         else:
             merged = new_df
-        merged.to_parquet(label_path, index=False)
+        atomic_write_parquet(merged, label_path, index=False)
 
         return len(new_records)
 

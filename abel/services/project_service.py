@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -14,9 +15,13 @@ from abel.core.exceptions import ProjectError
 from abel.models.schemas import ProjectConfig, ProjectContext, ProjectState
 from abel.storage.file_store import backup_file, read_json, read_yaml, write_json, write_yaml
 
+logger = logging.getLogger(__name__)
 
 class ProjectService:
     """Creates, opens, and updates ABEL projects on disk."""
+
+    # Models put back from derived/model_backups by the last open_project call.
+    restored_models: list[str] = []
 
     def create_project(
         self,
@@ -81,6 +86,15 @@ class ProjectService:
         state = ProjectState.model_validate(read_json(state_file, {}))
         state.last_opened_at = datetime.utcnow()
         self.save_state(project_root, state)
+        # A retrain that was interrupted (app closed or crashed) leaves the
+        # previous model in derived/model_backups; put it back.
+        from abel.services.model_backup import recover_interrupted_models
+
+        try:
+            self.restored_models = recover_interrupted_models(project_root)
+        except OSError as exc:
+            logger.error("Could not check for interrupted retrains: %s", exc)
+            self.restored_models = []
         return ProjectContext(project_root=project_root, config=config, state=state)
 
     def save_config(self, project_root: Path, config: ProjectConfig) -> None:

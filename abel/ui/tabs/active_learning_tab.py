@@ -70,14 +70,21 @@ from abel.services.context_feature_service import ContextFeatureConfig, ContextF
 from abel.services.evaluation_service import BoutMergeConfig, EvaluationService
 from abel.services.import_service import ImportService
 from abel.services.subject_rename_service import current_subjects
+from abel.services.model_backup import protect_model_dir
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.roi_service import ROIService
 from abel.services.seed_service import SeedService
 from abel.services.uncertainty_service import UncertaintyScoringService, UncertaintyWeights
 from abel.services.workflow_snapshot_service import WorkflowSnapshot, WorkflowSnapshotService
-from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
+from abel.storage.file_store import atomic_write_parquet, read_json, read_yaml, write_json, write_yaml
 from abel.utils import xgb_predict
-from abel.utils.cancellation import OperationCancelled, cancel_scope, check_cancel, is_cancel_traceback
+from abel.utils.cancellation import (
+    OperationCancelled,
+    cancel_scope,
+    check_cancel,
+    is_cancel_traceback,
+    is_cancelled,
+)
 from abel.utils.eta_estimator import StageEtaEstimator, blend_whole_run_eta
 from abel.utils.run_timeline import RunTimeline, Stage
 from abel.utils.run_timing_profile import RunTimingProfile
@@ -3738,33 +3745,30 @@ class ActiveLearningTab(QWidget):
                     f"Preparing · behavior {idx + 1}/{n_total}: {bname}",
                 )
 
-                # Delete the old model directory so stale artifacts from a
-                # previous run cannot leak into the new model.
+                # Build the new model in an empty directory so stale artifacts
+                # from a previous run cannot leak into it.  The old model is
+                # parked in derived/model_backups, not deleted, and comes back
+                # if this retrain fails, is stopped, or ABEL is closed first.
                 old_model_dir = self._project_root / "derived" / "models" / f"behavior_model_{self._safe_model_name(bname)}"
-                if old_model_dir.exists() and old_model_dir.is_dir():
-                    import shutil
+                with protect_model_dir(old_model_dir, start_fresh=True) as model_guard:
                     try:
-                        shutil.rmtree(old_model_dir)
-                        logger.info("Retrain-all: removed old model directory %s", old_model_dir)
-                    except Exception as rm_exc:
-                        logger.warning("Retrain-all: could not remove old model dir %s: %s", old_model_dir, rm_exc)
-
-                try:
-                    result = self._run_retrain_task(
-                        progress_cb=_make_behavior_progress_cb(idx, bname),
-                        target_behavior_override=bid,
-                        skip_candidates=not getattr(self, "_batch_generate_clips", True),
-                        merge_candidates=True,
-                    )
-                    result["target_behavior_name"] = bname
-                except Exception as exc:
-                    logger.error("Retrain-all: failed on behavior '%s': %s", bname, exc)
-                    result = {
-                        "retrained": False,
-                        "target_behavior": bid,
-                        "target_behavior_name": bname,
-                        "error": str(exc),
-                    }
+                        result = self._run_retrain_task(
+                            progress_cb=_make_behavior_progress_cb(idx, bname),
+                            target_behavior_override=bid,
+                            skip_candidates=not getattr(self, "_batch_generate_clips", True),
+                            merge_candidates=True,
+                        )
+                        result["target_behavior_name"] = bname
+                    except Exception as exc:
+                        logger.error("Retrain-all: failed on behavior '%s': %s", bname, exc)
+                        result = {
+                            "retrained": False,
+                            "target_behavior": bid,
+                            "target_behavior_name": bname,
+                            "error": str(exc),
+                        }
+                    if not result.get("retrained"):
+                        model_guard.restore_previous()
                 results.append(result)
         finally:
             # Clean up the override so subsequent single-behavior runs
@@ -4124,7 +4128,7 @@ class ActiveLearningTab(QWidget):
 
         try:
             for idx, behavior in enumerate(behaviors):
-                if cancel_flag and cancel_flag[0]:
+                if is_cancelled(cancel_flag):
                     break
                 bid = str(behavior.behavior_id).strip()
                 bname = str(behavior.name)
@@ -4473,7 +4477,7 @@ class ActiveLearningTab(QWidget):
 
         try:
             for idx, (bid, bname, model_version) in enumerate(selected):
-                if cancel_flag and cancel_flag[0]:
+                if is_cancelled(cancel_flag):
                     break
                 _sep = "━" * 18
                 if progress_cb is not None:
@@ -5470,7 +5474,7 @@ class ActiveLearningTab(QWidget):
             return _relay
 
         def _check_cancel() -> None:
-            if cancel_flag and cancel_flag[0]:
+            if is_cancelled(cancel_flag):
                 raise PipelineCancelledError("PIPELINE_CANCELLED_BY_USER")
 
         mode = str(self._mode.currentData() or "uncertainty")
@@ -5682,8 +5686,9 @@ class ActiveLearningTab(QWidget):
                 current_step, total_steps, "[Inference] ", "Inference", span=(0.5, 1.0)
             ),
         )
-        pred_df[["segment_id", "prediction_prob"]].to_parquet(model_dir / "segment_predictions.parquet", index=False)
-        pred_df[["segment_id", "uncertainty_score", "uncertainty_entropy", "prediction_variance", "density_outlier_score"]].to_parquet(
+        atomic_write_parquet(pred_df[["segment_id", "prediction_prob"]], model_dir / "segment_predictions.parquet", index=False)
+        atomic_write_parquet(
+            pred_df[["segment_id", "uncertainty_score", "uncertainty_entropy", "prediction_variance", "density_outlier_score"]],
             model_dir / "segment_uncertainty.parquet", index=False
         )
         current_step += 1
@@ -5779,7 +5784,40 @@ class ActiveLearningTab(QWidget):
             "candidates": candidates_out,
         }
 
+    def _model_dir_to_protect(self) -> Path | None:
+        """The existing model a run will overwrite, or None for a new directory.
+
+        Mirrors :meth:`_resolved_model_version`: a named model is reused in
+        place, an unnamed one gets a fresh time-stamped directory.
+        """
+        if self._project_root is None:
+            return None
+        name = getattr(self, "_pipeline_all_model_name_override", None) or self._safe_model_name(
+            self._model_name.text()
+        )
+        if not name:
+            return None
+        return self._project_root / "derived" / "models" / f"behavior_model_{name}"
+
     def _run_retrain_task(
+        self,
+        progress_cb: Callable[[int, int, str, str], None] | None = None,
+        target_behavior_override: str | None = None,
+        skip_candidates: bool = False,
+        merge_candidates: bool = False,
+    ) -> dict[str, Any]:
+        with protect_model_dir(self._model_dir_to_protect()) as model_guard:
+            result = self._run_retrain_task_impl(
+                progress_cb=progress_cb,
+                target_behavior_override=target_behavior_override,
+                skip_candidates=skip_candidates,
+                merge_candidates=merge_candidates,
+            )
+            if not result.get("retrained"):
+                model_guard.restore_previous()
+        return result
+
+    def _run_retrain_task_impl(
         self,
         progress_cb: Callable[[int, int, str, str], None] | None = None,
         target_behavior_override: str | None = None,
@@ -6028,8 +6066,9 @@ class ActiveLearningTab(QWidget):
 
         out_model_dir = self._project_root / "derived" / "models" / model_dir.name
         out_model_dir.mkdir(parents=True, exist_ok=True)
-        pred_df[["segment_id", "prediction_prob"]].to_parquet(out_model_dir / "segment_predictions.parquet", index=False)
-        pred_df[["segment_id", "uncertainty_score", "uncertainty_entropy", "prediction_variance", "density_outlier_score"]].to_parquet(
+        atomic_write_parquet(pred_df[["segment_id", "prediction_prob"]], out_model_dir / "segment_predictions.parquet", index=False)
+        atomic_write_parquet(
+            pred_df[["segment_id", "uncertainty_score", "uncertainty_entropy", "prediction_variance", "density_outlier_score"]],
             out_model_dir / "segment_uncertainty.parquet", index=False
         )
 
@@ -6185,6 +6224,14 @@ class ActiveLearningTab(QWidget):
         progress_cb: Callable[[int, int, str, str], None] | None = None,
         cancel_flag: list[bool] | None = None,
     ) -> dict[str, Any]:
+        with protect_model_dir(self._model_dir_to_protect()):
+            return self._run_pipeline_task_impl(progress_cb=progress_cb, cancel_flag=cancel_flag)
+
+    def _run_pipeline_task_impl(
+        self,
+        progress_cb: Callable[[int, int, str, str], None] | None = None,
+        cancel_flag: list[bool] | None = None,
+    ) -> dict[str, Any]:
         assert self._project_root is not None
         summary = _RunSummary()
         behavior_cfg = self._load_behavior_cfg()
@@ -6319,7 +6366,7 @@ class ActiveLearningTab(QWidget):
                 progress_cb(int(value) * _CHUNK_SCALE, int(maximum) * _CHUNK_SCALE, f"{log_line}{timing_text}", status or log_line)
 
         def _check_cancel() -> None:
-            if cancel_flag and cancel_flag[0]:
+            if is_cancelled(cancel_flag):
                 raise PipelineCancelledError("PIPELINE_CANCELLED_BY_USER")
 
         # Fast path: random bootstrap requires no pose/context preprocessing or model training.
@@ -7127,8 +7174,9 @@ class ActiveLearningTab(QWidget):
         )
         out_model_dir = self._project_root / "derived" / "models" / summary.model_version
         out_model_dir.mkdir(parents=True, exist_ok=True)
-        pred_df[["segment_id", "prediction_prob"]].to_parquet(out_model_dir / "segment_predictions.parquet", index=False)
-        pred_df[["segment_id", "uncertainty_score", "uncertainty_entropy", "prediction_variance", "density_outlier_score"]].to_parquet(
+        atomic_write_parquet(pred_df[["segment_id", "prediction_prob"]], out_model_dir / "segment_predictions.parquet", index=False)
+        atomic_write_parquet(
+            pred_df[["segment_id", "uncertainty_score", "uncertainty_entropy", "prediction_variance", "density_outlier_score"]],
             out_model_dir / "segment_uncertainty.parquet", index=False
         )
         current_step += 1
