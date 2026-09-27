@@ -207,7 +207,7 @@ def run_r3d_value(
     res = R3DValueResult(
         project_id=project.project_id, behavior_id=str(behavior_id),
         behavior_name=name, n_seeds=int(n_seeds),
-        n_pos_holdout=int(subsample.count_positives(holdout_split.holdout, behavior_id)),
+        n_pos_holdout=int(subsample.count_positives(holdout_split.holdout, behavior_id, co_occurring=project.allow_co_occurring_behaviors)),
     )
 
     r3d_cols = features.r3d_only_cols(pool)
@@ -225,7 +225,7 @@ def run_r3d_value(
     res.n_features_no_r3d = len(arm_cols[ARM_NO_R3D])
     res.n_features_with_r3d = len(arm_cols[ARM_WITH_R3D])
 
-    total_pos = subsample.count_positives(pool, behavior_id)
+    total_pos = subsample.count_positives(pool, behavior_id, co_occurring=project.allow_co_occurring_behaviors)
     if total_pos == 0:
         res.error = "no positive examples for this behavior in the training pool"
         return res

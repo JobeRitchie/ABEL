@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import combinations
 from pathlib import Path
@@ -95,6 +96,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -137,7 +139,9 @@ from abel.services.subject_rename_service import (
 )
 # ROI occupancy and ROI-scoped behavior must agree on what counts as "inside",
 # down to the boundary debounce, so both use the shared geometry helper.
+from abel.utils.cancellation import cancel_scope, cancellable, is_cancel_traceback
 from abel.utils.roi_geometry import debounce_bool as _debounce_bool
+from abel.utils.run_timeline import format_duration
 from abel.workers.task_worker import TaskWorker
 
 logger = logging.getLogger("abel")
@@ -4525,8 +4529,7 @@ class _SummaryStatsWidget(QWidget):
             return
         if col == 0:
             # Checkbox toggled: update graphs
-            self.rebuild()
-            self._host._graphs_tab.update_graph()
+            self._on_subject_toggled()
             return
         if col < self._FIXED_COLS:
             return  # session type column is read-only
@@ -4557,6 +4560,7 @@ class _SummaryStatsWidget(QWidget):
     def _on_subject_toggled(self) -> None:
         self.rebuild()
         self._host._graphs_tab.update_graph()
+        self._host._social_tab.on_subjects_changed()
 
     def _checked_subjects(self) -> set[str]:
         out: set[str] = set()
@@ -4573,8 +4577,7 @@ class _SummaryStatsWidget(QWidget):
             if item is not None:
                 item.setCheckState(Qt.CheckState.Checked)
         self._session_table.blockSignals(False)
-        self.rebuild()
-        self._host._graphs_tab.update_graph()
+        self._on_subject_toggled()
 
     def _uncheck_all(self) -> None:
         self._session_table.blockSignals(True)
@@ -4583,8 +4586,7 @@ class _SummaryStatsWidget(QWidget):
             if item is not None:
                 item.setCheckState(Qt.CheckState.Unchecked)
         self._session_table.blockSignals(False)
-        self.rebuild()
-        self._host._graphs_tab.update_graph()
+        self._on_subject_toggled()
 
     # -- sorting -------------------------------------------------------
 
@@ -4863,8 +4865,7 @@ class _SummaryStatsWidget(QWidget):
                 if item:
                     item.setCheckState(Qt.CheckState.Checked)
             self._session_table.blockSignals(False)
-            self.rebuild()
-            self._host._graphs_tab.update_graph()
+            self._on_subject_toggled()
             return
 
         if chosen is uncheck_action:
@@ -4874,8 +4875,7 @@ class _SummaryStatsWidget(QWidget):
                 if item:
                     item.setCheckState(Qt.CheckState.Unchecked)
             self._session_table.blockSignals(False)
-            self.rebuild()
-            self._host._graphs_tab.update_graph()
+            self._on_subject_toggled()
             return
 
         for action, fname in factor_actions:
@@ -12546,6 +12546,12 @@ def _ensure_hmmlearn() -> bool:
     return _HMM_OK
 
 
+class _HmmProgress(QObject):
+    """Carries HMM worker progress to the UI thread (queued signal)."""
+
+    update = Signal(str, float)  # message, fraction done in [0, 1]
+
+
 class _BehaviorMotifWidget(QWidget):
     """Three-panel behavioral sequence analysis: transition matrices,
     N-gram / cluster motif discovery, and Hidden Markov Model analysis.
@@ -13188,6 +13194,33 @@ class _BehaviorMotifWidget(QWidget):
         layout.addLayout(ctrl1)
         layout.addLayout(ctrl2)
 
+        # Progress for Run HMM and Auto-calibrate, which share one bar.  The
+        # signal object lives on the UI thread, so the worker's emits are
+        # queued onto it.
+        self._hmm_progress = _HmmProgress()
+        self._hmm_progress.update.connect(self._on_hmm_progress)
+        self._hmm_progress_bar = QProgressBar()
+        self._hmm_progress_bar.setRange(0, 1000)
+        self._hmm_progress_bar.setFormat("%p%")
+        self._hmm_progress_bar.setVisible(False)
+        self._hmm_cancel_btn = QPushButton("Cancel")
+        self._hmm_cancel_btn.setToolTip("Stop the job. The previous result and settings are kept.")
+        self._hmm_cancel_btn.clicked.connect(self._cancel_hmm_job)
+        self._hmm_cancel_btn.setVisible(False)
+        self._hmm_cancel_flag: list[bool] = [False]
+        self._hmm_job_active = False
+        self._hmm_job_t0 = 0.0
+        self._hmm_job_msg = ""
+        # Ticks the elapsed time between progress reports, so a long EM
+        # iteration or permutation test still looks alive.
+        self._hmm_elapsed_timer = QTimer(self)
+        self._hmm_elapsed_timer.setInterval(1000)
+        self._hmm_elapsed_timer.timeout.connect(self._show_hmm_job_status)
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self._hmm_progress_bar, 1)
+        progress_row.addWidget(self._hmm_cancel_btn)
+        layout.addLayout(progress_row)
+
         self._hmm_sel_fig: Any = None
         self._hmm_sel_canvas: Any = None
         self._hmm_emit_fig: Any = None
@@ -13287,13 +13320,37 @@ class _BehaviorMotifWidget(QWidget):
         # function of the bouts plus the fit settings, so it is restored from
         # disk rather than re-run.  It is only rendered once analytics data is
         # loaded (on_data_loaded), because the figures need the session labels.
-        self._hmm_result = load_hmm_result(project_root)
+        self._hmm_result = load_hmm_result(project_root, self._host._animal_scope)
+
+    def _hmm_result_scope(self) -> str:
+        """The animal the shown HMM fit describes (``""`` = either animal)."""
+        return str(self._hmm_result.get("animal_scope", "") or "")
+
+    def _hmm_scope_label(self, scope: str) -> str:
+        return self._host._animal_display_name(scope) if scope else "Either animal (max)"
+
+    def _hmm_file_tag(self) -> str:
+        """``_track_0`` style suffix for export file names of a one-animal fit."""
+        scope = self._hmm_result_scope()
+        return f"_{self._host._safe_name(scope)}" if scope else ""
+
+    def _sync_hmm_result_to_scope(self) -> None:
+        """Show the fit of the selected animal, never another animal's.
+
+        Each animal scope has its own saved fit; a fit made for another animal
+        (or for either animal) is swapped out for the selected one's, or for
+        nothing when that animal has not been fitted yet.
+        """
+        scope = self._host._animal_scope
+        if self._project_root is not None and (
+            not self._hmm_result or self._hmm_result_scope() != scope
+        ):
+            self._hmm_result = load_hmm_result(self._project_root, scope)
 
     def on_data_loaded(self) -> None:
         self._transition_result.clear()
         self._motif_result.clear()
-        if not self._hmm_result and self._project_root is not None:
-            self._hmm_result = load_hmm_result(self._project_root)
+        self._sync_hmm_result_to_scope()
         for fig in (self._tr_fig, self._mo_fig, self._hmm_sel_fig, self._hmm_emit_fig):
             if fig is not None:
                 fig.clear()
@@ -15044,18 +15101,30 @@ class _BehaviorMotifWidget(QWidget):
             sid: self._hmm_session_extent_s(sid, fps, frame_offsets.get(sid, 0))
             for sid in sequences
         }
+        animal_scope = self._host._animal_scope
         input_fingerprint = hmm_input_fingerprint(
-            sequences, bids, settings_snap, self._host._session_groups
+            sequences, bids, settings_snap, self._host._session_groups,
+            animal_scope=animal_scope,
         )
 
-        self._hmm_run_btn.setEnabled(False)
         self._hmm_run_btn.setText("Running\u2026")
-        self._status_lbl.setText("Fitting HMM\u2026 (this may take a moment)")
+        report = self._start_hmm_job("Starting the HMM fit\u2026")
+        flag = self._hmm_cancel_flag
 
         def _compute() -> dict[str, Any]:
-            hmm_res = fit_hmm(sequences, bids, settings_snap)
+            with cancel_scope(flag):
+                return _compute_inner()
+
+        def _compute_inner() -> dict[str, Any]:
+            # The EM restarts take most of the time; the rest is state bouts
+            # and the occupancy permutation test.
+            hmm_res = fit_hmm(
+                sequences, bids, settings_snap,
+                progress_cb=lambda msg, frac: report(msg, 0.85 * frac),
+            )
             if hmm_res.get("error"):
                 return hmm_res
+            report("Building timed state bouts\u2026", 0.87)
             from abel.services.behavioral_motif_service import (
                 decode_state_spans,
                 merge_state_bouts,
@@ -15144,12 +15213,19 @@ class _BehaviorMotifWidget(QWidget):
             groups = sorted(per_group_occ.keys())
             pval_occ: dict[tuple[str, str], np.ndarray] = {}
             from itertools import combinations as _hmm_combos
-            for g1, g2 in _hmm_combos(groups, 2):
+            pairs = list(_hmm_combos(groups, 2))
+            n_tests = max(len(pairs) * n_states, 1)
+            for pi, (g1, g2) in enumerate(pairs):
                 arr1 = np.array(per_group_occ[g1])
                 arr2 = np.array(per_group_occ[g2])
                 pvals = np.ones(n_states)
                 rng2 = np.random.default_rng(settings_snap.permutation_seed)
                 for st in range(n_states):
+                    report(
+                        f"Permutation test on state occupancy: {g1} vs {g2}, "
+                        f"state {st + 1} of {n_states}\u2026",
+                        0.9 + 0.1 * (pi * n_states + st) / n_tests,
+                    )
                     v1, v2 = arr1[:, st], arr2[:, st]
                     obs = abs(v1.mean() - v2.mean())
                     all_v = np.concatenate([v1, v2])
@@ -15177,12 +15253,64 @@ class _BehaviorMotifWidget(QWidget):
             # Stamped here, from the exact inputs this fit used, so a restored
             # result can tell whether the data has moved under it.
             hmm_res["input_fingerprint"] = input_fingerprint
+            hmm_res["animal_scope"] = animal_scope
             return hmm_res
 
         worker = TaskWorker(_compute)
         worker.signals.finished.connect(self._on_hmm_done)
-        worker.signals.failed.connect(self._on_worker_failed)
+        worker.signals.failed.connect(self._on_hmm_failed)
         self._pool.start(worker)
+
+    def _start_hmm_job(self, msg: str) -> Any:
+        """Show the progress row and return a cancellable progress callback."""
+        flag: list[bool] = [False]
+        self._hmm_cancel_flag = flag
+        self._hmm_job_active = True
+        self._hmm_run_btn.setEnabled(False)
+        self._hmm_calib_btn.setEnabled(False)
+        self._hmm_progress_bar.setValue(0)
+        self._hmm_progress_bar.setVisible(True)
+        self._hmm_cancel_btn.setEnabled(True)
+        self._hmm_cancel_btn.setVisible(True)
+        self._hmm_job_t0 = time.monotonic()
+        self._hmm_job_msg = msg
+        self._show_hmm_job_status()
+        self._hmm_elapsed_timer.start()
+        return cancellable(self._hmm_progress.update.emit, flag)
+
+    def _finish_hmm_job(self) -> None:
+        self._hmm_job_active = False
+        self._hmm_elapsed_timer.stop()
+        self._hmm_progress_bar.setVisible(False)
+        self._hmm_cancel_btn.setVisible(False)
+        self._hmm_run_btn.setEnabled(True)
+        self._hmm_run_btn.setText("Run HMM")
+        self._hmm_calib_btn.setEnabled(True)
+        self._hmm_calib_btn.setText("Auto-calibrate\u2026")
+
+    def _on_hmm_progress(self, msg: str, frac: float) -> None:
+        if not self._hmm_job_active:
+            return
+        self._hmm_job_msg = msg
+        self._hmm_progress_bar.setValue(int(round(1000 * float(frac))))
+        self._show_hmm_job_status()
+
+    def _show_hmm_job_status(self) -> None:
+        elapsed = format_duration(time.monotonic() - self._hmm_job_t0)
+        self._status_lbl.setText(f"{self._hmm_job_msg} ({elapsed} elapsed)")
+
+    def _cancel_hmm_job(self) -> None:
+        self._hmm_cancel_flag[0] = True
+        self._hmm_cancel_btn.setEnabled(False)
+        self._hmm_job_msg = "Cancelling at the next safe stop point\u2026"
+        self._show_hmm_job_status()
+
+    def _on_hmm_failed(self, tb: str) -> None:
+        self._finish_hmm_job()
+        if is_cancel_traceback(tb):
+            self._status_lbl.setText("HMM cancelled; the previous result is unchanged.")
+            return
+        self._on_worker_failed(tb)
 
 
     def _run_hmm_calibration(self) -> None:
@@ -15236,35 +15364,34 @@ class _BehaviorMotifWidget(QWidget):
             bout_overlap_tolerance_s=overlap_tol,
         )
 
-        self._hmm_calib_btn.setEnabled(False)
         self._hmm_calib_btn.setText("Calibrating\u2026")
-        self._hmm_run_btn.setEnabled(False)
-        self._status_lbl.setText("Calibrating HMM settings\u2026 this runs many fits and may take a few minutes.")
-
-        worker = TaskWorker(
-            lambda: calibrate_hmm_settings(
-                sequences, bids, settings_snap,
-                progress_cb=lambda msg, frac: worker.signals.line_emitted.emit(
-                    "Calibrating: %s (%d%%)" % (msg, int(frac * 100))
-                ),
-            )
+        report = self._start_hmm_job(
+            "Calibrating HMM settings\u2026 this runs many fits and may take a few minutes."
         )
-        worker.signals.line_emitted.connect(self._status_lbl.setText)
+        flag = self._hmm_cancel_flag
+
+        def _calibrate() -> dict[str, Any]:
+            with cancel_scope(flag):
+                return calibrate_hmm_settings(
+                    sequences, bids, settings_snap,
+                    progress_cb=lambda msg, frac: report(f"Calibrating: {msg}", frac),
+                )
+
+        worker = TaskWorker(_calibrate)
         worker.signals.finished.connect(self._on_hmm_calibration_done)
         worker.signals.failed.connect(self._on_hmm_calibration_failed)
         self._pool.start(worker)
 
     def _on_hmm_calibration_failed(self, msg: str) -> None:
-        self._hmm_calib_btn.setEnabled(True)
-        self._hmm_calib_btn.setText("Auto-calibrate\u2026")
-        self._hmm_run_btn.setEnabled(True)
+        self._finish_hmm_job()
+        if is_cancel_traceback(msg):
+            self._status_lbl.setText("Calibration cancelled; no settings changed.")
+            return
         self._status_lbl.setText("Calibration failed.")
         self._on_worker_failed(msg)
 
     def _on_hmm_calibration_done(self, result: dict[str, Any]) -> None:
-        self._hmm_calib_btn.setEnabled(True)
-        self._hmm_calib_btn.setText("Auto-calibrate\u2026")
-        self._hmm_run_btn.setEnabled(True)
+        self._finish_hmm_job()
 
         if not isinstance(result, dict) or result.get("error"):
             msg = (result or {}).get("error", "Calibration returned no result.")
@@ -15392,8 +15519,19 @@ class _BehaviorMotifWidget(QWidget):
             self._run_hmm()
 
     def _on_hmm_done(self, result: dict[str, Any]) -> None:
-        self._hmm_run_btn.setEnabled(True)
-        self._hmm_run_btn.setText("Run HMM")
+        self._finish_hmm_job()
+        scope = str(result.get("animal_scope", "") or "")
+        if scope != self._host._animal_scope:
+            # The animal was switched while the fit ran: keep it for its own
+            # animal, but do not show it as the selected animal's fit.
+            if not result.get("error") and self._project_root is not None:
+                save_hmm_result(self._project_root, result, scope)
+            self._status_lbl.setText(
+                f"HMM for {self._hmm_scope_label(scope)} finished after the animal "
+                f"was switched; it was saved for that animal. Run HMM again for "
+                f"{self._hmm_scope_label(self._host._animal_scope)}."
+            )
+            return
         self._hmm_result = result
         if result.get("error"):
             self._hmm_stats_text = f"HMM Error:\n{result['error']}"
@@ -15406,12 +15544,14 @@ class _BehaviorMotifWidget(QWidget):
         # result the user is already looking at.
         saved_note = ""
         if self._project_root is not None:
-            if save_hmm_result(self._project_root, result) is None:
+            if save_hmm_result(self._project_root, result, scope) is None:
                 saved_note = ", could not be saved, so it will need re-running next time"
             else:
                 saved_note = " and saved"
+        animal_note = f" for {self._hmm_scope_label(scope)}" if scope else ""
         self._status_lbl.setText(
-            f"HMM complete ({result.get('n_states', '?')} hidden states){saved_note}."
+            f"HMM complete{animal_note} ({result.get('n_states', '?')} hidden states)"
+            f"{saved_note}."
         )
 
     def _render_hmm(self) -> None:
@@ -15619,6 +15759,11 @@ class _BehaviorMotifWidget(QWidget):
             self._hmm_sel_fig.tight_layout(pad=1.0)
         except Exception:
             pass
+        if self._hmm_result_scope():
+            self._hmm_sel_fig.text(
+                0.995, 0.995, f"Animal: {self._hmm_scope_label(self._hmm_result_scope())}",
+                ha="right", va="top", fontsize=8, color="#1565c0",
+            )
         # Bar/line views shouldn't grow taller than the viewport; heatmaps
         # (emission, state-transition) keep their aspect ratio.
         if view in ("occupancy", "model_sel", "latency"):
@@ -15680,6 +15825,8 @@ class _BehaviorMotifWidget(QWidget):
                     "the current data, so whether it is still up to date is unknown.",
                     "",
                 ]
+        if not self._host._animal_combo.isHidden() or self._hmm_result_scope():
+            lines.append(f"Animal: {self._hmm_scope_label(self._hmm_result_scope())}")
         lines += [
             f"HMM  |  {n_states} hidden states (auto-selected by {sel_criterion}){criterion_reason}",
             f"Log-likelihood={result.get('log_likelihood', float('nan')):.2f}  "
@@ -15798,7 +15945,8 @@ class _BehaviorMotifWidget(QWidget):
                 for sid, evs in sequences.items()
             }
             return hmm_input_fingerprint(
-                sequences, bids, self._settings, self._host._session_groups
+                sequences, bids, self._settings, self._host._session_groups,
+                animal_scope=self._host._animal_scope,
             )
         except Exception:
             logger.exception("Could not fingerprint the current HMM inputs.")
@@ -16178,7 +16326,7 @@ class _BehaviorMotifWidget(QWidget):
         kind = "rawframes" if raw_frames else "aligned"
         if no_state_value is not None:
             kind += f"_nostate{no_state_value}"
-        default_name = f"hmm_state_ethogram_{n_states}states_{kind}.csv"
+        default_name = f"hmm_state_ethogram{self._hmm_file_tag()}_{n_states}states_{kind}.csv"
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Ethogram CSV", default_name, "CSV (*.csv);;All Files (*)"
         )
@@ -16251,7 +16399,9 @@ class _BehaviorMotifWidget(QWidget):
 
         tag = (f"posterior_top{int(result.get('state_bout_top_n', 5))}"
                if source == "posterior_topn" else "viterbi")
-        default_name = f"hmm_state_boutframes_{tag}_{n_states}states.xlsx"
+        default_name = (
+            f"hmm_state_boutframes{self._hmm_file_tag()}_{tag}_{n_states}states.xlsx"
+        )
         path, _ = QFileDialog.getSaveFileName(
             self, "Export HMM State Boutframes", default_name, "Excel (*.xlsx);;All Files (*)"
         )
@@ -17010,7 +17160,10 @@ class _BehaviorMotifWidget(QWidget):
             if not result or result.get("error"):
                 QMessageBox.information(self, "Export", "Run HMM analysis first.")
                 return
-            path, _ = QFileDialog.getSaveFileName(self, "Export HMM Data", "", "CSV (*.csv);;All Files (*)")
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export HMM Data", f"hmm_data{self._hmm_file_tag()}.csv",
+                "CSV (*.csv);;All Files (*)",
+            )
             if not path:
                 return
             n_states = result["n_states"]
@@ -17087,7 +17240,10 @@ class _BehaviorMotifWidget(QWidget):
                     r5[f"state_{st}_n_entries"] = rec["n_entries"][st]
                 rows3.append(r5)
 
-            pd.DataFrame(rows3).to_csv(path, index=False, encoding="utf-8-sig")
+            out_df = pd.DataFrame(rows3)
+            if self._hmm_result_scope():
+                out_df.insert(0, "animal", self._hmm_scope_label(self._hmm_result_scope()))
+            out_df.to_csv(path, index=False, encoding="utf-8-sig")
             self._host._status.setText(f"Exported to {path}")
 
     # ── Error handler ────────────────────────────────────────────────

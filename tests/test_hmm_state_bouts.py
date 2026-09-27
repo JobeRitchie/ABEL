@@ -427,6 +427,39 @@ def test_clear_removes_the_cache_and_tolerates_a_missing_one(tmp_path: Path):
     assert load_hmm_result(tmp_path) == {}
 
 
+def test_each_animal_scope_keeps_its_own_saved_fit(tmp_path: Path):
+    from abel.services.behavioral_motif_service import (
+        hmm_result_path, load_hmm_result, save_hmm_result,
+    )
+
+    either = _fake_result()
+    mouse1 = {**_fake_result(), "n_states": 3}
+    save_hmm_result(tmp_path, either)
+    save_hmm_result(tmp_path, mouse1, "track_0")
+
+    assert hmm_result_path(tmp_path) != hmm_result_path(tmp_path, "track_0")
+    assert load_hmm_result(tmp_path)["n_states"] == 2
+    assert load_hmm_result(tmp_path)["animal_scope"] == ""
+    back = load_hmm_result(tmp_path, "track_0")
+    assert back["n_states"] == 3
+    assert back["animal_scope"] == "track_0"
+    # An animal with no fit of its own gets nothing, not another animal's fit.
+    assert load_hmm_result(tmp_path, "track_1") == {}
+
+
+def test_fingerprint_separates_animals_but_keeps_old_either_fits_current():
+    from abel.services.behavioral_motif_service import hmm_input_fingerprint
+
+    seq = {"s1": [(0.0, 1.0, "b0"), (2.0, 3.0, "b1")]}
+    st = MotifSettings(hmm_n_states=3)
+    base = hmm_input_fingerprint(seq, ["b0", "b1"], st)
+    assert base == hmm_input_fingerprint(seq, ["b0", "b1"], st, animal_scope="")
+    assert base != hmm_input_fingerprint(seq, ["b0", "b1"], st, animal_scope="track_0")
+    assert hmm_input_fingerprint(seq, ["b0", "b1"], st, animal_scope="track_0") != (
+        hmm_input_fingerprint(seq, ["b0", "b1"], st, animal_scope="track_1")
+    )
+
+
 def test_fingerprint_is_stable_and_reacts_to_each_input():
     from abel.services.behavioral_motif_service import hmm_input_fingerprint
 

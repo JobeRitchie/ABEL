@@ -1703,9 +1703,22 @@ class ClipMiningDialog(QDialog):
         crits = self._metrics.extract_similar_essence(
             frames.exemplars, frames.background, k=k, recall_target=recall_target
         )
+        # Rank against the background plus clips mining surfaced that the user
+        # rejected (hard negatives); the criteria box above stays descriptive.
+        rank_bg = frames.background
+        try:
+            neg_ids = self._metrics.rejected_mining_clips([c.window_id for c in exemplars])
+            if neg_ids:
+                neg = self._metrics.rich_essence_frame(neg_ids)
+                if not neg.empty:
+                    rank_bg = self._metrics.with_hard_negatives(frames.background, neg)
+                    notes.append(f"Used {len(neg)} clip(s) you rejected earlier as "
+                                 "hard negatives.")
+        except Exception:
+            rank_bg = frames.background
         try:
             scorer = self._metrics.build_essence_scorer(
-                frames.exemplars, frames.background
+                frames.exemplars, rank_bg
             )
         except Exception:
             scorer = None

@@ -182,6 +182,62 @@ def test_progress_callback_is_driven_and_bounded():
     assert seen[-1][1] == pytest.approx(1.0)
 
 
+def test_fit_hmm_reports_em_progress_monotonically():
+    seqs = _synthetic_sequences(n_sessions=6, n_bouts=40)
+    settings = MotifSettings(
+        hmm_n_states_mode="auto", hmm_n_states_min=2, hmm_n_states_max=3,
+        hmm_n_iter=30, hmm_n_restarts=2, hmm_random_seed=1,
+    )
+    seen: list[tuple[str, float]] = []
+    plain = fit_hmm(seqs, BEHAVIORS, settings)
+    res = fit_hmm(seqs, BEHAVIORS, settings, progress_cb=lambda m, f: seen.append((m, f)))
+    assert res["error"] is None
+    # Reporting must not change the fit.
+    assert res["log_likelihood"] == pytest.approx(plain["log_likelihood"], abs=1e-9)
+    fracs = [f for _m, f in seen]
+    assert all(0.0 <= f <= 1.0 for f in fracs)
+    assert all(b >= a - 1e-12 for a, b in zip(fracs, fracs[1:])), "progress went backwards"
+    assert fracs[-1] > 0.9
+    assert any("EM iteration" in m and "restart 2 of 2" in m for m, _f in seen)
+    assert any("left" in m or "almost done" in m for m, _f in seen), "no time estimate"
+
+
+def test_cancel_from_progress_callback_stops_fit_hmm():
+    from abel.utils.cancellation import OperationCancelled, cancellable
+
+    seqs = _synthetic_sequences(n_sessions=6, n_bouts=40)
+    settings = MotifSettings(hmm_n_states_mode="manual", hmm_n_states=3,
+                             hmm_n_iter=500, hmm_n_restarts=5)
+    flag = [False]
+    calls = [0]
+
+    def cb(_m: str, _f: float) -> None:
+        calls[0] += 1
+        if calls[0] == 5:
+            flag[0] = True
+
+    # Not swallowed as a failed restart: the cancel must unwind the whole fit.
+    with pytest.raises(OperationCancelled):
+        fit_hmm(seqs, BEHAVIORS, settings, progress_cb=cancellable(cb, flag))
+    assert calls[0] == 5
+
+
+def test_cancel_scope_stops_calibration_within_an_em_step():
+    """Calibration only ticks between stages; EM steps are the stop points."""
+    from abel.utils.cancellation import OperationCancelled, cancel_scope
+
+    seqs = _synthetic_sequences(n_sessions=6, n_bouts=40)
+    flag = [False]
+
+    def cb(msg: str, _f: float) -> None:
+        if "EM iterations" in msg:
+            flag[0] = True
+
+    with cancel_scope(flag), pytest.raises(OperationCancelled):
+        calibrate_hmm_settings(seqs, BEHAVIORS, MotifSettings(), time_budget_s=15.0,
+                               progress_cb=cb)
+
+
 def test_random_seed_round_trips_through_settings_file(tmp_path):
     s = MotifSettings(hmm_random_seed=1234, hmm_criterion="icl")
     save_motif_settings(tmp_path, s)

@@ -120,7 +120,7 @@ def collect_feature_importance(
         if not bids:
             continue
         try:
-            df = pd.read_parquet(project.training_set_path)
+            df = holdout.load_training_frame(project)
         except Exception as exc:  # noqa: BLE001
             for bid in bids:
                 sources.append(FeatureImportanceSource(
@@ -156,7 +156,7 @@ def collect_feature_importance(
             if progress_cb is not None:
                 progress_cb(f"Feature importance: {project.project_id}: {name}",
                             done / total)
-            n_pos = subsample.count_positives(pool, bid)
+            n_pos = subsample.count_positives(pool, bid, co_occurring=project.allow_co_occurring_behaviors)
             n_neg = int(len(pool) - n_pos)
             res = run_one_config(
                 trainer, project, str(bid), pool, hsplit.holdout,

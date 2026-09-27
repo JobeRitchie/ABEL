@@ -78,3 +78,28 @@ def test_pose_load_never_substitutes_the_other_animal() -> None:
     # A single-animal file has only one track to use.
     host = _pose_host("track_1", ["individual0"])
     assert BehaviorAnalyticsTab._load_pose_file(host, Path("x.h5")) == "pose:individual0"
+
+
+def test_hmm_panel_swaps_to_the_selected_animals_fit(tmp_path: Path) -> None:
+    from abel.services.behavioral_motif_service import save_hmm_result
+    from abel.ui.tabs.behavior_analytics_tab import _BehaviorMotifWidget
+
+    save_hmm_result(tmp_path, {"n_states": 2})
+    save_hmm_result(tmp_path, {"n_states": 3}, "track_0")
+    host = SimpleNamespace(_animal_scope="")
+    panel = SimpleNamespace(_host=host, _project_root=tmp_path, _hmm_result={})
+    panel._hmm_result_scope = lambda: _BehaviorMotifWidget._hmm_result_scope(panel)
+    sync = lambda: _BehaviorMotifWidget._sync_hmm_result_to_scope(panel)  # noqa: E731
+
+    sync()
+    assert panel._hmm_result["n_states"] == 2
+    host._animal_scope = "track_0"
+    sync()
+    assert panel._hmm_result["n_states"] == 3
+    # Mouse 2 was never fitted: the panel empties instead of showing Mouse 1.
+    host._animal_scope = "track_1"
+    sync()
+    assert panel._hmm_result == {}
+    host._animal_scope = ""
+    sync()
+    assert panel._hmm_result["n_states"] == 2

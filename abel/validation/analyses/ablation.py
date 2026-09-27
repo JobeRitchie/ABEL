@@ -429,7 +429,8 @@ def run_ablation(
     behavior_name = project.behavior_label(behavior_id)
     pool = holdout_split.train_pool
     group_col = holdout_split.group_col
-    total_pos = subsample.count_positives(pool, behavior_id)
+    total_pos = subsample.count_positives(pool, behavior_id,
+        co_occurring=project.allow_co_occurring_behaviors)
 
     # Gate a family's rung on whether it has any *informative* column here, not
     # merely a present one. A project with no ROI defined still carries all-zero
@@ -478,6 +479,7 @@ def run_ablation(
             sub, n_pos, n_neg = subsample.draw(
                 pool, behavior_id, clip_budget, group_col=group_col, seed=seed,
                 neg_policy=neg_policy, neg_per_pos=neg_per_pos,
+                co_occurring=project.allow_co_occurring_behaviors,
             )
             seed_subsets[rep] = (sub, int(n_pos), int(n_neg))
 

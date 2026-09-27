@@ -93,6 +93,69 @@ def clip_unit_label(frames: float, fps: float) -> str:
     return f"labeled clips (~{shown} s)"
 
 
+def load_training_frame(project: ProjectRef) -> pd.DataFrame:
+    """The project's training set as the shipped trainer sees it.
+
+    ``_load_training_frame`` collapses duplicate distance spellings onto their
+    canonical names before training (the fix for models keying on which spelling a
+    row happened to carry, and for the runaway ``_norm_norm`` social columns).  A
+    training set merged before that fix still carries both spellings on disk; read
+    raw, the suite trained on 144-460 extra provenance-coded columns the product
+    never sees (DG_EPM, Novel object, OpenField, TMT).  Every full-width read of
+    the training set in the suite goes through here.
+    """
+    from abel.services.active_learning_trainer_service import (  # noqa: PLC0415
+        ActiveLearningTrainerService,
+    )
+
+    df = pd.read_parquet(project.training_set_path)
+    return ActiveLearningTrainerService._canonicalize_training_distances(df)
+
+
+def data_freshness(project: ProjectRef, df: pd.DataFrame | None = None) -> dict:
+    """How far this project's cached features lag the current extraction code.
+
+    The suite scores whatever ``training_set.parquet`` holds, so a run can only be
+    as current as the last re-extraction.  This reports the product's own
+    staleness signals so a run over old features says so instead of passing for
+    a validation of today's pipeline.  Read-only and cheap (footer reads + one
+    pass over the R3D block).
+    """
+    from abel.services.behavior_representation_service import (  # noqa: PLC0415
+        BehaviorRepresentationService,
+    )
+    from abel.services.feature_prep_service import FeaturePrepService  # noqa: PLC0415
+
+    out: dict = {}
+    try:
+        out["pose_cache_stale"] = bool(FeaturePrepService.pose_cache_stale(project.root))
+    except Exception:  # noqa: BLE001, a missing cache is not this check's problem
+        out["pose_cache_stale"] = None
+    try:
+        out["float64_segment_cache"] = bool(
+            BehaviorRepresentationService.legacy_float64_segment_cache(project.root))
+    except Exception:  # noqa: BLE001
+        out["float64_segment_cache"] = None
+    if df is None:
+        df = load_training_frame(project)
+    own = df.loc[~is_imported(df)] if len(df) else df
+    r3d = [c for c in own.columns if str(c).startswith("r3d_")]
+    # A project that switched R3D off keeps its old columns; they are unused, not stale.
+    if r3d and len(own) and bool(getattr(project, "use_r3d_features", True)):
+        block = own[r3d].to_numpy(dtype="float32", na_value=np.nan)
+        dead = np.all(np.isnan(block) | (block == 0.0), axis=1)
+        out["r3d_dead_row_frac"] = float(dead.mean())
+    else:
+        out["r3d_dead_row_frac"] = float("nan")
+    out["n_pipe_labels"] = int(own["label"].astype(str).str.contains(r"\|").sum()) \
+        if "label" in own.columns else 0
+    out["stale"] = bool(
+        out.get("pose_cache_stale") or out.get("float64_segment_cache")
+        or (np.isfinite(out["r3d_dead_row_frac"]) and out["r3d_dead_row_frac"] > 0.05)
+    )
+    return out
+
+
 def _group_column(strategy: str) -> str:
     """Column to partition train vs. held-out by (mirrors trainer._split).
 
@@ -202,12 +265,23 @@ def split(
         Optional pre-loaded training frame (else read from disk).
     """
     if df is None:
-        df = pd.read_parquet(project.training_set_path)
+        df = load_training_frame(project)
     df = df.reset_index(drop=True)
 
     group_col = _group_column(project.split_strategy)
     if group_col == SUBJECT_GROUP_COL:
         add_subject_groups(df, project.root)
+        # Without a readable manifest, multi-animal track rows fall back to their
+        # track label (track_0/track_1), which puts the two animals of one dyad in
+        # different groups and splits the session across train and holdout.  The
+        # session is the independent unit, so any session whose rows resolve to
+        # more than one subject is grouped by the session itself.
+        if "session_id" in df.columns:
+            n_subj = df.groupby("session_id")[SUBJECT_GROUP_COL].transform("nunique")
+            split_sess = n_subj > 1
+            if split_sess.any():
+                df.loc[split_sess, SUBJECT_GROUP_COL] = (
+                    "session:" + df.loc[split_sess, "session_id"].astype(str))
     if group_col not in df.columns:
         raise ValueError(f"Training set has no '{group_col}' column for holdout split.")
 

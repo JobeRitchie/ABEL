@@ -9,7 +9,8 @@ disambiguate them.
 
 For each requested ``(project, behavior)`` this trains ABEL's real classifier twice
 on the *same* held-out split and the *same* per-seed training subsample, once
-**without** the video features (pose + kinematics + context ± social) and once
+**without** the video features (pose + kinematics + context ± social, each only
+when it varies on the pool) and once
 **with** them, so the F1 difference is a clean paired estimate of what the video
 motion features add.  Nothing is re-implemented: both arms call the shared
 ``engine.run_one_config`` primitive with a ``feature_cols_override``.
@@ -137,21 +138,52 @@ def run_video_value(
     res = VideoValueResult(
         project_id=project.project_id, behavior_id=str(behavior_id),
         behavior_name=name, n_seeds=int(n_seeds),
-        n_pos_holdout=int(subsample.count_positives(holdout_split.holdout, behavior_id)),
+        n_pos_holdout=int(subsample.count_positives(holdout_split.holdout, behavior_id, co_occurring=project.allow_co_occurring_behaviors)),
     )
 
-    has_social = bool(features.social_only_cols(pool))
+    has_social = bool(features.informative_cols(pool, features.social_only_cols(pool)))
+    has_context = bool(features.informative_cols(pool, features.context_only_cols(pool)))
     # Both arms hold everything else constant; they differ ONLY by the video
     # motion features, so the delta isolates the video features' contribution.
+    # Context/ROI rides along on both arms: the shipped model trains on it, and
+    # leaving it out measured video against a baseline no project ships.
     cols_no_video = features.select_feature_cols(
-        pool, include_video=False, include_social=has_social)
+        pool, include_video=False, include_social=has_social, include_context=has_context)
     cols_with_video = features.select_feature_cols(
-        pool, include_video=True, include_social=has_social)
+        pool, include_video=True, include_social=has_social, include_context=has_context)
     if len(cols_with_video) <= len(cols_no_video):
         res.error = "project has no video features (use_video_features off or none extracted)"
         return res
+    return run_paired_arms(trainer, project, behavior_id, holdout_split, res,
+                           cols_no_video, cols_with_video, n_seeds=n_seeds,
+                           progress_cb=progress_cb)
 
-    total_pos = subsample.count_positives(pool, behavior_id)
+
+def run_paired_arms(
+    trainer: ActiveLearningTrainerService,
+    project: ProjectRef,
+    behavior_id: str,
+    holdout_split: holdout.HoldoutSplit,
+    res: VideoValueResult,
+    cols_off: list[str],
+    cols_on: list[str],
+    *,
+    n_seeds: int = 5,
+    arm_names: tuple[str, str] = (ARM_NO_VIDEO, ARM_WITH_VIDEO),
+    progress_cb: Callable[[str], None] | None = None,
+) -> VideoValueResult:
+    """Train ``cols_off`` vs ``cols_on`` on the same split and subsample per seed.
+
+    Shared by every "what does feature family X add" analysis (video, social): the
+    two arms differ only in their column lists, so the per-seed difference is a
+    paired estimate of that family's value.  ``res`` carries the family-neutral
+    ``*_no_video``/``*_with_video`` slots; callers rename them on export.
+    """
+    name = res.behavior_name
+    pool = holdout_split.train_pool
+    cols_no_video, cols_with_video = cols_off, cols_on
+    ARM_OFF, ARM_ON = arm_names
+    total_pos = subsample.count_positives(pool, behavior_id, co_occurring=project.allow_co_occurring_behaviors)
     if total_pos == 0:
         res.error = "no positive examples for this behavior in the training pool"
         return res
@@ -166,9 +198,9 @@ def run_video_value(
     for rep in range(n_seeds):
         seed = 2000 + rep
         for arm, cols, sink in (
-            (ARM_NO_VIDEO, cols_no_video,
+            (ARM_OFF, cols_no_video,
              (f1_no, prec_no, rec_no, fp_no, fn_no)),
-            (ARM_WITH_VIDEO, cols_with_video,
+            (ARM_ON, cols_with_video,
              (f1_yes, prec_yes, rec_yes, fp_yes, fn_yes)),
         ):
             _log(f"{project.project_id}/{name}: {arm} seed {rep + 1}/{n_seeds}…")
@@ -183,7 +215,7 @@ def run_video_value(
             sink[2].append(r.recall if ok else float("nan"))
             sink[3].append(float(r.fp) if ok else float("nan"))
             sink[4].append(float(r.fn) if ok else float("nan"))
-            if arm == ARM_NO_VIDEO:
+            if arm == ARM_OFF:
                 res.n_features_no_video = int(r.n_features or len(cols_no_video))
             else:
                 res.n_features_with_video = int(r.n_features or len(cols_with_video))
@@ -280,7 +312,16 @@ def results_to_frame(results: list[VideoValueResult]) -> pd.DataFrame:
     return df
 
 
-def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
+def plot_video_value(
+    results: list[VideoValueResult],
+    save_path: Path,
+    *,
+    off_label: str = "Pose only (no video motion)",
+    on_label: str = "+ Video motion features",
+    family: str = "video features",
+    title: str = "Value of video motion features "
+                 "(paired: same split & subsample, video features on vs. off)",
+) -> Path:
     """Paired dumbbells: F1 without → with video features, per (project, behavior).
 
     Two panels.  Left: for each behavior, a line from the pose-only F1 to the
@@ -331,9 +372,9 @@ def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
                  linewidth=2.0 if s else 1.4, alpha=0.9 if s else 0.7, zorder=1,
                  solid_capstyle="round")
     ax1.scatter(no_v, y, s=34, color=C_OFF, edgecolor="white", linewidth=0.7,
-                zorder=3, label="Pose only (no video motion)")
+                zorder=3, label=off_label)
     ax1.scatter(with_v, y, s=34, color=C_ON, edgecolor="white", linewidth=0.7,
-                zorder=3, label="+ Video motion features")
+                zorder=3, label=on_label)
     ax1.set_yticks(y)
     ax1.set_yticklabels(labels, fontsize=7.5)
     # Frame the region F1 actually occupies: starting at 0 spends most of the
@@ -341,7 +382,7 @@ def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
     lo = float(np.nanmin([no_v.min(), with_v.min()]))
     ax1.set_xlim(max(0.0, lo - 0.06), 1.0)
     ax1.set_xlabel("F1 (held-out, target-vs-rest)", fontsize=9)
-    ax1.set_title("Paired: video features off → on", fontsize=10, loc="left")
+    ax1.set_title(f"Paired: {family} off → on", fontsize=10, loc="left")
     ax1.legend(loc="lower left", fontsize=8, frameon=False)
     ax1.grid(axis="x", alpha=0.22)
     for side in ("top", "right"):
@@ -363,7 +404,7 @@ def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
             ax2.text(g + side * (c + pad), yi, f"{g:+.3f}" + ("*" if s else ""),
                      va="center", ha="left" if g >= 0 else "right", fontsize=7,
                      color="#263238" if s else "#90A4AE")
-    ax2.set_xlabel("ΔF1 from video features  (paired, 95% CI across seeds)", fontsize=9)
+    ax2.set_xlabel(f"ΔF1 from {family}  (paired, 95% CI across seeds)", fontsize=9)
     ax2.set_title("Gain  (* = CI excludes 0)", fontsize=10, loc="left")
     ax2.grid(axis="x", alpha=0.22)
     for side in ("top", "right"):
@@ -377,9 +418,7 @@ def plot_video_value(results: list[VideoValueResult], save_path: Path) -> Path:
         rng = max(hi_e - lo_e, 1e-4)
         ax2.set_xlim(min(lo_e, 0.0) - 0.34 * rng, max(hi_e, 0.0) + 0.34 * rng)
 
-    fig.suptitle("Value of video motion features "
-                 "(paired: same split & subsample, video features on vs. off)",
-                 fontsize=11.5, y=0.995)
+    fig.suptitle(title, fontsize=11.5, y=0.995)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(save_path, dpi=200, bbox_inches="tight")
     plt.close(fig)

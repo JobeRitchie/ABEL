@@ -80,7 +80,7 @@ def run_generalization(
     """
     behavior_name = project.behavior_label(behavior_id)
     pool = holdout_split.train_pool
-    n_pos = subsample.count_positives(pool, behavior_id)
+    n_pos = subsample.count_positives(pool, behavior_id, co_occurring=project.allow_co_occurring_behaviors)
     n_neg = int(len(pool) - n_pos)
 
     result = GeneralizationResult(

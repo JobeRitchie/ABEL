@@ -257,7 +257,7 @@ def time_training(
     out: list[StageTiming] = []
     for bid in bids:
         name = project.behavior_label(bid)
-        n_pos = int(subsample.count_positives(pool, bid))
+        n_pos = int(subsample.count_positives(pool, bid, co_occurring=project.allow_co_occurring_behaviors))
         if n_pos == 0:
             out.append(StageTiming(project_id=project.project_id, stage=STAGE_TRAIN,
                                    detail=name, error="no positives"))

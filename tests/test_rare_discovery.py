@@ -957,3 +957,26 @@ def test_provenance_and_coverage_reach_the_rendered_figures(tmp_path):
         out = tmp_path / name
         fn(res, out)
         assert out.exists() and out.stat().st_size > 0
+
+
+def test_shipped_al_order_ranks_with_the_al_tab_queue():
+    """The AL arm must run the tab's real queue code, not silently fall back."""
+    import types
+
+    from xgboost import XGBClassifier
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(400, 4))
+    lab = np.where(x[:, 0] > 1.2, "B1", np.where(x[:, 1] > 1.0, "B2", "NB"))
+    pool = pd.DataFrame(x, columns=[f"f{i}" for i in range(4)])
+    pool["label"] = lab
+    y = pd.Series(lab).map({"NB": 0, "B1": 1, "B2": 2}).to_numpy()
+    model = XGBClassifier(n_estimators=10).fit(x[:100], y[:100])
+    res = types.SimpleNamespace(feature_cols=[f"f{i}" for i in range(4)],
+                                calibrated_model=model, target_idx=1,
+                                label_map={0: "NB", 1: "B1", 2: "B2"})
+    names = {"NB": "No Behavior", "B1": "x", "B2": "y"}
+    proj = types.SimpleNamespace(behavior_names=names, behavior_label=names.get)
+    remaining = list(range(100, 400))
+    order = rd._shipped_al_order(res, proj, "B1", pool, remaining, pool.iloc[:100], {})
+    assert sorted(order.tolist()) == list(range(len(remaining)))

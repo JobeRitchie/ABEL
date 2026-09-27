@@ -214,7 +214,17 @@ class RareDiscoveryResult:
 
 
 def _pos_mask(df: pd.DataFrame, target: str) -> np.ndarray:
-    return (df["label"].astype(str).str.strip() == str(target).strip()).to_numpy()
+    """Rows labeled ``target``, counting co-occurring labels ("a|b") for each part,
+    the app's own rule (behavior_service.split_co_occurring)."""
+    t = str(target).strip()
+    lab = df["label"].astype(str).str.strip()
+    exact = (lab == t).to_numpy()
+    multi = lab.str.contains("|", regex=False).to_numpy()
+    if not multi.any():
+        return exact
+    parts = lab[multi].map(lambda v: t in [x.strip() for x in v.split("|")]).to_numpy()
+    exact[multi] = parts
+    return exact
 
 
 def _seed_positives(pos_idx: np.ndarray, n_seed_pos: int,
@@ -263,6 +273,87 @@ _HARD_NEG_MAX_REPEAT = 8
 # trained on positives alone.  Measured: 10 is enough to make the fit non-degenerate,
 # and every clip beyond that is pure cost charged to AL's discovery curve.
 _AL_WARM_FILL = 10
+
+
+# The Active Learning tab's default queue ("Uncertainty" mode, weighted queue off),
+# replayed with the shipped code: UncertaintyScoringService.score_segments' terms
+# (entropy + 3-model XGBoost ensemble variance + kNN density, the tab's weights)
+# feed CandidateGenerationService._rank_segments, whose uncertainty rank is
+#     behavior_aware_uncertainty + 0.5 * p + 0.2 * feedback + 0.2 * exclusivity.
+# Two stand-ins, both leak-free: the tab reads competing behaviors from the other
+# deployed per-behavior models, which here would have been trained on the very
+# labels being hunted, so the competitor score is the best non-target class of the
+# same fit (No Behavior included, as the tab deploys it); and reviewed clips leave the pool, so the
+# feedback term is 0 (as it is for every unreviewed tab candidate).
+_AL_ENSEMBLE = (
+    (11, {"tree_method": "hist", "max_depth": 4, "subsample": 0.7,
+          "colsample_bytree": 0.7, "learning_rate": 0.05}),
+    (23, {"tree_method": "hist", "max_depth": 6, "subsample": 0.9,
+          "colsample_bytree": 0.8, "learning_rate": 0.1}),
+    (37, {"tree_method": "hist", "max_depth": 8, "subsample": 0.6,
+          "colsample_bytree": 0.6, "learning_rate": 0.15}),
+)
+
+
+def _shipped_al_order(res, project: ProjectRef, behavior: str, pool: pd.DataFrame,
+                      remaining: list[int], labeled: pd.DataFrame,
+                      density_cache: dict) -> np.ndarray:
+    """Best-first order over ``remaining`` by the AL tab's default queue rank."""
+    from abel.services.candidate_service import CandidateGenerationService
+    from abel.services.uncertainty_service import UncertaintyScoringService
+
+    cols = list(res.feature_cols)
+    key = tuple(cols)
+    if key not in density_cache:
+        density_cache.clear()
+        density_cache[key] = UncertaintyScoringService.density_outlier_score(
+            pool[cols].to_numpy(dtype=float))
+    density = np.asarray(density_cache[key])[remaining]
+    x_rem = pool.iloc[remaining][cols].to_numpy(dtype=float)
+
+    probs = xgb_predict.predict_proba(res.calibrated_model, x_rem)
+    ti = int(res.target_idx)
+    p_tar = probs[:, ti] if ti < probs.shape[1] else probs.max(axis=1)
+    # Every other class competes, No Behavior included: the tab reads each deployed
+    # peer model, and every project deploys a No Behavior model. Leaving it out made
+    # empty clips (no model confident) look maximally ambiguous and float to the top.
+    peer = [int(i) for i in dict(res.label_map) if int(i) != ti and int(i) < probs.shape[1]]
+    peer_max = probs[:, peer].max(axis=1) if peer else np.zeros(len(remaining))
+
+    y_bin = _pos_mask(labeled, behavior).astype(int)
+    x_lab = labeled[cols].to_numpy(dtype=float)
+    ensemble: list[np.ndarray] = []
+    for rs, params in _AL_ENSEMBLE:
+        if np.unique(y_bin).size < 2:
+            p = np.full(len(remaining), float(y_bin[0]) if len(y_bin) else 0.5)
+        else:
+            est = ActiveLearningTrainerService._make_estimator("xgboost", dict(params), rs)
+            try:
+                est.fit(x_lab, y_bin)
+            except Exception:  # noqa: BLE001, GPU busy/unavailable -> CPU, as the tab does
+                est = ActiveLearningTrainerService._make_estimator(
+                    "xgboost", {**params, "device": "cpu"}, rs)
+                est.fit(x_lab, y_bin)
+            p = xgb_predict.predict_proba(est, x_rem)[:, 1]
+        ensemble.append(np.column_stack([1.0 - p, p]))
+
+    binary = np.column_stack([1.0 - p_tar, p_tar])
+    variance = UncertaintyScoringService.ensemble_variance(ensemble)
+    raw = (0.4 * UncertaintyScoringService.entropy(binary) + 0.4 * variance
+           + 0.2 * density)
+    unc = (raw - raw.min()) / (raw.max() - raw.min() + 1e-9)
+    margin = p_tar - peer_max
+    frame = pd.DataFrame({
+        "segment_id": np.arange(len(remaining)).astype(str),
+        "prediction_prob": p_tar, "uncertainty_score": unc,
+        "other_behavior_max_prob": peer_max, "other_behavior_mean_prob": 0.0,
+        "other_behavior_support": 0.0, "exclusivity_margin": margin,
+        "exclusivity_uncertainty": 1.0 - np.clip(np.abs(margin), 0.0, 1.0),
+    })
+    ranked = CandidateGenerationService._rank_segments(
+        frame, feedback=pd.DataFrame(columns=["segment_id", "review_label"]))
+    score = ranked.sort_index()["rank_score"].to_numpy(dtype=float)
+    return _rank_by_score(score, descending=True)
 
 
 def _essence_background(
@@ -414,13 +505,14 @@ def _al_discovery(
     batch: int,
     max_reveal: int,
     log: Callable[[str], None],
+    warm_fill: int | None = None,
 ) -> np.ndarray:
     """Reveal-order over the candidate pool produced by the AL loop.
 
     Warm-starts on the seed exemplars (+ a random negative fill), then repeatedly
     trains via the *real* trainer (:func:`al_curve._fit`), scores the unrevealed
-    pool, and reveals the highest predicted-probability batch, ABEL's candidate
-    generation.  Returns the order in which candidate rows are revealed, so the
+    pool, and reveals the top batch of the AL tab's default queue
+    (:func:`_shipped_al_order`), not simply the highest-probability clips.  Returns the order in which candidate rows are revealed, so the
     discovery curve is ``cumsum`` of their true-positive flags.  The loop stops
     once ``max_reveal`` candidates have been revealed, a realistic review budget
     (nobody hand-reviews the entire pool to find a rare behavior), and the arm
@@ -438,7 +530,8 @@ def _al_discovery(
     # ``n_seed_pos`` handicapped AL more and more as the seed grew.  At a 20-clip
     # seed the old ``3 * len(seed_rows)`` spent AL's first 60 reveals on random
     # picks, which alone reversed the AL-vs-essence ranking at small budgets.
-    fill = min(_AL_WARM_FILL, len(remaining))
+    density_cache: dict = {}
+    fill = min(_AL_WARM_FILL if warm_fill is None else int(warm_fill), len(remaining))
     rng.shuffle(remaining)
     revealed.extend(remaining[:fill])
     remaining = remaining[fill:]
@@ -451,12 +544,8 @@ def _al_discovery(
         sub = pd.concat([seed_rows, pool.iloc[rev_idx]], ignore_index=True)
         try:
             res = al_curve._fit(trainer, project, behavior, sub, throwaway_holdout, seed)
-            rem_df = pool.iloc[remaining]
-            probs = xgb_predict.predict_proba(
-                res.calibrated_model, rem_df[res.feature_cols].to_numpy(dtype=float))
-            ti = int(res.target_idx)
-            p_tar = probs[:, ti] if ti < probs.shape[1] else probs.max(axis=1)
-            order = np.argsort(-p_tar)
+            order = _shipped_al_order(res, project, behavior, pool, remaining, sub,
+                                      density_cache)
         except Exception as exc:  # degenerate early set → random reveal this step
             log(f"AL seed {seed}: fallback ({type(exc).__name__})")
             order = rng.permutation(len(remaining))
@@ -1017,13 +1106,16 @@ def _acquire_next(
     umap_emb: "np.ndarray | None",
     rng: np.random.Generator,
     labeled_neg: "list[int] | None" = None,
+    project: "ProjectRef | None" = None,
+    behavior: str = "",
+    density_cache: "dict | None" = None,
 ) -> np.ndarray:
     """Best-first order over ``remaining`` (positions into that list) for one batch.
 
     essence → re-fit from the *currently labeled* positives, against the pool plus
     the labeled negatives, and rank by likeness; umap → distance to the
-    labeled-positive centroid; al → highest predicted target probability from the
-    just-trained model; random / any fallback → shuffle.  Re-derives from the labels
+    labeled-positive centroid; al → the AL tab's default queue rank (:func:`_shipped_al_order`) from
+    the just-trained model; random / any fallback → shuffle.  Re-derives from the labels
     acquired so far, so every ABEL arm gets the same compounding AL enjoys.
     """
     if strategy == STRATEGY_ESSENCE and metrics_all is not None and labeled_pos:
@@ -1038,15 +1130,12 @@ def _acquire_next(
         centroid = np.nanmean(umap_emb[labeled_pos], axis=0)
         dist = np.linalg.norm(umap_emb[remaining] - centroid, axis=1)
         return np.argsort(dist)
-    elif strategy == STRATEGY_AL and res is not None:
+    elif strategy == STRATEGY_AL and res is not None and project is not None:
         try:
-            rem_df = pool.iloc[remaining]
-            probs = xgb_predict.predict_proba(
-                res.calibrated_model, rem_df[res.feature_cols].to_numpy(dtype=float))
-            ti = int(res.target_idx)
-            p_tar = probs[:, ti] if ti < probs.shape[1] else probs.max(axis=1)
-            return np.argsort(-p_tar)
-        except Exception:
+            return _shipped_al_order(res, project, behavior, pool, remaining,
+                                     pool.iloc[labeled_pos + (labeled_neg or [])],
+                                     density_cache if density_cache is not None else {})
+        except Exception:  # noqa: BLE001
             pass
     return rng.permutation(len(remaining))
 
@@ -1092,6 +1181,7 @@ def _run_quality_strategy(
     pos_arr = (pool["label"].astype(str).str.strip() == str(behavior).strip()).to_numpy()
     labeled = al_curve._seed_set(pool, behavior, k0, seed_pos, rng)
     traj: list[tuple[int, int, float, float]] = []
+    density_cache: dict = {}
 
     while True:
         idx = sorted(labeled)
@@ -1120,7 +1210,8 @@ def _run_quality_strategy(
         order = _acquire_next(
             strategy, remaining, pool, labeled_pos, res,
             metrics_all=metrics_all, umap_emb=umap_emb, rng=rng,
-            labeled_neg=labeled_neg)
+            labeled_neg=labeled_neg, project=project, behavior=behavior,
+            density_cache=density_cache)
         labeled.update(int(remaining[k]) for k in order[:n_choose])
 
     return traj

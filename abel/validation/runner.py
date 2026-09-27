@@ -19,7 +19,7 @@ import pandas as pd
 from abel.services.active_learning_trainer_service import ActiveLearningTrainerService
 from abel.validation import (
     aggregate, benchmark, findings as findings_mod, holdout, meta_summary, pdf_report,
-    plots, prism, report, subsample, video_value,
+    plots, prism, report, social_value, subsample, video_value,
 )
 from abel.validation.analyses import (
     ablation, al_curve, behaviorscape, calibration, cross_project, discrimination,
@@ -36,6 +36,7 @@ ANALYSIS_DISCRIMINATION = "discrimination"
 ANALYSIS_AL_CURVE = "al_curve"
 ANALYSIS_BEHAVIORSCAPE = "behaviorscape"
 ANALYSIS_VIDEO_VALUE = "video_value"
+ANALYSIS_SOCIAL_VALUE = "social_value"
 ANALYSIS_THROUGHPUT = "throughput"
 ANALYSIS_RARE_DISCOVERY = "rare_discovery"
 ANALYSIS_REVIEW_EFFORT = "review_effort"
@@ -51,8 +52,8 @@ ALL_ANALYSES = [
 FULL_SUITE = [
     ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_DISCRIMINATION,
     ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE, ANALYSIS_RARE_DISCOVERY,
-    ANALYSIS_BEHAVIORSCAPE, ANALYSIS_VIDEO_VALUE, ANALYSIS_REVIEW_EFFORT,
-    ANALYSIS_THROUGHPUT,
+    ANALYSIS_BEHAVIORSCAPE, ANALYSIS_VIDEO_VALUE, ANALYSIS_SOCIAL_VALUE,
+    ANALYSIS_REVIEW_EFFORT, ANALYSIS_THROUGHPUT,
 ]
 
 # The analyses behind the manuscript's Figure 3.  Ticked by default on the Run All
@@ -86,6 +87,7 @@ ANALYSIS_LABELS = {
     ANALYSIS_AL_CURVE: "Active learning vs. random",
     ANALYSIS_BEHAVIORSCAPE: "Behaviorscape (feature modalities)",
     ANALYSIS_VIDEO_VALUE: "Video-feature value (paired)",
+    ANALYSIS_SOCIAL_VALUE: "Social-feature value (paired, multi-animal only)",
     ANALYSIS_THROUGHPUT: "Pipeline throughput",
     ANALYSIS_RARE_DISCOVERY: "Rare-behavior discovery (clip hunting)",
     ANALYSIS_REVIEW_EFFORT: "Human review effort (labeling time)",
@@ -171,6 +173,8 @@ class ValidationRunConfig:
     bscape_alias_map: dict[str, str] = field(default_factory=dict)
     # video-feature value (paired with/without)
     n_seeds_video_value: int = 5
+    # social-feature value (paired with/without); multi-animal projects only
+    n_seeds_social_value: int = 5
     # pipeline throughput.  Dense inference is OFF by default: unlike every other
     # analysis it has side effects on the real project (it recomputes that
     # session's temporal-refinement traces).
@@ -223,6 +227,7 @@ class ValidationRunConfig:
             "bscape_threshold": self.bscape_threshold,
             "bscape_normalize": self.bscape_normalize,
             "n_seeds_video_value": self.n_seeds_video_value,
+            "n_seeds_social_value": self.n_seeds_social_value,
             "throughput_stages": self.throughput_stages,
             "review_break_sec": self.review_break_sec,
             "review_batch_sec": self.review_batch_sec,
@@ -303,6 +308,7 @@ def publication_config(
         rare_auto_target=MANUSCRIPT_RARE_AUTO_TARGET,
         rare_n_seed_pos=MANUSCRIPT_RARE_SEED_POS,
         n_seeds_video_value=PUBLICATION_SEEDS,
+        n_seeds_social_value=PUBLICATION_SEEDS,
         throughput_stages=[benchmark.STAGE_EXTRACT, benchmark.STAGE_TRAIN],
         # Score only against labels the reviewer was certain of.
         min_confidence=1.0,
@@ -314,6 +320,18 @@ def publication_config(
         if hasattr(cfg, k):
             setattr(cfg, k, v)
     return cfg
+
+
+def _freshness_text(f: dict) -> str:
+    parts = []
+    if f.get("pose_cache_stale"):
+        parts.append("pose cache older than the pose schema")
+    if f.get("float64_segment_cache"):
+        parts.append("pre-float32 segment cache")
+    frac = f.get("r3d_dead_row_frac")
+    if isinstance(frac, float) and frac == frac and frac > 0.05:
+        parts.append(f"{frac:.0%} of rows have no R3D features")
+    return "; ".join(parts) or "unknown"
 
 
 def preset_description(cfg: ValidationRunConfig) -> str:
@@ -446,6 +464,8 @@ def run_validation(
             u += beh_count * config.n_seeds_al * 2 * steps  # AL + random arms
         if ANALYSIS_VIDEO_VALUE in config.analyses:
             u += beh_count * config.n_seeds_video_value * 2  # with + without arms
+        if ANALYSIS_SOCIAL_VALUE in config.analyses:
+            u += beh_count * config.n_seeds_social_value * 2
         if ANALYSIS_BEHAVIORSCAPE in config.analyses:
             u += beh_count                                   # one fit per behavior
         if ANALYSIS_THROUGHPUT in config.analyses:
@@ -515,6 +535,7 @@ def run_validation(
     rare_target_rows: list[dict] = []      # which behavior each project hunted, and why
     proj_names: dict[str, str] = {p.project_id: p.name for p in projects}
     vv_results: list = []
+    sv_results: list = []
     bench_results: list = []
     effort_results: list = []
     tb_results: list = []
@@ -537,8 +558,23 @@ def run_validation(
             test_size=config.holdout_test_size,
             seed=config.holdout_seed,
         )
-        store.write_holdout_manifest(proj.project_id, sp.manifest(proj))
+        # The suite validates whatever features are on disk, so say when they
+        # predate the current extraction code rather than let a run over old
+        # caches pass for a validation of today's pipeline.
+        try:
+            freshness = holdout.data_freshness(proj, sp.train_pool)
+        except Exception as exc:  # noqa: BLE001, a diagnostic must not sink a run
+            freshness = {"stale": None, "error": str(exc)}
+        if freshness.get("stale"):
+            _emit_msg(f"[{proj.name}] WARNING: features predate the current extraction "
+                      f"code ({_freshness_text(freshness)}); re-extract for a current run")
+        manifest = sp.manifest(proj)
+        manifest["data_freshness"] = freshness
+        store.write_holdout_manifest(proj.project_id, manifest)
+        proj_has_social = social_value.has_social_features(sp.train_pool)
         project_meta.append({
+            "data_freshness": freshness,
+            "has_social_features": bool(proj_has_social),
             "project_id": proj.project_id, "name": proj.name,
             # Renames are display-only, so the manifest carries both names: a figure
             # labeled "Groom" must stay traceable to the project/behavior on disk.
@@ -666,6 +702,16 @@ def run_validation(
                     progress_cb=lambda m: _emit(m),
                 )
                 vv_results.append(vv)
+
+            if ANALYSIS_SOCIAL_VALUE in config.analyses:
+                if proj_has_social:
+                    sv_results.append(social_value.run_social_value(
+                        trainer, proj, beh, sp, n_seeds=config.n_seeds_social_value,
+                        progress_cb=lambda m: _emit(m),
+                    ))
+                else:
+                    # Solo-animal project: nothing to measure, keep the ETA honest.
+                    done["n"] += 2 * config.n_seeds_social_value
 
         # ── rare-behavior discovery (its own loop over this project's targets) ──
         # In auto-target mode ``rare_targets`` is the rarity ranking and we stop at
@@ -1495,6 +1541,15 @@ def run_validation(
         sections.append(("Video-feature value (paired with vs. without)",
                          report.table_section(vv_df) + report.img_section([vv_img])))
 
+    if sv_results:
+        sv_dir = store.sub("social_value")
+        sv_df = social_value.results_to_frame(sv_results)
+        store.write_csv(sv_df, "social_value.csv", subdir="social_value")
+        sv_img = social_value.plot_social_value(sv_results, sv_dir / "social_value.png")
+        plots.close_all()
+        sections.append(("Social-feature value (paired with vs. without, multi-animal)",
+                         report.table_section(sv_df) + report.img_section([sv_img])))
+
     if bench_results:
         bench_dir = store.sub("throughput")
         bench_df = benchmark.results_to_frame(bench_results)
@@ -1712,7 +1767,7 @@ def run_validation(
             lc_results=lc_results, abl_results=abl_results,
             disc_by_project=disc_by_project, gen_results=gen_results,
             tb_results=tb_results, cal_results=cal_results, al_results=al_results,
-            vv_results=vv_results, bench_results=bench_results,
+            vv_results=vv_results, sv_results=sv_results, bench_results=bench_results,
             effort_results=effort_results,
             bscape_stats=bscape_stats, bscape_data=bscape_data,
         ))

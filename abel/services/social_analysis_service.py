@@ -33,11 +33,15 @@ import hashlib
 import json
 import logging
 import pickle
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+
+from abel.utils.hmm_progress import reporting_monitor
+from abel.utils.run_timeline import format_duration
 
 logger = logging.getLogger("abel")
 
@@ -67,6 +71,11 @@ _SPEED_COL = "centroid_velocity"
 # jumps produce velocities of 10,000+ px/s; left in, they claim a state of
 # their own and stretch every z-score.
 _CLIP_PCT: tuple[float, float] = (0.5, 99.5)
+
+# Share of the progress bar spent in the EM restarts; the rest is feature
+# preparation before and decoding/scoring after.
+_FIT_START = 0.05
+_FIT_END = 0.90
 
 # A displacement needs both animals moving at least this fast along the line
 # between them (body lengths per second).  0.5 BL/s is roughly the 20th/80th
@@ -236,9 +245,13 @@ class SocialAnalysisService:
         min_event_s: float = DEFAULT_MIN_EVENT_S,
         bin_s: float = DEFAULT_BIN_S,
         prechop_frames: dict[str, int] | None = None,
-        progress_cb: Callable[[str], None] | None = None,
+        progress_cb: Callable[[str, float], None] | None = None,
     ) -> dict[str, Any]:
         """Fit a pooled Gaussian HMM and derive per-subject dominance scores.
+
+        ``progress_cb(message, fraction)`` is called at every stage and after
+        every EM iteration, with ``fraction`` in [0, 1] and, once a restart
+        has finished, an estimate of the time left in ``message``.
 
         ``prechop_frames`` maps session id to the first analysed frame; frames
         before it (e.g. the experimenter's hand placing the intruder) are
@@ -260,12 +273,16 @@ class SocialAnalysisService:
                 ),
             }
 
-        def _say(msg: str) -> None:
+        def _say(msg: str, frac: float) -> None:
+            # Only ordinary errors are swallowed: a cancel (BaseException)
+            # raised by the callback must unwind the fit.
             if progress_cb is not None:
                 try:
-                    progress_cb(msg)
+                    progress_cb(msg, float(min(max(frac, 0.0), 1.0)))
                 except Exception:
                     pass
+
+        _say("Preparing social features…", 0.0)
 
         feats = feature_cols or self.available_hmm_features(df)
         if len(feats) < 2:
@@ -320,8 +337,50 @@ class SocialAnalysisService:
         best_ll = -np.inf
         restart_ll: list[float] = []
         n_restarts = max(1, int(n_restarts))
+        restart_s: list[float] = []
+        restart_iters: list[int] = []
+        frames_txt = f"{len(X):,} frames"
+
+        def _within(it: int, gain: float, cur: dict[str, float]) -> float:
+            """Share of the current restart done, never moving backwards."""
+            if restart_iters:
+                # A finished restart's iteration count is the best yardstick.
+                est = it / max(float(np.mean(restart_iters)), 1.0)
+            else:
+                # EM gains shrink roughly geometrically toward ``tol``, so the
+                # log distance travelled from the first gain to ``tol`` tracks
+                # progress far better than ``it / n_iter`` (it converges long
+                # before the cap).
+                est = it / float(n_iter)
+                if np.isfinite(gain) and gain > 0:
+                    cur.setdefault("g0", gain)
+                    g0 = cur["g0"]
+                    if g0 > tol:
+                        est = max(est, np.log(g0 / max(gain, tol)) / np.log(g0 / tol))
+            cur["w"] = max(cur.get("w", 0.0), min(float(est), 0.95))
+            return cur["w"]
+
+        def _frac(r: int, within: float) -> float:
+            return _FIT_START + (_FIT_END - _FIT_START) * (r + within) / n_restarts
+
+        def _eta(r: int, within: float, elapsed: float) -> str:
+            if restart_s:
+                per = float(np.mean(restart_s))
+            elif within >= 0.2:
+                per = elapsed / within
+            else:
+                return ""
+            left = (1.0 - within) * per + per * (n_restarts - r - 1)
+            if left < 1.0:
+                return "; almost done"
+            return f"; about {format_duration(left)} left"
+
         for r in range(n_restarts):
-            _say(f"Fitting dominance HMM: restart {r + 1} of {n_restarts}…")
+            _say(
+                f"Fitting dominance HMM on {frames_txt}: restart {r + 1} of {n_restarts}…"
+                + _eta(r, 0.0, 0.0),
+                _frac(r, 0.0),
+            )
             model = hmmlearn_hmm.GaussianHMM(
                 n_components=n_states,
                 covariance_type="diag",
@@ -330,6 +389,19 @@ class SocialAnalysisService:
                 random_state=int(random_state) + r,
                 verbose=False,
             )
+            cur: dict[str, float] = {}
+            t0 = time.perf_counter()
+
+            def _on_iter(it: int, gain: float, r: int = r, cur: dict = cur, t0: float = t0) -> None:
+                within = _within(it, gain, cur)
+                _say(
+                    f"Fitting dominance HMM on {frames_txt}: restart {r + 1} of "
+                    f"{n_restarts}, EM iteration {it} (stops at {int(n_iter)} or "
+                    f"on convergence){_eta(r, within, time.perf_counter() - t0)}",
+                    _frac(r, within),
+                )
+
+            model.monitor_ = reporting_monitor(model.monitor_, _on_iter)
             try:
                 model.fit(X, lengths)
                 ll = float(model.score(X, lengths))
@@ -338,13 +410,15 @@ class SocialAnalysisService:
                 if best_model is None and r == n_restarts - 1:
                     return {"n_states": 0, "error": f"HMM fit failed: {exc}"}
                 continue
+            restart_s.append(time.perf_counter() - t0)
+            restart_iters.append(max(1, int(getattr(model.monitor_, "iter", 1) or 1)))
             restart_ll.append(ll)
             if ll > best_ll:
                 best_ll, best_model = ll, model
         if best_model is None:
             return {"n_states": 0, "error": "HMM fit failed on every restart."}
 
-        _say("Decoding states and scoring dominance…")
+        _say("Decoding the most likely state sequence…", _FIT_END)
         decoded = best_model.predict(X, lengths)
 
         # Scatter decoded runs back onto each full sequence (-1 = no partner).
@@ -371,8 +445,10 @@ class SocialAnalysisService:
         transmat = np.asarray(best_model.transmat_, dtype=float)[np.ix_(order, order)]
 
         interaction_states = self._identify_interaction_states(profiles, feats)
+        _say("Measuring state occupancy, dwell and switching…", 0.93)
         occupancy, no_partner = self._state_occupancy(state_seqs, n_states)
         dwell, switch = self._dwell_and_switching(state_seqs, n_states, fps)
+        _say("Counting displacements and scoring dominance…", 0.96)
         analysis = self.displacement_analysis(
             df, state_seqs, interaction_states, fps, group_map or {},
             move_thresh_bl=move_thresh_bl, min_event_s=min_event_s, bin_s=bin_s,

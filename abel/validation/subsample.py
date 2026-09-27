@@ -18,12 +18,47 @@ import pandas as pd
 ALL_CLIPS = -1  # sentinel for "use all available positives"
 
 
-def _positive_mask(df: pd.DataFrame, behavior_id: str) -> pd.Series:
-    return df["label"].astype(str).str.strip() == str(behavior_id).strip()
+def positive_mask(df: pd.DataFrame, behavior_id: str, *, co_occurring: bool = False) -> pd.Series:
+    """Rows the trainer will treat as positives for ``behavior_id``.
+
+    With ``co_occurring`` (the project's ``allow_co_occurring_behaviors``) the
+    trainer expands a pipe-joined label such as ``"Chase|Sniff"`` into one row per
+    behavior, so the clip is a positive for each of them.  Multi-animal projects
+    pool co-occurring labels this way.  Exact matching would count those clips as
+    negatives and understate the positives a learning-curve point was trained on.
+    """
+    target = str(behavior_id).strip()
+    labels = df["label"].astype(str)
+    exact = labels.str.strip() == target
+    if not co_occurring:
+        return exact
+    piped = labels.str.contains("|", regex=False)
+    if not piped.any():
+        return exact
+    in_pipe = labels[piped].map(lambda s: target in {t.strip() for t in s.split("|")})
+    return exact | in_pipe.reindex(df.index, fill_value=False).astype(bool)
 
 
-def count_positives(df: pd.DataFrame, behavior_id: str) -> int:
-    return int(_positive_mask(df, behavior_id).sum())
+def dropped_sibling_mask(df: pd.DataFrame, behavior_id: str, *, co_occurring: bool = False) -> pd.Series:
+    """Pipe-joined rows the trainer DROPS when training ``behavior_id``.
+
+    With co-occurring labels on, a clip labeled ``"B|C"`` is neither a positive nor
+    a negative for ``A``: the trainer expands it and discards both halves rather
+    than make it a negative.  Counting such rows as negatives overstates the
+    negatives a cell trained on and lets a ratio draw spend its budget on them.
+    """
+    if not co_occurring:
+        return pd.Series(False, index=df.index)
+    piped = df["label"].astype(str).str.contains("|", regex=False)
+    return piped & ~positive_mask(df, behavior_id, co_occurring=True)
+
+
+# Kept for callers that predate the co-occurring flag.
+_positive_mask = positive_mask
+
+
+def count_positives(df: pd.DataFrame, behavior_id: str, *, co_occurring: bool = False) -> int:
+    return int(positive_mask(df, behavior_id, co_occurring=co_occurring).sum())
 
 
 def draw(
@@ -35,6 +70,7 @@ def draw(
     seed: int = 0,
     neg_policy: str = "all",      # "all" | "ratio"
     neg_per_pos: float = 3.0,
+    co_occurring: bool = False,
 ) -> tuple[pd.DataFrame, int, int]:
     """Return a sub-pool with ``size`` positive clips (+ negatives per policy).
 
@@ -42,9 +78,9 @@ def draw(
     uses every positive.  Guarantees ≥1 positive whenever any exist.
     """
     rng = np.random.default_rng(int(seed))
-    pos_mask = _positive_mask(pool, behavior_id)
+    pos_mask = positive_mask(pool, behavior_id, co_occurring=co_occurring)
     pos_df = pool.loc[pos_mask]
-    neg_df = pool.loc[~pos_mask]
+    neg_df = pool.loc[~pos_mask & ~dropped_sibling_mask(pool, behavior_id, co_occurring=co_occurring)]
 
     n_available = len(pos_df)
     if size == ALL_CLIPS or size >= n_available:

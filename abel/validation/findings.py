@@ -69,6 +69,7 @@ class FindingsInput:
     cal_results: list = field(default_factory=list)
     al_results: list = field(default_factory=list)
     vv_results: list = field(default_factory=list)
+    sv_results: list = field(default_factory=list)
     bench_results: list = field(default_factory=list)
     effort_results: list = field(default_factory=list)
     bscape_stats: object = None
@@ -741,6 +742,50 @@ def _video_value_findings(inp: FindingsInput) -> list[Finding]:
     return out
 
 
+def _social_value_findings(inp: FindingsInput) -> list[Finding]:
+    usable = [r for r in inp.sv_results if not r.error]
+    if not usable:
+        return []
+    from abel.validation import social_value  # noqa: PLC0415
+
+    df = social_value.results_to_frame(usable)
+    up = int(((df["verdict"] == "improved")).sum()) if "verdict" in df else 0
+    down = int(((df["verdict"] == "degraded")).sum()) if "verdict" in df else 0
+    gains = _finite([r.gain for r in usable])
+    return [Finding(
+        "Social features",
+        f"Removing the social (inter-animal) family from the shipped feature set "
+        f"significantly lowers F1 for {up} of {len(usable)} multi-animal "
+        f"(project × behavior) {_plural(len(usable), 'combination')}"
+        + (f" and raises it for {down}." if down else "."),
+        f"Mean ΔF1 from social features: {_f(float(np.mean(gains)))} "
+        f"(range {_f(min(gains))}–{_f(max(gains))}). Both arms carry every other family "
+        f"the project ships and share the held-out split and subsample; significance is "
+        f"BH-adjusted across behaviors (q < 0.05). Held-out unit is the session, so a "
+        f"dyad's two animals never straddle train and test. "
+        + "; ".join(f"{r.project_id} · {r.behavior_name} {_f(r.f1_no_video)}→"
+                    f"{_f(r.f1_with_video)} (Δ{r.gain:+.3f})" for r in usable[:8]),
+    )]
+
+
+def _data_freshness_findings(inp: FindingsInput) -> list[Finding]:
+    stale = [m for m in inp.project_meta if (m.get("data_freshness") or {}).get("stale")]
+    if not stale:
+        return []
+    from abel.validation.runner import _freshness_text  # noqa: PLC0415
+
+    return [Finding(
+        "Data",
+        f"{len(stale)} of {len(inp.project_meta)} {_plural(len(inp.project_meta), 'project')} "
+        f"were validated on features that predate the current extraction code.",
+        "These numbers describe the cached features, not today's pipeline. Re-extract "
+        "features, rebuild the training set and rerun for a current validation. "
+        + "; ".join(f"{m.get('name')}: {_freshness_text(m['data_freshness'])}"
+                    for m in stale),
+        kind=KIND_WARNING,
+    )]
+
+
 def _behaviorscape_findings(inp: FindingsInput) -> list[Finding]:
     stats = inp.bscape_stats
     if stats is None:
@@ -914,6 +959,8 @@ _DERIVERS = (
     _calibration_findings,
     _al_findings,
     _video_value_findings,
+    _social_value_findings,
+    _data_freshness_findings,
     _behaviorscape_findings,
     _throughput_findings,
     _review_effort_findings,

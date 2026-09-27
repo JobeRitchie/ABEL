@@ -205,3 +205,125 @@ def test_prechop_trims_frames_before_the_fit():
     assert res["settings"]["prechop_frames"] == {"s0": 100}
     ev = [e for e in res["displacement_events"] if e["session_id"] == "s0"]
     assert all(e["start_frame"] >= 100 for e in ev)
+
+
+class _Table:
+    def __init__(self, n: int) -> None:
+        self._n = n
+
+    def rowCount(self) -> int:
+        return self._n
+
+
+class _Summary:
+    """Stands in for the Analytics subject list with a tick set."""
+
+    def __init__(self, ticked: set[str]) -> None:
+        self.ticked = set(ticked)
+        self._session_table = _Table(3)
+
+    def _checked_subjects(self) -> set[str]:
+        return set(self.ticked)
+
+
+def test_unticked_subjects_are_left_out_of_fit_views_and_exports(qapp, monkeypatch):
+    pytest.importorskip("hmmlearn")
+    pytest.importorskip("matplotlib")
+    import abel.ui.tabs.social_interaction_panel as mod
+
+    class _SyncPool:
+        @staticmethod
+        def globalInstance():
+            return _SyncPool()
+
+        def start(self, worker):
+            worker.run()
+
+    monkeypatch.setattr(mod, "QThreadPool", _SyncPool)
+    fitted: list[set[str]] = []
+    real_fit = SocialAnalysisService.fit_dominance_hmm
+
+    def _fit_spy(self, df, **kw):
+        fitted.append(set(df["session_id"].astype(str)))
+        return real_fit(self, df, **{**kw, "n_states": 3, "n_restarts": 1, "bin_s": 5.0})
+
+    monkeypatch.setattr(SocialAnalysisService, "fit_dominance_hmm", _fit_spy)
+
+    host = _Host()
+    host._summary_tab = _Summary({"M1", "M3"})
+    w = mod.SocialInteractionWidget(host)
+    monkeypatch.setattr(w, "_load_frames", _synthetic_cohort)
+    w._run_dominance_hmm()
+
+    # M2 (s1) never reaches the fit, so it cannot shape the pooled states.
+    assert fitted == [{"s0", "s2"}]
+    assert w._res["unticked_sessions"] == ["s1"]
+    assert {r["session_label"] for r in w._current_dominance()} == {"M1", "M3"}
+    assert "This fit" not in w._status.text()
+
+    # Unticking a fitted subject hides it everywhere and asks for a refit.
+    host._summary_tab.ticked = {"M1"}
+    w.on_subjects_changed()
+    assert {r["session_label"] for r in w._current_dominance()} == {"M1"}
+    tables = w.result_tables()
+    for stem in ("social_dominance", "social_dominance_bins", "social_state_occupancy"):
+        assert set(tables[stem]["session_id"]) <= {"s0"}, stem
+    assert [w._session_combo.itemData(i) for i in range(w._session_combo.count())] == ["s0"]
+    assert "includes unticked subject(s) M3" in w._status.text()
+
+    # Re-ticking the subject left out of the fit is flagged too; the note is
+    # replaced, not stacked.
+    host._summary_tab.ticked = {"M1", "M2", "M3"}
+    w.on_subjects_changed()
+    status = w._status.text()
+    assert "left out now-ticked subject(s) M2" in status
+    assert status.count("This fit") == 1
+    w.deleteLater()
+
+
+def test_fit_reports_every_em_iteration_with_rising_fraction():
+    pytest.importorskip("hmmlearn")
+    calls: list[tuple[str, float]] = []
+    res = SocialAnalysisService().fit_dominance_hmm(
+        _synthetic_cohort(), fps=30.0, n_states=3, n_restarts=2, bin_s=5.0,
+        progress_cb=lambda msg, frac: calls.append((msg, frac)),
+    )
+    assert res["error"] is None
+    fracs = [f for _m, f in calls]
+    assert fracs == sorted(fracs) and 0.0 <= fracs[0] and fracs[-1] <= 1.0
+    iters = [m for m, _f in calls if "EM iteration" in m]
+    assert any("restart 1 of 2" in m for m in iters) and any("restart 2 of 2" in m for m in iters)
+    # Once a restart has finished, the second one carries a time estimate.
+    assert all(("left" in m or "almost done" in m) for m in iters if "restart 2 of 2" in m)
+
+
+def test_cancel_stops_the_fit_and_keeps_the_previous_result(qapp, monkeypatch):
+    pytest.importorskip("hmmlearn")
+    import abel.ui.tabs.social_interaction_panel as mod
+
+    class _SyncPool:
+        @staticmethod
+        def globalInstance():
+            return _SyncPool()
+
+        def start(self, worker):
+            worker.run()
+
+    monkeypatch.setattr(mod, "QThreadPool", _SyncPool)
+    w = mod.SocialInteractionWidget(_Host())
+    w._res = {"sentinel": True}
+    monkeypatch.setattr(w, "_load_frames", _synthetic_cohort)
+    # Press Cancel on the first progress report.
+    real = w._on_progress
+
+    def _press_cancel(msg, frac):
+        real(msg, frac)
+        w._cancel_hmm()
+
+    w._progress.update.disconnect()
+    w._progress.update.connect(_press_cancel)
+    w._run_dominance_hmm()
+    assert "cancelled" in w._status.text()
+    assert w._res == {"sentinel": True}
+    assert not w._progress_bar.isVisible() and w._worker is None
+    w.deleteLater()

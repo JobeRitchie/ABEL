@@ -20,12 +20,13 @@ reopening the project restores it.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import QObject, Qt, QThreadPool, Signal
+from PySide6.QtCore import QObject, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSpinBox,
@@ -52,6 +54,8 @@ from abel.services.social_analysis_service import (
     SocialAnalysisService,
 )
 from abel.ui.mpl_theme import style_navigation_toolbar
+from abel.utils.cancellation import cancel_scope, cancellable, is_cancel_traceback
+from abel.utils.run_timeline import format_duration
 from abel.workers.task_worker import TaskWorker
 
 if TYPE_CHECKING:
@@ -69,6 +73,9 @@ _FALLBACK_GROUP_COLORS = [
     "#5b9bd5", "#ed7d31", "#70ad47", "#ffc000", "#a855f7",
     "#06b6d4", "#f43f5e", "#6366f1", "#84cc16", "#ec4899",
 ]
+# Start of the status-bar warning that the fit's cohort differs from the
+# ticked subjects; replaced whenever the ticks change.
+_COHORT_NOTE_MARK = " This fit "
 
 _VIEWS: list[tuple[str, str]] = [
     ("dominance", "Dominance index by group"),
@@ -121,7 +128,7 @@ def _fmt_p(p: float) -> str:
 class _Progress(QObject):
     """Carries worker-thread progress text to the UI thread (queued signal)."""
 
-    message = Signal(str)
+    update = Signal(str, float)  # message, fraction done in [0, 1]
 
 
 class SocialInteractionWidget(QWidget):
@@ -174,7 +181,23 @@ class SocialInteractionWidget(QWidget):
         # Bound to the label (a main-thread QObject) so the worker's emits are
         # queued onto the UI thread; a bare lambda would run in the worker.
         self._progress = _Progress()
-        self._progress.message.connect(self._status.setText)
+        self._progress.update.connect(self._on_progress)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 1000)
+        self._progress_bar.setFormat("%p%")
+        self._progress_bar.setVisible(False)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.setToolTip("Stop the fit. The previous saved fit is kept.")
+        self._cancel_btn.clicked.connect(self._cancel_hmm)
+        self._cancel_btn.setVisible(False)
+        self._cancel_flag: list[bool] = [False]
+        self._fit_t0 = 0.0
+        self._fit_msg = ""
+        # Ticks the elapsed time between progress reports, so a slow stage
+        # (loading the frame table, scoring displacements) still looks alive.
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._show_fit_status)
 
         self._compute_btn = QPushButton("Compute Social Metrics")
         self._compute_btn.setToolTip(
@@ -351,6 +374,10 @@ class SocialInteractionWidget(QWidget):
         root.setSpacing(4)
         root.addLayout(ctrl)
         root.addWidget(self._status)
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self._progress_bar, 1)
+        progress_row.addWidget(self._cancel_btn)
+        root.addLayout(progress_row)
         root.addWidget(self._inner, 1)
 
         self._on_view_changed()
@@ -396,10 +423,66 @@ class SocialInteractionWidget(QWidget):
         groups = facet if facet is not None else (getattr(self._host, "_session_groups", {}) or {})
         return str(groups.get(self._session_label(sid), groups.get(sid, "")) or "")
 
+    def _ticked_labels(self) -> set[str] | None:
+        """Session labels ticked in the Analytics subject list.
+
+        ``None`` when the host has no subject list or it is not populated yet,
+        so nothing is dropped before the Analytics tab has loaded.
+        """
+        summary = getattr(self._host, "_summary_tab", None)
+        table = getattr(summary, "_session_table", None)
+        if summary is None or table is None or table.rowCount() == 0:
+            return None
+        return set(summary._checked_subjects())
+
+    def _is_ticked(self, sid: str) -> bool:
+        """False when the user unticked this subject to exclude it."""
+        ticked = self._ticked_labels()
+        return ticked is None or self._session_label(sid) in ticked
+
     def _session_included(self, sid: str) -> bool:
-        """False when the facet selection filters this session out."""
+        """False when the subject is unticked or the facet selection drops it."""
+        if not self._is_ticked(sid):
+            return False
         facet = self._facet_groups()
         return facet is None or self._session_label(sid) in facet or sid in facet
+
+    def _cohort_note(self) -> str:
+        """Warning when the ticked subjects differ from the ones the fit used.
+
+        The state definitions, profiles, switching and dwell are pooled over
+        every fitted session, so hiding a subject afterwards does not remove
+        it from them; only a refit does.
+        """
+        res = self._res
+        if not res or self._ticked_labels() is None:
+            return ""
+        fitted = {str(r.get("session_id")) for r in res.get("dominance") or []}
+        now_excluded = sorted(self._session_label(s) for s in fitted if not self._is_ticked(s))
+        re_ticked = sorted(
+            self._session_label(s) for s in res.get("unticked_sessions") or []
+            if self._is_ticked(str(s))
+        )
+        if not now_excluded and not re_ticked:
+            return ""
+        parts = []
+        if now_excluded:
+            parts.append(f"includes unticked subject(s) {', '.join(now_excluded)}")
+        if re_ticked:
+            parts.append(f"left out now-ticked subject(s) {', '.join(re_ticked)}")
+        return (
+            f"{_COHORT_NOTE_MARK}{' and '.join(parts)}; the pooled state profiles, switching "
+            "and dwell still reflect that cohort. Click Run Dominance HMM to refit."
+        )
+
+    def on_subjects_changed(self) -> None:
+        """Host hook: subjects were ticked or unticked in the Analytics tab."""
+        if not self._res:
+            return
+        self._refresh_session_combo()
+        self._refresh_result_views()
+        status = self._status.text().split(_COHORT_NOTE_MARK)[0]
+        self._status.setText(status + self._cohort_note())
 
     def _order_groups(self, groups: Any) -> list[str]:
         """Groups in the user's saved level order (as in the Graphs tab)."""
@@ -519,6 +602,7 @@ class SocialInteractionWidget(QWidget):
                             + " The prechop changed since this fit; click Run "
                             "Dominance HMM to refresh it."
                         )
+                self._status.setText(self._status.text() + self._cohort_note())
         self._render()
 
     def _apply_settings(self, s: dict[str, Any]) -> None:
@@ -604,6 +688,10 @@ class SocialInteractionWidget(QWidget):
                 "with 'Interaction features' extracted in the Pose Features tab."
             )
             return
+        # Decide per session, not per row: _is_ticked reads the Qt subject
+        # table, and the frame table has ~a million rows.
+        sids = df["session_id"].astype(str)
+        df = df[sids.isin([s for s in sids.unique() if self._is_ticked(s)])]
         fps = self._host._project_fps()
         rows = self._svc.compute_social_summary(
             df, fps, self._group_map(df["session_id"].unique())
@@ -621,53 +709,110 @@ class SocialInteractionWidget(QWidget):
     def _run_dominance_hmm(self) -> None:
         if self._worker is not None:
             return
-        df = self._load_frames()
-        if df is None:
-            self._status.setText(
-                "No social features found. Extract 'Interaction features' first."
-            )
-            return
         root = self._project_root()
+        # Resolved here on the UI thread; the worker only reads these copies.
+        labels = dict(getattr(self._host, "_session_label_by_session", {}) or {})
+        ticked_labels = self._ticked_labels()
+        known = set(labels) | set(getattr(self._host, "_subject_by_session", {}) or {})
+        if self._frames_cache is not None:
+            known |= set(self._frames_cache["session_id"].astype(str).unique())
+        group_map = self._group_map(sorted(known))
+        prechop_all = self._prechop_map(sorted(known))
         fps = self._host._project_fps()
         settings = self._settings()
-        group_map = self._group_map(df["session_id"].unique())
-        prechop = self._prechop_map(df["session_id"].unique())
         svc = self._svc
-        progress = self._progress
+        flag: list[bool] = [False]
+        self._cancel_flag = flag
+        report = cancellable(self._progress.update.emit, flag)
 
         def _job() -> dict[str, Any]:
-            res = svc.fit_dominance_hmm(
-                df, fps=fps,
-                n_states=settings["n_states"],
-                n_iter=settings["n_iter"],
-                n_restarts=settings["n_restarts"],
-                move_thresh_bl=settings["move_thresh_bl"],
-                min_event_s=settings["min_event_s"],
-                bin_s=settings["bin_s"],
-                prechop_frames=prechop,
-                group_map=group_map,
-                progress_cb=progress.message.emit,
-            )
-            if not res.get("error") and root is not None:
-                svc.save_result(root, res, svc.input_fingerprint(root, res["settings"]))
-            return res
+            with cancel_scope(flag):
+                if self._frames_cache is None:
+                    report("Loading the per-frame social features…", 0.0)
+                df = self._load_frames()
+                if df is None:
+                    return {"error": "No social features found. Extract 'Interaction features' first."}
+                # Unticked subjects are excluded from the fit itself: the states
+                # are pooled across sessions, so hiding them afterwards is not
+                # enough.
+                sids = df["session_id"].astype(str)
+                if ticked_labels is None:
+                    keep = pd.Series(True, index=df.index)
+                else:
+                    keep = sids.isin(
+                        [s for s in sids.unique() if labels.get(s, s) in ticked_labels]
+                    )
+                unticked = sorted(sids[~keep].unique())
+                df = df[keep]
+                if df.empty:
+                    return {"error": "None of the ticked subjects have social features."}
+                fitted = set(df["session_id"].astype(str).unique())
+                res = svc.fit_dominance_hmm(
+                    df, fps=fps,
+                    n_states=settings["n_states"],
+                    n_iter=settings["n_iter"],
+                    n_restarts=settings["n_restarts"],
+                    move_thresh_bl=settings["move_thresh_bl"],
+                    min_event_s=settings["min_event_s"],
+                    bin_s=settings["bin_s"],
+                    prechop_frames={k: v for k, v in prechop_all.items() if k in fitted},
+                    group_map={k: v for k, v in group_map.items() if k in fitted},
+                    progress_cb=report,
+                )
+                res["unticked_sessions"] = unticked
+                if not res.get("error") and root is not None:
+                    report("Saving the fit…", 1.0)
+                    svc.save_result(root, res, svc.input_fingerprint(root, res["settings"]))
+                return res
 
         self._hmm_btn.setEnabled(False)
         self._hmm_btn.setText("Fitting…")
-        self._status.setText("Fitting dominance HMM… (about a minute per restart on large cohorts)")
+        self._compute_btn.setEnabled(False)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self._cancel_btn.setEnabled(True)
+        self._cancel_btn.setVisible(True)
+        self._fit_t0 = time.monotonic()
+        self._fit_msg = "Starting the dominance HMM…"
+        self._show_fit_status()
+        self._elapsed_timer.start()
         worker = TaskWorker(_job)
         worker.signals.finished.connect(self._on_hmm_done)
         worker.signals.failed.connect(self._on_hmm_failed)
         self._worker = worker
         QThreadPool.globalInstance().start(worker)
 
+    def _on_progress(self, msg: str, frac: float) -> None:
+        if self._worker is None:
+            return
+        self._fit_msg = msg
+        self._progress_bar.setValue(int(round(1000 * float(frac))))
+        self._show_fit_status()
+
+    def _show_fit_status(self) -> None:
+        elapsed = format_duration(time.monotonic() - self._fit_t0)
+        self._status.setText(f"{self._fit_msg} ({elapsed} elapsed)")
+
+    def _cancel_hmm(self) -> None:
+        self._cancel_flag[0] = True
+        self._cancel_btn.setEnabled(False)
+        self._fit_msg = "Cancelling at the next safe stop point…"
+        self._show_fit_status()
+
     def _hmm_finished(self) -> None:
         self._worker = None
+        self._elapsed_timer.stop()
+        self._progress_bar.setVisible(False)
+        self._cancel_btn.setVisible(False)
+        self._compute_btn.setEnabled(True)
         self._hmm_btn.setEnabled(True)
         self._hmm_btn.setText("Run Dominance HMM")
 
     def _on_hmm_failed(self, tb: str) -> None:
         self._hmm_finished()
+        if is_cancel_traceback(tb):
+            self._status.setText("Dominance HMM cancelled; the previous fit is unchanged.")
+            return
         logger.error("Dominance HMM failed:\n%s", tb)
         self._status.setText("Dominance HMM failed; see the log for details.")
 
@@ -699,12 +844,7 @@ class SocialInteractionWidget(QWidget):
         self._fill_table(self._dom_table, self._DOM_COLS, rows)
         self._stats_text.setPlainText(self._format_stats(res, rows))
 
-        self._session_combo.blockSignals(True)
-        self._session_combo.clear()
-        sids = sorted({str(k[1]) for k in res.get("state_seqs", {})}, key=self._session_label)
-        for sid in sids:
-            self._session_combo.addItem(self._session_label(sid), userData=sid)
-        self._session_combo.blockSignals(False)
+        self._refresh_session_combo()
 
         self._set_result_widgets_enabled(True)
         n_dom = sum(1 for r in rows if r.get("is_dominant"))
@@ -723,8 +863,28 @@ class SocialInteractionWidget(QWidget):
                 + f" Warning: one track id ranks first in most sessions (p = {_fmt_p(p)}); "
                 "see the checks below."
             )
+        if not restored:
+            # A restored fit adds this after its staleness notes instead, so
+            # the cohort note stays last and can be replaced on re-ticking.
+            self._status.setText(self._status.text() + self._cohort_note())
         self._inner.setCurrentIndex(1)
         self._render()
+
+    def _refresh_session_combo(self) -> None:
+        """Ethogram session picker, limited to included subjects."""
+        current = self._session_combo.currentData()
+        self._session_combo.blockSignals(True)
+        self._session_combo.clear()
+        sids = sorted(
+            {str(k[1]) for k in self._res.get("state_seqs", {}) if self._session_included(str(k[1]))},
+            key=self._session_label,
+        )
+        for sid in sids:
+            self._session_combo.addItem(self._session_label(sid), userData=sid)
+        idx = self._session_combo.findData(current)
+        if idx >= 0:
+            self._session_combo.setCurrentIndex(idx)
+        self._session_combo.blockSignals(False)
 
     # ── Stats text ──────────────────────────────────────────────────────────
 
@@ -1467,12 +1627,14 @@ class SocialInteractionWidget(QWidget):
 
         bins = pd.DataFrame(res.get("dominance_bins") or [])
         if not bins.empty:
+            bins = bins[bins["session_id"].astype(str).map(self._session_included)].copy()
             bins["session_label"] = bins["session_id"].map(lambda s: self._session_label(str(s)))
             bins["group"] = bins["session_id"].map(lambda s: self._group_of(str(s)))
         out["social_dominance_bins"] = bins
 
         ev = pd.DataFrame(res.get("displacement_events") or [])
         if not ev.empty:
+            ev = ev[ev["session_id"].astype(str).map(self._session_included)].copy()
             ev["session_label"] = ev["session_id"].map(lambda s: self._session_label(str(s)))
             ev["group"] = ev["session_id"].map(lambda s: self._group_of(str(s)))
         out["social_displacement_events"] = ev
@@ -1502,6 +1664,8 @@ class SocialInteractionWidget(QWidget):
         rank = {(str(r["animal_id"]), str(r["session_id"])): r for r in dom}
         occ_rows = []
         for (aid, sid), fracs in (res.get("occupancy") or {}).items():
+            if not self._session_included(str(sid)):
+                continue
             r = rank.get((aid, sid), {})
             row = {
                 "animal_id": aid,

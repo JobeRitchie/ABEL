@@ -35,6 +35,7 @@ from abel.temporal_refinement.refined_eval import (
 )
 from abel.validation.datamodel import ProjectRef
 from abel.validation.engine import run_one_config
+from abel.validation.holdout import load_training_frame
 
 logger = logging.getLogger("abel.validation.loso")
 
@@ -302,7 +303,7 @@ def leave_one_subject_out(
     if df is None:
         if not project.training_set_path.exists():
             return {"behavior_id": behavior_id, "error": "training_set.parquet not found"}
-        df = pd.read_parquet(project.training_set_path)
+        df = load_training_frame(project)
     df = df.reset_index(drop=True)
 
     group_col = _group_column(df, project)
@@ -544,7 +545,7 @@ def leave_one_subject_out_all(
     """
     trainer = ActiveLearningTrainerService()
     _emit(progress, stage="loading")
-    df = pd.read_parquet(project.training_set_path) if project.training_set_path.exists() else None
+    df = load_training_frame(project) if project.training_set_path.exists() else None
     bids = behavior_ids or [b for b in project.behavior_names if str(b) != "no_behavior"]
     out: list[dict[str, Any]] = []
     for b_i, bid in enumerate(bids, 1):

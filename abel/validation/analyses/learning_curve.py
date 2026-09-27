@@ -324,7 +324,8 @@ def run_learning_curve(
     behavior_name = project.behavior_label(behavior_id)
     pool = holdout_split.train_pool
     group_col = holdout_split.group_col
-    total_pos = subsample.count_positives(pool, behavior_id)
+    total_pos = subsample.count_positives(pool, behavior_id,
+        co_occurring=project.allow_co_occurring_behaviors)
 
     result = LearningCurveResult(
         project_id=project.project_id,
@@ -382,6 +383,7 @@ def run_learning_curve(
                 pool, behavior_id, size,
                 group_col=group_col, seed=seed,
                 neg_policy=neg_policy, neg_per_pos=neg_per_pos,
+                co_occurring=project.allow_co_occurring_behaviors,
             )
             _log(f"{behavior_name}: n={size_label} seed {rep + 1}/{n_seeds} "
                  f"({n_pos} pos / {n_neg} neg)…")

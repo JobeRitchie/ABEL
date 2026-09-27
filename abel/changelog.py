@@ -7,10 +7,60 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 23, 2026"
+VERSION_DATE = "September 27, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.24.0", "September 27, 2026", [
+        "Closing ABEL during training no longer loses models. Retrain All "
+        "used to delete each old model before building its replacement. Now "
+        "the old model is kept aside until the new one finishes, and is put "
+        "back if the retrain fails, is stopped, or ABEL is closed or crashes "
+        "(restored the next time the project opens). Closing while a job "
+        "runs asks first and stops the job at a safe point. Models, labels "
+        "and the training set are written so an interrupted save can never "
+        "leave a broken file, and an unreadable label file is no longer "
+        "replaced by only the newest labels.",
+        "Social Interaction and HMM fits show real progress. Run HMM, "
+        "Auto-calibrate and Run Dominance HMM fill a percent bar after every "
+        "EM iteration, name the current state count, restart and iteration, "
+        "estimate the time left once a fit has finished, and keep an elapsed "
+        "clock running between updates. Each has a Cancel button that stops "
+        "at the next iteration and keeps the previous result and settings.",
+        "Behavior motif HMMs follow the analyzed animal. In multi-animal "
+        "projects each animal (and Either animal) keeps its own saved fit, so "
+        "switching animals never shows or overwrites another animal's fit. A "
+        "fit that finishes after the animal was switched is saved for the "
+        "animal it was run on. Charts, the report and exported file names "
+        "say which animal the fit describes.",
+        "The Dominance HMM respects the subject ticks in Behavior Analytics. "
+        "Unticked subjects are left out of the fit itself, since states are "
+        "pooled across sessions, and out of the ethogram and charts. If the "
+        "ticks change after a fit, the status bar says which subjects differ "
+        "and asks for a refit.",
+        "Clip Mining learns from clips you rejected. Mined clips reviewed as "
+        "not the target behavior are added to the ranker's background as "
+        "hard negatives, capped at a quarter of it. On 52 models across 8 "
+        "projects this found 11 to 13% more positives in the first 100 to 200 "
+        "reviewed clips.",
+        "Validation gains a Social-feature value analysis for multi-animal "
+        "projects. It trains the shipped feature set with and without the "
+        "social family on the same held-out sessions and subsample and "
+        "reports the paired F1 change per behavior, with a report section "
+        "and a finding.",
+        "Validation now matches the app more closely. Co-occurring labels "
+        "such as 'Chase|Sniff' count as positives for each behavior they "
+        "name, and a clip labeled with two other behaviors is no longer "
+        "counted as a negative. The training set is read the way the trainer "
+        "reads it, without duplicate distance spellings. A dyad's two tracks "
+        "stay in one group even without a readable manifest. The rare "
+        "discovery Active Learning arm replays the Active Learning tab's "
+        "default queue instead of ranking by probability alone.",
+        "Validation runs warn when a project's cached features predate the "
+        "current extraction code (old pose cache, pre-float32 segments, or "
+        "rows with no R3D features), so an old run is not read as a "
+        "validation of today's pipeline.",
+    ]),
     ("0.23.0", "September 23, 2026", [
         "Multi-animal projects get a Social Interaction subtab in Behavior "
         "Analytics. Summary shows per-session distance, time in contact, "
@@ -49,15 +99,6 @@ CHANGELOG: list[tuple[str, str, list[str]]] = [
         "checkpoint and keep the previous results; nothing half written is "
         "saved. LOSO shows live progress with the current fold, held-out "
         "subject and ETA.",
-        "Closing ABEL during training no longer loses models. Retrain All "
-        "used to delete each old model before building its replacement. Now "
-        "the old model is kept aside until the new one finishes, and is put "
-        "back if the retrain fails, is stopped, or ABEL is closed or crashes "
-        "(restored the next time the project opens). Closing while a job "
-        "runs asks first and stops the job at a safe point. Models, labels "
-        "and the training set are written so an interrupted save can never "
-        "leave a broken file, and an unreadable label file is no longer "
-        "replaced by only the newest labels.",
         "The Pose & Features smoothing settings now reach feature "
         "extraction. Before this fix every project was extracted with the "
         "default 5-frame smoothing whatever the tab said. Changing the "

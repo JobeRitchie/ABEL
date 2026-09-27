@@ -149,6 +149,14 @@ SECTIONS: tuple[SectionSpec, ...] = (
               "motion features add.",
     ),
     SectionSpec(
+        "Social features", "Social-feature value (paired, multi-animal projects)",
+        figures=FigureSpec("social_value", ("social_value.png",), 1),
+        table=TableSpec("social_value", "social_value.csv"),
+        blurb="The shipped feature set with and without the social (inter-animal) "
+              "family, on the same held-out sessions and training subsample. Only "
+              "multi-animal projects carry social features, so only they appear here.",
+    ),
+    SectionSpec(
         "Throughput", "Pipeline throughput",
         figures=FigureSpec("throughput", ("benchmark.png",), 1),
         table=TableSpec("throughput", "benchmark.csv"),

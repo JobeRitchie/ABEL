@@ -37,7 +37,7 @@ from abel.services.active_learning_trainer_service import (
     ActiveLearningTrainerService,
     TrainingConfig,
 )
-from abel.validation import holdout
+from abel.validation import holdout, subsample
 from abel.validation import metrics as vmetrics
 from abel.validation.datamodel import ConfigEvalResult, ProjectRef
 
@@ -50,6 +50,7 @@ CAL_MIN_POS = 3
 
 def _carve_calibration_slice(
     pool: pd.DataFrame, group_col: str, seed: int, behavior_id: str,
+    co_occurring: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Split ``pool`` into (fit_rows, calibration_rows) along group boundaries.
 
@@ -72,7 +73,7 @@ def _carve_calibration_slice(
     if group_col not in pool.columns or len(pool) < 2 * CAL_MIN_ROWS:
         return pool, empty
 
-    is_pos = pool["label"].astype(str).str.strip() == str(behavior_id).strip()
+    is_pos = subsample.positive_mask(pool, behavior_id, co_occurring=co_occurring)
     groups = pool[group_col].astype(str)
     # Only groups carrying the target can seed a usable calibration slice, and we
     # must leave at least one behind so the model still sees positives.
@@ -212,7 +213,7 @@ def run_one_config(
     # the slice unused.
     fit_df, cal_df = _carve_calibration_slice(
         train_pool_df, holdout._group_column(project.split_strategy),
-        seed, str(behavior_id),
+        seed, str(behavior_id), bool(cfg.allow_co_occurring_behaviors),
     )
     calibration_requested = str(cfg.calibration_method) in {"sigmoid", "isotonic"}
     if cal_df.empty and calibration_requested:
@@ -230,8 +231,10 @@ def run_one_config(
     # must describe the rows the base model actually saw, otherwise a learning
     # curve plots more labels than were used.
     if n_cal:
-        is_pos = fit_df["label"].astype(str).str.strip() == str(behavior_id).strip()
-        n_pos_train, n_neg_train = int(is_pos.sum()), int((~is_pos).sum())
+        co = bool(cfg.allow_co_occurring_behaviors)
+        is_pos = subsample.positive_mask(fit_df, behavior_id, co_occurring=co)
+        dropped = subsample.dropped_sibling_mask(fit_df, behavior_id, co_occurring=co)
+        n_pos_train, n_neg_train = int(is_pos.sum()), int((~is_pos & ~dropped).sum())
     df = pd.concat([fit_df, holdout_df, cal_df], ignore_index=True)
     train_idx = np.arange(n_fit, dtype=int)
     val_idx = np.arange(n_fit, n_fit + n_hold, dtype=int)

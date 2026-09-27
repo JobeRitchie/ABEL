@@ -29,15 +29,21 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from dataclasses import asdict, dataclass, field
 from itertools import combinations
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+
+from abel.utils.cancellation import checkpoint
+from abel.utils.hmm_progress import reporting_monitor
+from abel.utils.run_timeline import format_duration
 
 logger = logging.getLogger("abel")
 
@@ -815,16 +821,26 @@ def hmm_free_params(n_states: int, n_features: int) -> int:
     return n_states * (n_states - 1) + n_states * (n_features - 1) + (n_states - 1)
 
 
+# Share of fit_hmm's progress spent in the EM restarts; the rest is decoding
+# and posteriors for the chosen model.
+_FIT_SHARE = 0.9
+
+
 def _fit_single_hmm(
     observations: list[np.ndarray],
     n_states: int,
     n_iter: int,
     n_features: int,
     seed: int | None = None,
+    on_iter: Callable[[int, float], None] | None = None,
 ) -> tuple[Any, float, bool, int]:
     """Fit one CategoricalHMM.
 
     Returns ``(model, log_likelihood, converged, iters_used)``.
+
+    ``on_iter(iteration, ll_gain)`` runs after every EM step.  A cancel it
+    raises (a ``BaseException``) unwinds the fit rather than counting as a
+    failed restart.
 
     ``converged`` is computed here rather than read from
     ``model.monitor_.converged``: hmmlearn's property reports ``True`` whenever
@@ -849,6 +865,14 @@ def _fit_single_hmm(
         n_features=n_features,
         random_state=seed,
     )
+    def _step(it: int, gain: float) -> None:
+        # Every EM step is a cancel stop point, so a job run inside a
+        # cancel_scope (fits, calibration) stops within one iteration.
+        checkpoint()
+        if on_iter is not None:
+            on_iter(it, gain)
+
+    model.monitor_ = reporting_monitor(model.monitor_, _step)
     try:
         model.fit(concatenated, lengths)
         ll = model.score(concatenated, lengths)
@@ -862,8 +886,14 @@ def fit_hmm(
     sequences: dict[str, list[tuple[float, float, str]]],
     behavior_ids: list[str],
     settings: MotifSettings,
+    progress_cb: Callable[[str, float], None] | None = None,
 ) -> dict[str, Any]:
     """Fit a categorical HMM to the pooled behavior sequences.
+
+    ``progress_cb(message, fraction)`` is called before every fit and after
+    every EM iteration, with ``fraction`` in [0, 1] and, once a fit has
+    finished, an estimate of the time left in ``message``.  A cancel raised
+    by the callback (a ``BaseException``) stops the fit.
 
     Returns
     -------
@@ -914,17 +944,72 @@ def fit_hmm(
     if criterion not in {"aic", "bic", "aicc", "icl"}:
         criterion = "icl" if criterion == "cv" else "bic"
 
+    def _say(msg: str, frac: float) -> None:
+        # Only ordinary errors are swallowed: a cancel (BaseException) raised
+        # by the callback must unwind the fit.
+        if progress_cb is not None:
+            try:
+                progress_cb(msg, float(min(max(frac, 0.0), 1.0)))
+            except Exception:
+                pass
+
+    # Forward-backward costs O(N * K^2) per EM step, so a fit is weighted by
+    # K^2 and the bar does not stall on the large state counts at the end.
+    n_restarts = max(1, int(settings.hmm_n_restarts))
+    n_iter = int(settings.hmm_n_iter)
+    ks = list(n_range)
+    total_w = float(sum(k * k for k in ks) * n_restarts) or 1.0
+    done_w = 0.0
+    fit_no = 0
+    t_start = time.perf_counter()
+    obs_txt = f"{total_obs:,} bouts"
+
+    def _frac(k: int, within: float) -> float:
+        return _FIT_SHARE * (done_w + k * k * within) / total_w
+
+    def _eta(frac: float) -> str:
+        # Only once a fit has finished: the first EM steps are not a fair
+        # sample of how long the rest will take.
+        if fit_no == 0 or frac <= 0:
+            return ""
+        left = (time.perf_counter() - t_start) * (_FIT_SHARE - frac) / frac
+        if left < 1.0:
+            return "; almost done"
+        return f"; about {format_duration(left)} left"
+
+    def _fit_msg(k: int, r: int, it: int | None, frac: float) -> str:
+        head = f"Fitting HMM on {obs_txt}: "
+        if len(ks) > 1:
+            head += f"K={k} ({ks.index(k) + 1} of {len(ks)} state counts), "
+        head += f"restart {r + 1} of {n_restarts}"
+        if it is not None:
+            head += f", EM iteration {it} of up to {n_iter}"
+        return head + "…" + _eta(frac)
+
     for n_states in n_range:
         # Multiple random restarts: keep best log-likelihood.  Seeds are
         # deterministic so the selected state count reproduces across runs.
         best_ll = float("-inf")
         best_run_model = None
         any_converged = False
-        for restart in range(settings.hmm_n_restarts):
+        for restart in range(n_restarts):
+            f0 = _frac(n_states, 0.0)
+            _say(_fit_msg(n_states, restart, None, f0), f0)
+            peak = [0.0]
+
+            def _on_iter(it: int, _gain: float, k: int = n_states, r: int = restart,
+                         peak: list[float] = peak) -> None:
+                # EM usually runs to the iteration cap on bout data, so the
+                # share of it used is a fair, never-decreasing estimate.
+                peak[0] = max(peak[0], min(it / max(n_iter, 1), 0.99))
+                f = _frac(k, peak[0])
+                _say(_fit_msg(k, r, it, f), f)
+
             try:
                 model, ll, conv, _iters = _fit_single_hmm(
-                    observations, n_states, settings.hmm_n_iter, n_features,
+                    observations, n_states, n_iter, n_features,
                     seed=seed0 + restart,
+                    on_iter=_on_iter if progress_cb is not None else None,
                 )
                 any_converged = any_converged or conv
                 if ll > best_ll:
@@ -932,6 +1017,8 @@ def fit_hmm(
                     best_run_model = model
             except Exception as exc:
                 logger.debug("HMM restart %d failed for n=%d: %s", restart, n_states, exc)
+            done_w += n_states * n_states
+            fit_no += 1
 
         if best_run_model is None or best_ll == float("-inf"):
             continue
@@ -946,6 +1033,7 @@ def fit_hmm(
         aicc = aic + (2 * n_free * (n_free + 1) / denom) if denom > 0 else float("inf")
         # ICL = BIC + 2 * entropy of the posterior state assignments.  Penalizes
         # models whose states are not cleanly separable.
+        _say(f"Scoring K={n_states}…" + _eta(_frac(n_states, 0.0)), _frac(n_states, 0.0))
         icl = bic + 2.0 * _posterior_entropy(best_run_model, observations)
 
         model_selection.append({
@@ -974,6 +1062,7 @@ def fit_hmm(
         }
 
     # Decode state sequences for each session
+    _say(f"Decoding the {best_n}-state model…", _FIT_SHARE)
     lengths = [len(o) for o in observations]
     concatenated = np.concatenate(observations).reshape(-1, 1)
     try:
@@ -998,6 +1087,7 @@ def fit_hmm(
     # model rather than just the decoded path.  Always returned; which of the
     # two occupancy measures is actually reported is a display/analysis choice
     # made by the caller (see MotifSettings.hmm_occupancy_method).
+    _say("Computing state posteriors…", 0.5 * (1.0 + _FIT_SHARE))
     try:
         gamma = np.asarray(
             best_model.predict_proba(concatenated, lengths), dtype=np.float64
@@ -2342,9 +2432,18 @@ HMM_FIT_SETTING_KEYS = (
 )
 
 
-def hmm_result_path(project_root: Path) -> Path:
-    """Where a project's cached HMM fit lives."""
-    return Path(project_root) / "derived" / "motif_hmm" / HMM_RESULT_FILENAME
+def hmm_result_path(project_root: Path, animal_scope: str = "") -> Path:
+    """Where a project's cached HMM fit lives.
+
+    A multi-animal project is fitted separately per analyzed animal (and once
+    for either animal), so each animal scope keeps its own file and switching
+    animals never shows, or overwrites, another animal's fit.
+    """
+    folder = Path(project_root) / "derived" / "motif_hmm"
+    if not animal_scope:
+        return folder / HMM_RESULT_FILENAME
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(animal_scope))
+    return folder / f"hmm_result_animal_{safe}.json"
 
 
 def hmm_input_fingerprint(
@@ -2352,11 +2451,13 @@ def hmm_input_fingerprint(
     behavior_ids: list[str],
     settings: MotifSettings,
     session_groups: dict[str, str] | None = None,
+    animal_scope: str = "",
 ) -> str:
     """Hash of everything a fit depends on.
 
     Covers the behaviors in the fit, the sessions and their bout structure, the
-    fit settings, and the group assignment (which the permutation tests use).
+    fit settings, the group assignment (which the permutation tests use) and
+    the analyzed animal of a multi-animal project.
     Bout *times* are included at 3 decimals, so re-running temporal refinement
     and getting different bouts invalidates the cache even when the counts
     happen to match.
@@ -2374,16 +2475,21 @@ def hmm_input_fingerprint(
         parts.append(f"c:{key}={getattr(settings, key, None)!r}")
     for label, group in sorted((session_groups or {}).items()):
         parts.append(f"g:{label}={group}")
+    # Only added when set, so fits saved before animal scoping stay current.
+    if animal_scope:
+        parts.append(f"a:{animal_scope}")
     return hashlib.sha1("\n".join(parts).encode("utf-8")).hexdigest()
 
 
-def save_hmm_result(project_root: Path, result: dict[str, Any]) -> Path | None:
+def save_hmm_result(
+    project_root: Path, result: dict[str, Any], animal_scope: str = "",
+) -> Path | None:
     """Persist a completed fit.  Returns the path, or None if it could not be written.
 
     A failure here must never break the analysis the user just ran, so the
     error is logged and swallowed, the result stays live in memory either way.
     """
-    path = hmm_result_path(project_root)
+    path = hmm_result_path(project_root, animal_scope)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -2400,9 +2506,9 @@ def save_hmm_result(project_root: Path, result: dict[str, Any]) -> Path | None:
         return None
 
 
-def load_hmm_result(project_root: Path) -> dict[str, Any]:
+def load_hmm_result(project_root: Path, animal_scope: str = "") -> dict[str, Any]:
     """Restore the cached fit, or ``{}`` when there is none or it is unreadable."""
-    path = hmm_result_path(project_root)
+    path = hmm_result_path(project_root, animal_scope)
     if not path.exists():
         return {}
     try:
@@ -2417,13 +2523,14 @@ def load_hmm_result(project_root: Path) -> dict[str, Any]:
         return {}
     result["restored_from_cache"] = True
     result["saved_at"] = payload.get("saved_at", "")
+    result["animal_scope"] = str(animal_scope)
     return result
 
 
-def clear_hmm_result(project_root: Path) -> None:
+def clear_hmm_result(project_root: Path, animal_scope: str = "") -> None:
     """Delete the cached fit (used when the project's behaviors change)."""
     try:
-        hmm_result_path(project_root).unlink(missing_ok=True)
+        hmm_result_path(project_root, animal_scope).unlink(missing_ok=True)
     except Exception:
         logger.warning("Could not delete the cached HMM result.")
 

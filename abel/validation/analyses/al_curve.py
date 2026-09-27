@@ -108,7 +108,8 @@ def _seed_set(pool: pd.DataFrame, behavior: str, k0: int, seed_pos: int,
     the *identical* seed (per seed value), so the comparison isolates acquisition.
     """
     n = len(pool)
-    pos_mask = (pool["label"].astype(str).str.strip() == str(behavior).strip()).to_numpy()
+    from abel.validation.analyses.rare_discovery import _pos_mask
+    pos_mask = _pos_mask(pool, behavior)
     pos_idx = np.where(pos_mask)[0]
     labeled: set[int] = set()
     n_pos = min(seed_pos, len(pos_idx))
