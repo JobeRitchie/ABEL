@@ -1,3 +1,14 @@
+<p align="center">
+  <a href="https://joberitchie.github.io/ABEL/"><img src="site/banner.png" alt="ABEL website: getting started, citation and FAQ" width="100%"></a>
+</p>
+
+<h3 align="center">
+  <a href="https://joberitchie.github.io/ABEL/">Website</a> &middot;
+  <a href="https://joberitchie.github.io/ABEL/#getting-started">Getting started</a> &middot;
+  <a href="https://joberitchie.github.io/ABEL/#citation">Citation</a> &middot;
+  <a href="https://joberitchie.github.io/ABEL/#faq">FAQ</a>
+</h3>
+
 # ABEL
 
 **ABEL - Active-learning Behavior Estimation and Labeling**
