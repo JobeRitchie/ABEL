@@ -2,7 +2,7 @@
   "use strict";
 
   // ---------- Navigation ----------
-  const PAGES = ["welcome", "getting-started", "citation", "faq"];
+  const PAGES = ["welcome", "getting-started", "tutorials", "citation", "faq"];
 
   function show() {
     const id = location.hash.replace("#", "") || "welcome";

@@ -339,7 +339,7 @@ footer {
     order: 3;
     flex-direction: row;
     width: 100%;
-    overflow-x: auto;
+    flex-wrap: wrap;
     gap: 4px;
   }
   .nav a { white-space: nowrap; padding: 6px 10px; font-size: 0.92rem; }
@@ -356,3 +356,12 @@ footer {
 }
 :root[data-theme="dark"] .brand img { background: #e9eef8; padding: 3px; }
 :root[data-theme="dark"] .hero-logo { background: #e9eef8; padding: 10px; box-sizing: content-box; }
+
+/* ---------- Tutorials ---------- */
+.soon {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 48px 24px;
+  text-align: center;
+}
+.soon .badge { font-size: 0.95rem; padding: 6px 16px; }
