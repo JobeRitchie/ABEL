@@ -108,7 +108,9 @@ def gpu_available() -> bool:
     try:
         import torch
 
-        _TORCH_CUDA_OK = torch.cuda.is_available()
+        from abel.utils.torch_cuda import cuda_usable
+
+        _TORCH_CUDA_OK = cuda_usable()
         if _TORCH_CUDA_OK:
             logger.info(
                 "GPU feature acceleration available: %s",
@@ -116,7 +118,7 @@ def gpu_available() -> bool:
             )
         else:
             logger.info(
-                "PyTorch found but CUDA not available: using vectorised CPU path."
+                "PyTorch found but CUDA not usable: using vectorised CPU path."
             )
     except ImportError:
         logger.info("PyTorch not installed: using vectorised CPU path.")

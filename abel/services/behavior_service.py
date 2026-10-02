@@ -68,6 +68,11 @@ def label_names_behavior(review_label: object, behavior_id: str) -> bool:
 class ReservedBehaviorError(ValueError):
     """Raised when an edit would repurpose the reserved ``No Behavior`` label."""
 
+
+class DuplicateShortcutError(ValueError):
+    """Raised when a keyboard shortcut is already assigned to another behavior."""
+
+
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
 )
@@ -476,6 +481,7 @@ class BehaviorService:
 
     def add(self, behavior: BehaviorDefinition) -> BehaviorDefinition:
         self._guard_reserved_name(behavior.behavior_id, behavior.name)
+        self._guard_shortcut(behavior.behavior_id, behavior.keyboard_shortcut)
         if not behavior.behavior_id:
             behavior = behavior.model_copy(update={"behavior_id": str(uuid.uuid4())})
         self._behaviors.append(behavior)
@@ -497,6 +503,37 @@ class BehaviorService:
                 f"'{NO_BEHAVIOR_NAME}' is reserved for the built-in negative label "
                 "and cannot be used as a behavior name. Every project already has "
                 "one; pick a different name."
+            )
+
+    def shortcut_owner(
+        self, key: object, exclude_id: object = None
+    ) -> BehaviorDefinition | None:
+        """The behavior already using keyboard shortcut *key*, ignoring *exclude_id*.
+
+        Keys compare case-insensitively, matching how the Review tab binds them.
+        """
+        key_norm = str(key or "").strip().lower()
+        if not key_norm:
+            return None
+        skip = str(exclude_id or "").strip()
+        for b in self._behaviors:
+            if skip and str(b.behavior_id).strip() == skip:
+                continue
+            if str(b.keyboard_shortcut or "").strip().lower() == key_norm:
+                return b
+        return None
+
+    def _guard_shortcut(self, behavior_id: object, key: object) -> None:
+        """Reject a shortcut another behavior already holds.
+
+        The Review tab binds one key to one behavior, so a second behavior on the
+        same key is silently unreachable from the keyboard.
+        """
+        owner = self.shortcut_owner(key, exclude_id=behavior_id)
+        if owner is not None:
+            raise DuplicateShortcutError(
+                f"The shortcut '{str(key).strip()}' is already used by "
+                f"'{owner.name}'. Pick a different key or clear that one first."
             )
 
     def update(self, behavior_id: str, updated: BehaviorDefinition) -> bool:
@@ -525,6 +562,7 @@ class BehaviorService:
                 })
         elif renamed:
             self._guard_reserved_name(behavior_id, updated.name)
+        self._guard_shortcut(behavior_id, updated.keyboard_shortcut)
         for i, b in enumerate(self._behaviors):
             if b.behavior_id == behavior_id:
                 history = list(b.version_history) + [
@@ -966,6 +1004,8 @@ class BehaviorService:
                     continue
                 if b.behavior_id in existing_ids:
                     b = b.model_copy(update={"behavior_id": str(uuid.uuid4())})
+                if self.shortcut_owner(b.keyboard_shortcut) is not None:
+                    b = b.model_copy(update={"keyboard_shortcut": None})
                 self._behaviors.append(b)
                 added += 1
             except Exception:

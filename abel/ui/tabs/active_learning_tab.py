@@ -7352,13 +7352,13 @@ class ActiveLearningTab(QWidget):
             model_backend = "CPU"
 
         try:
-            import torch
+            from abel.utils.torch_cuda import cuda_status
 
-            if torch.cuda.is_available():
-                _ = torch.zeros(1).to("cuda")
+            torch_status = cuda_status()
+            if torch_status.usable:
                 r3d_backend = "GPU"
             else:
-                logger.info("torch.cuda.is_available() = False; R3D backend = CPU.")
+                logger.info("Torch CUDA not usable (%s); R3D backend = CPU.", torch_status.reason)
                 r3d_backend = "CPU"
         except Exception as exc:
             logger.info("Torch CUDA probe failed (%s); R3D backend = CPU.", str(exc).splitlines()[0])

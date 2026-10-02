@@ -20,6 +20,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from abel.utils.torch_cuda import cuda_usable
+
 logger = logging.getLogger("abel")
 
 _flow_lock = threading.Lock()
@@ -46,7 +48,7 @@ def gpu_vram_total_mb() -> float:
     """Return total GPU VRAM in MB, or 0 if unavailable."""
     try:
         import torch
-        if torch.cuda.is_available():
+        if cuda_usable():
             props = torch.cuda.get_device_properties(0)
             # PyTorch ≥2.0 uses 'total_memory'; older builds use 'total_mem'.
             total = getattr(props, "total_memory", None) or getattr(props, "total_mem", 0)
@@ -60,7 +62,7 @@ def gpu_vram_free_mb() -> float:
     """Return currently free GPU VRAM in MB, or 0 if unavailable."""
     try:
         import torch
-        if torch.cuda.is_available():
+        if cuda_usable():
             free, _total = torch.cuda.mem_get_info(0)
             return free / (1024 * 1024)
     except Exception as exc:
@@ -138,7 +140,7 @@ def gpu_summary() -> dict[str, Any]:
     name = "(none)"
     try:
         import torch
-        if torch.cuda.is_available():
+        if cuda_usable():
             name = torch.cuda.get_device_name(0)
     except Exception as exc:
         logger.debug("gpu_summary name lookup failed: %s", exc)
@@ -183,7 +185,7 @@ def detect_flow_backend() -> str:
     # 2. PyTorch CUDA
     try:
         import torch
-        if torch.cuda.is_available():
+        if cuda_usable():
             logger.info(
                 "Optical flow backend: PyTorch pyramidal LK on %s",
                 torch.cuda.get_device_name(0),

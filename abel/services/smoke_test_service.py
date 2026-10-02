@@ -175,14 +175,19 @@ class SmokeTestService:
                 name="", passed=False,
                 detail="PyTorch not installed",
             )
-        has_cuda = torch.cuda.is_available()
-        if has_cuda:
+        from abel.utils.torch_cuda import cuda_status
+
+        status = cuda_status()
+        if status.usable:
             name = torch.cuda.get_device_name(0)
             mem = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            detail = f"torch {torch.__version__}, {name} ({mem:.1f} GB)"
+            detail = (
+                f"torch {torch.__version__} (CUDA {status.cuda_build}), {name} "
+                f"({mem:.1f} GB, compute capability {status.capability[0]}.{status.capability[1]})"
+            )
         else:
-            detail = f"torch {torch.__version__}, CUDA not available (CPU only)"
-        return SmokeTestResult(name="", passed=has_cuda, detail=detail)
+            detail = f"torch {torch.__version__}, GPU not used: {status.reason}"
+        return SmokeTestResult(name="", passed=status.usable, detail=detail)
 
     @staticmethod
     def _probe_gpu_features() -> SmokeTestResult:

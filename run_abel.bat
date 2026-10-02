@@ -143,6 +143,13 @@ echo [INFO] ABEL is up to date.
 
 :INSTALL_DONE
 
+REM --- Make sure PyTorch (if installed) can run on this NVIDIA GPU ---
+REM A wheel built for an older CUDA toolkit has no kernels for newer cards
+REM (e.g. cu126 on RTX 50-series Blackwell), and Windows locks torch's DLLs
+REM once ABEL imports it, so the matching build is swapped in here, before
+REM launch. Normally this is one quick nvidia-smi call; it never blocks launch.
+"%PY_EXE%" -m abel._gpu_setup --auto 2>> "%RUN_LOG%"
+
 REM For runtime, force a clean PATH so Qt DLL resolution does not pick up Anaconda/system Qt binaries.
 set "PATH=%CD%\.venv\Scripts;%SystemRoot%\system32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0\"
 

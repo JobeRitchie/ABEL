@@ -33,6 +33,7 @@ from abel.models.schemas import BehaviorDefinition
 from abel.services.behavior_service import (
     NO_BEHAVIOR_ID,
     BehaviorService,
+    DuplicateShortcutError,
     ReservedBehaviorError,
 )
 from abel.storage.file_store import read_yaml, write_yaml
@@ -204,6 +205,10 @@ class BehaviorTab(QWidget):
         self._f_shortcut.setMaximumWidth(50)
         self._f_shortcut.setMaxLength(1)
         self._f_shortcut.setPlaceholderText("g")
+        self._f_shortcut.textChanged.connect(self._check_shortcut_conflict)
+        self._shortcut_hint = QLabel()
+        self._shortcut_hint.setStyleSheet("color: #C62828;")
+        self._shortcut_hint.setVisible(False)
 
         self._f_active = QCheckBox("Behavior is active")
         self._f_active.setChecked(True)
@@ -249,6 +254,7 @@ class BehaviorTab(QWidget):
         meta_row.addSpacing(12)
         meta_row.addWidget(QLabel("Shortcut:"))
         meta_row.addWidget(self._f_shortcut)
+        meta_row.addWidget(self._shortcut_hint)
         meta_row.addStretch()
         form_layout.addRow("", meta_row)
 
@@ -475,12 +481,25 @@ class BehaviorTab(QWidget):
             else:
                 b = self._service.add(b)
                 self._selected_id = b.behavior_id
+        except DuplicateShortcutError as exc:
+            QMessageBox.warning(self, "Shortcut In Use", str(exc))
+            self._f_shortcut.setFocus()
+            self._f_shortcut.selectAll()
+            return
         except ReservedBehaviorError as exc:
             QMessageBox.warning(self, "Reserved Label", str(exc))
             self._cancel_edit()
             return
         self.refresh()
         logger.info("Behavior saved: %s", name)
+
+    def _check_shortcut_conflict(self, text: str) -> None:
+        owner = self._service.shortcut_owner(text, exclude_id=self._selected_id)
+        if owner is None:
+            self._shortcut_hint.setVisible(False)
+            return
+        self._shortcut_hint.setText(f"Already used by {owner.name}")
+        self._shortcut_hint.setVisible(True)
 
     def _cancel_edit(self) -> None:
         if self._selected_id:

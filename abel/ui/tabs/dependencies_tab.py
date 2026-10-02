@@ -53,13 +53,23 @@ class DependenciesTab(QWidget):
 
         refresh_btn = QPushButton("Refresh")
         install_all_btn = QPushButton("Install All Dependencies")
+        install_torch_btn = QPushButton("Install GPU PyTorch")
+        install_torch_btn.setToolTip(
+            "Detect the NVIDIA GPU and driver, then install and verify the PyTorch build "
+            "that runs on it (falls back to the CPU build when there is no NVIDIA GPU)."
+        )
         uninstall_selected_btn = QPushButton("Uninstall Selected")
         smoke_test_btn = QPushButton("Run Smoke Test")
         copy_report_btn = QPushButton("Copy Diagnostic Report")
 
         refresh_btn.clicked.connect(self.refresh)
         install_all_btn.clicked.connect(
-            lambda: self.install_packages(self._deps.recommended_all())
+            lambda: self._run_action("Installing all dependencies", self._deps.install_all)
+        )
+        install_torch_btn.clicked.connect(
+            lambda: self._run_action(
+                "Installing GPU PyTorch", self._deps.install_gpu_torch, force=True
+            )
         )
         uninstall_selected_btn.clicked.connect(self.uninstall_selected)
         smoke_test_btn.clicked.connect(self.run_smoke_test)
@@ -69,6 +79,7 @@ class DependenciesTab(QWidget):
         for btn in [
             refresh_btn,
             install_all_btn,
+            install_torch_btn,
             uninstall_selected_btn,
             smoke_test_btn,
             copy_report_btn,
@@ -106,6 +117,15 @@ class DependenciesTab(QWidget):
         self._append_log(f"Installing: {', '.join(packages)}")
         worker = TaskWorker(self._deps.install_packages, packages)
         # Stream each pip output line live into the log panel
+        worker.kwargs["on_line"] = worker.signals.line_emitted.emit
+        worker.signals.line_emitted.connect(self._append_log)
+        worker.signals.finished.connect(self._on_action_result)
+        worker.signals.failed.connect(self._on_action_error)
+        self._pool.start(worker)
+
+    def _run_action(self, title: str, fn, **kwargs) -> None:
+        self._append_log(f"{title} ...")
+        worker = TaskWorker(fn, **kwargs)
         worker.kwargs["on_line"] = worker.signals.line_emitted.emit
         worker.signals.line_emitted.connect(self._append_log)
         worker.signals.finished.connect(self._on_action_result)

@@ -899,7 +899,9 @@ class R3DFeatureService:
         except Exception as exc:
             raise R3DUnavailable(f"torch unavailable: {exc}") from exc
 
-        device_name = "cuda" if torch.cuda.is_available() else "cpu"
+        from abel.utils.torch_cuda import cuda_usable
+
+        device_name = "cuda" if cuda_usable() else "cpu"
         out: list[np.ndarray] = []
         for start in range(0, len(clips), _BATCH):
             checkpoint()

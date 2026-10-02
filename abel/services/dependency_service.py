@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Callable
 
 from abel.models.schemas import DependencySpec
+from abel.services.torch_install_service import TorchInstaller
+from abel.utils.torch_cuda import cuda_status
 
 
 @dataclass
@@ -217,20 +219,14 @@ class DependencyService:
         return ["xgboost"]
 
     def recommended_windows_cuda_r3d(self) -> list[str]:
-        if platform.system().lower().startswith("win"):
-            return [
-                "torch",
-                "torchvision",
-                "--extra-index-url",
-                "https://download.pytorch.org/whl/cu126",
-            ]
+        """Torch packages; installed by :meth:`install_gpu_torch`, not plain pip."""
         return ["torch", "torchvision"]
 
     def recommended_all(self) -> list[str]:
+        """Everything except torch, whose CUDA build depends on the GPU."""
         return [
             *self.recommended_preprocessing(),
             *self.recommended_gpu_modeling(),
-            *self.recommended_windows_cuda_r3d(),
             "scikit-learn>=1.5",
             "python-docx",
             "openpyxl",
@@ -238,6 +234,43 @@ class DependencyService:
             "umap-learn",
             "hdbscan",
         ]
+
+    def install_gpu_torch(
+        self,
+        force: bool = False,
+        on_line: "Callable[[str], None] | None" = None,
+    ) -> DependencyActionResult:
+        """Install the torch/torchvision build that runs on this machine's GPU."""
+        if "torch" in sys.modules and platform.system() == "Windows":
+            # Windows keeps the loaded torch DLLs locked, so pip cannot replace them.
+            status = cuda_status()
+            if status.usable and not force:
+                msg = f"PyTorch {status.torch_version} already runs on {status.device_name}; nothing to do."
+                if on_line is not None:
+                    on_line(msg)
+                return DependencyActionResult(True, [], msg)
+            msg = (
+                "PyTorch is already loaded in this ABEL session, so Windows will not let it be "
+                "replaced. Close ABEL and start it again with run_abel.bat: the launcher checks "
+                "the GPU and installs the matching PyTorch build before the app opens."
+            )
+            if on_line is not None:
+                on_line(msg)
+            return DependencyActionResult(False, [], msg)
+        result = TorchInstaller().ensure(force=force, on_line=on_line)
+        return DependencyActionResult(result.success, result.command, result.output)
+
+    def install_all(
+        self,
+        on_line: "Callable[[str], None] | None" = None,
+    ) -> DependencyActionResult:
+        base = self.install_packages(self.recommended_all(), on_line=on_line)
+        torch_result = self.install_gpu_torch(on_line=on_line)
+        return DependencyActionResult(
+            success=base.success and torch_result.success,
+            command=base.command,
+            output="\n".join(x for x in (base.output, torch_result.output) if x),
+        )
 
     def recommended_science_stack(self) -> list[str]:
         return [

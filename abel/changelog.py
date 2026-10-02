@@ -11,6 +11,33 @@ VERSION_DATE = "October 2, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.26.0", "October 2, 2026", [
+        "ABEL now installs the PyTorch build that runs on your NVIDIA GPU. "
+        "The old installer always used the CUDA 12.6 build, which has no "
+        "support for RTX 50-series cards, so R3D and other GPU steps failed "
+        "with \"no kernel image\" errors. The installer now reads the GPU and "
+        "driver, picks a matching build from the PyTorch site, and tests it "
+        "before keeping it. run_abel.bat checks this before the app opens "
+        "and repairs a mismatched build. Dependencies has a new Install GPU "
+        "PyTorch button, and Install All Dependencies uses it.",
+        "GPU steps (R3D features, optical flow, GPU feature math, the Active "
+        "Learning backend and the smoke test) now confirm the GPU can run "
+        "work before using it. A PyTorch build that cannot run on the card "
+        "falls back to the CPU up front instead of failing partway through. "
+        "The smoke test reports the CUDA build and the card's compute "
+        "capability, or the reason the GPU is not used.",
+        "Each behavior's keyboard shortcut must now be unique. The Behaviors "
+        "tab shows which behavior already uses a key and will not save a "
+        "duplicate. Keys match regardless of case. Imported definitions keep "
+        "their other settings but drop a key that is already taken.",
+        "Training now stops with a clear message when the target behavior "
+        "has no labeled examples. Before, it trained a one-class model that "
+        "scored every window as the behavior.",
+        "Reviewer labels saved before the multi-animal fields existed load "
+        "again. They were silently skipped, so the Validation tab could show "
+        "far fewer positive labels than training used (for example 716 of "
+        "6271 in one project).",
+    ]),
     ("0.25.0", "October 2, 2026", [
         "Analytics statistics now match GraphPad Prism. Every p-value in "
         "the Analytics tab (Run Statistics, the brackets on Bar and Box "

@@ -952,6 +952,16 @@ class ActiveLearningTrainerService:
             raise ValueError(
                 "No trainable labeled rows remain after filtering ambiguous/boundary_error segments."
             )
+        # A target with no positive rows trains a one-class model whose only
+        # class is read back as the target, so it ships scoring every window
+        # as the behavior (metrics NaN, held-out "positives" = every row).
+        if target_label and not bool((df["label"].astype(str).str.strip() == target_label).any()):
+            raise ValueError(
+                "This behavior has no labeled examples, so a model cannot be trained "
+                "for it. Label some clips as this behavior first. If its examples were "
+                "labeled under a different behavior with a similar name, delete or "
+                "merge the duplicate behavior instead."
+            )
 
         # Drop the internal tracking column before feature selection.
         if "_co_occurring_expanded" in df.columns:
