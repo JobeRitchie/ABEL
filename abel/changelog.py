@@ -11,6 +11,44 @@ VERSION_DATE = "October 2, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.27.0", "October 2, 2026", [
+        "Sessions can now switch to new pose tracking (a new DeepLabCut or "
+        "SLEAP run) without being re-imported. Data Import has a Replace "
+        "Pose Files button that pairs the new files to linked sessions by "
+        "name, or pairs one file to one selected session by hand. Importing "
+        "new pose files for recordings that already have tracking offers the "
+        "same swap. Sessions keep their labels, subjects, session type and "
+        "px/mm. Animal ids carry over to the new tracks, and renamed tracks "
+        "are matched by position and listed for you to confirm. Swap "
+        "corrections made on the old tracking are cleared. Cached features "
+        "and training rows from the old file are dropped, so the sessions "
+        "need feature extraction again. A changed frame count is flagged.",
+        "Onset Auto-Tune now shrinks toward 0.3 instead of 0.1. With the "
+        "0.4 s minimum bout, the old suggestions turned small trace bumps "
+        "into bouts. The suggestion is also capped at the median held-out "
+        "positive probability, so a model with squashed probabilities is "
+        "not tuned above its own positives.",
+        "HMM motif Auto-calibrate is faster. One adaptive sweep over state "
+        "counts now measures EM iterations, restarts and the state count "
+        "together instead of refitting the same models in separate stages. "
+        "Each state count stops restarting once the best fit has been "
+        "reached three times, the sweep stops once BIC and ICL stop "
+        "improving, and the search is capped at 10 states. The time budget "
+        "is now 120 s.",
+        "Sessions unchecked in Analytics > Summary stay unchecked after a "
+        "restart and follow a subject rename. Before, every launch checked "
+        "every session again.",
+        "Density Analysis group lists now update when factors are assigned "
+        "or edited. Before, they kept what they saw when the project opened, "
+        "so a new project showed only \"(all sessions)\". When the top-level "
+        "group gives just one group, the Factor list now picks the first "
+        "factor.",
+        "Relocating pose files that only match by DLC file stem now treats "
+        "them as new tracking, so animal ids and cached features are handled "
+        "as above.",
+        "Removed the Generate Bouts button from Temporal Refinement. Make "
+        "bouts in Temporal Review with Apply + Process.",
+    ]),
     ("0.26.0", "October 2, 2026", [
         "ABEL now installs the PyTorch build that runs on your NVIDIA GPU. "
         "The old installer always used the CUDA 12.6 build, which has no "

@@ -241,10 +241,19 @@ class DataImportTab(QWidget):
         )
         relocate_pose_btn.clicked.connect(lambda: self._relocate_sources("pose"))
 
+        replace_pose_btn = QPushButton("Replace Pose Files…")
+        replace_pose_btn.setToolTip(
+            "Use different pose tracking (a new DLC or SLEAP run) for linked sessions. "
+            "Files pair to sessions by name; select one session and pick one file to "
+            "pair by hand. Labels and subjects are kept; the sessions are re-extracted."
+        )
+        replace_pose_btn.clicked.connect(self._replace_pose_files)
+
         copy_row = QHBoxLayout()
         copy_row.addWidget(copy_files_btn)
         copy_row.addWidget(relocate_video_btn)
         copy_row.addWidget(relocate_pose_btn)
+        copy_row.addWidget(replace_pose_btn)
         copy_row.addWidget(self._copy_status_label, 1)
 
         import_page = QWidget()
@@ -406,7 +415,16 @@ class DataImportTab(QWidget):
         )
         if not selected:
             return
-        paths = [Path(p) for p in selected]
+        dlc_paths = self._readable_pose_paths([Path(p) for p in selected])
+        existing_resolved = {str(p.resolve()) for p in self._pose_paths}
+        added = [p for p in dlc_paths if str(p.resolve()) not in existing_resolved]
+        self._pose_paths.extend(added)
+        self._append_log(
+            f"Added {len(added)} new pose file(s); {len(self._pose_paths)} total."
+        )
+
+    def _readable_pose_paths(self, paths: list[Path]) -> list[Path]:
+        """*paths* as files ABEL can read, offering to convert SLEAP ones first."""
         sleap_paths = [p for p in paths if is_sleap_pose_file(p)]
         dlc_paths = [p for p in paths if not is_sleap_pose_file(p)]
 
@@ -454,16 +472,12 @@ class DataImportTab(QWidget):
                 self._append_log(
                     f"Skipped {len(sleap_paths)} SLEAP file(s) (not converted)."
                 )
-
-        existing_resolved = {str(p.resolve()) for p in self._pose_paths}
-        added = [p for p in dlc_paths if str(p.resolve()) not in existing_resolved]
-        self._pose_paths.extend(added)
-        self._append_log(
-            f"Added {len(added)} new pose file(s); {len(self._pose_paths)} total."
-        )
+        return dlc_paths
 
     def _build_manifest(self) -> None:
         settings = self._subject_settings_from_ui()
+        had_sessions = bool(self._manifest.linked_sessions)
+        known_pose_ids = {p.asset_id for p in self._manifest.poses}
 
         # Auto Match probes every video/pose file's metadata, which can be slow
         # when the source files live on a network drive. Run that I/O off the GUI
@@ -502,6 +516,17 @@ class DataImportTab(QWidget):
                 f"Could not finish matching the imported files:\n\n{error}",
             )
             return
+
+        # Newly imported pose files for recordings that already have tracking are
+        # a new DLC/SLEAP run: offer to switch those sessions over.
+        if had_sessions and self._project_root:
+            new_pose_ids = {p.asset_id for p in self._manifest.poses} - known_pose_ids
+            replacements = self._import_service.find_pose_replacements(
+                self._manifest, pose_asset_ids=new_pose_ids
+            ) if new_pose_ids else {}
+            if replacements and self._confirm_pose_replacements(replacements):
+                self._apply_pose_replacements(replacements)
+                file_sets = None  # probed before the swap: re-read the new files
 
         self._populate_table(self._manifest)
         linked = self._manifest.linked_sessions
@@ -1676,9 +1701,11 @@ class DataImportTab(QWidget):
                     by_key.setdefault(ImportService._match_key(f), []).append(f)
 
         assets = self._manifest.videos if kind == "video" else self._manifest.poses
+        n_assets = len(assets)
         matched = 0
         lenient = 0
         ambiguous: list[str] = []
+        lenient_swaps: list[tuple] = []
         for asset in assets:
             name = Path(asset.source_path).name
             if name in available:
@@ -1705,24 +1732,38 @@ class DataImportTab(QWidget):
                     if len(same_ext) == 1:
                         candidates = same_ext
                 if len(candidates) == 1:
-                    asset.source_path = str(candidates[0])
-                    asset.local_path = None
+                    # A different tracking run, not the same file moved: swap it
+                    # in as a replacement so identities and caches follow.
+                    lenient_swaps.append((asset, candidates[0]))
                     matched += 1
                     lenient += 1
                 elif len(candidates) > 1:
                     ambiguous.append(name)
 
+        replacements: dict[str, str] = {}
+        if lenient_swaps:
+            settings = self._manifest.subject_name_settings or self._subject_settings_from_ui()
+            for asset, path in lenient_swaps:
+                new_asset = ImportService._pose_asset(path, settings)
+                self._manifest.poses.append(new_asset)
+                for session in self._manifest.linked_sessions:
+                    if session.pose_asset_id == asset.asset_id:
+                        replacements[session.session_id] = new_asset.asset_id
+
         if matched:
-            # Save directly: bypass _save_manifest to avoid triggering auto-copy.
-            self._import_service.save_manifest(self._project_root, self._manifest)
-            # The relocated files are new data, so any features cached from the
-            # old files are stale. Invalidate them so extraction rebuilds from
-            # the new source (otherwise the old copies would keep being used).
-            if self._project_root and kind == "pose":
-                from abel.services.feature_prep_service import FeaturePrepService
-                FeaturePrepService.invalidate_caches(self._project_root)
+            if matched > lenient:
+                # Save directly: bypass _save_manifest to avoid triggering auto-copy.
+                self._import_service.save_manifest(self._project_root, self._manifest)
+                # The relocated files are new data, so any features cached from the
+                # old files are stale. Invalidate them so extraction rebuilds from
+                # the new source (otherwise the old copies would keep being used).
+                if self._project_root and kind == "pose":
+                    from abel.services.feature_prep_service import FeaturePrepService
+                    FeaturePrepService.invalidate_caches(self._project_root)
+            if replacements:
+                self._apply_pose_replacements(replacements)
             self._populate_table(self._manifest)
-            msg = f"Relocated {matched}/{len(assets)} {label} files to {folder}."
+            msg = f"Relocated {matched}/{n_assets} {label} files to {folder}."
             if lenient:
                 msg += (
                     f" {lenient} matched leniently by DLC stem "
@@ -1744,6 +1785,140 @@ class DataImportTab(QWidget):
                 self, "No Matches",
                 f"No filenames in that folder matched the current {label} assets.",
             )
+
+    # ------------------------------------------------------------------
+    # Replace pose tracking
+    # ------------------------------------------------------------------
+
+    def _selected_session_ids(self) -> list[str]:
+        rows = sorted({i.row() for i in self.session_table.selectionModel().selectedRows()})
+        ids = []
+        for row in rows:
+            item = self.session_table.item(row, 0)
+            if item is not None and item.text():
+                ids.append(item.text())
+        return ids
+
+    def _replace_pose_files(self) -> None:
+        """Swap linked sessions onto different pose files (a new DLC/SLEAP run)."""
+        if not self._project_root or not self._manifest or not self._manifest.linked_sessions:
+            QMessageBox.warning(self, "No Sessions", "Import and link sessions first.")
+            return
+        selected_ids = self._selected_session_ids()
+        chosen, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select the new pose files (DeepLabCut or SLEAP)",
+            "",
+            "Pose files (*.csv *.h5 *.hdf5 *.slp);;"
+            "DeepLabCut (*.csv *.h5 *.hdf5);;SLEAP (*.slp)",
+        )
+        if not chosen:
+            return
+        paths = [
+            p for p in self._readable_pose_paths([Path(c) for c in chosen])
+            if p.suffix.lower() in ImportService.POSE_EXTENSIONS
+        ]
+        if not paths:
+            return
+        settings = self._manifest.subject_name_settings or self._subject_settings_from_ui()
+        fresh, error = self._run_blocking(
+            "Reading Pose Files",
+            "Reading the new pose files…",
+            lambda: [ImportService._pose_asset(p, settings) for p in paths],
+        )
+        if error is not None:
+            QMessageBox.critical(self, "Replace Failed", f"Could not read the pose files:\n\n{error}")
+            return
+        fresh_ids = {p.asset_id for p in fresh}
+        self._manifest.poses.extend(fresh)
+        if len(fresh) == 1 and len(selected_ids) == 1:
+            # One file onto one chosen session: the user paired them, names aside.
+            replacements = {selected_ids[0]: fresh[0].asset_id}
+        else:
+            replacements = self._import_service.find_pose_replacements(
+                self._manifest,
+                pose_asset_ids=fresh_ids,
+                session_ids=set(selected_ids) or None,
+            )
+        unmatched = len(fresh_ids - set(replacements.values()))
+        applied = bool(replacements) and self._confirm_pose_replacements(replacements, unmatched)
+        # Files that will not replace anything are not kept as unpaired imports.
+        keep = set(replacements.values()) if applied else set()
+        self._manifest.poses = [
+            p for p in self._manifest.poses if p.asset_id not in fresh_ids or p.asset_id in keep
+        ]
+        if applied:
+            self._apply_pose_replacements(replacements)
+        if not replacements:
+            QMessageBox.information(
+                self,
+                "No Matches",
+                "None of the selected files matched a linked session's video by name. "
+                "To pair a file by hand, select one session row and choose one file.",
+            )
+
+    def _confirm_pose_replacements(self, replacements: dict[str, str], unmatched: int = 0) -> bool:
+        sessions = {s.session_id: s for s in self._manifest.linked_sessions}
+        poses = {p.asset_id: p for p in self._manifest.poses}
+        lines = []
+        for sid, pid in list(replacements.items())[:12]:
+            session = sessions.get(sid)
+            old = poses.get(session.pose_asset_id) if session else None
+            new = poses.get(pid)
+            who = (session.subject_id if session else None) or sid
+            lines.append(
+                f"{who}: {Path(old.source_path).name if old else '?'}  ->  "
+                f"{Path(new.source_path).name if new else '?'}"
+            )
+        if len(replacements) > 12:
+            lines.append(f"… and {len(replacements) - 12} more.")
+        extra = f"\n\n{unmatched} selected file(s) matched no session and will be ignored." if unmatched else ""
+        answer = QMessageBox.question(
+            self,
+            "Replace Pose Tracking",
+            f"Use new pose tracking for {len(replacements)} session(s)?\n\n"
+            + "\n".join(lines)
+            + extra
+            + "\n\nSessions, subjects and labels are kept. Features built from the old "
+            "tracking are cleared, so these sessions need feature extraction again.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _apply_pose_replacements(self, replacements: dict[str, str]) -> None:
+        """Re-point sessions at new pose files and clear what the old ones built."""
+        from abel.services.feature_prep_service import FeaturePrepService
+
+        results = self._import_service.replace_session_poses(self._manifest, replacements)
+        if not results:
+            return
+        sids = [r.session_id for r in results]
+        cleared = FeaturePrepService.invalidate_replaced_pose(self._project_root, sids)
+        self._pose_paths = [Path(p.source_path) for p in self._manifest.poses]
+        self._save_manifest(silent=True)
+        self._populate_table(self._manifest)
+        names = {s.session_id: (s.subject_id or s.session_id) for s in self._manifest.linked_sessions}
+        self._append_log(
+            f"Replaced pose tracking for {len(results)} session(s). Labels, subjects and "
+            f"session settings were kept; {cleared['files']} cached feature file(s) and "
+            f"{cleared.get('rows', 0)} training row(s) from the old tracking were cleared. "
+            "Re-extract these sessions in Pose Features (Select Needing Extraction), then "
+            "retrain. Their review clips, inference traces and bouts show the old tracking "
+            "until rebuilt."
+        )
+        for r in results:
+            self._append_log(f"  {names.get(r.session_id, r.session_id)}: {r.old_pose} -> {r.new_pose}")
+            for note in r.notes:
+                self._append_log(f"    Check: {note}")
+        if any(r.notes for r in results):
+            QMessageBox.information(
+                self,
+                "Check Replaced Sessions",
+                "Some sessions need a look after the swap (frame counts or animal "
+                "tracks differ from the old files). See the import log for details.",
+            )
+        self._check_keypoint_consistency()
 
     def _append_log(self, message: str) -> None:
         self.log_panel.append(message)

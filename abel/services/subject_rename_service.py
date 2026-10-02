@@ -185,7 +185,11 @@ def anchor_group_state(state: dict, labels: SessionLabels) -> dict:
     """
     previous = state.get(ANCHORS_KEY) or {}
     label_keys = _unique(
-        [*(state.get("session_factors") or {}), *(state.get("subject_order") or [])]
+        [
+            *(state.get("session_factors") or {}),
+            *(state.get("subject_order") or []),
+            *(state.get("unchecked_subjects") or []),
+        ]
     )
     state[ANCHORS_KEY] = {
         "labels": _anchor_keys(
@@ -248,6 +252,13 @@ def remap_group_state(state: dict, labels: SessionLabels) -> list[str]:
         state["subject_order"] = _unique(
             t for key in order for t in targets(key, label_anchor, label_of, current_labels)
         )
+
+    unchecked = state.get("unchecked_subjects") or []
+    if unchecked:
+        state["unchecked_subjects"] = sorted(_unique(
+            t for key in unchecked
+            for t in targets(key, label_anchor, label_of, current_labels)
+        ))
 
     subject_of = labels.subject_by_session
     current_subjects = set(subject_of.values())

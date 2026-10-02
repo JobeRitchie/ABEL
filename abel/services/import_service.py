@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -20,6 +21,16 @@ from abel.utils.sleap_converter import (
 )
 
 logger = logging.getLogger("abel")
+
+
+@dataclass
+class PoseReplacement:
+    """One session moved onto a different pose file, and what needs checking."""
+
+    session_id: str
+    old_pose: str
+    new_pose: str
+    notes: list[str] = field(default_factory=list)
 
 
 class ImportService:
@@ -474,6 +485,175 @@ class ImportService:
             manifest.linked_sessions.extend(new_sessions)
 
         return manifest
+
+    # ------------------------------------------------------------------
+    # Swapping a session's pose file for different tracking
+    # ------------------------------------------------------------------
+
+    def find_pose_replacements(
+        self,
+        manifest: ImportManifest,
+        pose_asset_ids: set[str] | None = None,
+        session_ids: set[str] | None = None,
+    ) -> dict[str, str]:
+        """``{session_id: pose_asset_id}`` for pose files that belong to a linked recording.
+
+        Candidates are pose assets no session uses (or only *pose_asset_ids*),
+        matched against the videos of already-linked sessions (or only
+        *session_ids*) with the same rules as Auto Match.  These are new tracking
+        runs of recordings the project already has, which a plain Auto Match
+        leaves unpaired because the video is taken.
+        """
+        linked_pose_ids = {s.pose_asset_id for s in manifest.linked_sessions}
+        poses = [
+            p for p in manifest.poses
+            if (p.asset_id in pose_asset_ids if pose_asset_ids is not None
+                else p.asset_id not in linked_pose_ids)
+        ]
+        sessions = [
+            s for s in manifest.linked_sessions
+            if session_ids is None or s.session_id in session_ids
+        ]
+        videos_by_id = {v.asset_id: v for v in manifest.videos}
+        videos = [videos_by_id[s.video_asset_id] for s in sessions if s.video_asset_id in videos_by_id]
+        if not poses or not videos:
+            return {}
+        session_by_video = {s.video_asset_id: s for s in sessions}
+        poses_by_id = {p.asset_id: p for p in manifest.poses}
+
+        def _same_run(a: str, b: str) -> bool:
+            # The .csv and .h5 a DLC run writes side by side are one tracking.
+            pa, pb = poses_by_id.get(a), poses_by_id.get(b)
+            return bool(pa and pb) and Path(pa.source_path).stem.casefold() == Path(pb.source_path).stem.casefold()
+
+        out: dict[str, str] = {}
+        for pair in self.auto_match(videos, poses):
+            session = session_by_video.get(pair.video_asset_id)
+            if session is None or session.pose_asset_id == pair.pose_asset_id:
+                continue
+            if _same_run(session.pose_asset_id, pair.pose_asset_id):
+                continue
+            out[session.session_id] = pair.pose_asset_id
+        return out
+
+    def replace_session_poses(
+        self, manifest: ImportManifest, replacements: dict[str, str],
+    ) -> list[PoseReplacement]:
+        """Point sessions at different pose files, keeping everything keyed to them.
+
+        The session keeps its ``session_id``, ``subject_key``, subject, session
+        type and px/mm, so labels, clips, ROIs and analytics groups stay
+        attached.  What belongs to the *old tracking* is reconciled: animal ids
+        are carried onto the new file's tracks (see :meth:`_carry_identities`)
+        and swap corrections, which name frames of the old tracks, are cleared.
+        Old pose assets no session uses any more are dropped, so a later Auto
+        Match cannot offer them back.  The caller must invalidate the sessions'
+        feature caches (``FeaturePrepService.invalidate_replaced_pose``).
+        """
+        poses_by_id = {p.asset_id: p for p in manifest.poses}
+        sessions_by_id = {s.session_id: s for s in manifest.linked_sessions}
+        results: list[PoseReplacement] = []
+        old_ids: set[str] = set()
+        for session_id, new_id in replacements.items():
+            session = sessions_by_id.get(session_id)
+            new_pose = poses_by_id.get(new_id)
+            if session is None or new_pose is None or session.pose_asset_id == new_id:
+                continue
+            old_pose = poses_by_id.get(session.pose_asset_id)
+            old_ids.add(session.pose_asset_id)
+            notes = self._carry_identities(session, list(new_pose.individuals or []))
+            old_n = old_pose.frame_count if old_pose else None
+            new_n = new_pose.frame_count
+            if old_n and new_n and old_n != new_n:
+                notes.append(
+                    f"frame count changed ({old_n} to {new_n}). Labels are placed by "
+                    "frame number, so check the new tracking was run on the same "
+                    "(untrimmed) video."
+                )
+            session.pose_asset_id = new_id
+            results.append(PoseReplacement(
+                session_id=session_id,
+                old_pose=Path(old_pose.source_path).name if old_pose else "",
+                new_pose=Path(new_pose.source_path).name,
+                notes=notes,
+            ))
+        still_used = {s.pose_asset_id for s in manifest.linked_sessions}
+        manifest.poses = [
+            p for p in manifest.poses
+            if p.asset_id in still_used or p.asset_id not in old_ids
+        ]
+        return results
+
+    @staticmethod
+    def _carry_identities(session: LinkedSession, new_inds: list[str]) -> list[str]:
+        """Re-key a session's animals onto a new pose file's tracks.
+
+        Labels and per-animal features are keyed by animal id, so the new tracks
+        must resolve to the ids the old ones did.  A track with the same name
+        keeps its id; the rest take the remaining old ids in file order (DLC
+        ``individual1`` and SLEAP ``track_0`` name the same slot differently).
+        Which physical animal a tracker puts in each slot can differ between
+        runs, so a positional carry is reported for the user to confirm.
+        """
+        from abel.services.identity_remap_service import resolved_animal_ids  # noqa: PLC0415
+
+        notes: list[str] = []
+        n_corr = len(session.identity_corrections or [])
+        if n_corr:
+            notes.append(
+                f"cleared {n_corr} identity swap correction(s) made on the old "
+                "tracking. Run Scan Swaps or Map Animal Identities on the new file."
+            )
+            session.identity_corrections = []
+        old_inds = list(session.individuals or [])
+        subject_key = session.subject_key or session.subject_id or session.session_id
+        if not old_inds and not new_inds:
+            return notes  # single animal: the animal id is the subject key either way
+        if not new_inds:
+            session.individuals = []
+            session.individual_subject_map = {}
+            notes.append(
+                "the new file has no named animals, so this session's animal is now "
+                f"'{subject_key}'. Labels made on its tracks "
+                f"({', '.join(old_inds)}) no longer match."
+            )
+            return notes
+
+        old_ids = resolved_animal_ids(old_inds, session.individual_subject_map, subject_key)
+        unclaimed = [o for o in old_inds if o not in new_inds]
+        new_map: dict[str, str] = {}
+        carried: list[str] = []
+        for ind in new_inds:
+            if ind in old_ids:
+                new_map[ind] = old_ids[ind]
+            elif unclaimed:
+                old = unclaimed.pop(0)
+                new_map[ind] = old_ids[old]
+                carried.append(f"{ind} takes {old_ids[old]} (was {old})")
+        used = set(new_map.values())
+        extra: list[str] = []
+        for ind in new_inds:
+            if ind not in new_map:
+                new_map[ind] = ind if ind not in used else f"{subject_key}:{ind}"
+                used.add(new_map[ind])
+                extra.append(ind)
+        session.individuals = list(new_inds)
+        session.individual_subject_map = new_map
+        if carried:
+            notes.append(
+                "tracks renamed in the new file were matched by position: "
+                + "; ".join(carried)
+                + ". Confirm each is the same animal in Map Animal Identities."
+            )
+        if extra:
+            notes.append(f"new track(s) with no earlier labels: {', '.join(extra)}.")
+        if unclaimed:
+            notes.append(
+                "track(s) missing from the new file: "
+                + ", ".join(old_ids[o] for o in unclaimed)
+                + ". Their labels in this session no longer match."
+            )
+        return notes
 
     def _collect_fresh(
         self,

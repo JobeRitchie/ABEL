@@ -26,16 +26,17 @@ def test_squashed_probabilities_get_a_low_threshold() -> None:
     preds = _preds(rng.uniform(0.06, 0.09, 40), rng.uniform(0.0, 0.04, 400))
     s = suggest_for_predictions("b", "Allogroom", 0.3, preds)
     assert s.is_change
-    # Window midpoint ~0.05, shrunk toward the 0.1 prior.
-    assert 0.08 <= s.suggested <= 0.095
+    # Shrinking toward 0.3 would sit above every positive; capped at their median.
+    assert 0.06 <= s.suggested <= 0.09
+    assert "Capped" in s.note
     assert s.f1_current == 0.0
 
 
 def test_threshold_at_the_suggestion_is_left_alone() -> None:
     preds = _preds(np.full(40, 0.9), np.full(400, 0.1))
     first = suggest_for_predictions("b", "Dig", 0.5, preds)
-    # Flat plateau 0.1-0.9, midpoint ~0.5, shrunk to ~0.2.
-    assert abs(first.suggested - 0.2) < 0.01
+    # Flat plateau 0.1-0.9, midpoint ~0.5, shrunk to ~0.35.
+    assert abs(first.suggested - 0.35) < 0.01
     s = suggest_for_predictions("b", "Dig", first.suggested, preds)
     assert not s.is_change
     assert "already at the suggestion" in s.note
@@ -52,7 +53,7 @@ def test_weak_model_is_flagged_but_still_shrunk() -> None:
     rng = np.random.default_rng(1)
     preds = _preds(rng.uniform(0.0, 1.0, 20), rng.uniform(0.0, 1.0, 400))
     s = suggest_for_predictions("b", "Dominate", 0.9, preds)
-    assert s.is_change and s.suggested <= 0.32
+    assert s.is_change and s.suggested <= 0.47
     assert "Weak model" in s.note
 
 
@@ -103,5 +104,5 @@ def test_recall_beta_lowers_the_threshold() -> None:
 
 def test_shrunk_suggestions_stay_in_a_narrow_band() -> None:
     from abel.temporal_refinement.onset_autotune import shrink_threshold
-    assert shrink_threshold(0.01) >= 0.075
-    assert shrink_threshold(0.95) <= 0.32
+    assert shrink_threshold(0.01) >= 0.225
+    assert shrink_threshold(0.95) <= 0.47

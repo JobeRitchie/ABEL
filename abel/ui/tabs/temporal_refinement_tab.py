@@ -422,8 +422,6 @@ class TemporalRefinementTab(QWidget):
 
         self._infer_btn = QPushButton("Run Inference")
 
-        self._refine_btn = QPushButton("Generate Bouts")
-
         self._refresh_results_btn = QPushButton("Refresh Results View")
 
         self._clear_cache_btn = QPushButton("Clear Temporal Cache")
@@ -431,7 +429,7 @@ class TemporalRefinementTab(QWidget):
         self._cancel_btn = QPushButton("■ Cancel")
 
         self._cancel_btn.setToolTip(
-            "Stop the running inference or bout generation. The previous "
+            "Stop the running inference. The previous "
             "results stay in place; nothing from the canceled run is used."
         )
 
@@ -440,8 +438,6 @@ class TemporalRefinementTab(QWidget):
 
 
         self._infer_btn.clicked.connect(self._run_infer)
-
-        self._refine_btn.clicked.connect(self._run_refine)
 
         self._refresh_results_btn.clicked.connect(self._refresh_results_view)
 
@@ -689,8 +685,6 @@ class TemporalRefinementTab(QWidget):
         btn_row = QHBoxLayout()
 
         btn_row.addWidget(self._infer_btn)
-
-        btn_row.addWidget(self._refine_btn)
 
         btn_row.addWidget(self._cancel_btn)
 
@@ -1756,7 +1750,6 @@ class TemporalRefinementTab(QWidget):
 
         self._infer_btn.setEnabled(not busy)
 
-        self._refine_btn.setEnabled(not busy)
 
         self._refresh_results_btn.setEnabled(not busy)
 
@@ -1847,58 +1840,6 @@ class TemporalRefinementTab(QWidget):
 
 
 
-    def _run_refine(self) -> None:
-
-        if self._manager is None:
-
-            QMessageBox.warning(self, "Temporal Refinement", "Open a project first.")
-
-            return
-
-        self._persist_settings()
-
-        self._refresh_config_summary()
-
-        self._set_busy(True)
-
-        self._active_job = "refine"
-
-        self._status.setText("Generating bout calls from frame probabilities…")
-
-        self._append_log("Starting bout postprocess...")
-
-        _concept_id = self._current_behavior_id()
-        _config = self._config()
-        _sessions = (
-            sorted(self._selected_session_ids) if self._selected_session_ids else None
-        )
-
-        worker = TaskWorker(self._refine_task)
-
-        worker.kwargs["progress_cb"] = worker.signals.line_emitted.emit
-
-        worker.kwargs["concept_id"] = _concept_id
-
-        worker.kwargs["config"] = _config
-
-        worker.kwargs["sessions"] = _sessions
-
-        worker.signals.line_emitted.connect(self._on_progress_line)
-
-        worker.signals.finished.connect(
-
-            lambda result: self._on_finished("Bout extraction completed.", result)
-
-        )
-
-        worker.signals.failed.connect(self._on_failed)
-
-        self._current_worker = worker  # prevents GC before signals fire
-
-        self._pool.start(worker)
-
-
-
     def _infer_task(
 
         self,
@@ -1931,38 +1872,6 @@ class TemporalRefinementTab(QWidget):
                 mode="dense",
 
                 max_sessions=max_sessions,
-
-                progress_cb=cancellable(progress_cb, self._cancel_flag),
-
-            )
-
-
-
-    def _refine_task(
-
-        self,
-
-        progress_cb: Callable[[str], None] | None = None,
-
-        concept_id: str | None = None,
-
-        config: "TemporalRefinementConfig | None" = None,
-
-        sessions: list[str] | None = None,
-
-    ) -> dict[str, Any]:
-
-        manager = self._require_manager()
-
-        with cancel_scope(self._cancel_flag):
-
-            return manager.run_temporal_refinement_postprocess(
-
-                concept_id=concept_id or self._current_behavior_id(),
-
-                sessions=sessions,
-
-                config=config or self._config(),
 
                 progress_cb=cancellable(progress_cb, self._cancel_flag),
 

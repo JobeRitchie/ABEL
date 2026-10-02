@@ -3009,8 +3009,8 @@ class TemporalReviewTab(QWidget):
         autotune_btn = QPushButton("Auto-Tune Settings", dlg)
         autotune_btn.setToolTip(
             "Suggest each behavior's positive threshold from its model's held-out "
-            "validation predictions, shrunk toward a low global value that suits the "
-            "dense trace, plus audited min bout and merge gap. Fills the table only; "
+            "validation predictions, shrunk toward 0.3 so small trace bumps are not "
+            "called as bouts, plus audited min bout and merge gap. Fills the table only; "
             "nothing is saved until you click Apply + Process."
         )
         favor_recall_cb = QCheckBox("Favor recall (fewer missed bouts)", dlg)

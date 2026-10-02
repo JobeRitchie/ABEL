@@ -1169,6 +1169,29 @@ CALIB_MIN_OBS_PER_PARAM = 10.0
 estimable.  Ten is the conventional lower bound for multinomial-style models;
 the report flags anything below it rather than silently fitting it."""
 
+CALIB_K_CAP = 10
+"""Largest state count calibration searches, however much data there is.
+Pohle et al. (2017) recommend bounding the search by what is interpretable, and
+fit cost grows with K squared."""
+
+CALIB_MIN_RESTARTS = 5
+CALIB_MAX_RESTARTS = 40
+CALIB_TARGET_HITS = 3
+"""Restarts at a state count stop once the best optimum found has been reached
+this many times (after at least CALIB_MIN_RESTARTS), or at CALIB_MAX_RESTARTS."""
+
+CALIB_HIT_TOL = 0.5
+"""A restart counts as reaching the best optimum when within this many nats."""
+
+
+def _restarts_for_hit_rate(hit_rate: float) -> int:
+    """Restarts needed for a >=99% chance of reaching the optimum at least once."""
+    if hit_rate >= 0.999:
+        return 5
+    return int(np.clip(
+        np.ceil(np.log(0.01) / np.log(max(1e-9, 1.0 - hit_rate))), 5, 50
+    ))
+
 
 def _hmm_cv_loglik(
     observations: list[np.ndarray],
@@ -1230,28 +1253,32 @@ def calibrate_hmm_settings(
     sequences: dict[str, list[tuple[float, float, str]]],
     behavior_ids: list[str],
     settings: MotifSettings,
-    time_budget_s: float = 240.0,
+    time_budget_s: float = 120.0,
     progress_cb: Any = None,
 ) -> dict[str, Any]:
     """Measure this dataset and propose HMM settings, with the evidence.
 
-    Four stages, each of which measures rather than assumes:
-
     Stage 1 -- data adequacy.  Counts observations and sequences, then finds the
     largest state count with at least :data:`CALIB_MIN_OBS_PER_PARAM`
-    observations per free parameter.  That caps the search range.
+    observations per free parameter.  That, and :data:`CALIB_K_CAP`, bound the
+    search range.
 
-    Stage 2 -- EM iterations.  Fits at the largest feasible state count with a
-    generous cap and records how many iterations EM actually needed.  This
-    matters more than it sounds: a truncated fit can make the log-likelihood
-    *decrease* as states are added, which is impossible at the true optimum and
-    silently corrupts every information criterion computed from it.
+    One adaptive sweep over K then supplies stages 2-4.  Each K gets restarts
+    at a generous iteration cap until the best optimum has been reached
+    :data:`CALIB_TARGET_HITS` times, and the sweep stops once BIC and ICL have
+    both stopped improving for two state counts.
 
-    Stage 3 -- restarts.  Fits many restarts at a mid-range state count and
-    measures how often EM reaches the best optimum found, then sets the restart
-    count needed for a ~99% chance of reaching it at that hit rate.
+    Stage 2 -- EM iterations.  Records how many iterations EM needed to reach
+    each K's best optimum.  This matters more than it sounds: a truncated fit
+    can make the log-likelihood *decrease* as states are added, which is
+    impossible at the true optimum and silently corrupts every information
+    criterion computed from it.
 
-    Stage 4 -- state count.  Computes AIC, AICc, BIC and ICL over the feasible
+    Stage 3 -- restarts.  Measures how often EM reaches the best optimum at the
+    recommended K, then sets the restart count needed for a ~99% chance of
+    reaching it at that hit rate.
+
+    Stage 4 -- state count.  Computes AIC, AICc, BIC and ICL over the swept
     range, plus cross-validated held-out log-likelihood when it fits in
     ``time_budget_s``.  The recommendation is the most parsimonious state count
     the criteria support: for CV, the smallest K within one standard error of
@@ -1297,7 +1324,7 @@ def calibrate_hmm_settings(
         else:
             break
     k_min = 2
-    k_max = max(k_max_feasible, k_min + 1)
+    k_max = max(min(k_max_feasible, CALIB_K_CAP), k_min + 1)
 
     lens = sorted(len(o) for o in observations)
     report += [
@@ -1308,7 +1335,10 @@ def calibrate_hmm_settings(
         "  Sequence length: min=%d  median=%d  max=%d" % (lens[0], int(np.median(lens)), lens[-1]),
         "  Largest state count with >=%.0f observations per free parameter: K=%d"
         % (CALIB_MIN_OBS_PER_PARAM, k_max_feasible),
-        "  -> searching K = %d...%d" % (k_min, k_max),
+        "  -> searching K = %d...%d%s" % (
+            k_min, k_max,
+            " (capped at %d for interpretability)" % CALIB_K_CAP
+            if k_max_feasible > CALIB_K_CAP else ""),
         "",
     ]
     if total_obs < 500:
@@ -1323,28 +1353,102 @@ def calibrate_hmm_settings(
             "power and the cross-validation SE will be unstable." % n_seq
         )
 
-    # ---- Stage 2: EM iterations -------------------------------------------
-    _tick("Calibrating EM iterations...", 0.08)
+    # ---- Stage 2: one adaptive sweep over K ---------------------------------
+    # Every fit runs to a generous iteration cap, so a converged fit is exactly
+    # the fit any lower cap above its iteration count would give.  That lets one
+    # set of fits answer all three questions (iterations, restarts, K) instead
+    # of separate probe stages refitting the same models.  Restarts at a K stop
+    # once the best optimum has been reached CALIB_TARGET_HITS times, and the
+    # sweep stops once BIC and ICL have both stopped improving.
     hard_cap = 2000
-    probe_iters: list[int] = []
-    for k in (k_max, max(k_min, k_max - 2)):
-        for r in range(3):
+    k_range = list(range(k_min, k_max + 1))
+    total_w = float(sum(k * k for k in k_range)) or 1.0
+    done_w = 0.0
+    table: list[dict[str, Any]] = []
+    fit_info: dict[int, dict[str, Any]] = {}
+    stopped_early = False
+    for i, k in enumerate(k_range):
+        lls_k: list[float] = []
+        iters_k: list[int] = []
+        conv_k: list[bool] = []
+        best_ll, best_model, any_conv = float("-inf"), None, False
+        t0 = _time.time()
+        for r in range(CALIB_MAX_RESTARTS):
+            frac = 0.02 + 0.63 * (done_w + k * k * (1.0 - 0.8 ** r)) / total_w
+            _tick("Fitting K=%d (%d of up to %d state counts), restart %d, up to %d EM "
+                  "iterations..." % (k, i + 1, len(k_range), r + 1, hard_cap), frac)
+            # Seeds match fit_hmm's (seed0 + restart), so 'Run HMM' at the
+            # proposed settings reproduces the first of these fits exactly.
             try:
-                _m, ll, conv, iters = _fit_single_hmm(
+                m, ll, conv, iters = _fit_single_hmm(
                     observations, k, hard_cap, n_features, seed=seed0 + r
                 )
             except Exception:
                 continue
-            if ll > float("-inf") and conv:
-                probe_iters.append(iters)
-    if probe_iters:
-        needed = int(max(probe_iters))
+            if ll == float("-inf"):
+                continue
+            lls_k.append(ll)
+            iters_k.append(iters)
+            conv_k.append(conv)
+            any_conv = any_conv or conv
+            if ll > best_ll:
+                best_ll, best_model = ll, m
+            hits = sum(1 for v in lls_k if v >= best_ll - CALIB_HIT_TOL)
+            if len(lls_k) >= CALIB_MIN_RESTARTS and hits >= CALIB_TARGET_HITS:
+                break
+        done_w += k * k
+        if best_model is None:
+            continue
+        n_fits = len(lls_k)
+        hit_mask = [v >= best_ll - CALIB_HIT_TOL for v in lls_k]
+        hits = int(sum(hit_mask))
+        # (hits-1)/(n-1) is the unbiased hit-rate estimate when sampling stops
+        # on the hits-th success, which is how this loop usually ends.
+        rate = 1.0 if hits == n_fits else (hits - 1) / max(n_fits - 1, 1)
+        fit_info[k] = {
+            "fits": n_fits, "hits": hits, "hit_rate": rate,
+            "sec_per_fit": (_time.time() - t0) / max(n_fits, 1),
+            "hit_iters": [it for it, h in zip(iters_k, hit_mask) if h],
+            "hit_converged": all(c for c, h in zip(conv_k, hit_mask) if h),
+        }
+        pfree = hmm_free_params(k, n_features)
+        aic = -2 * best_ll + 2 * pfree
+        bic = -2 * best_ll + pfree * np.log(max(total_obs, 1))
+        denom = total_obs - pfree - 1
+        aicc = aic + (2 * pfree * (pfree + 1) / denom) if denom > 0 else float("inf")
+        icl = bic + 2.0 * _posterior_entropy(best_model, observations)
+        table.append({
+            "n_states": k, "log_likelihood": best_ll, "n_free_params": pfree,
+            "obs_per_param": total_obs / pfree, "aic": aic, "aicc": aicc,
+            "bic": bic, "icl": icl, "converged": any_conv,
+            "restarts_run": n_fits, "restart_hits": hits,
+            "cv_loglik": float("nan"), "cv_sem": float("nan"), "cv_folds": 0,
+        })
+        best_bic_k = int(min(table, key=lambda row: row["bic"])["n_states"])
+        best_icl_k = int(min(table, key=lambda row: row["icl"])["n_states"])
+        if k < k_max and k - best_bic_k >= 2 and k - best_icl_k >= 2:
+            stopped_early = True
+            break
+
+    if not table:
+        return {
+            "error": "Every HMM fit failed. There may be too few bouts to model.",
+            "report": report,
+        }
+    k_swept = int(table[-1]["n_states"])
+
+    # EM iterations: what matters is that the fits reaching each K's best
+    # optimum converge, so the requirement is measured on those fits.
+    hit_iters = [it for info in fit_info.values() for it in info["hit_iters"]]
+    all_hits_converged = all(info["hit_converged"] for info in fit_info.values())
+    if hit_iters and all_hits_converged:
+        needed = int(max(hit_iters))
         proposed_iter = int(min(hard_cap, max(100, np.ceil(needed * 1.5 / 50.0) * 50)))
-        conv_note = "EM reached its own optimum in at most %d iterations" % needed
+        conv_note = "EM reached each state count's best optimum in at most %d iterations" % needed
     else:
         needed = hard_cap
         proposed_iter = hard_cap
-        conv_note = "EM did NOT converge within %d iterations at any probed state count" % hard_cap
+        conv_note = "EM did NOT converge within %d iterations at every state count" % hard_cap
         warnings_out.append(
             "EM did not converge within %d iterations. The likelihood surface for this "
             "dataset is very flat - the state count should be read as indicative only."
@@ -1352,6 +1456,9 @@ def calibrate_hmm_settings(
         )
     report += [
         "STAGE 2 - EM ITERATIONS",
+        "  Fitted K = %d...%d%s." % (
+            k_min, k_swept,
+            " (stopped there: BIC and ICL had both stopped improving)" if stopped_early else ""),
         "  %s." % conv_note,
         "  Current setting: n_iter=%d" % settings.hmm_n_iter,
         "  -> proposing n_iter=%d (measured requirement plus 50%% headroom)" % proposed_iter,
@@ -1364,92 +1471,7 @@ def calibrate_hmm_settings(
             "a larger model can come out BELOW a smaller one - which cannot happen at the "
             "true maximum." % (settings.hmm_n_iter, needed)
         )
-
-    # ---- Stage 3: restarts -------------------------------------------------
-    _tick("Measuring local optima...", 0.20)
-    k_probe = int(np.clip((k_min + k_max) // 2, k_min, k_max))
-    lls: list[float] = []
-    for r in range(25):
-        try:
-            _m, ll, _c, _i = _fit_single_hmm(
-                observations, k_probe, proposed_iter, n_features, seed=seed0 + 500 + r
-            )
-        except Exception:
-            continue
-        if ll > float("-inf"):
-            lls.append(ll)
-    if lls:
-        arr = np.asarray(lls)
-        top = float(arr.max())
-        hits = int(np.sum(arr >= top - 0.5))  # within 0.5 nat of the best found
-        hit_rate = hits / len(arr)
-        if hit_rate >= 0.999:
-            proposed_restarts = 5
-        else:
-            proposed_restarts = int(np.clip(
-                np.ceil(np.log(0.01) / np.log(max(1e-9, 1.0 - hit_rate))), 5, 50
-            ))
-        report += [
-            "STAGE 3 - RANDOM RESTARTS (local optima)",
-            "  Probed K=%d with %d restarts." % (k_probe, len(arr)),
-            "  Best log-likelihood %.2f; reached by %d/%d restarts (%.0f%%)."
-            % (top, hits, len(arr), 100 * hit_rate),
-            "  Spread across restarts: %.2f nats." % (arr.max() - arr.min()),
-            "  Current setting: n_restarts=%d" % settings.hmm_n_restarts,
-            "  -> proposing n_restarts=%d (>=99%% chance of reaching that optimum at the "
-            "measured hit rate)" % proposed_restarts,
-            "",
-        ]
-        if settings.hmm_n_restarts < proposed_restarts:
-            warnings_out.append(
-                "EM lands on the best optimum only %.0f%% of the time here, so %d restarts can "
-                "miss it and report a worse fit for some state counts than for others - which "
-                "distorts the criterion curve." % (100 * hit_rate, settings.hmm_n_restarts)
-            )
-    else:
-        proposed_restarts = max(10, settings.hmm_n_restarts)
-        report += ["STAGE 3 - RANDOM RESTARTS", "  Probe failed; keeping a conservative default.", ""]
-
-    # ---- Stage 4: state count ---------------------------------------------
-    _tick("Scoring state counts...", 0.32)
-    k_range = list(range(k_min, k_max + 1))
-    table: list[dict[str, Any]] = []
-    fit_cost_s = 0.0
-    for i, k in enumerate(k_range):
-        _tick("Scoring K=%d..." % k, 0.32 + 0.33 * i / max(len(k_range), 1))
-        best_ll, best_model, any_conv = float("-inf"), None, False
-        t0 = _time.time()
-        for r in range(proposed_restarts):
-            try:
-                m, ll, conv, _i2 = _fit_single_hmm(
-                    observations, k, proposed_iter, n_features, seed=seed0 + r
-                )
-            except Exception:
-                continue
-            any_conv = any_conv or conv
-            if ll > best_ll:
-                best_ll, best_model = ll, m
-        fit_cost_s += (_time.time() - t0) / max(proposed_restarts, 1)
-        if best_model is None or best_ll == float("-inf"):
-            continue
-        pfree = hmm_free_params(k, n_features)
-        aic = -2 * best_ll + 2 * pfree
-        bic = -2 * best_ll + pfree * np.log(max(total_obs, 1))
-        denom = total_obs - pfree - 1
-        aicc = aic + (2 * pfree * (pfree + 1) / denom) if denom > 0 else float("inf")
-        icl = bic + 2.0 * _posterior_entropy(best_model, observations)
-        table.append({
-            "n_states": k, "log_likelihood": best_ll, "n_free_params": pfree,
-            "obs_per_param": total_obs / pfree, "aic": aic, "aicc": aicc,
-            "bic": bic, "icl": icl, "converged": any_conv,
-            "cv_loglik": float("nan"), "cv_sem": float("nan"), "cv_folds": 0,
-        })
-
-    if not table:
-        return {
-            "error": "Every HMM fit failed. There may be too few bouts to model.",
-            "report": report,
-        }
+    stage3_at = len(report)
 
     lls_by_k = [r["log_likelihood"] for r in table]
     if not all(b >= a - 1e-6 for a, b in zip(lls_by_k, lls_by_k[1:])):
@@ -1459,22 +1481,26 @@ def calibrate_hmm_settings(
             "calibration - raise n_restarts further before trusting the criterion curve."
         )
 
-    # Cross-validation, if affordable.
-    per_fit = fit_cost_s / max(len(k_range), 1)
-    cv_restarts = max(3, min(proposed_restarts, 8))
-    n_folds = min(n_seq, 16)
-    est = per_fit * cv_restarts * n_folds * len(k_range)
+    # Cross-validation, if affordable.  Each K gets the restarts its own
+    # measured hit rate calls for, capped to keep the fold fits cheap.
+    cv_restarts = {
+        k: int(np.clip(_restarts_for_hit_rate(info["hit_rate"]), 3, 8))
+        for k, info in fit_info.items()
+    }
+    cost_per_fold = sum(fit_info[k]["sec_per_fit"] * cv_restarts[k] for k in fit_info)
+    n_folds = min(n_seq, 10)
+    est = cost_per_fold * n_folds
     while n_folds > 3 and est > time_budget_s:
         n_folds = max(3, n_folds // 2)
-        est = per_fit * cv_restarts * n_folds * len(k_range)
-    cv_ok = n_seq >= 4 and est <= time_budget_s * 1.5
+        est = cost_per_fold * n_folds
+    cv_ok = n_seq >= 4 and est <= time_budget_s
     if cv_ok:
         folds = _make_folds(n_seq, n_folds, seed0 + 77)
         for i, row in enumerate(table):
             _tick("Cross-validating K=%d..." % row["n_states"], 0.65 + 0.33 * i / len(table))
             mean_ll, sem, used = _hmm_cv_loglik(
                 observations, int(row["n_states"]), n_features, proposed_iter,
-                cv_restarts, seed0, folds,
+                cv_restarts[int(row["n_states"])], seed0, folds,
             )
             row["cv_loglik"], row["cv_sem"], row["cv_folds"] = mean_ll, sem, used
 
@@ -1500,6 +1526,38 @@ def calibrate_hmm_settings(
     }
     if cv_complete:
         picks["CV (1-SE)"] = rec_k
+
+    # Restarts are proposed from the hit rate at the recommended K, the only
+    # state count 'Run HMM' fits in Manual mode.
+    rec_info = fit_info[rec_k]
+    proposed_restarts = _restarts_for_hit_rate(rec_info["hit_rate"])
+    stage3 = [
+        "STAGE 3 - RANDOM RESTARTS (local optima)",
+        "  Restarts stop at a state count once the best optimum has been reached %d times "
+        "(at least %d, at most %d restarts)." % (
+            CALIB_TARGET_HITS, CALIB_MIN_RESTARTS, CALIB_MAX_RESTARTS),
+        "  Restarts reaching the best optimum, by K: " + ", ".join(
+            "K=%d %d/%d" % (k, info["hits"], info["fits"]) for k, info in fit_info.items()),
+        "  At the recommended K=%d the estimated hit rate is %.0f%%."
+        % (rec_k, 100 * rec_info["hit_rate"]),
+        "  Current setting: n_restarts=%d" % settings.hmm_n_restarts,
+        "  -> proposing n_restarts=%d (>=99%% chance of reaching that optimum at the "
+        "measured hit rate)" % proposed_restarts,
+        "",
+    ]
+    report[stage3_at:stage3_at] = stage3
+    if settings.hmm_n_restarts < proposed_restarts:
+        warnings_out.append(
+            "EM lands on the best optimum only %.0f%% of the time at K=%d, so %d restarts can "
+            "miss it and report a worse fit than the model can reach."
+            % (100 * rec_info["hit_rate"], rec_k, settings.hmm_n_restarts)
+        )
+    if any(info["hits"] < CALIB_TARGET_HITS for info in fit_info.values()):
+        warnings_out.append(
+            "At some state counts the best optimum was reached fewer than %d times in %d "
+            "restarts, so a better one may exist there. Read those rows of the criterion "
+            "table with caution." % (CALIB_TARGET_HITS, CALIB_MAX_RESTARTS)
+        )
 
     report += [
         "STAGE 4 - NUMBER OF STATES",
@@ -1528,6 +1586,11 @@ def calibrate_hmm_settings(
     report += ["", "  Each criterion's preferred K:"]
     for name, k in picks.items():
         report.append("    %10s: K=%d" % (name, k))
+    if stopped_early and k_swept in (picks["AIC"], picks["AICc"]):
+        report.append(
+            "    (AIC was still falling at K=%d, where the search stopped; it would pick "
+            "a larger K.)" % k_swept
+        )
     agree = len(set(picks.values())) == 1
     report += [
         "",
@@ -1591,9 +1654,10 @@ def calibrate_hmm_settings(
             )
         report.append("")
 
-    # Runtime the proposed settings imply for a subsequent 'Run HMM'.  per_fit was
-    # measured at the proposed iteration cap, so this is a like-for-like estimate.
-    est_run_s = per_fit * proposed_restarts
+    # Runtime the proposed settings imply for a subsequent 'Run HMM'.  Converged
+    # fits stop on their own before the cap, so per-fit time measured at the
+    # hard cap carries over to the proposed one.
+    est_run_s = rec_info["sec_per_fit"] * proposed_restarts
     report += [
         "  Cost of the proposed settings",
         "    'Run HMM' will fit %d restarts at K=%d with up to %d EM iterations, roughly "
@@ -1628,7 +1692,7 @@ def calibrate_hmm_settings(
         "hmm_n_states_mode": "manual",
         "hmm_n_states": rec_k,
         "hmm_n_states_min": int(k_min),
-        "hmm_n_states_max": int(k_max),
+        "hmm_n_states_max": int(k_swept),
         "hmm_n_iter": int(proposed_iter),
         "hmm_n_restarts": int(proposed_restarts),
         "hmm_criterion": "icl",

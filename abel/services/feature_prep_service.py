@@ -46,7 +46,7 @@ from abel.services.context_feature_service import (
     ContextFeatureService,
 )
 from abel.services.pose_processing_service import PoseProcessingService
-from abel.storage.file_store import read_json, write_json
+from abel.storage.file_store import atomic_write_parquet, read_json, write_json
 from abel.utils.cancellation import OperationCancelled, cancel_scope, cancellable
 
 logger = logging.getLogger("abel")
@@ -456,6 +456,8 @@ class FeaturePrepService:
                 derived / "pose_features" / "sessions" / f"{sid}.parquet",
                 derived / "context_features" / "sessions" / f"{sid}.parquet",
                 derived / "pose_features" / f"{sid}.npz",
+                derived / "pose_cache" / f"{sid}_frame_features.npz",
+                derived / "pose_clean" / f"{sid}.parquet",
                 derived / "r3d_features" / f"{sid}.parquet",
             ]
             dense = derived / "r3d_features" / "dense_anchors"
@@ -477,6 +479,56 @@ class FeaturePrepService:
             except OSError as exc:  # pragma: no cover - locked file
                 logger.warning("Could not drop the representation manifest: %s", exc)
         return {"sessions": len(sids), "files": removed}
+
+    @classmethod
+    def invalidate_replaced_pose(cls, project_root: Path, session_ids: "list[str] | set[str]") -> dict:
+        """Forget everything computed from sessions' old pose files.
+
+        :meth:`invalidate_sessions` plus the feature *rows* copied out of those
+        caches: the training set and the enrichment cache keep a row per
+        labeled window, and a retrain before re-extraction would otherwise
+        train on the old tracking.  The rows come back, rebuilt from the new
+        file, the next time the training set is assembled.  Labels themselves
+        are untouched.
+        """
+        import pandas as pd  # noqa: PLC0415
+
+        sids = {str(s) for s in (session_ids or []) if str(s)}
+        out = cls.invalidate_sessions(project_root, sids)
+        out["rows"] = 0
+        if not sids:
+            return out
+        rep = project_root / "derived" / "representations"
+        for path in (
+            project_root / "derived" / "training_sets" / "training_set.parquet",
+            rep / "enriched_segments.parquet",
+        ):
+            if not path.exists():
+                continue
+            try:
+                df = pd.read_parquet(path)
+                if "session_id" in df.columns:
+                    drop = df["session_id"].astype(str).isin(sids)
+                elif "segment_id" in df.columns:
+                    drop = df["segment_id"].astype(str).map(
+                        lambda seg: any(f"_{sid}_" in seg for sid in sids)
+                    )
+                else:
+                    continue
+                if drop.any():
+                    atomic_write_parquet(df.loc[~drop].reset_index(drop=True), path, index=False)
+                    out["rows"] += int(drop.sum())
+            except Exception as exc:  # pragma: no cover - locked/corrupt file
+                logger.warning("Could not drop replaced-pose rows from %s: %s", path, exc)
+        # Windows that yielded no features from the old file may from the new one.
+        skip_path = rep / "enriched_segments_skipped.json"
+        if skip_path.exists():
+            blob = read_json(skip_path, {}) or {}
+            ids = [str(s) for s in blob.get("segment_ids", [])]
+            kept = [seg for seg in ids if not any(f"_{sid}_" in seg for sid in sids)]
+            if len(kept) != len(ids):
+                write_json(skip_path, {**blob, "segment_ids": kept})
+        return out
 
     @classmethod
     def sessions_needing_extraction(

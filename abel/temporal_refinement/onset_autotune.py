@@ -24,10 +24,18 @@ estimate tracked it well:
   0.017 (worst 0.09), chosen leave-one-project-out, and it also won when scored
   on the random probe windows alone.
 
-So the suggestion is the window midpoint shrunk hard toward a global prior. The
-best constant was about 0.2 with or without inhibition, so the prior does not
-depend on the inhibition weight. ``recall_beta`` > 1 tunes the window curve for
-F-beta instead of F1 before shrinking.
+So the suggestion is the window midpoint shrunk hard toward a global prior.
+``recall_beta`` > 1 tunes the window curve for F-beta instead of F1 before
+shrinking.
+
+That benchmark scored frames, and frame scores barely notice short false bouts.
+With the 0.4 s minimum bout, a prior of 0.1 (suggestions 0.08-0.31) turned
+small trace bumps into bouts. On KORKO_NSF deployed traces (2026-10), bouts
+peaking below 0.5 landed on labeled positives only 8-50% of the time. Frame F1
+was flat from 0.20 to 0.35 for every behavior except a weak Walk model, while
+bout counts fell 6-30% over that range. The prior is therefore 0.3. A model
+with squashed probabilities would then sit above its own positives, so the
+suggestion never exceeds the median held-out positive probability.
 """
 
 from __future__ import annotations
@@ -47,7 +55,7 @@ RECALL_BETA = 1.5
 MIN_VAL_POSITIVES = 5
 LOW_POSITIVES_WARNING = 30
 # Suggested = (1 - SHRINK_WEIGHT) * SHRINK_PRIOR + SHRINK_WEIGHT * window midpoint.
-SHRINK_PRIOR = 0.1
+SHRINK_PRIOR = 0.3
 SHRINK_WEIGHT = 0.25
 # A window optimum that flags this many times more windows than are truly
 # positive comes from a weak model; the suggestion still stands, with a warning.
@@ -165,11 +173,17 @@ def suggest_for_predictions(
     score = np.array([_fbeta_at(y, p, t, recall_beta) for t in _GRID])
     midpoint = _plateau_midpoint(score)
     candidate = shrink_threshold(midpoint)
+    median_pos = round(float(np.median(p[y == 1])), 3)
+    capped = candidate > median_pos
+    if capped:
+        candidate = median_pos
     f1_cur = _f1_at(y, p, current)
     f1_new = _f1_at(y, p, candidate)
     if abs(candidate - float(current)) < MIN_THRESHOLD_MOVE:
         return result(None, f1_cur, f1_new, n_pos, "Current threshold is already at the suggestion.")
     notes = [f"Held-out windows peak around {midpoint:.2f}; shrunk toward {SHRINK_PRIOR:.2f} for the dense trace."]
+    if capped:
+        notes.append(f"Capped at {median_pos:.2f}, the median probability of held-out positives.")
     ratio = float(np.mean(p >= midpoint)) / float(np.mean(y))
     if ratio > MAX_PREDICTED_OVER_TRUE:
         notes.append(f"Weak model: its best window threshold flags {ratio:.1f}x more windows than are positive.")

@@ -811,6 +811,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._facet_controls: dict[str, str] = {}
         self._facet_split_factors: list[str] = []  # factors currently set to split
         self._subject_order: list[str] = []  # user-defined subject/session order
+        self._unchecked_subjects: set[str] = set()  # session labels excluded in Summary
         self._subject_prechop_frames: dict[str, int] = {}  # subject -> analysis prechop frames
         self._session_prechop_overrides: dict[str, int] = {}  # session_id -> analysis prechop frames
         self._session_end_s_overrides: dict[str, float] = {}  # session_id -> end seconds (merged)
@@ -1084,6 +1085,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._facet_controls.clear()
         self._facet_split_factors.clear()
         self._subject_order.clear()
+        self._unchecked_subjects.clear()
         self._subject_prechop_frames.clear()
         self._session_prechop_overrides.clear()
         self._session_end_s_overrides.clear()
@@ -1152,6 +1154,7 @@ class BehaviorAnalyticsTab(QWidget):
             "active_grouping_factor": self._active_grouping_factor,
             "facet_controls": dict(self._facet_controls),
             "subject_order": list(self._subject_order),
+            "unchecked_subjects": sorted(self._unchecked_subjects),
             "subject_prechop_frames": dict(self._subject_prechop_frames),
             "group_order": list(self._group_order),
             "factor_level_order": {k: list(v) for k, v in self._factor_level_order.items()},
@@ -1236,6 +1239,7 @@ class BehaviorAnalyticsTab(QWidget):
                 self._active_grouping_factor
             )
         self._subject_order[:] = [str(s) for s in (state.get("subject_order") or [])]
+        self._unchecked_subjects = {str(s) for s in (state.get("unchecked_subjects") or [])}
         self._subject_prechop_frames.clear()
         for subject, frames in (state.get("subject_prechop_frames") or {}).items():
             try:
@@ -1573,6 +1577,7 @@ class BehaviorAnalyticsTab(QWidget):
         state = {
             "session_factors": self._session_factors,
             "subject_order": self._subject_order,
+            "unchecked_subjects": sorted(self._unchecked_subjects),
             "subject_prechop_frames": self._subject_prechop_frames,
             ANCHORS_KEY: self._group_state_anchors,
         }
@@ -1582,6 +1587,7 @@ class BehaviorAnalyticsTab(QWidget):
         if (
             state["session_factors"] == self._session_factors
             and state["subject_order"] == self._subject_order
+            and set(state["unchecked_subjects"]) == self._unchecked_subjects
             and state["subject_prechop_frames"] == self._subject_prechop_frames
         ):
             return
@@ -1589,6 +1595,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._session_factors.clear()
         self._session_factors.update(new_factors)
         self._subject_order[:] = state["subject_order"]
+        self._unchecked_subjects = set(state["unchecked_subjects"])
         new_prechop = dict(state["subject_prechop_frames"])
         self._subject_prechop_frames.clear()
         self._subject_prechop_frames.update(new_prechop)
@@ -1684,6 +1691,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._sections_tab.on_groups_updated()
         self._velocity_tab.on_groups_updated()
         self._social_tab.on_groups_updated()
+        self._density_tab.on_groups_updated()
 
     def _session_groups_for_controls(
         self, controls: dict[str, str]
@@ -4495,16 +4503,10 @@ class _SummaryStatsWidget(QWidget):
             headers = ["Session", "Session Type"] + list(factors)
             self._session_table.setHorizontalHeaderLabels(headers)
 
-            # Preserve check state
-            prev_checked = self._checked_subjects()
-            # Track which labels were already in the table so we can
-            # distinguish user-unchecked rows from brand-new rows.
-            prev_labels: set[str] = set()
-            for _i in range(self._session_table.rowCount()):
-                _it = self._session_table.item(_i, 0)
-                if _it is not None:
-                    prev_labels.add(_it.text())
-            prev_had_rows = bool(prev_labels)
+            # Check state comes from the host's persisted exclusions, so a
+            # session the user unchecked stays unchecked across rebuilds and
+            # restarts while new sessions default to checked.
+            unchecked = self._host._unchecked_subjects
 
             self._session_table.setRowCount(len(session_labels))
             for row_idx, label in enumerate(session_labels):
@@ -4516,15 +4518,10 @@ class _SummaryStatsWidget(QWidget):
                     | Qt.ItemFlag.ItemIsSelectable
                     | Qt.ItemFlag.ItemIsDragEnabled
                 )
-                if prev_had_rows and label in prev_labels:
-                    # Label was in the table before: preserve user's choice
-                    item0.setCheckState(
-                        Qt.CheckState.Checked if label in prev_checked
-                        else Qt.CheckState.Unchecked
-                    )
-                else:
-                    # Brand-new label (or first population): default to Checked
-                    item0.setCheckState(Qt.CheckState.Checked)
+                item0.setCheckState(
+                    Qt.CheckState.Unchecked if label in unchecked
+                    else Qt.CheckState.Checked
+                )
                 self._session_table.setItem(row_idx, 0, item0)
 
                 # Column 1: session type (read-only but selectable)
@@ -4595,9 +4592,31 @@ class _SummaryStatsWidget(QWidget):
         self._host._save_group_state()
 
     def _on_subject_toggled(self) -> None:
+        self._store_unchecked_subjects()
         self.rebuild()
         self._host._graphs_tab.update_graph()
         self._host._social_tab.on_subjects_changed()
+
+    def _store_unchecked_subjects(self) -> None:
+        """Record the table's unchecked rows on the host and save them.
+
+        Labels not shown in the table keep whatever state they had, so a
+        session hidden by a filter or merge change is still excluded when it
+        comes back.
+        """
+        shown: set[str] = set()
+        unchecked: set[str] = set()
+        for i in range(self._session_table.rowCount()):
+            item = self._session_table.item(i, 0)
+            if item is None:
+                continue
+            shown.add(item.text())
+            if item.checkState() != Qt.CheckState.Checked:
+                unchecked.add(item.text())
+        new = (self._host._unchecked_subjects - shown) | unchecked
+        if new != self._host._unchecked_subjects:
+            self._host._unchecked_subjects = new
+            self._host._save_group_state()
 
     def _checked_subjects(self) -> set[str]:
         out: set[str] = set()
@@ -4844,6 +4863,7 @@ class _SummaryStatsWidget(QWidget):
             self._session_table.blockSignals(False)
 
         self._host._sync_session_groups()
+        self._host._refresh_group_selectors()
         self.rebuild()
         self._host._graphs_tab.update_graph()
         self._host._save_group_state()
@@ -6400,6 +6420,8 @@ class _GraphsWidget(QWidget):
             return
         self._host._facet_controls = self._facet.state()
         self._host._sync_session_groups()
+        # The Density tab's "(top-level group)" option reads these groups.
+        self._host._density_tab.on_groups_updated()
         self.update_graph()
         self._host._save_group_state()
 
@@ -11336,7 +11358,11 @@ class _DensityAnalysisWidget(QWidget):
             combo.setCurrentIndex(max(0, idx))
             combo.blockSignals(False)
 
-        # Factor / group combos ────────────────────────────────────────
+        self.on_groups_updated()
+
+    def on_groups_updated(self) -> None:
+        """Rebuild the factor and group drop-downs after factors or levels change."""
+        host = self._host
         factors = host._factor_definitions or []
         prev_factor = self._diff_factor_combo.currentData()
         self._diff_factor_combo.blockSignals(True)
@@ -11346,6 +11372,11 @@ class _DensityAnalysisWidget(QWidget):
             self._diff_factor_combo.addItem(f, userData=f)
         idx_f = self._diff_factor_combo.findData(prev_factor)
         self._diff_factor_combo.setCurrentIndex(max(0, idx_f))
+        # The top-level group follows the Graphs tab's split, which is a single
+        # "All" series until a factor is split there. That cannot be compared,
+        # so fall back to the first factor when one exists.
+        if not prev_factor and factors and len(self._get_available_groups()) < 2:
+            self._diff_factor_combo.setCurrentIndex(1)
         self._diff_factor_combo.blockSignals(False)
 
         self._refresh_group_combos()
