@@ -296,6 +296,7 @@ def gather_facts(
         "recordings": _gather_recordings(root),
         "roi": _gather_roi(root),
         "motif": _gather_motif(root),
+        "stats_options": _read_json(root / "derived" / "analytics_groups.json").get("stats_options"),
         "temporal_default": (
             _read_json(root / "config" / "temporal_review_settings.json").get("__all__") or {}
         ),
@@ -1126,16 +1127,16 @@ def _r_motifs(f: dict[str, Any]) -> str:
 
 
 def _r_stats(f: dict[str, Any]) -> str:
+    from abel.services.group_stats_options import StatsOptions, methods_text  # noqa: PLC0415
+
     return (
         "Per-session behavior metrics (bout count, total and mean bout duration, latency, "
-        "percentage of session time) were exported from ABEL and compared between groups "
-        "with an independent two-sample t-test for two groups, or one-way ANOVA followed by "
-        "Šidák-corrected pairwise t-tests for more than two. The unit of analysis is the "
-        "session. "
+        "percentage of session time) were computed per animal in ABEL. "
+        + methods_text(StatsOptions.from_dict(f.get("stats_options")))
+        + " "
         + _fill(
-            "your actual test, the software you ran it in, the alpha level, and any "
-            "repeated-measures or covariate structure: ABEL's built-in tests are a "
-            "screening tool, not a substitute for a designed analysis"
+            "any covariates, and the software used if the exported values were "
+            "analyzed outside ABEL"
         )
     )
 

@@ -21,10 +21,6 @@ NavigationToolbar: Any = None
 Figure: Any = None
 _MPL_OK: bool | None = None  # None = not yet checked
 
-ttest_ind: Any = None
-f_oneway: Any = None
-_SCIPY_OK: bool | None = None
-
 cv2: Any = None
 _CV2_OK: bool | None = None
 
@@ -45,20 +41,6 @@ def _ensure_matplotlib() -> bool:
     except Exception:
         _MPL_OK = False
     return _MPL_OK
-
-
-def _ensure_scipy() -> bool:
-    global ttest_ind, f_oneway, _SCIPY_OK  # noqa: PLW0603
-    if _SCIPY_OK is not None:
-        return _SCIPY_OK
-    try:
-        from scipy.stats import ttest_ind as _t, f_oneway as _f
-        ttest_ind = _t
-        f_oneway = _f
-        _SCIPY_OK = True
-    except Exception:
-        _SCIPY_OK = False
-    return _SCIPY_OK
 
 
 def _ensure_cv2() -> bool:
@@ -125,6 +107,8 @@ from abel.services.behavioral_motif_service import (
 )
 from abel.ui.flow_layout import FlowLayout
 from abel.ui.mpl_theme import style_navigation_toolbar
+from abel.ui.stats_options_dialog import StatsOptionsWidget, StatsReportDialog, describe_test
+from abel.services.group_stats_options import StatsOptions
 from abel.services.import_service import ImportService
 from abel.services.project_merge_service import ProjectMergeService
 from abel.services.pose_processing_service import PoseProcessingService
@@ -609,22 +593,64 @@ def _legend_right_margin(labels: list, fig_width_px: int = 700) -> tuple:
     return rect_right, legend_x
 
 
+def _t975(n: Any) -> Any:
+    """SEM multiplier for a 95% CI of a mean of *n* values: t(0.975, n-1).
+
+    1.96 is the large-sample limit; at typical group sizes (n = 5-10) it gives
+    intervals 15-40% too narrow, and Prism uses t.  Vectorized; 0 where n < 2.
+    """
+    from scipy.stats import t as _t_dist  # noqa: PLC0415
+
+    arr = np.asarray(n, dtype=float)
+    out = np.where(arr >= 2, _t_dist.ppf(0.975, np.maximum(arr - 1, 1)), 0.0)
+    return float(out) if np.ndim(out) == 0 else out
+
+
 def _eb_val(vals: "np.ndarray", style: str) -> float:
     """Return the error bar half-height for *vals* according to *style*.
 
     style: "SEM" | "SD" | "95% CI" | "None"
-    Returns 0.0 when style is "None" or there is only one value.
+    Returns 0.0 when style is "None" or there are fewer than two finite values.
     """
-    if style == "None" or len(vals) < 2:
+    arr = np.asarray(vals, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if style == "None" or len(arr) < 2:
         return 0.0
-    std = float(np.array(vals, dtype=float).std(ddof=1))
-    n   = len(vals)
+    std = float(arr.std(ddof=1))
+    n   = len(arr)
     if style == "SD":
         return std
     if style == "95% CI":
-        return 1.96 * std / np.sqrt(n)
+        return _t975(n) * std / np.sqrt(n)
     # Default: SEM
     return std / np.sqrt(n)
+
+
+def _band_halfwidth(sem: Any, count: Any, style: str) -> "np.ndarray":
+    """Error-band half-width from per-point SEM and n for *style*."""
+    sem_a = np.nan_to_num(np.asarray(sem, dtype=float))
+    n_a = np.asarray(count, dtype=float)
+    if style == "SD":
+        return sem_a * np.sqrt(np.maximum(n_a, 1))
+    if style == "95% CI":
+        return sem_a * _t975(n_a)
+    return sem_a
+
+
+def _aggregate_metric(df: pd.DataFrame, keys: list[str], metric: str) -> pd.DataFrame:
+    """One value of *metric* per *keys* combination (a session, or session x behavior).
+
+    Counts, durations, latencies and distance are summed over a session's rows;
+    a sum with no finite values stays NaN instead of becoming 0.  Mean bout
+    duration is averaged and is undefined (NaN) for a row with no bouts, so an
+    animal that never did the behavior is left out instead of counting as 0 s.
+    """
+    if metric == "mean_bout_s":
+        if "n_bouts" in df.columns:
+            has_bouts = pd.to_numeric(df["n_bouts"], errors="coerce").fillna(0) > 0
+            df = df.assign(mean_bout_s=df["mean_bout_s"].where(has_bouts))
+        return df.groupby(keys)[metric].mean().reset_index()
+    return df.groupby(keys)[metric].sum(min_count=1).reset_index()
 
 
 def _force_fit_canvas(canvas: Any, fig: Any, max_w: int, max_h: int, dpi: int = 100) -> None:
@@ -813,7 +839,9 @@ class BehaviorAnalyticsTab(QWidget):
         # "density".  Lets one tab reuse the other's exact background so
         # manuscript figures share a look without re-tuning.
         self._shared_bg_images: dict[str, np.ndarray] = {}
-        self._last_stats_result: dict[str, Any] = {}  # populated by stats dialog
+        # Prism-style analysis choices behind every p-value this tab shows;
+        # saved with the group state because the design is per project.
+        self._stats_options = StatsOptions()
         # Merged external projects
         self._merge_service = ProjectMergeService()
         self._pose_cache: dict[str, Any] = {}  # session_id → PoseData
@@ -1128,6 +1156,7 @@ class BehaviorAnalyticsTab(QWidget):
             "group_order": list(self._group_order),
             "factor_level_order": {k: list(v) for k, v in self._factor_level_order.items()},
             "group_colors": dict(self._group_colors),
+            "stats_options": self._stats_options.to_dict(),
             "section_definitions": self._sections_tab.get_sections_state(),
             "section_custom_presets": self._sections_tab.get_custom_presets(),
             ANCHORS_KEY: self._group_state_anchors,
@@ -1196,6 +1225,7 @@ class BehaviorAnalyticsTab(QWidget):
             if isinstance(facs, dict):
                 self._session_factors[str(label)] = {str(k): str(v) for k, v in facs.items()}
         self._active_grouping_factor = str(state.get("active_grouping_factor") or "")
+        self._stats_options = StatsOptions.from_dict(state.get("stats_options"))
         self._facet_controls.clear()
         loaded_controls = state.get("facet_controls")
         if isinstance(loaded_controls, dict):
@@ -1523,6 +1553,14 @@ class BehaviorAnalyticsTab(QWidget):
         self._session_label_by_session = dict(labels.label_by_session)
         self._sessions_by_label = labels.sessions_by_label()
         return dict(labels.subject_by_session)
+
+    def subject_for_label(self, label: str) -> str:
+        """The subject a session label belongs to (pairs values in paired tests)."""
+        for sid in self._sessions_by_label.get(label, []):
+            subj = self._subject_by_session.get(str(sid), "")
+            if subj:
+                return str(subj)
+        return label
 
     def _remap_group_state_to_labels(self, previous: SessionLabels) -> None:
         """Re-key in-memory factors/order/prechop after the session labels changed.
@@ -3363,7 +3401,6 @@ class BehaviorAnalyticsTab(QWidget):
         self._raw_bouts.clear()
         self._raw_bouts_unscoped.clear()
         self._roi_mask_cache.clear()
-        self._last_stats_result.clear()
         self._pose_cache.clear()
         self._pose_vel_cache.clear()
         self._summary_tab.rebuild()
@@ -5077,14 +5114,15 @@ class _SummaryStatsWidget(QWidget):
 
     # -- statistics ---------------------------------------------------
 
-    def _run_statistics_dialog(self) -> None:
-        if not _ensure_scipy():
-            QMessageBox.warning(
-                self, "Analytics",
-                "scipy is not installed. Install it with: pip install scipy",
-            )
-            return
+    _STATS_METRICS: tuple[tuple[str, str], ...] = (
+        ("Bout Count", "n_bouts"),
+        ("Total Duration (s)", "time_spent_s"),
+        ("Mean Bout Duration (s)", "mean_bout_s"),
+        ("Latency to First (s)", "latency_s"),
+        ("Distance Traveled (cm)", "distance_cm"),
+    )
 
+    def _run_statistics_dialog(self) -> None:
         factors = self._host._factor_definitions
         if not factors:
             msg = (
@@ -5099,17 +5137,8 @@ class _SummaryStatsWidget(QWidget):
             return
 
         # Check that at least one factor has ≥2 levels assigned
-        has_valid_factor = False
-        for fname in factors:
-            levels = {
-                facs.get(fname, "")
-                for facs in self._host._session_factors.values()
-                if facs.get(fname, "")
-            }
-            if len(levels) >= 2:
-                has_valid_factor = True
-                break
-        if not has_valid_factor:
+        levels_by_factor = self._host._levels_by_factor()
+        if not any(len(v) >= 2 for v in levels_by_factor.values()):
             msg = (
                 "At least one factor must have 2 or more levels assigned.\n\n"
                 "Assign levels by typing into the factor column for each session "
@@ -5120,48 +5149,52 @@ class _SummaryStatsWidget(QWidget):
             QMessageBox.information(self, "Analytics", msg)
             return
 
-        checked = self._checked_subjects()
-        rows = [r for r in self._host._filtered_rows() if r["session_label"] in checked]
-        # Apply data range filter from the Graphs tab if active
-        graphs_tab = self._host._graphs_tab
-        if graphs_tab is not None and graphs_tab._is_data_range_active():
-            rows = graphs_tab._recompute_rows_for_range(rows)
-        # Apply bout filter from the Graphs tab if active
-        if graphs_tab is not None and graphs_tab._is_bout_filter_active():
-            rows = graphs_tab._recompute_rows_for_first_n(rows)
-        if not rows:
-            msg = "No data loaded or no sessions checked."
-            self._stats_output_text = msg
-            self._stats_view_btn.setEnabled(True)
-            QMessageBox.information(self, "Analytics", msg)
-            return
-
         dlg = QDialog(self)
         dlg.setWindowTitle("Statistical Tests")
-        dlg.resize(440, 300)
 
         metric_combo = QComboBox(dlg)
-        metric_combo.addItem("Bout Count", userData="n_bouts")
-        metric_combo.addItem("Total Duration (s)", userData="time_spent_s")
-        metric_combo.addItem("Mean Bout Duration (s)", userData="mean_bout_s")
-        metric_combo.addItem("Latency to First (s)", userData="latency_s")
-        metric_combo.addItem("Distance Traveled (cm)", userData="distance_cm")
+        for label, key in self._STATS_METRICS:
+            metric_combo.addItem(label, userData=key)
+        last = getattr(self, "_last_stats_request", None)
+        if last:
+            metric_combo.setCurrentIndex(max(0, metric_combo.findData(last[0])))
 
-        # Factor selection
         factor1_combo = QComboBox(dlg)
         for f in factors:
             factor1_combo.addItem(f)
-
         factor2_combo = QComboBox(dlg)
         factor2_combo.addItem("(none: one-way design)", userData="__none__")
         for f in factors:
             factor2_combo.addItem(f, userData=f)
+        if last:
+            factor1_combo.setCurrentIndex(max(0, factor1_combo.findText(last[1])))
+            factor2_combo.setCurrentIndex(max(0, factor2_combo.findData(last[2] or "__none__")))
 
-        test_combo = QComboBox(dlg)
-        test_combo.addItem("Auto (choose best test)", userData="auto")
-        test_combo.addItem("Independent t-test", userData="ttest")
-        test_combo.addItem("One-way ANOVA", userData="anova")
-        test_combo.addItem("Two-way ANOVA", userData="anova2")
+        all_levels: list[str] = []
+        for f in factors:
+            all_levels += [l for l in levels_by_factor.get(f, []) if l not in all_levels]
+        opts_widget = StatsOptionsWidget(
+            self._host._stats_options, all_levels, factors, dlg,
+        )
+        will_run = QLabel(dlg)
+        will_run.setWordWrap(True)
+
+        def _update_will_run() -> None:
+            f2 = factor2_combo.currentData()
+            two_way = bool(f2 and f2 != "__none__")
+            n_lv = len(levels_by_factor.get(factor1_combo.currentText(), []))
+            will_run.setText(
+                "Test: " + describe_test(opts_widget.options(), n_lv, two_way)
+                + ", run separately for each selected behavior."
+            )
+
+        for w in (factor1_combo, factor2_combo):
+            w.currentIndexChanged.connect(lambda _i: _update_will_run())
+        for combo in opts_widget.findChildren(QComboBox):
+            combo.currentIndexChanged.connect(lambda _i: _update_will_run())
+        for chk in opts_widget.findChildren(QCheckBox):
+            chk.toggled.connect(lambda _c: _update_will_run())
+        _update_will_run()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -5170,298 +5203,138 @@ class _SummaryStatsWidget(QWidget):
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
 
+        form = QFormLayout()
+        form.addRow("Metric:", metric_combo)
+        form.addRow("Primary factor:", factor1_combo)
+        form.addRow("Second factor (two-way ANOVA):", factor2_combo)
         layout = QVBoxLayout(dlg)
-        layout.addWidget(QLabel("Metric:"))
-        layout.addWidget(metric_combo)
-        layout.addWidget(QLabel("Primary factor:"))
-        layout.addWidget(factor1_combo)
-        layout.addWidget(QLabel("Second factor (for two-way ANOVA):"))
-        layout.addWidget(factor2_combo)
-        layout.addWidget(QLabel("Test:"))
-        layout.addWidget(test_combo)
+        layout.addLayout(form)
+        layout.addWidget(opts_widget)
+        layout.addWidget(will_run)
         layout.addWidget(buttons)
 
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
         metric = str(metric_combo.currentData())
-        test = str(test_combo.currentData())
         factor1_name = factor1_combo.currentText()
         factor2_data = str(factor2_combo.currentData() or "__none__")
         factor2_name = factor2_data if factor2_data != "__none__" else ""
-
         if factor2_name and factor2_name == factor1_name:
             QMessageBox.information(
                 self, "Analytics",
                 "Primary and second factors must be different.",
             )
             return
-
-        df = pd.DataFrame(rows)
-        agg_fn = "mean" if metric == "mean_bout_s" else "sum"
-        sess_agg = df.groupby("session_label")[metric].agg(agg_fn).reset_index()
-
-        # Map factor levels onto sessions
-        sess_agg["_factor1"] = sess_agg["session_label"].map(
-            lambda lbl: self._host._session_factors.get(lbl, {}).get(factor1_name, "")
+        self._host._stats_options = opts_widget.options()
+        self._host._save_group_state()
+        self._last_stats_request = (metric, factor1_name, factor2_name)
+        self._stats_output_text = self._compute_statistics(
+            metric, factor1_name, factor2_name, self._host._stats_options,
         )
-        sess_agg = sess_agg[sess_agg["_factor1"] != ""]
+        self._stats_view_btn.setEnabled(True)
+        self._host._graphs_tab.update_graph()
+        self._show_summary_stats_popup()
+
+    def _stats_value_table(self, metric: str) -> pd.DataFrame:
+        """One value per (checked session, behavior): the table every test runs on.
+
+        Built from the same rows as Graphs > Export Data: the Data Range and
+        bout filters apply, animals with no bouts are filled in at their
+        missing value (0 bouts / 0 s, latency = time available, mean bout
+        duration undefined), and each behavior is kept separate.
+        """
+        graphs = self._host._graphs_tab
+        rows = graphs._graph_rows(metric=metric, group_filter=False)
+        checked = self._checked_subjects()
+        roster = [s for s in self._host.ordered_session_labels() if s in checked]
+        if not rows or not roster:
+            return pd.DataFrame(columns=["session_label", "behavior", "value", "subject"])
+        df = pd.DataFrame(rows)
+        out = []
+        for bname in sorted(df["behavior"].unique()):
+            vals = (
+                _aggregate_metric(df[df["behavior"] == bname], ["session_label"], metric)
+                .set_index("session_label")[metric].to_dict()
+            )
+            for sess in roster:
+                v = vals[sess] if sess in vals else graphs._missing_value_for_metric(metric, sess)
+                out.append({
+                    "session_label": sess, "behavior": bname, "value": v,
+                    "subject": self._host.subject_for_label(sess),
+                })
+        return pd.DataFrame(out)
+
+    def _compute_statistics(
+        self, metric: str, factor1_name: str, factor2_name: str, opts: StatsOptions,
+    ) -> str:
+        from abel.services import group_stats as _gst  # noqa: PLC0415
+
+        metric_label = dict((k, l) for l, k in self._STATS_METRICS).get(metric, metric)
+        table = self._stats_value_table(metric)
+        if table.empty:
+            return "No data loaded or no sessions checked."
+        facs = self._host._session_factors
+        table["a"] = [facs.get(s, {}).get(factor1_name, "") for s in table["session_label"]]
+        table = table[table["a"] != ""]
         if factor2_name:
-            sess_agg["_factor2"] = sess_agg["session_label"].map(
-                lambda lbl: self._host._session_factors.get(lbl, {}).get(factor2_name, "")
-            )
-            sess_agg = sess_agg[sess_agg["_factor2"] != ""]
-
-        if sess_agg.empty:
-            self._stats_output_text = "No sessions have levels assigned for the selected factor(s)."
-            self._stats_view_btn.setEnabled(True)
-            return
-
-        # Determine the actual test to run
-        group_names_1 = sorted(sess_agg["_factor1"].unique())
-        if test == "auto":
-            if factor2_name:
-                test = "anova2"
-            elif len(group_names_1) == 2:
-                test = "ttest"
-            else:
-                test = "anova"
-        elif test == "anova2" and not factor2_name:
-            self._stats_output_text = "Two-way ANOVA requires a second factor. Select one and try again."
-            self._stats_view_btn.setEnabled(True)
-            return
-
-        # \u2500\u2500 Two-way ANOVA \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        if test == "anova2" and factor2_name:
-            self._run_two_way_anova(
-                sess_agg, metric, metric_combo.currentText(),
-                factor1_name, factor2_name,
-            )
-            return
-
-        # \u2500\u2500 One-way tests (t-test / one-way ANOVA) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-        group_arrays = [
-            sess_agg.loc[sess_agg["_factor1"] == g, metric].to_numpy(dtype=float)
-            for g in group_names_1
+            table["b"] = [facs.get(s, {}).get(factor2_name, "") for s in table["session_label"]]
+            table = table[table["b"] != ""]
+        if table.empty:
+            return "No sessions have levels assigned for the selected factor(s)."
+        levels = self._host._levels_by_factor()
+        graphs = self._host._graphs_tab
+        header = [
+            f"Metric: {metric_label}",
+            f"Factor: {factor1_name}" + (f" x {factor2_name}" if factor2_name else ""),
+            "Values: one per animal (session) and behavior, the same numbers "
+            "Graphs > Export Data writes.",
         ]
-
-        min_n = min(len(a) for a in group_arrays) if group_arrays else 0
-        if min_n < 2:
-            self._stats_output_text = (
-                "Each group must have at least 2 sessions.\n"
-                f"Group sizes: {', '.join(f'{g}={len(a)}' for g, a in zip(group_names_1, group_arrays))}"
-            )
-            self._stats_view_btn.setEnabled(True)
-            return
-
-        lines: list[str] = []
-        lines.append(f"Metric: {metric_combo.currentText()}")
-        lines.append(f"Factor: {factor1_name}")
-        lines.append(f"Groups: {', '.join(f'{g} (n={len(a)})' for g, a in zip(group_names_1, group_arrays))}")
-        for g, a in zip(group_names_1, group_arrays):
-            lines.append(f"  {g}: mean={np.mean(a):.3f}, std={np.std(a, ddof=1):.3f}")
-        lines.append("")
-
-        stat, pval = float("nan"), float("nan")
-        if test == "ttest" and len(group_arrays) == 2 and ttest_ind is not None:
-            _res = ttest_ind(group_arrays[0], group_arrays[1])
-            stat, pval = float(_res[0]), float(_res[1])
-            lines.append(f"Independent t-test: t={stat:.4f}, p={pval:.6f}")
-            lines.append(_significance_label(pval))
-        elif test == "anova" and f_oneway is not None:
-            _res = f_oneway(*group_arrays)
-            stat, pval = float(_res[0]), float(_res[1])
-            lines.append(f"One-way ANOVA: F={stat:.4f}, p={pval:.6f}")
-            lines.append(_significance_label(pval))
-
-            # Automatic post-hoc pairwise comparisons (Sidak correction)
-            if pval < 0.05 and len(group_names_1) > 2:
-                lines.append("")
-                lines.append("Post-hoc pairwise comparisons (Sidak correction):")
-                lines.append("-" * 50)
-                n_comparisons = len(group_names_1) * (len(group_names_1) - 1) // 2
-                for i in range(len(group_names_1)):
-                    for j in range(i + 1, len(group_names_1)):
-                        pw_res = ttest_ind(group_arrays[i], group_arrays[j])
-                        pw_p = float(pw_res[1])
-                        pw_p_adj = 1.0 - (1.0 - pw_p) ** n_comparisons
-                        pw_p_adj = min(pw_p_adj, 1.0)
-                        sig = "***" if pw_p_adj < 0.001 else "**" if pw_p_adj < 0.01 else "*" if pw_p_adj < 0.05 else "ns"
-                        lines.append(
-                            f"  {group_names_1[i]} vs {group_names_1[j]}: "
-                            f"t={float(pw_res[0]):.4f}, p={pw_p:.6f}, "
-                            f"p(adj)={pw_p_adj:.6f} {sig}"
-                        )
-
-        self._stats_output_text = "\n".join(lines)
-        self._stats_view_btn.setEnabled(True)
-
-        # Store for graphs significance overlay
-        self._host._last_stats_result = {
-            "metric": metric,
-            "test": test,
-            "stat": stat,
-            "pval": pval,
-            "groups": group_names_1,
-        }
-        self._host._graphs_tab.update_graph()
-
-    def _run_two_way_anova(
-        self,
-        sess_agg: "pd.DataFrame",
-        metric: str,
-        metric_label: str,
-        factor1_name: str,
-        factor2_name: str,
-    ) -> None:
-        """Run a Type-I two-way ANOVA with interaction term."""
-        from scipy.stats import f as f_dist  # type: ignore[import-untyped]
-
-        values = sess_agg[metric].to_numpy(dtype=float)
-        fa = sess_agg["_factor1"].to_numpy()
-        fb = sess_agg["_factor2"].to_numpy()
-        n_total = len(values)
-        grand_mean = float(np.mean(values))
-
-        levels_a = sorted(set(fa))
-        levels_b = sorted(set(fb))
-
-        # SS factor A (main effect)
-        ss_a = 0.0
-        for a in levels_a:
-            mask = fa == a
-            n_a = int(np.sum(mask))
-            if n_a > 0:
-                ss_a += n_a * (float(np.mean(values[mask])) - grand_mean) ** 2
-
-        # SS factor B (main effect)
-        ss_b = 0.0
-        for b in levels_b:
-            mask = fb == b
-            n_b = int(np.sum(mask))
-            if n_b > 0:
-                ss_b += n_b * (float(np.mean(values[mask])) - grand_mean) ** 2
-
-        # SS interaction
-        ss_ab = 0.0
-        for a in levels_a:
-            for b in levels_b:
-                mask = (fa == a) & (fb == b)
-                n_cell = int(np.sum(mask))
-                if n_cell > 0:
-                    cell_mean = float(np.mean(values[mask]))
-                    a_mean = float(np.mean(values[fa == a]))
-                    b_mean = float(np.mean(values[fb == b]))
-                    ss_ab += n_cell * (cell_mean - a_mean - b_mean + grand_mean) ** 2
-
-        ss_total = float(np.sum((values - grand_mean) ** 2))
-        ss_error = ss_total - ss_a - ss_b - ss_ab
-
-        # DF
-        df_a = len(levels_a) - 1
-        df_b = len(levels_b) - 1
-        df_ab = df_a * df_b
-        n_cells = len(levels_a) * len(levels_b)
-        df_error = n_total - n_cells
-
-        if df_error <= 0 or ss_error <= 0:
-            self._stats_output_text = (
-                "Two-way ANOVA cannot be computed:\n"
-                "not enough observations per cell (need at least 1 replicate per cell\n"
-                "and residual degrees of freedom > 0).\n\n"
-                f"Design: {len(levels_a)} x {len(levels_b)} ({n_cells} cells), n={n_total}"
-            )
-            self._stats_view_btn.setEnabled(True)
-            return
-
-        ms_a = ss_a / df_a if df_a > 0 else 0
-        ms_b = ss_b / df_b if df_b > 0 else 0
-        ms_ab = ss_ab / df_ab if df_ab > 0 else 0
-        ms_error = ss_error / df_error
-
-        lines: list[str] = []
-        lines.append(f"Two-way ANOVA. Metric: {metric_label}")
-        lines.append(f"  Factor A: {factor1_name} ({', '.join(levels_a)})")
-        lines.append(f"  Factor B: {factor2_name} ({', '.join(levels_b)})")
-        lines.append(f"  Design: {len(levels_a)} x {len(levels_b)}, n={n_total}")
-        lines.append("")
-        lines.append(f"{'Source':<24s} {'SS':>10s} {'df':>4s} {'MS':>10s} {'F':>10s} {'p':>10s}")
-        lines.append("-" * 74)
-
-        def _row(label: str, ss: float, df: int, ms: float) -> str:
-            if df > 0 and ms_error > 0:
-                f_val = ms / ms_error
-                p_val = 1.0 - float(f_dist.cdf(f_val, df, df_error))
-                sig = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*" if p_val < 0.05 else "ns"
-                return (
-                    f"{label:<24s} {ss:10.3f} {df:4d} {ms:10.3f} {f_val:10.4f} {p_val:10.6f}  {sig}"
+        if graphs._is_data_range_active():
+            lo, hi = graphs._get_data_range_seconds()
+            header.append(f"Data Range filter active: {lo if lo is not None else 0} to "
+                          f"{hi if hi is not None else 'end'} s.")
+        if graphs._is_bout_filter_active():
+            header.append("Bout filter active (Graphs tab): values use only the filtered bouts.")
+        if metric == "latency_s":
+            header.append("Animals that never did the behavior get latency = time available.")
+        if metric == "mean_bout_s":
+            header.append("Animals with no bouts have no mean bout duration and are left out.")
+        blocks = ["\n".join(header)]
+        for bname in sorted(table["behavior"].unique()):
+            part = table[table["behavior"] == bname]
+            if factor2_name:
+                res = _gst.two_factor(
+                    part, factor1_name, factor2_name,
+                    levels.get(factor1_name, []), levels.get(factor2_name, []), opts,
                 )
-            _dash = "-"
-            return f"{label:<24s} {ss:10.3f} {df:4d} {ms:10.3f} {_dash:>10s} {_dash:>10s}"
-
-        lines.append(_row(factor1_name, ss_a, df_a, ms_a))
-        lines.append(_row(factor2_name, ss_b, df_b, ms_b))
-        lines.append(_row(f"{factor1_name} x {factor2_name}", ss_ab, df_ab, ms_ab))
-        lines.append(f"{'Residual':<24s} {ss_error:10.3f} {df_error:4d} {ms_error:10.3f}")
-        lines.append("-" * 74)
-        lines.append(f"{'Total':<24s} {ss_total:10.3f} {n_total - 1:4d}")
-
-        # Cell means summary
-        lines.append("")
-        lines.append("Cell means:")
-        header = f"{'':>16s}"
-        for b in levels_b:
-            header += f"  {b:>12s}"
-        lines.append(header)
-        for a in levels_a:
-            row_str = f"{a:>16s}"
-            for b in levels_b:
-                mask = (fa == a) & (fb == b)
-                n_cell = int(np.sum(mask))
-                if n_cell > 0:
-                    cell_mean = float(np.mean(values[mask]))
-                    row_str += f"  {cell_mean:10.3f}({n_cell})"
-                else:
-                    row_str += "  " + "-".rjust(12)
-            lines.append(row_str)
-
-        self._stats_output_text = "\n".join(lines)
-        self._stats_view_btn.setEnabled(True)
-
-        # Store primary factor's result for graph overlay
-        if df_a > 0 and ms_error > 0:
-            f_val = ms_a / ms_error
-            p_val = 1.0 - float(f_dist.cdf(f_val, df_a, df_error))
-        else:
-            f_val, p_val = float("nan"), float("nan")
-        self._host._last_stats_result = {
-            "metric": metric,
-            "test": "anova2",
-            "stat": f_val,
-            "pval": p_val,
-            "groups": levels_a,
-        }
-        self._host._graphs_tab.update_graph()
+            else:
+                res = _gst.one_factor(
+                    part.assign(group=part["a"]), levels.get(factor1_name, []), opts,
+                )
+            blocks.append(res.report(f"{bname}: {metric_label}"))
+        return "\n\n".join(blocks)
 
     def _show_summary_stats_popup(self) -> None:
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Statistics Results")
-        dlg.resize(600, 440)
-        layout = QVBoxLayout(dlg)
-        te = QTextEdit(dlg)
-        te.setReadOnly(True)
-        te.setPlainText(self._stats_output_text or "(No results yet: run statistics first.)")
-        te.setStyleSheet(
-            "QTextEdit{background:#0A1929;color:#cfd8dc;font-family:Consolas,monospace;"
-            "font-size:11px;border:1px solid #1E3A5F;border-radius:4px;}"
+        last = getattr(self, "_last_stats_request", None)
+
+        def _rerun(opts: StatsOptions) -> str:
+            self._host._stats_options = opts
+            self._host._save_group_state()
+            self._stats_output_text = self._compute_statistics(*last, opts)
+            self._host._graphs_tab.update_graph()
+            return self._stats_output_text
+
+        levels: list[str] = []
+        for lv in self._host._levels_by_factor().values():
+            levels += [l for l in lv if l not in levels]
+        dlg = StatsReportDialog(
+            self, "Statistics Results", self._host._stats_options,
+            self._stats_output_text or "(No results yet: run statistics first.)",
+            _rerun if last else None,
+            group_names=levels,
+            factor_names=[f for f in (last or ("", "", ""))[1:] if f] if last and last[2] else (),
         )
-        layout.addWidget(te, 1)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(dlg.accept)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        btn_row.addWidget(close_btn)
-        layout.addLayout(btn_row)
         dlg.exec()
 
     def _export_csv(self) -> None:
@@ -5532,14 +5405,6 @@ class _SummaryStatsWidget(QWidget):
             f"Auto-grouped sessions by type: {', '.join(types)}"
         )
         self._host._save_group_state()
-
-
-def _significance_label(pval: float) -> str:
-    if pval < 0.001:
-        return "Result: Highly significant (p < 0.001)"
-    if pval < 0.05:
-        return "Result: Significant (p < 0.05)"
-    return "Result: Not significant (p >= 0.05)"
 
 
 def _time_bin_start(origin_s: float, k: int, bin_seconds: float) -> int | float:
@@ -5668,6 +5533,16 @@ class _GraphsWidget(QWidget):
         self._settings_btn = QPushButton("Settings…")
         self._settings_btn.setToolTip("Adjust fonts, DPI, legend placement.")
         self._settings_btn.clicked.connect(self._open_settings_dialog)
+        self._graph_stats_btn = QPushButton("Statistics…")
+        self._graph_stats_btn.setToolTip(
+            "Show the exact test behind the significance marks on this graph\n"
+            "(n, means, test, P values, multiple comparisons) and change the\n"
+            "analysis: paired/unpaired, parametric or rank-based, Welch,\n"
+            "post-hoc method."
+        )
+        self._graph_stats_btn.clicked.connect(self._open_graph_stats_dialog)
+        # (title, StatsResult) for every panel drawn by the last update_graph.
+        self._stats_reports: list[tuple[str, Any]] = []
 
         self._export_btn = QPushButton("Export…")
         self._export_btn.setToolTip("Save graph to PNG, SVG, or PDF.")
@@ -5827,6 +5702,7 @@ class _GraphsWidget(QWidget):
         action_row1.addWidget(_bin_lbl_g)
         action_row1.addWidget(self._time_bin_spin)
         action_row1.addWidget(self._settings_btn)
+        action_row1.addWidget(self._graph_stats_btn)
         action_row1.addWidget(self._groups_btn)
         action_row1.addWidget(self._level_order_btn)
         action_row1.addStretch(1)
@@ -6195,6 +6071,7 @@ class _GraphsWidget(QWidget):
         if self._figure is None or self._updating:
             return
         self._updating = True
+        self._stats_reports = []
         try:
             self._refresh_factor_selector()
             style = self._get_style()
@@ -6709,9 +6586,11 @@ class _GraphsWidget(QWidget):
             return max(float(lo_s), float(end_s))
         return float(end_s)
 
-    def _apply_latency_fallbacks(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Replace missing latency with max-possible time for graph/export paths."""
-        if self._get_metric() != "latency_s":
+    def _apply_latency_fallbacks(
+        self, rows: list[dict[str, Any]], metric: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Replace missing latency with max-possible time for graph/export/stats paths."""
+        if (metric or self._get_metric()) != "latency_s":
             return rows
 
         lo_s, hi_s = self._get_data_range_seconds()
@@ -7053,33 +6932,146 @@ class _GraphsWidget(QWidget):
         if self._y_max.value() != self._y_max.minimum():
             ax.set_ylim(top=self._y_max.value())
 
-    def _annotate_stats(self, ax: Any, x_positions: list[float], y_top: float) -> None:
-        """Draw a significance bracket above two bars if stats results are available."""
-        if not self._gs().get("show_stats", True):
+    # -- statistics ---------------------------------------------------
+
+    def _run_graph_stats(
+        self, sess_agg: pd.DataFrame, metric: str, group_names: list[str], title: str,
+    ) -> Any:
+        """Test the per-animal values a bar/box panel shows; recorded for the report.
+
+        Computed from the exact ``sess_agg`` the panel plots, so the P value on
+        the graph is always for the data on screen.  Two split factors give a
+        two-way ANOVA; otherwise the groups are compared as one factor.
+        """
+        if len(group_names) < 2:
+            return None
+        from abel.services import group_stats as _gst  # noqa: PLC0415
+
+        opts = self._host._stats_options
+        data = pd.DataFrame({
+            "session_label": sess_agg["session_label"].to_numpy(),
+            "group": sess_agg["group"].astype(str).to_numpy(),
+            "value": pd.to_numeric(sess_agg[metric], errors="coerce").to_numpy(),
+        })
+        data["subject"] = [self._host.subject_for_label(lbl) for lbl in data["session_label"]]
+        split = list(self._host._facet_split_factors)
+        if len(split) == 2:
+            fa, fb = split
+            facs = self._host._session_factors
+            data["a"] = [facs.get(lbl, {}).get(fa, "") for lbl in data["session_label"]]
+            data["b"] = [facs.get(lbl, {}).get(fb, "") for lbl in data["session_label"]]
+            cell_names = {(a, b): g for a, b, g in zip(data["a"], data["b"], data["group"])}
+            levels = self._host._levels_by_factor()
+            res = _gst.two_factor(
+                data, fa, fb, levels.get(fa, []), levels.get(fb, []), opts,
+                cell_label=lambda a, b: cell_names.get((a, b), f"{a} × {b}"),
+            )
+            if opts.design == "paired" and not opts.repeated_factor:
+                res.notes.append(
+                    "The design is set to paired, but no repeated factor is chosen for "
+                    "the two-way ANOVA, so both factors were treated as between subjects."
+                )
+        else:
+            res = _gst.one_factor(data, group_names, opts)
+            if len(split) > 2:
+                res.notes.append(
+                    f"{len(split)} factors are split; their combinations were compared as "
+                    "the levels of one factor. Split exactly two factors for a two-way ANOVA."
+                )
+        self._stats_reports.append((title, res))
+        return res
+
+    def _draw_stats(
+        self, ax: Any, res: Any, group_names: list[str],
+        x_positions: list[float], y_top: float,
+    ) -> None:
+        """Brackets for significant comparisons plus the overall result."""
+        if res is None or not self._gs().get("show_stats", True):
             return
-        ls = self._host._last_stats_result
-        if not ls or len(x_positions) != 2:
+        from abel.services.group_stats import format_p, p_stars  # noqa: PLC0415
+
+        fs = max(6, int(self._gs()["tick_fontsize"]) - 1)
+        if res.error:
+            ax.text(0.98, 0.98, "not tested (see Statistics…)", ha="right", va="top",
+                    transform=ax.transAxes, fontsize=fs, color="#78909c")
             return
-        pval = ls.get("pval")
-        if pval is None or np.isnan(pval):
-            return
-        # Only annotate if the metric matches
-        if ls.get("metric") != self._get_metric():
-            return
-        sig = "***" if pval < 0.001 else "**" if pval < 0.01 else "*" if pval < 0.05 else "ns"
-        pad = max(y_top * 0.08, 0.10)
-        y_line = y_top + pad
-        ax.plot(x_positions, [y_line, y_line], color="black", linewidth=1.2, zorder=6)
-        ax.plot([x_positions[0], x_positions[0]], [y_top, y_line], color="black",
-                linewidth=1.2, zorder=6)
-        ax.plot([x_positions[1], x_positions[1]], [y_top, y_line], color="black",
-                linewidth=1.2, zorder=6)
-        ax.text(
-            (x_positions[0] + x_positions[1]) / 2, y_line + pad * 0.3,
-            f"p={pval:.4f}  {sig}",
-            ha="center", va="bottom", fontsize=self._gs()["tick_fontsize"],
-            color="black", fontweight="bold", zorder=7,
+        pos = {g: float(x) for g, x in zip(group_names, x_positions)}
+        span = max(abs(y_top), 1e-9)
+        pad = span * 0.06
+        head_lines = 0
+        if len(group_names) == 2 and not res.effects:
+            pairs = [(group_names[0], group_names[1], res.p)]
+        else:
+            if res.effects:
+                head = "\n".join(
+                    f"{e.source}: {format_p(e.p)} {p_stars(e.p)}"
+                    for e in res.effects if np.isfinite(e.p)
+                )
+            else:
+                head = f"{res.test}: {format_p(res.p)} {p_stars(res.p)}"
+            ax.text(0.98, 0.98, head, ha="right", va="top", transform=ax.transAxes,
+                    fontsize=fs, color="black",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#90a4ae", alpha=0.85))
+            head_lines = head.count("\n") + 1
+            sig = [c for c in res.significant_comparisons() if c.a in pos and c.b in pos]
+            sig.sort(key=lambda c: abs(pos[c.a] - pos[c.b]))
+            pairs = [(c.a, c.b, c.p_adj) for c in sig[:8]]
+            if len(sig) > 8:
+                ax.text(0.02, 0.98, f"+{len(sig) - 8} more significant pairs (Statistics…)",
+                        ha="left", va="top", transform=ax.transAxes, fontsize=fs, color="#546e7a")
+        y = y_top + pad
+        for a, b, p in pairs:
+            x0, x1 = sorted((pos[a], pos[b]))
+            ax.plot([x0, x0, x1, x1], [y - pad * 0.4, y, y, y - pad * 0.4],
+                    color="black", linewidth=1.0, zorder=6)
+            ax.text((x0 + x1) / 2, y + pad * 0.15, f"{format_p(p)} {p_stars(p)}",
+                    ha="center", va="bottom", fontsize=fs, color="black", zorder=7)
+            y += pad * 2.4
+        lo, hi = ax.get_ylim()
+        top = max(hi, y + pad) if pairs else hi
+        if head_lines:
+            # Keep the corner summary above the data instead of over it.
+            try:
+                ax_h_px = float(ax.get_window_extent().height)
+                box_px = (head_lines * 1.35 + 1.2) * fs * ax.figure.dpi / 72.0
+                frac = min(0.6, box_px / max(ax_h_px, 1.0))
+                data_top = (y if pairs else y_top)
+                top = max(top, lo + (data_top - lo) / (1.0 - frac))
+            except Exception:
+                pass
+        if top > hi:
+            ax.set_ylim(lo, top)
+
+    def _open_graph_stats_dialog(self) -> None:
+        """Show what was tested on the current graph and let the user change it."""
+        groups: list[str] = []
+        for _title, r in self._stats_reports:
+            for g in r.groups:
+                if g.name not in groups:
+                    groups.append(g.name)
+        factor_names = list(self._host._facet_split_factors)
+
+        def _report() -> str:
+            if not self._stats_reports:
+                return (
+                    "No statistics on this graph.\n\n"
+                    "Significance tests run on group-mode Bar and Box charts with two "
+                    "or more groups. Turn on 'Show statistics on graph' in Settings if it "
+                    "is off, or use Summary > Run Statistics."
+                )
+            return "\n\n".join(r.report(title) for title, r in self._stats_reports)
+
+        def _rerun(opts: StatsOptions) -> str:
+            self._host._stats_options = opts
+            self._host._save_group_state()
+            self.update_graph()
+            return _report()
+
+        dlg = StatsReportDialog(
+            self, "Graph Statistics", self._host._stats_options, _report(), _rerun,
+            group_names=groups, factor_names=factor_names if len(factor_names) == 2 else (),
         )
+        dlg.exec()
 
     # -- chart types --------------------------------------------------
 
@@ -7091,7 +7083,7 @@ class _GraphsWidget(QWidget):
         rows in ``dfc`` at all; it is appended here at its missing value so
         group means, error bars and N count it instead of skipping it.
         """
-        sess_agg = dfc.groupby(["session_label", "group"])[metric].agg(agg_fn).reset_index()
+        sess_agg = _aggregate_metric(dfc, ["session_label", "group"], metric)
         groups_map = self._host._session_groups
         seen = set(sess_agg["session_label"])
         missing = [
@@ -7192,20 +7184,14 @@ class _GraphsWidget(QWidget):
         for i, (m, eb) in enumerate(zip(g_means, g_ebs)):
             ax.text(i, m + eb + float(np.max(g_means)) * 0.02, f"{m:.1f}",
                     ha="center", va="bottom", fontsize=max(6, gs["tick_fontsize"] - 1))
-        # Stats annotation
-        if len(group_names) == 2:
-            y_top = float(max(m + eb for m, eb in zip(g_means, g_ebs)))
-            self._annotate_stats(ax, [0.0, 1.0], y_top)
-        elif len(group_names) > 2 and gs.get("show_stats", True):
-            ls = self._host._last_stats_result
-            if ls and ls.get("metric") == self._get_metric():
-                _pv = ls.get("pval")
-                if _pv is not None and not np.isnan(float(_pv)) and _pv < 0.05:
-                    _sig = "***" if _pv < 0.001 else "**" if _pv < 0.01 else "*"
-                    ax.text(0.98, 0.98, f"{_sig}  p={_pv:.4f}",
-                            ha="right", va="top", transform=ax.transAxes,
-                            fontsize=gs["tick_fontsize"], color="black", fontweight="bold",
-                            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="black", alpha=0.8))
+        # Significance from the values plotted here (see Statistics...)
+        if gs.get("show_stats", True):
+            res = self._run_graph_stats(sess_agg, metric, group_names, ylabel)
+            _tops = [m + eb for m, eb in zip(g_means, g_ebs) if np.isfinite(m + eb)]
+            _pts = pd.to_numeric(sess_agg[metric], errors="coerce").to_numpy()
+            _pts = _pts[np.isfinite(_pts)]
+            y_top = float(max(_tops + ([float(_pts.max())] if _pts.size else []), default=0.0))
+            self._draw_stats(ax, res, group_names, list(x), y_top)
         # Add labeled patches so update_graph can place a shared side legend.
         from matplotlib.patches import Patch as _Patch
         _leg_handles = [_Patch(facecolor=c, label=g) for c, g in zip(colors, group_names)]
@@ -7283,22 +7269,13 @@ class _GraphsWidget(QWidget):
             error_style = gs.get("error_style", "SEM")
             for gi, g in enumerate(group_list):
                 gdf = sess_bin[sess_bin["group"] == g]
-                stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
+                stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem", "count"]).reset_index()
                 stats["sem"] = stats["sem"].fillna(0)
                 seconds = stats["time_bin_s"]
                 color = self._host._group_color(g, gi)
                 ax.plot(seconds, stats["mean"], marker=".", label=str(g), color=color)
                 if error_style != "None":
-                    eb = stats["sem"].to_numpy() * (1.0 if error_style == "SEM" else
-                                                     (stats["mean"].count()**0.5 if error_style == "SD" else 1.96))
-                    if error_style == "SD":
-                        # recompute proper SD from SEM
-                        n_grp = gdf.groupby("time_bin_s")[col].count().reindex(stats["time_bin_s"]).fillna(1).to_numpy()
-                        eb = stats["sem"].to_numpy() * np.sqrt(np.maximum(n_grp, 1))
-                    elif error_style == "95% CI":
-                        eb = stats["sem"].to_numpy() * 1.96
-                    else:
-                        eb = stats["sem"].to_numpy()
+                    eb = _band_halfwidth(stats["sem"], stats["count"], error_style)
                     ax.fill_between(seconds, stats["mean"] - eb,
                                     stats["mean"] + eb, alpha=0.2, color=color)
             eb_lbl = f" \u00b1 {error_style}" if error_style != "None" else ""
@@ -7317,13 +7294,13 @@ class _GraphsWidget(QWidget):
             error_style = gs.get("error_style", "SEM")
             for bi, bname in enumerate(sorted(sess_bin["behavior"].unique())):
                 bdf = sess_bin[sess_bin["behavior"] == bname]
-                stats = bdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
+                stats = bdf.groupby("time_bin_s")[col].agg(["mean", "sem", "count"]).reset_index()
                 stats["sem"] = stats["sem"].fillna(0)
                 seconds = stats["time_bin_s"]
                 color = _PALETTE[bi % len(_PALETTE)]
                 ax.plot(seconds, stats["mean"], marker=".", label=str(bname), color=color)
                 if error_style != "None":
-                    eb = stats["sem"].to_numpy() * (1.96 if error_style == "95% CI" else 1.0)
+                    eb = _band_halfwidth(stats["sem"], stats["count"], error_style)
                     ax.fill_between(seconds, stats["mean"] - eb,
                                     stats["mean"] + eb, alpha=0.2, color=color)
             eb_lbl = f" \u00b1 {error_style}" if error_style != "None" else ""
@@ -7353,7 +7330,10 @@ class _GraphsWidget(QWidget):
             return
         sess_agg = self._session_aggregate(dfc, metric, agg_fn)
         group_names = self._host._ordered_group_list(sess_agg["group"].unique())
-        data = [sess_agg.loc[sess_agg["group"] == g, metric].tolist() for g in group_names]
+        data = [
+            [v for v in sess_agg.loc[sess_agg["group"] == g, metric].tolist() if np.isfinite(v)]
+            for g in group_names
+        ]
         bp = ax.boxplot(data, labels=group_names, patch_artist=True, widths=0.5,
                         medianprops={"color": "white", "linewidth": 1.5})
         for i, patch in enumerate(bp["boxes"]):
@@ -7369,10 +7349,10 @@ class _GraphsWidget(QWidget):
             jitter = rng.uniform(-0.08, 0.08, size=len(vals))
             ax.scatter(np.full(len(vals), i + 1) + jitter, vals,
                        color="white", s=25, zorder=3, edgecolors="black", linewidths=0.5)
-        # Stats annotation
-        if len(group_names) == 2:
+        if gs.get("show_stats", True) and any(data):
+            res = self._run_graph_stats(sess_agg, metric, group_names, metric_label)
             y_top = float(max(max(d) for d in data if d))
-            self._annotate_stats(ax, [1.0, 2.0], y_top)
+            self._draw_stats(ax, res, group_names, [float(i + 1) for i in range(len(group_names))], y_top)
         self._apply(ax, title=f"Box Plot: {metric_label}", ylabel=metric_label)
 
     def _ethogram(self, df: pd.DataFrame) -> None:
@@ -7745,13 +7725,13 @@ class _GraphsWidget(QWidget):
         error_style = self._gs().get("error_style", "SEM")
         for gi, g in enumerate(group_list):
             gdf = sess_bin[sess_bin["group"] == g]
-            stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
+            stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem", "count"]).reset_index()
             stats["sem"] = stats["sem"].fillna(0)
             seconds = stats["time_bin_s"]
             color = self._host._group_color(g, gi)
             ax.plot(seconds, stats["mean"], marker=".", label=str(g), color=color)
             if error_style != "None":
-                eb = stats["sem"].to_numpy() * (1.96 if error_style == "95% CI" else 1.0)
+                eb = _band_halfwidth(stats["sem"], stats["count"], error_style)
                 ax.fill_between(seconds, stats["mean"] - eb,
                                 stats["mean"] + eb, alpha=0.2, color=color)
         eb_lbl = f" \u00b1 {error_style}" if error_style != "None" else ""
@@ -7830,47 +7810,14 @@ class _GraphsWidget(QWidget):
                 jitter = rng.uniform(-0.12, 0.12, len(vals)) * bar_spacing
                 ax.scatter(np.full(len(vals), gi) + jitter, vals,
                            color="white", edgecolors="black", linewidths=0.5, s=25, zorder=5)
-        # Inline significance annotation (independent of the stats panel)
-        _show_stats = self._gs().get("show_stats", True)
-        if _show_stats and len(group_names) == 2:
-            try:
-                from scipy.stats import ttest_ind as _ttest_on_ax  # type: ignore[import-untyped]
-                _a0 = sess_agg.loc[sess_agg["group"] == group_names[0], metric].to_numpy()
-                _a1 = sess_agg.loc[sess_agg["group"] == group_names[1], metric].to_numpy()
-                if len(_a0) >= 2 and len(_a1) >= 2:
-                    _, _pv = _ttest_on_ax(_a0, _a1, equal_var=False)
-                    _sig = "***" if _pv < 0.001 else "**" if _pv < 0.01 else "*" if _pv < 0.05 else ""
-                    if _sig:
-                        _ytop = float(max(m + e for m, e in zip(g_means, g_ebs)))
-                        _pad = max(_ytop * 0.08, 0.10)
-                        _yline = _ytop + _pad
-                        ax.plot([0, 1], [_yline, _yline], color="black", linewidth=1.0, zorder=6)
-                        ax.plot([0, 0], [_ytop, _yline], color="black", linewidth=1.0, zorder=6)
-                        ax.plot([1, 1], [_ytop, _yline], color="black", linewidth=1.0, zorder=6)
-                        ax.text(0.5, _yline + _pad * 0.3, f"p={_pv:.3f}  {_sig}",
-                                ha="center", va="bottom",
-                                fontsize=max(6, gs["tick_fontsize"] - 1),
-                                color="black", fontweight="bold", zorder=7)
-            except Exception:
-                pass
-        elif _show_stats and len(group_names) > 2:
-            try:
-                from scipy.stats import f_oneway as _fow_on_ax  # type: ignore[import-untyped]
-                _arrs = [sess_agg.loc[sess_agg["group"] == g, metric].to_numpy()
-                         for g in group_names]
-                _arrs = [a for a in _arrs if len(a) >= 2]
-                if len(_arrs) >= 2:
-                    _, _pv = _fow_on_ax(*_arrs)
-                    _sig = "***" if _pv < 0.001 else "**" if _pv < 0.01 else "*" if _pv < 0.05 else ""
-                    if _sig:
-                        ax.text(0.98, 0.98, f"ANOVA {_sig}  p={_pv:.4f}",
-                                ha="right", va="top", transform=ax.transAxes,
-                                fontsize=max(6, gs["tick_fontsize"] - 1),
-                                color="black", fontweight="bold",
-                                bbox=dict(boxstyle="round,pad=0.3", fc="white",
-                                          ec="black", alpha=0.8))
-            except Exception:
-                pass
+        # Significance from the values plotted here (see Statistics...)
+        if gs.get("show_stats", True):
+            res = self._run_graph_stats(sess_agg, metric, group_names, title or ylabel)
+            _tops = [m + e for m, e in zip(g_means, g_ebs) if np.isfinite(m + e)]
+            _pts = pd.to_numeric(sess_agg[metric], errors="coerce").to_numpy()
+            _pts = _pts[np.isfinite(_pts)]
+            _ytop = float(max(_tops + ([float(_pts.max())] if _pts.size else []), default=0.0))
+            self._draw_stats(ax, res, group_names, list(x), _ytop)
         # Add labeled patches so the parent update_graph can collect handles
         # and place a shared side legend (hiding these x-tick labels).
         from matplotlib.patches import Patch as _Patch
@@ -7915,14 +7862,14 @@ class _GraphsWidget(QWidget):
         group_list = self._host._ordered_group_list(sess_bin["group"].unique())
         for gi, g in enumerate(group_list):
             gdf = sess_bin[sess_bin["group"] == g]
-            stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem"]).reset_index()
+            stats = gdf.groupby("time_bin_s")[col].agg(["mean", "sem", "count"]).reset_index()
             stats["sem"] = stats["sem"].fillna(0)
             seconds = stats["time_bin_s"]
             color = self._host._group_color(g, gi)
             ax.plot(seconds, stats["mean"], marker=".", label=str(g), color=color, markersize=4)
             error_style = gs.get("error_style", "SEM")
             if error_style != "None":
-                eb = stats["sem"].to_numpy() * (1.96 if error_style == "95% CI" else 1.0)
+                eb = _band_halfwidth(stats["sem"], stats["count"], error_style)
                 ax.fill_between(seconds, stats["mean"] - eb,
                                 stats["mean"] + eb, alpha=0.2, color=color)
         eb_lbl = f" \u00b1 {gs.get('error_style', 'SEM')}" if gs.get("error_style", "SEM") != "None" else ""
@@ -7948,7 +7895,10 @@ class _GraphsWidget(QWidget):
             return
         sess_agg = self._session_aggregate(dfc, metric, agg_fn)
         group_names = self._host._ordered_group_list(sess_agg["group"].unique())
-        data = [sess_agg.loc[sess_agg["group"] == g, metric].tolist() for g in group_names]
+        data = [
+            [v for v in sess_agg.loc[sess_agg["group"] == g, metric].tolist() if np.isfinite(v)]
+            for g in group_names
+        ]
         bp = ax.boxplot(data, labels=group_names, patch_artist=True, widths=0.5,
                         medianprops={"color": "white", "linewidth": 1.2})
         for i, patch in enumerate(bp["boxes"]):
@@ -7960,6 +7910,10 @@ class _GraphsWidget(QWidget):
             ax.set_xticklabels(group_names, rotation=_rot_bp, ha="right",
                                fontsize=max(7, gs["tick_fontsize"] - 1))
         beh_name = df["behavior"].iloc[0] if len(df) > 0 else ""
+        if gs.get("show_stats", True) and any(data):
+            res = self._run_graph_stats(sess_agg, metric, group_names, str(beh_name))
+            y_top = float(max(max(d) for d in data if d))
+            self._draw_stats(ax, res, group_names, [float(i + 1) for i in range(len(group_names))], y_top)
         self._apply(ax, title=str(beh_name), ylabel=ylabel)
 
     def _overview_on_ax(self, ax: Any, df: pd.DataFrame, title: str) -> None:
@@ -8031,7 +7985,7 @@ class _GraphsWidget(QWidget):
             "Error bar / shaded-band style shown on bar and line charts.\n"
             "SEM = standard error of the mean (default)\n"
             "SD = standard deviation\n"
-            "95% CI = 1.96 \u00d7 SEM\n"
+            "95% CI = t(0.975, n-1) \u00d7 SEM\n"
             "None = no error bars"
         )
 
@@ -8275,15 +8229,19 @@ class _GraphsWidget(QWidget):
             return pd.DataFrame(columns=["session_label", "behavior", "time_bin_s", col])
         return pd.concat(parts, ignore_index=True)
 
-    def _graph_rows(self) -> list[dict[str, Any]]:
+    def _graph_rows(
+        self, metric: str | None = None, group_filter: bool = True,
+    ) -> list[dict[str, Any]]:
         """Return the session x behavior summary rows behind the current graph.
 
         Applies, in order: the checked-subject and checked-group filters, the
         Data Range recompute, the bout filter (First N / Until Behavior, which
         is also where per-time scaling is applied) and the latency fallbacks.
+        ``metric`` overrides the graph's metric (the Statistics dialog picks
+        its own); ``group_filter=False`` skips the graph's group checkboxes.
         """
         checked = self._host._summary_tab._checked_subjects()
-        metric = self._get_metric()
+        metric = metric or self._get_metric()
 
         # Distance Traveled is a pseudo-behavior stored under a special ID.
         # _filtered_rows() only returns normal behavior rows (distance_cm = 0
@@ -8302,7 +8260,7 @@ class _GraphsWidget(QWidget):
             ]
         checked_groups = self._checked_groups()
         groups_map = self._host._session_groups
-        if self._get_mode() == "group" and checked_groups:
+        if group_filter and self._get_mode() == "group" and checked_groups:
             rows = [
                 r for r in rows
                 if groups_map.get(r["session_label"], "") in checked_groups
@@ -8313,7 +8271,7 @@ class _GraphsWidget(QWidget):
         # Apply bout filter
         if self._is_bout_filter_active():
             rows = self._recompute_rows_for_first_n(rows)
-        return self._apply_latency_fallbacks(rows)
+        return self._apply_latency_fallbacks(rows, metric)
 
     def _per_session_metric_table(
         self, df: "pd.DataFrame", metric: str, metric_label: str, agg_fn: str,
@@ -8331,7 +8289,10 @@ class _GraphsWidget(QWidget):
         out_rows = []
         for bname in behaviors:
             bdf = df[df["behavior"] == bname]
-            vals_by_session = bdf.groupby("session_label")[metric].agg(agg_fn).to_dict()
+            vals_by_session = (
+                _aggregate_metric(bdf, ["session_label"], metric)
+                .set_index("session_label")[metric].to_dict()
+            )
             for sess in sessions:
                 if sess in vals_by_session:
                     v = vals_by_session[sess]
@@ -8454,7 +8415,7 @@ class _GraphsWidget(QWidget):
                 # own rows.  Without it, all behaviors are collapsed per session
                 # (e.g. latencies summed across every behavior → one inflated
                 # number per group with no behavior breakdown).
-                sess_agg = dfc.groupby(["session_label", "behavior", "group"])[metric].agg(agg_fn).reset_index()
+                sess_agg = _aggregate_metric(dfc, ["session_label", "behavior", "group"], metric)
                 behaviors_out = sorted(sess_agg["behavior"].unique())
                 # Subjects that never performed a behavior contribute no rows,
                 # which would quietly drop them from that behavior's group
@@ -8496,9 +8457,16 @@ class _GraphsWidget(QWidget):
                 dfc = df.copy()
                 dfc["group"] = dfc["session_label"].map(groups_map)
                 dfc = dfc.dropna(subset=["group"])
-                sess_agg = self._session_aggregate(dfc, metric, agg_fn)
+                parts = []
+                for bname in sorted(dfc["behavior"].unique()):
+                    part = self._session_aggregate(dfc[dfc["behavior"] == bname], metric, agg_fn)
+                    part.insert(1, "behavior", bname)
+                    parts.append(part)
+                if not parts:
+                    return None
+                sess_agg = pd.concat(parts, ignore_index=True)
                 sess_agg.rename(columns={metric: metric_label}, inplace=True)
-                return sess_agg[["session_label", "group", metric_label]]
+                return sess_agg[["session_label", "behavior", "group", metric_label]]
             return None
 
         elif style == "stacked":
@@ -16544,7 +16512,7 @@ class _BehaviorMotifWidget(QWidget):
         error_style_combo.setToolTip(
             "Error bar style for Motif Discovery grouped bar charts.\n"
             "SEM = standard error, SD = standard deviation,\n"
-            "95% CI = 1.96 \u00d7 SEM, None = no error bars."
+            "95% CI = t(0.975, n-1) \u00d7 SEM, None = no error bars."
         )
 
         bar_spacing_spin = QDoubleSpinBox(dlg)
@@ -19859,7 +19827,7 @@ class _SessionSectionsWidget(QWidget):
             "Error bar / band style.\n"
             "SEM = standard error of the mean\n"
             "SD = standard deviation\n"
-            "95% CI = 1.96 \u00d7 SEM\n"
+            "95% CI = t(0.975, n-1) \u00d7 SEM\n"
             "None = no error bars"
         )
         form.addRow("Error bar style:", error_cb)
@@ -21682,7 +21650,7 @@ class _VelocityWidget(QWidget):
                     if error_style == "SD":
                         err_v = std_v
                     elif error_style == "95% CI":
-                        err_v = np.where(n_valid > 1, 1.96 * std_v / np.sqrt(np.maximum(n_valid, 1)), 0.0)
+                        err_v = np.where(n_valid > 1, _t975(n_valid) * std_v / np.sqrt(np.maximum(n_valid, 1)), 0.0)
                     else:  # SEM
                         err_v = np.where(n_valid > 1, std_v / np.sqrt(np.maximum(n_valid, 1)), 0.0)
             ax.plot(x_axis_ctx, mean_v, color=color, label=label, linewidth=1.5)
@@ -22257,7 +22225,7 @@ class _VelocityWidget(QWidget):
             "Error band style on line charts.\n"
             "SEM = standard error of the mean\n"
             "SD = standard deviation\n"
-            "95% CI = 1.96 \u00d7 SEM\n"
+            "95% CI = t(0.975, n-1) \u00d7 SEM\n"
             "None = no shading"
         )
         form.addRow("Error band style:", error_cb)
@@ -22597,11 +22565,11 @@ class _VelocityWidget(QWidget):
             mean_v = np.nanmean(mat[:, :p95], axis=0)
             n_v = np.sum(~np.isnan(mat[:, :p95]), axis=0).astype(float)
             with np.errstate(invalid="ignore", divide="ignore"):
-                std_v = np.nanstd(mat[:, :p95], axis=0)
+                std_v = np.nanstd(mat[:, :p95], axis=0, ddof=1)
                 if error_style == "SD":
                     err_v = std_v
                 elif error_style == "95% CI":
-                    err_v = np.where(n_v > 1, 1.96 * std_v / np.sqrt(np.maximum(n_v, 1)), 0.0)
+                    err_v = np.where(n_v > 1, _t975(n_v) * std_v / np.sqrt(np.maximum(n_v, 1)), 0.0)
                 else:
                     err_v = np.where(n_v > 1, std_v / np.sqrt(np.maximum(n_v, 1)), 0.0)
             x_axis = np.arange(p95) / fps
@@ -22724,7 +22692,7 @@ class _VelocityWidget(QWidget):
                 if error_style == "SD":
                     err_v = std_v
                 elif error_style == "95% CI":
-                    err_v = np.where(n_v > 1, 1.96 * std_v / np.sqrt(np.maximum(n_v, 1)), 0.0)
+                    err_v = np.where(n_v > 1, _t975(n_v) * std_v / np.sqrt(np.maximum(n_v, 1)), 0.0)
                 else:
                     err_v = np.where(n_v > 1, std_v / np.sqrt(np.maximum(n_v, 1)), 0.0)
             return x_axis, mean_v, err_v, n_v

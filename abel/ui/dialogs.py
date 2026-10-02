@@ -47,7 +47,7 @@ class ProjectWizardDialog(QDialog):
         self.default_fps.setRange(1, 240)
         self.default_fps.setValue(30)
 
-        self.clip_duration = QLineEdit("2.0")
+        self.clip_duration = QLineEdit("0.5")
         self.crop_margin = QSpinBox()
         self.crop_margin.setRange(0, 1000)
         self.crop_margin.setValue(40)
@@ -124,12 +124,13 @@ class ProjectWizardDialog(QDialog):
             single_animal=int(self.num_animals.value()) <= 1,
             expected_pose_formats=["csv", "h5"],
             default_fps=float(self.default_fps.value()),
-            default_clip_duration_sec=float(self.clip_duration.text().strip() or 2.0),
+            default_clip_duration_sec=float(self.clip_duration.text().strip() or 0.5),
             default_crop_margin_px=int(self.crop_margin.value()),
             video_source_mode=SourceMode(self.video_mode.currentText()),
             pose_source_mode=SourceMode(self.pose_mode.currentText()),
         )
         cfg.behavior_model.segment_window_frames = max(8, round(cfg.default_clip_duration_sec * cfg.default_fps))
+        cfg.behavior_model.segment_stride_frames = max(1, round(0.5 * cfg.default_fps))
         return root, cfg
 
     def _choose_root(self) -> None:

@@ -7,10 +7,69 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "September 27, 2026"
+VERSION_DATE = "October 2, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.25.0", "October 2, 2026", [
+        "Analytics statistics now match GraphPad Prism. Every p-value in "
+        "the Analytics tab (Run Statistics, the brackets on Bar and Box "
+        "graphs, and the Social group comparison) comes from one engine. A "
+        "new Statistics dialog shows the exact test, n, means and P values, "
+        "and lets you choose the design the way Prism does: unpaired or "
+        "paired by subject, Gaussian or rank-based, equal SDs or Welch, the "
+        "post-hoc method (Tukey, Sidak, Holm-Sidak, Bonferroni, Dunnett, "
+        "Fisher), Geisser-Greenhouse correction, and a repeated factor for "
+        "two-way ANOVA. The choices are saved per project and the Methods "
+        "write-up describes them.",
+        "Several Analytics numbers were fixed. Statistics run on the same "
+        "per-animal table that Export Data writes, one value per session "
+        "and behavior, instead of summing behaviors per session. Animals "
+        "that never did a behavior get latency equal to the time available, "
+        "not 0, and are left out of mean bout duration instead of counting "
+        "as 0 s. Two-way ANOVA handles unequal group sizes. 95% CI error "
+        "bars and bands use the t distribution instead of 1.96, which was "
+        "too narrow at typical group sizes. Graphs no longer show a stale "
+        "p-value from an earlier dialog run.",
+        "Social Interaction: hierarchy steepness text and chart use the "
+        "same per-dyad values and test, with tied dyads counted as 0. The "
+        "per-state dominant versus subordinate tests are corrected across "
+        "states (Holm-Sidak).",
+        "Onset Auto-Tune gives better thresholds for dense traces. The "
+        "held-out window optimum is now pulled toward a low global value. "
+        "In a leak-free benchmark of 120 behaviors in 20 projects this about "
+        "halved the average loss of the previous rule, which capped the "
+        "threshold at labeled bout peaks. Weak models still get a "
+        "suggestion, with a warning.",
+        "Review Effort judges breaks against each reviewer's own pace. A "
+        "gap is a break when it is far longer than the reviewer's pace over "
+        "the neighboring clips (never under 30 s, always over 30 min), so "
+        "new reviewers who start slow keep their long looks and fast "
+        "reviewers do not get pauses billed as review. On simulated "
+        "reviewers this kept active time within about 2%, where the fixed "
+        "120 s cutoff was off by up to 36%. The fixed cutoff is still an "
+        "option in the app and in Validation.",
+        "Defaults now match how projects are set up in practice: 0.5 s "
+        "clips, feature windows and stride, pose smoothing of 3 frames, "
+        "Active Learning batches of 200 with the weighted queue on at 20% "
+        "edge cases and the hard-negative component off, and Clip "
+        "Extraction showing the top 20 candidates with reviewed clips "
+        "hidden. Saved project settings are not changed. The Active "
+        "Learning queue now uses the edge-case percent shown on screen even "
+        "when it was never moved.",
+        "The Review tab behavior filter uses each clip's latest label, so a "
+        "clip changed from Groom to Rear no longer shows up under Groom.",
+        "The filename pattern dialog keeps your highlight when you click "
+        "Use as Subject or Use as Session, and highlighting in the example "
+        "box works too.",
+        "The unused Min duration field was removed from the Behaviors tab. "
+        "Bout length is set in Temporal Review.",
+        "The Windows taskbar shows the ABEL icon instead of a generic one "
+        "when the app is busy at startup.",
+        "ABEL has a project website with a welcome page, getting started "
+        "guide, citation, a searchable FAQ and a Tutorials page (coming "
+        "soon). The README links to it.",
+    ]),
     ("0.24.0", "September 27, 2026", [
         "Closing ABEL during training no longer loses models. Retrain All "
         "used to delete each old model before building its replacement. Now "

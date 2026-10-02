@@ -91,7 +91,7 @@ def _make_widget(metric: str, style: str, mode: str = "individual"):
     stub._bin_from_range_chk = SimpleNamespace(isChecked=lambda: False)
     stub._is_data_range_active = lambda: False
     stub._is_bout_filter_active = lambda: False
-    stub._apply_latency_fallbacks = lambda r: r
+    stub._apply_latency_fallbacks = lambda r, metric=None: r
     return stub
 
 

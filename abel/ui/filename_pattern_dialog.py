@@ -81,6 +81,16 @@ class FilenamePatternDialog(QDialog):
         self._stem_edit.setFont(font)
         self._stem_edit.setToolTip("Drag across the characters you want to extract.")
 
+        # Qt clears a line edit's selection when it loses focus, and users also
+        # highlight in the example box itself, so remember the last selection
+        # made in either field as (start, end) within the stem.
+        self._last_selection: tuple[int, int] | None = None
+        self._stem_edit.selectionChanged.connect(
+            lambda: self._remember_selection(self._stem_edit)
+        )
+        example_edit = self._example_combo.lineEdit()
+        example_edit.selectionChanged.connect(lambda: self._remember_selection(example_edit))
+
         subject_btn = QPushButton("Use as Subject")
         session_btn = QPushButton("Use as Session")
         clear_session_btn = QPushButton("No Session in Name")
@@ -142,22 +152,38 @@ class FilenamePatternDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _on_example_changed(self, name: str) -> None:
-        self._stem_edit.setText(Path(name.strip()).stem if name.strip() else "")
+        stem = Path(name.strip()).stem if name.strip() else ""
+        if stem != self._stem_edit.text():
+            self._last_selection = None
+        self._stem_edit.setText(stem)
         self._refresh_preview()
+
+    def _remember_selection(self, edit: QLineEdit) -> None:
+        start = edit.selectionStart()
+        length = len(edit.selectedText())
+        if start >= 0 and length:
+            # The example box shows the full name; the stem is its prefix.
+            stem_len = len(self._stem_edit.text())
+            end = min(start + length, stem_len)
+            if start < end:
+                self._last_selection = (start, end)
+        elif edit.hasFocus():
+            # A click inside the field that deselects is deliberate; a
+            # focus-out deselect is not.
+            self._last_selection = None
 
     def _use_selection(self, which: str) -> None:
         stem = self._stem_edit.text()
-        start = self._stem_edit.selectionStart()
-        length = len(self._stem_edit.selectedText())
-        if start < 0 or length == 0:
+        if self._last_selection is None:
             QMessageBox.information(
                 self, "Highlight Text",
                 "Drag across part of the filename first, then click the button.",
             )
             return
+        start, end = self._last_selection
         try:
-            snapped = snap_selection(stem, start, start + length)
-            pattern = generate_capture_regex(stem, start, start + length)
+            snapped = snap_selection(stem, start, end)
+            pattern = generate_capture_regex(stem, start, end)
         except ValueError as exc:
             QMessageBox.information(self, "Highlight Text", str(exc))
             return

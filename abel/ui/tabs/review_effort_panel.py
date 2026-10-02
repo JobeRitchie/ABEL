@@ -13,6 +13,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThreadPool
 from PySide6.QtWidgets import (
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -72,8 +73,10 @@ class ReviewEffortPanel(QWidget):
         intro = QLabel(
             "How much time did labeling take? Each clip's review time is the gap to the "
             "previous review decision. Gaps shorter than the bulk-action threshold are one "
-            "UI action writing many labels, and gaps longer than the break threshold are "
-            "the reviewer stepping away; neither is counted. Hours are therefore a floor; "
+            "UI action writing many labels, and breaks are the reviewer stepping away; "
+            "neither is counted. By default a break is judged against the reviewer's own "
+            "recent pace, so slow or still-learning reviewers keep their long looks and "
+            "fast reviewers do not get pauses billed as review. Hours are therefore a floor; "
             "the adjusted total adds the first clip of each sitting back at the median "
             "rate. Imported labels are excluded and Temporal Review corrections are "
             "counted but not timed. Nothing is written to the project."
@@ -96,11 +99,28 @@ class ReviewEffortPanel(QWidget):
         self._break.setDecimals(0)
         self._break.setSuffix(" s")
         self._break.setValue(review_effort.BREAK_SEC)
-        self._break.setToolTip("Gaps longer than this count as a break and are not charged to any clip.")
+        self._break.setToolTip(
+            "Fixed rule: gaps longer than this count as a break and are not charged to "
+            "any clip. Adaptive rule: used only where too few clips surround a gap to "
+            "judge the reviewer's pace.")
+        self._mode = QComboBox()
+        self._mode.addItem("Adapt to reviewer pace", review_effort.BREAK_ADAPTIVE)
+        self._mode.addItem("Fixed cutoff", review_effort.BREAK_FIXED)
+        self._mode.setCurrentIndex(self._mode.findData(review_effort.BREAK_MODE))
+        self._mode.setToolTip(
+            "Adapt: a gap is a break when it is far longer than the reviewer's pace over "
+            f"the {review_effort.ADAPTIVE_WINDOW} clips either side (never under "
+            f"{review_effort.ADAPTIVE_MIN_SEC:g} s, always over "
+            f"{review_effort.ADAPTIVE_MAX_SEC:g} s). Suits reviewers whose pace varies, "
+            "such as new users who start slow.\n"
+            "Fixed: one break cutoff for everyone.")
         row.addWidget(QLabel("Bulk-action below:"))
         row.addWidget(self._batch)
         row.addSpacing(16)
-        row.addWidget(QLabel("Break above:"))
+        row.addWidget(QLabel("Breaks:"))
+        row.addWidget(self._mode)
+        row.addSpacing(16)
+        row.addWidget(QLabel("Fixed break above:"))
         row.addWidget(self._break)
         row.addStretch(1)
         self._run_btn = QPushButton("Measure Review Effort")
@@ -167,15 +187,17 @@ class ReviewEffortPanel(QWidget):
         root = self._project_root
         break_sec = float(self._break.value())
         batch_sec = float(self._batch.value())
+        break_mode = str(self._mode.currentData())
 
         def _task() -> tuple:
             from abel.validation.analyses import review_effort  # noqa: PLC0415
             from abel.validation.datamodel import ProjectRef  # noqa: PLC0415
 
             result = review_effort.measure_project(
-                ProjectRef.load(root), break_sec=break_sec, batch_sec=batch_sec)
+                ProjectRef.load(root), break_sec=break_sec, batch_sec=batch_sec,
+                break_mode=break_mode)
             daily = review_effort.daily_breakdown(
-                root, break_sec=break_sec, batch_sec=batch_sec)
+                root, break_sec=break_sec, batch_sec=batch_sec, break_mode=break_mode)
             return result, daily
 
         self._stale = False
@@ -225,6 +247,10 @@ class ReviewEffortPanel(QWidget):
             ("Clips timed", f"{r.n_timed:,}"),
             ("Bulk-action decisions (not timed)", f"{r.n_batch:,}"),
             ("Breaks", f"{r.n_breaks:,}"),
+            ("Break rule",
+             "adapts to reviewer pace" if r.break_mode == review_effort.BREAK_ADAPTIVE
+             else "fixed cutoff"),
+            ("Typical break cutoff", f"{_num(r.break_cutoff_median_sec, '{:.0f}')} s"),
             ("Clip-review decisions", f"{r.n_clip_review:,}"),
             ("Temporal Review corrections", f"{r.n_temporal_feedback:,}"),
             ("Imported labels (excluded)", f"{r.n_imported:,}"),

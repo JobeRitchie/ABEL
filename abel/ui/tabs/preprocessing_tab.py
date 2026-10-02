@@ -92,7 +92,7 @@ class ClipExtractionTab(QWidget):
 
         self._top_n = QSpinBox()
         self._top_n.setRange(0, 2000)
-        self._top_n.setValue(5)
+        self._top_n.setValue(20)
         self._top_n.setToolTip("Highest-scoring candidates to extract per subject (and per behavior when all behaviors are targeted).")
 
         self._bottom_n = QSpinBox()
@@ -238,7 +238,7 @@ class ClipExtractionTab(QWidget):
         # refresh (it reads reviewer_labels.parquet) and reused across combo
         # changes, which fire _on_session_changed frequently.
         self._hide_reviewed_chk = QCheckBox("Hide reviewed clips")
-        self._hide_reviewed_chk.setChecked(False)
+        self._hide_reviewed_chk.setChecked(True)
         self._hide_reviewed_chk.setToolTip(
             "Hide candidates you've already reviewed (any accept / reject / "
             "relabel decision). Your review labels and clip files are untouched."
@@ -399,7 +399,7 @@ class ClipExtractionTab(QWidget):
         return list(by_id.values())
 
     def _reset_ui_settings_to_defaults(self) -> None:
-        self._top_n.setValue(5)
+        self._top_n.setValue(20)
         self._bottom_n.setValue(0)
         self._median_n.setValue(0)
         self._crop_area_percent.setValue(125.0)
@@ -408,7 +408,7 @@ class ClipExtractionTab(QWidget):
         self._id_marker_percent.setValue(100)
         self._before_sec.setValue(0.0)
         self._after_sec.setValue(0.0)
-        self._hide_reviewed_chk.setChecked(False)
+        self._hide_reviewed_chk.setChecked(True)
 
     def _bind_project_setting_persistence(self) -> None:
         self._session_combo.currentIndexChanged.connect(lambda _i: self._persist_ui_settings_to_project())
@@ -493,7 +493,7 @@ class ClipExtractionTab(QWidget):
                         self._preset_combo.setCurrentIndex(i)
                         break
 
-            self._top_n.setValue(int(ui.get("top_candidates", 5)))
+            self._top_n.setValue(int(ui.get("top_candidates", 20)))
             self._bottom_n.setValue(int(ui.get("bottom_candidates", 0)))
             self._median_n.setValue(int(ui.get("median_candidates", 0)))
             self._crop_area_percent.setValue(float(ui.get("crop_area_percent", 125.0)))
@@ -503,7 +503,7 @@ class ClipExtractionTab(QWidget):
             self._id_marker_percent.setValue(int(ui.get("identity_marker_percent", 100) or 100))
             self._before_sec.setValue(float(ui.get("before_sec", 0.0)))
             self._after_sec.setValue(float(ui.get("after_sec", 0.0)))
-            self._hide_reviewed_chk.setChecked(bool(ui.get("hide_reviewed", False)))
+            self._hide_reviewed_chk.setChecked(bool(ui.get("hide_reviewed", True)))
         finally:
             self._loading_ui_settings = False
 

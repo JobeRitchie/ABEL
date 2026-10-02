@@ -300,6 +300,15 @@ class SocialInteractionWidget(QWidget):
             "The group chart's values (one per session) as Prism-ready columns."
         )
         self._prism_btn.clicked.connect(self._copy_for_prism)
+        self._stats_btn = QPushButton("Statistics\u2026")
+        self._stats_btn.setToolTip(
+            "Show the test behind the group comparison (n, means, P values,\n"
+            "multiple comparisons) and change it: parametric or rank-based,\n"
+            "Welch, post-hoc method. Shared with the Graphs tab."
+        )
+        self._stats_btn.clicked.connect(self._open_stats_dialog)
+        # (title, StatsResult) of the group comparison last drawn.
+        self._compare_stats: tuple[str, Any] | None = None
         self._export_csv_btn = QPushButton("Export Results…")
         self._export_csv_btn.setToolTip(
             "Write every dominance table (per subject, per time bin, per\n"
@@ -319,6 +328,7 @@ class SocialInteractionWidget(QWidget):
             view_row.addSpacing(12)
             view_row.addWidget(self._facet)
         view_row.addStretch(1)
+        view_row.addWidget(self._stats_btn)
         view_row.addWidget(self._prism_btn)
         view_row.addWidget(self._export_fig_btn)
         view_row.addWidget(self._export_csv_btn)
@@ -549,6 +559,7 @@ class SocialInteractionWidget(QWidget):
         eth = self._view_key() == "ethogram"
         cmp_view = self._view_key() == "compare"
         self._prism_btn.setVisible(self._view_key() in ("compare", "dominance", "pct_dominant"))
+        self._stats_btn.setVisible(cmp_view)
         self._metric_lbl.setVisible(cmp_view)
         self._metric_combo.setVisible(cmp_view)
         self._session_lbl.setVisible(eth)
@@ -952,16 +963,22 @@ class SocialInteractionWidget(QWidget):
             lines.append(
                 f"  Ranked first by track id: {counts} (binomial p = {_fmt_p(p)}).{flag}"
             )
-        gs = self._svc.group_steepness(rows)
-        if len(gs["summary"]) >= 2 or (len(gs["summary"]) == 1 and "" not in gs["summary"]):
-            lines.append("  Hierarchy steepness (|dominance index|) by group:")
-            for g in self._order_groups(gs["summary"]):
-                s = gs["summary"][g]
+        # Same per-dyad values and test as the group comparison chart (a tied
+        # dyad counts as steepness 0), so the text and the chart agree.
+        dm = self.dyad_metrics()
+        dm = dm[np.isfinite(dm["steepness"].astype(float))] if not dm.empty else dm
+        st_groups = self._order_groups(dm["group"]) if not dm.empty else []
+        if len(st_groups) >= 2 or (len(st_groups) == 1 and st_groups[0] != ""):
+            lines.append("  Hierarchy steepness (|dominance index|, tied dyads = 0) by group:")
+            for g in st_groups:
+                v = dm.loc[dm["group"] == g, "steepness"].to_numpy(dtype=float)
+                sem = v.std(ddof=1) / np.sqrt(v.size) if v.size > 1 else float("nan")
                 lines.append(
-                    f"    {g or '(no group)'}: {s['mean']:.2f} ± {s['sem']:.2f} SEM (n = {s['n']})"
+                    f"    {g or '(no group)'}: {v.mean():.2f} ± {sem:.2f} SEM (n = {v.size})"
                 )
-            if gs["test"]:
-                lines.append(f"    {gs['test']}: p = {_fmt_p(gs['p'])}")
+            res_st = self._compare_result(dm, "steepness", st_groups)
+            if res_st is not None and not res_st.error:
+                lines.append(f"    {res_st.test}: p = {_fmt_p(res_st.p)} (options: Statistics…)")
         lines.append("")
         lines.append("DEFINITIONS")
         lines.append(
@@ -1380,12 +1397,63 @@ class SocialInteractionWidget(QWidget):
             ax.set_ylim(-1.05, 1.05)
             ax.axhline(0, color="#90a4ae", lw=0.8, zorder=1)
         ax.set_ylabel(axis)
-        test, p = self._svc.compare_groups([by_group[g] for g in groups])
         title = f"{label} by group (mean ± SEM, one point per session)"
-        if test:
-            title += f"; {test} p = {_fmt_p(p)}"
+        res = self._compare_result(df, key, groups)
+        self._compare_stats = (label, res)
+        if res is not None and not res.error:
+            from abel.services.group_stats import format_p  # noqa: PLC0415
+
+            title += f"; {res.test} {format_p(res.p)}"
         ax.set_title(title)
         self._tidy(ax)
+
+    def _stats_options(self) -> Any:
+        from abel.services.group_stats_options import StatsOptions  # noqa: PLC0415
+
+        opts = getattr(self._host, "_stats_options", None)
+        return opts if isinstance(opts, StatsOptions) else StatsOptions()
+
+    def _compare_result(self, df: pd.DataFrame, key: str, groups: list[str]) -> Any:
+        """The group comparison with the project's statistics options, or None."""
+        if len(groups) < 2:
+            return None
+        from abel.services.group_stats import one_factor  # noqa: PLC0415
+
+        subject_of = getattr(self._host, "subject_for_label", None)
+        data = pd.DataFrame({
+            "group": df["group"].astype(str).to_numpy(),
+            "value": df[key].astype(float).to_numpy(),
+            "subject": [
+                subject_of(lbl) if callable(subject_of) else lbl
+                for lbl in df["session_label"].astype(str)
+            ],
+        })
+        return one_factor(data, [str(g) for g in groups], self._stats_options())
+
+    def _open_stats_dialog(self) -> None:
+        from abel.ui.stats_options_dialog import StatsReportDialog  # noqa: PLC0415
+
+        def _report() -> str:
+            if self._compare_stats is None or self._compare_stats[1] is None:
+                return "No group comparison: split a factor into two or more groups."
+            title, res = self._compare_stats
+            return res.report(f"{title} (one value per dyad session)")
+
+        def _rerun(opts: Any) -> str:
+            self._host._stats_options = opts
+            save = getattr(self._host, "_save_group_state", None)
+            if callable(save):
+                save()
+            self._render()
+            return _report()
+
+        groups = [g.name for g in self._compare_stats[1].groups] if (
+            self._compare_stats and self._compare_stats[1] is not None) else []
+        StatsReportDialog(
+            self, "Social Statistics", self._stats_options(), _report(),
+            _rerun if hasattr(self._host, "_stats_options") else None,
+            group_names=groups,
+        ).exec()
 
     def _draw_profiles(self, fig: Any) -> None:
         res = self._res
@@ -1484,11 +1552,19 @@ class SocialInteractionWidget(QWidget):
         ax.set_ylim(0, top * 1.12)
         try:
             from scipy.stats import wilcoxon
-            for s in range(n):
-                diff = dom[:, s] - sub[:, s]
-                if len(pairs) >= 6 and np.any(diff != 0):
-                    p = float(wilcoxon(dom[:, s], sub[:, s]).pvalue)
-                    ax.text(s, top * 1.04, f"p = {_fmt_p(p)}", ha="center", fontsize=7)
+
+            from abel.services.group_stats import _adjust  # noqa: PLC0415
+
+            tested = [
+                s for s in range(n)
+                if len(pairs) >= 6 and np.any(dom[:, s] - sub[:, s] != 0)
+            ]
+            raw = [float(wilcoxon(dom[:, s], sub[:, s]).pvalue) for s in tested]
+            # One test per state: correct across states so a "significant"
+            # state is not just the luck of testing several.
+            adj = _adjust(np.asarray(raw), "holm_sidak") if raw else []
+            for s, p in zip(tested, adj):
+                ax.text(s, top * 1.04, f"p = {_fmt_p(float(p))}", ha="center", fontsize=7)
         except Exception:
             pass
         labels = res.get("state_labels", {})
@@ -1496,7 +1572,7 @@ class SocialInteractionWidget(QWidget):
         ax.set_xticklabels([labels.get(s, f"S{s}") for s in range(n)], rotation=20, ha="right", fontsize=8)
         ax.set_ylabel("% of tracked frames")
         ax.set_title(f"Do dominant and subordinate animals spend time differently? "
-                     f"(n = {len(pairs)} dyads; Wilcoxon signed-rank)")
+                     f"(n = {len(pairs)} dyads; Wilcoxon signed-rank, Holm-Šídák across states)")
         ax.legend(fontsize=8, frameon=False)
         self._tidy(ax)
 

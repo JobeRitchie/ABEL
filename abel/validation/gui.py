@@ -487,12 +487,14 @@ class _BenchmarkWorker(QRunnable):
 class _ReviewEffortWorker(QRunnable):
     """Human clip-review effort ledger: a cheap read of the decision logs."""
 
-    def __init__(self, projects, out_dir, break_sec: float, batch_sec: float) -> None:
+    def __init__(self, projects, out_dir, break_sec: float, batch_sec: float,
+                 break_mode: str) -> None:
         super().__init__()
         self.projects = projects
         self.out_dir = Path(out_dir)
         self.break_sec = float(break_sec)
         self.batch_sec = float(batch_sec)
+        self.break_mode = str(break_mode)
         self.signals = _JobSignals()
 
     @Slot()
@@ -506,7 +508,8 @@ class _ReviewEffortWorker(QRunnable):
                 self.signals.progress.emit(
                     f"[{project.name}] reading review decisions…", i / total)
                 results.append(review_effort.measure_project(
-                    project, break_sec=self.break_sec, batch_sec=self.batch_sec))
+                    project, break_sec=self.break_sec, batch_sec=self.batch_sec,
+                    break_mode=self.break_mode))
 
             self.out_dir.mkdir(parents=True, exist_ok=True)
             csv_path = self.out_dir / "review_effort.csv"
@@ -3244,7 +3247,11 @@ class ValidationWindow(QMainWindow):
             "• under the bulk-action threshold: one UI action (an assign-to-selection,\n"
             "  a held-down shortcut, a temporal-review interval tiling into windows)\n"
             "  writing many decisions in one loop, not a human looking at clips.\n"
-            "• over the break threshold: the reviewer walked away.\n"
+            "• breaks: the reviewer walked away. By default a gap is a break when it\n"
+            "  is far longer than the reviewer's own pace over the neighbouring clips,\n"
+            "  so slow or still-learning reviewers keep their long looks and fast\n"
+            "  reviewers do not get pauses billed as review. 'Fixed cutoff' uses one\n"
+            "  break threshold for everyone.\n"
             "\n"
             "Because the first clip after every break has no measurable gap, the hours\n"
             "reported are a floor. The table also carries an adjusted total that adds\n"
@@ -3273,10 +3280,18 @@ class ValidationWindow(QMainWindow):
         self._effort_break.setSuffix(" s")
         self._effort_break.setValue(review_effort.BREAK_SEC)
         self._effort_break.setToolTip(
-            "Gaps longer than this count as the reviewer stepping away and are not "
-            "charged to any clip. Lower it and genuine slow clips get dropped; raise "
-            "it and coffee breaks get billed as review time.")
-        form.addRow("Break above:", self._effort_break)
+            "Fixed rule: gaps longer than this count as the reviewer stepping away and "
+            "are not charged to any clip. Lower it and genuine slow clips get dropped; "
+            "raise it and coffee breaks get billed as review time. Adaptive rule: used "
+            "only where too few clips surround a gap to judge the reviewer's pace.")
+
+        self._effort_mode = QComboBox()
+        self._effort_mode.addItem("Adapt to reviewer pace", review_effort.BREAK_ADAPTIVE)
+        self._effort_mode.addItem("Fixed cutoff", review_effort.BREAK_FIXED)
+        self._effort_mode.setCurrentIndex(
+            self._effort_mode.findData(review_effort.BREAK_MODE))
+        form.addRow("Breaks:", self._effort_mode)
+        form.addRow("Fixed break above:", self._effort_break)
 
         run = QPushButton("Measure Review Effort"); run.setObjectName("runBtn")
         run.clicked.connect(self._run_review_effort)
@@ -3307,7 +3322,8 @@ class ValidationWindow(QMainWindow):
                       f"out={out_dir}")
         worker = _ReviewEffortWorker(projects, out_dir,
                                      self._effort_break.value(),
-                                     self._effort_batch.value())
+                                     self._effort_batch.value(),
+                                     str(self._effort_mode.currentData()))
         worker.signals.progress.connect(self._on_progress)
         worker.signals.finished.connect(self._on_review_effort_finished)
         worker.signals.error.connect(self._on_job_error)

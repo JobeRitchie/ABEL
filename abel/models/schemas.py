@@ -226,7 +226,7 @@ class BehaviorModelConfig(BaseModel):
     position within the zone) in addition to distance/angle to its center.
     Center-only features cannot express *where inside* a large or elongated zone
     the animal is, for a whole EPM open arm the center sits at the maze hub."""
-    segment_window_frames: int = 60
+    segment_window_frames: int = 15
     segment_stride_frames: int = 15
     hard_negative_sampling_ratio: float = 0.3
     query_strategy: Literal[
@@ -262,7 +262,7 @@ class BehaviorModelConfig(BaseModel):
             "margin": 0.0,
         }
     )
-    active_learning_query_size: int = 50
+    active_learning_query_size: int = 200
     bout_merge_gap: int = 10
     min_bout_duration: int = 15
     evaluation_split_strategy: Literal[
@@ -285,7 +285,7 @@ class ProjectConfig(BaseModel):
     features.  Kept consistent with ``single_animal`` (single_animal == num_animals <= 1)."""
     expected_pose_formats: list[str] = Field(default_factory=lambda: ["csv", "h5"])
     default_fps: float = 30.0
-    default_clip_duration_sec: float = 2.0
+    default_clip_duration_sec: float = 0.5
     default_crop_margin_px: int = 40
     default_downsample_preset: str = "fast_preview"
     behavior_model: BehaviorModelConfig = Field(default_factory=BehaviorModelConfig)
@@ -451,12 +451,12 @@ class PoseFeaturePreset(BaseModel):
     """Parameters for pose cleaning and kinematic feature window extraction."""
     preset_id: str
     name: str
-    window_duration_sec: float = 2.0
-    stride_sec: float = 1.0
+    window_duration_sec: float = 0.5
+    stride_sec: float = 0.5
     source_fps: float = 30.0
     likelihood_threshold: float = 0.2
     interpolate_dropouts: bool = True
-    smoothing_window: int = 5
+    smoothing_window: int = 3
 
 
 class SessionFeatureSummary(BaseModel):
@@ -599,8 +599,8 @@ class PreprocessingPreset(BaseModel):
     """Video clip output parameters used during selective clip extraction."""
     preset_id: str
     name: str
-    clip_duration_sec: float = 2.0
-    stride_sec: float = 1.0
+    clip_duration_sec: float = 0.5
+    stride_sec: float = 0.5
     output_fps: float = 15.0
     resize_width: int = 256
     resize_height: int = 256

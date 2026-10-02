@@ -112,3 +112,23 @@ def test_reviewed_clip_matches_every_per_animal_label():
     tab._segment_labels_by_window = {("sessA", 0, 14): {"attack", "submit|groom"}}
     ids = ReviewTab._nominating_behavior_ids(tab, cand)
     assert ids == {"attack", "submit", "groom"}
+
+
+def test_relabeled_clip_drops_its_superseded_label():
+    # Saved as groom, then re-saved as rear: the append-only label file keeps
+    # both rows, but the clip must no longer appear under the groom filter.
+    from types import SimpleNamespace
+
+    from abel.models.schemas import ReviewerLabelRecord
+    from abel.ui.tabs.review_tab import ReviewTab
+
+    seg = "seg_A_session_abc_0_14"
+    rows = [
+        ReviewerLabelRecord(segment_id=seg, review_label="groom", reviewer_id="r"),
+        ReviewerLabelRecord(segment_id=seg, review_label="rear", reviewer_id="r"),
+    ]
+    tab = type("T", (), {})()
+    tab._SEG_WINDOW_RE = ReviewTab._SEG_WINDOW_RE
+    tab._review_service = SimpleNamespace(load_segment_labels=lambda: rows)
+    index = ReviewTab._load_segment_label_index(tab)
+    assert index == {("session_abc", 0, 14): {"rear"}}

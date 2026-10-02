@@ -24,9 +24,27 @@ Three gap classes fall out of that, and only one of them is review time:
     A real per-clip look.  These, and only these, are summed into review time and
     are the sample behind every seconds-per-clip statistic here.
 
-``break``   gap > :data:`BREAK_SEC`
+``break``   gap > the break cutoff
     The reviewer walked away.  Excluded entirely, charging a lunch break to the
     next clip would turn a 3-hour labeling job into a 3-week one.
+
+The break cutoff
+----------------
+One fixed cutoff cannot fit every reviewer.  A new reviewer who takes 30-60 s
+per clip, with a long tail of harder clips, has real looks well past 120 s, so a
+fixed cutoff drops them; an experienced reviewer at 1 s per clip who answers the
+phone for 90 s gets that billed as review.  The default rule
+(:data:`BREAK_ADAPTIVE`) therefore judges each gap against the reviewer's *local*
+pace: the median and spread of the log gaps in the :data:`ADAPTIVE_WINDOW` gaps
+either side of it.  A gap is a break when it sits more than :data:`ADAPTIVE_Z`
+robust SDs above that local pace, clamped to
+[:data:`ADAPTIVE_MIN_SEC`, :data:`ADAPTIVE_MAX_SEC`].  The window follows the
+decisions in time, so it tracks a reviewer speeding up as they learn, and it
+tracks whoever is reviewing at that moment (the log does not name people).
+Against simulated reviewers with known review time, it kept active time within
+about 2% for learners slowing from 60 s to 5 s per clip and for fast reviewers
+with occasional 1-3 minute distractions, where the fixed 120 s cutoff was off by
+-26% and +36%.  :data:`BREAK_FIXED` keeps the single ``break_sec`` cutoff.
 
 What this deliberately under-counts
 -----------------------------------
@@ -73,8 +91,28 @@ from abel.validation.datamodel import ProjectRef
 #: Gaps below this are one bulk UI action, not a human look at a clip.
 BATCH_SEC = 0.05
 
-#: Gaps above this mean the reviewer left; the time is not charged to any clip.
+#: Fixed-rule break cutoff: gaps above this mean the reviewer left.  The adaptive
+#: rule falls back to it where there are too few neighbouring gaps to judge pace.
 BREAK_SEC = 120.0
+
+#: Break rules (see "The break cutoff" in the module docstring).
+BREAK_ADAPTIVE = "adaptive"
+BREAK_FIXED = "fixed"
+BREAK_MODE = BREAK_ADAPTIVE
+
+#: Adaptive rule: gaps either side of a gap that define the local pace.
+ADAPTIVE_WINDOW = 25
+#: Adaptive rule: robust SDs of log gap above the local median that make a break.
+ADAPTIVE_Z = 3.5
+#: Adaptive rule: floor on the log-gap spread, so a very regular stretch does not
+#: call a gap a break at 1.5x the median.
+ADAPTIVE_MIN_LOG_SPREAD = 0.35
+#: Adaptive rule: a gap this short is never a break, whatever the local pace.
+ADAPTIVE_MIN_SEC = 30.0
+#: Adaptive rule: a gap this long is always a break, and never counts toward pace.
+ADAPTIVE_MAX_SEC = 1800.0
+#: Adaptive rule: fewer neighbouring gaps than this and ``break_sec`` is used.
+ADAPTIVE_MIN_NEIGHBOURS = 5
 
 #: ``reviewer`` value written by the Temporal Review tab's interval tiling.
 REVIEWER_TEMPORAL = "temporal_feedback"
@@ -110,6 +148,8 @@ class ReviewEffortResult:
     n_timed: int = 0    # gaps counted as one clip's review
     n_batch: int = 0    # bulk UI actions
     n_breaks: int = 0   # reviewer away
+    break_mode: str = BREAK_MODE
+    break_cutoff_median_sec: float = float("nan")  # typical per-gap break cutoff
 
     # ── seconds per clip (over the timed gaps) ──
     median_sec: float = float("nan")
@@ -203,22 +243,69 @@ def _timestamps(rows: Iterable[dict[str, Any]]) -> list[datetime]:
     return out
 
 
+def _gaps(stamps: list[datetime]) -> np.ndarray:
+    return np.asarray([(b - a).total_seconds() for a, b in zip(stamps, stamps[1:])],
+                      dtype=float)
+
+
+def break_cutoffs(
+    gaps: np.ndarray, *, break_mode: str = BREAK_MODE, break_sec: float = BREAK_SEC,
+    batch_sec: float = BATCH_SEC,
+) -> np.ndarray:
+    """The break cutoff for each gap, in seconds.
+
+    Fixed rule: ``break_sec`` everywhere.  Adaptive rule: the local-pace cutoff
+    described in the module docstring.  The window looks both ways (this is an
+    offline read of a finished log), so the start of a sitting is judged by the
+    clips that follow it rather than by a warm-up default.
+    """
+    gaps = np.asarray(gaps, dtype=float)
+    cutoffs = np.full(gaps.size, float(break_sec))
+    if break_mode == BREAK_FIXED or gaps.size == 0:
+        return cutoffs
+    if break_mode != BREAK_ADAPTIVE:
+        raise ValueError(f"unknown break mode {break_mode!r}")
+
+    pace_idx = np.flatnonzero((gaps >= batch_sec) & (gaps <= ADAPTIVE_MAX_SEC))
+    log_pace = np.log(gaps[pace_idx])
+    # Position of each gap in the pace pool (its own slot if it is in the pool).
+    pos = np.searchsorted(pace_idx, np.arange(gaps.size))
+    for i in range(gaps.size):
+        p = int(pos[i])
+        lo, hi = max(0, p - ADAPTIVE_WINDOW), min(pace_idx.size, p + ADAPTIVE_WINDOW + 1)
+        neighbours = log_pace[lo:hi]
+        if p < pace_idx.size and pace_idx[p] == i:   # judge a gap by the others
+            neighbours = np.delete(neighbours, p - lo)
+        if neighbours.size < ADAPTIVE_MIN_NEIGHBOURS:
+            continue
+        centre = np.median(neighbours)
+        spread = max(1.4826 * np.median(np.abs(neighbours - centre)),
+                     ADAPTIVE_MIN_LOG_SPREAD)
+        cutoffs[i] = np.clip(np.exp(centre + ADAPTIVE_Z * spread),
+                             ADAPTIVE_MIN_SEC, ADAPTIVE_MAX_SEC)
+    return cutoffs
+
+
+def _label_gaps(
+    gaps: np.ndarray, *, break_mode: str, break_sec: float, batch_sec: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per gap: (is_timed, is_break, cutoff).  Anything neither is a bulk action."""
+    cutoffs = break_cutoffs(gaps, break_mode=break_mode, break_sec=break_sec,
+                            batch_sec=batch_sec)
+    is_break = gaps > cutoffs
+    return ~is_break & (gaps >= batch_sec), is_break, cutoffs
+
+
 def classify_gaps(
     stamps: list[datetime], *, break_sec: float = BREAK_SEC,
-    batch_sec: float = BATCH_SEC,
+    batch_sec: float = BATCH_SEC, break_mode: str = BREAK_MODE,
 ) -> tuple[np.ndarray, int, int]:
     """Split consecutive-decision gaps into (timed seconds, n_batch, n_breaks)."""
-    timed: list[float] = []
-    n_batch = n_breaks = 0
-    for previous, current in zip(stamps, stamps[1:]):
-        gap = (current - previous).total_seconds()
-        if gap > break_sec:
-            n_breaks += 1
-        elif gap < batch_sec:
-            n_batch += 1
-        else:
-            timed.append(gap)
-    return np.asarray(timed, dtype=float), n_batch, n_breaks
+    gaps = _gaps(stamps)
+    timed, is_break, _ = _label_gaps(gaps, break_mode=break_mode,
+                                     break_sec=break_sec, batch_sec=batch_sec)
+    n_batch = int(gaps.size - timed.sum() - is_break.sum())
+    return gaps[timed], n_batch, int(is_break.sum())
 
 
 # ── the data volume the effort bought ───────────────────────────────────────
@@ -273,10 +360,12 @@ def _footage_reviewed_hours(rows: list[dict[str, Any]], fps: float) -> float:
 
 def measure_project(
     project: ProjectRef, *, break_sec: float = BREAK_SEC, batch_sec: float = BATCH_SEC,
+    break_mode: str = BREAK_MODE,
 ) -> ReviewEffortResult:
     """Measure one project's human clip-review cost.  Never raises."""
     result = ReviewEffortResult(project_id=project.project_id,
-                               project_name=project.name or project.project_id)
+                               project_name=project.name or project.project_id,
+                               break_mode=break_mode)
     try:
         rows = _load_decisions(project.root)
     except Exception as exc:  # noqa: BLE001, a missing/odd file must not sink a run
@@ -300,12 +389,16 @@ def measure_project(
     result.first_decision = stamps[0].isoformat(timespec="seconds")
     result.last_decision = stamps[-1].isoformat(timespec="seconds")
 
-    timed, n_batch, n_breaks = classify_gaps(
-        stamps, break_sec=break_sec, batch_sec=batch_sec)
+    gaps = _gaps(stamps)
+    is_timed, is_break, cutoffs = _label_gaps(
+        gaps, break_mode=break_mode, break_sec=break_sec, batch_sec=batch_sec)
+    timed = gaps[is_timed]
+    n_breaks = int(is_break.sum())
     result.timed_sec = timed
     result.n_timed = int(timed.size)
-    result.n_batch = int(n_batch)
-    result.n_breaks = int(n_breaks)
+    result.n_batch = int(gaps.size - timed.size - n_breaks)
+    result.n_breaks = n_breaks
+    result.break_cutoff_median_sec = float(np.median(cutoffs))
     if timed.size == 0:
         result.error = ("no gaps fell in the per-clip band: every decision was "
                         "either a bulk action or separated by a break")
@@ -337,19 +430,22 @@ def measure_project(
 
 def run_review_effort(
     projects: list[ProjectRef], *, break_sec: float = BREAK_SEC,
-    batch_sec: float = BATCH_SEC, log: Callable[[str], None] | None = None,
+    batch_sec: float = BATCH_SEC, break_mode: str = BREAK_MODE,
+    log: Callable[[str], None] | None = None,
 ) -> list[ReviewEffortResult]:
     """Measure every project's review cost (one cheap pass over the decision logs)."""
     results: list[ReviewEffortResult] = []
     for project in projects:
         if log:
             log(f"[{project.name}] reading review decisions…")
-        results.append(measure_project(project, break_sec=break_sec, batch_sec=batch_sec))
+        results.append(measure_project(project, break_sec=break_sec, batch_sec=batch_sec,
+                                       break_mode=break_mode))
     return results
 
 
 def daily_breakdown(
     project_root: Path, *, break_sec: float = BREAK_SEC, batch_sec: float = BATCH_SEC,
+    break_mode: str = BREAK_MODE,
 ) -> pd.DataFrame:
     """Per-day clip-review effort, one row per local calendar date.
 
@@ -366,6 +462,9 @@ def daily_breakdown(
     from datetime import timezone  # noqa: PLC0415
 
     local = [s.replace(tzinfo=timezone.utc).astimezone() for s in stamps]
+    gaps = _gaps(stamps)
+    is_timed, is_break, _ = _label_gaps(
+        gaps, break_mode=break_mode, break_sec=break_sec, batch_sec=batch_sec)
     by_day: dict[Any, dict[str, Any]] = {}
     for i, when in enumerate(local):
         day = by_day.setdefault(when.date(), {"gaps": [], "sittings": 0,
@@ -374,11 +473,10 @@ def daily_breakdown(
         if i == 0:
             day["sittings"] += 1
             continue
-        gap = (stamps[i] - stamps[i - 1]).total_seconds()
-        if gap > break_sec or local[i - 1].date() != when.date():
+        if is_break[i - 1] or local[i - 1].date() != when.date():
             day["sittings"] += 1
-        if batch_sec <= gap <= break_sec:
-            day["gaps"].append(gap)
+        if is_timed[i - 1]:
+            day["gaps"].append(gaps[i - 1])
     out = []
     for date, day in sorted(by_day.items()):
         gaps = np.asarray(day["gaps"], dtype=float)
@@ -475,6 +573,8 @@ def results_to_frame(results: list[ReviewEffortResult]) -> pd.DataFrame:
             "n_clips_timed": r.n_timed,
             "n_bulk_actions": r.n_batch,
             "n_breaks": r.n_breaks,
+            "break_rule": r.break_mode,
+            "median_break_cutoff_sec": r.break_cutoff_median_sec,
             "n_temporal_feedback": r.n_temporal_feedback,
             "n_imported_excluded": r.n_imported,
             "median_sec_per_clip": r.median_sec,

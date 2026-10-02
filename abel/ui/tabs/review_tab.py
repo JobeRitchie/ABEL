@@ -1794,9 +1794,14 @@ class ReviewTab(QWidget):
         Soundboard labels are stored per animal (``seg_{animal}_{session}_{s}_{e}``)
         while the clip's review decision keeps only the first label, so this is
         what lets the behavior filter find every behavior in a reviewed clip.
+        The label file is append-only, so only the last row per segment counts
+        (as in training); a clip re-saved from Groom to Rear is no longer Groom.
         """
-        index: dict[tuple[str, int, int], set[str]] = {}
+        latest: dict[str, ReviewerLabelRecord] = {}
         for rec in self._review_service.load_segment_labels():
+            latest[str(rec.segment_id)] = rec
+        index: dict[tuple[str, int, int], set[str]] = {}
+        for rec in latest.values():
             label = str(rec.review_label or "").strip()
             m = self._SEG_WINDOW_RE.match(str(rec.segment_id))
             if not label or not m:

@@ -12,7 +12,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -206,12 +205,6 @@ class BehaviorTab(QWidget):
         self._f_shortcut.setMaxLength(1)
         self._f_shortcut.setPlaceholderText("g")
 
-        self._f_min_dur = QDoubleSpinBox()
-        self._f_min_dur.setRange(0.0, 600.0)
-        self._f_min_dur.setSingleStep(0.1)
-        self._f_min_dur.setSuffix(" s")
-        self._f_min_dur.setMaximumWidth(100)
-
         self._f_active = QCheckBox("Behavior is active")
         self._f_active.setChecked(True)
 
@@ -259,10 +252,6 @@ class BehaviorTab(QWidget):
         meta_row.addStretch()
         form_layout.addRow("", meta_row)
 
-        dur_row = QHBoxLayout()
-        dur_row.addWidget(self._f_min_dur)
-        dur_row.addStretch()
-        form_layout.addRow("Min duration", dur_row)
         form_layout.addRow("", self._f_active)
 
         self._social_row = QWidget()
@@ -404,7 +393,6 @@ class BehaviorTab(QWidget):
         self._f_short.setText(b.short_name)
         self._set_color_btn(self._current_color)
         self._f_shortcut.setText(b.keyboard_shortcut or "")
-        self._f_min_dur.setValue(b.min_duration_sec)
         self._f_active.setChecked(b.is_active)
         self._f_social.setChecked(bool(getattr(b, "is_social", False)))
         direction = getattr(b, "directionality", "none") or "none"
@@ -422,7 +410,6 @@ class BehaviorTab(QWidget):
                 widget.clear()
             else:
                 widget.clear()
-        self._f_min_dur.setValue(0.5)
         self._f_active.setChecked(True)
         self._f_social.setChecked(False)
         self._f_directionality.setCurrentIndex(0)
@@ -431,7 +418,7 @@ class BehaviorTab(QWidget):
     def _set_form_enabled(self, enabled: bool) -> None:
         for w in (
             self._f_name, self._f_short, self._f_color_btn, self._f_shortcut,
-            self._f_min_dur, self._f_active, self._f_social, self._f_directionality,
+            self._f_active, self._f_social, self._f_directionality,
             self._f_description,
             self._save_btn, self._cancel_btn, self._delete_btn,
         ):
@@ -468,13 +455,14 @@ class BehaviorTab(QWidget):
             QMessageBox.warning(self, "Required", "Behavior name is required.")
             return
 
+        existing = self._service.get(self._selected_id) if self._selected_id else None
         b = BehaviorDefinition(
             behavior_id=self._selected_id or "",
             name=name,
             short_name=self._f_short.text().strip() or name[:6].lower(),
             color=self._current_color,
             keyboard_shortcut=self._f_shortcut.text().strip() or None,
-            min_duration_sec=self._f_min_dur.value(),
+            min_duration_sec=existing.min_duration_sec if existing else 0.0,
             is_active=self._f_active.isChecked(),
             is_social=self._f_social.isChecked(),
             directionality=self._f_directionality.currentText() if self._f_social.isChecked() else "none",

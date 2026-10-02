@@ -64,9 +64,72 @@ def test_classify_gaps_splits_batch_active_and_break():
 
 def test_classify_gaps_honours_custom_thresholds():
     stamps = [BASE + timedelta(seconds=s) for s in (0, 0.5, 10.0)]
-    timed, n_batch, n_breaks = re.classify_gaps(stamps, break_sec=5.0, batch_sec=1.0)
+    timed, n_batch, n_breaks = re.classify_gaps(stamps, break_sec=5.0, batch_sec=1.0,
+                                                break_mode=re.BREAK_FIXED)
     assert n_batch == 1 and n_breaks == 1        # 0.5 s is bulk, 9.5 s is a break
     assert timed.size == 0
+
+
+def _stamps_from_gaps(gaps: list[float]) -> list[datetime]:
+    return [BASE + timedelta(seconds=float(s)) for s in np.concatenate([[0], np.cumsum(gaps)])]
+
+
+def test_adaptive_keeps_a_slow_reviewers_long_looks():
+    """A learner at ~60 s per clip has real looks past 120 s; a fixed cutoff drops them."""
+    rng = np.random.default_rng(0)
+    gaps = list(rng.lognormal(np.log(60.0), 0.5, 200)) + [200.0]
+    stamps = _stamps_from_gaps(gaps)
+    _, _, fixed_breaks = re.classify_gaps(stamps, break_mode=re.BREAK_FIXED)
+    timed, _, adaptive_breaks = re.classify_gaps(stamps, break_mode=re.BREAK_ADAPTIVE)
+    assert fixed_breaks > 10
+    assert adaptive_breaks == 0
+    assert 200.0 in timed
+
+
+def test_adaptive_cuts_a_fast_reviewers_distraction():
+    """A 90 s pause among 1 s clips is not one clip's review."""
+    gaps = [1.0, 1.2, 0.8, 1.1] * 20 + [90.0] + [1.0, 0.9, 1.3] * 20
+    stamps = _stamps_from_gaps(gaps)
+    timed_fixed, _, _ = re.classify_gaps(stamps, break_mode=re.BREAK_FIXED)
+    timed, _, n_breaks = re.classify_gaps(stamps, break_mode=re.BREAK_ADAPTIVE)
+    assert 90.0 in timed_fixed
+    assert n_breaks == 1 and 90.0 not in timed
+
+
+def test_adaptive_follows_a_reviewer_speeding_up():
+    """The same 100 s gap is a look early on (slow) and a break later (fast)."""
+    early = [40.0, 55.0, 35.0, 60.0, 45.0] * 8
+    late = [1.0, 1.5, 0.8, 1.2, 0.9] * 8
+    gaps = early[:20] + [100.0] + early[20:] + late[:20] + [100.0] + late[20:]
+    cutoffs = re.break_cutoffs(np.asarray(gaps), break_mode=re.BREAK_ADAPTIVE)
+    assert gaps[20] <= cutoffs[20]
+    assert gaps[61] > cutoffs[61]
+
+
+def test_adaptive_cutoff_is_clamped():
+    gaps = np.asarray([1.0] * 60 + [20.0] + [1.0] * 60)
+    cutoffs = re.break_cutoffs(gaps, break_mode=re.BREAK_ADAPTIVE)
+    assert cutoffs.min() >= re.ADAPTIVE_MIN_SEC        # 20 s is still a look
+    slow = np.asarray([600.0] * 60)
+    assert re.break_cutoffs(slow, break_mode=re.BREAK_ADAPTIVE).max() <= re.ADAPTIVE_MAX_SEC
+
+
+def test_adaptive_falls_back_to_break_sec_with_too_few_gaps():
+    cutoffs = re.break_cutoffs(np.asarray([1.0, 2.0, 500.0]), break_sec=120.0,
+                               break_mode=re.BREAK_ADAPTIVE)
+    np.testing.assert_allclose(cutoffs, 120.0)
+
+
+def test_measure_project_records_the_break_rule(tmp_path):
+    _write_decisions(tmp_path, [_decision(i * 2.0) for i in range(30)])
+    fixed = re.measure_project(_project(tmp_path), break_mode=re.BREAK_FIXED)
+    adaptive = re.measure_project(_project(tmp_path))
+    assert fixed.break_mode == re.BREAK_FIXED
+    assert fixed.break_cutoff_median_sec == pytest.approx(re.BREAK_SEC)
+    assert adaptive.break_mode == re.BREAK_MODE == re.BREAK_ADAPTIVE
+    assert adaptive.break_cutoff_median_sec == pytest.approx(re.ADAPTIVE_MIN_SEC)
+    df = re.results_to_frame([adaptive])
+    assert df.loc[0, "break_rule"] == re.BREAK_ADAPTIVE
 
 
 def test_classify_gaps_on_fewer_than_two_stamps_is_empty():
@@ -388,6 +451,18 @@ def test_daily_breakdown_splits_by_day_and_matches_project_total(tmp_path):
     assert list(daily["sittings"]) == [1, 1]
     assert daily["active_min"].tolist() == pytest.approx([5 / 60, 3 / 60])
     total = re.measure_project(_project(tmp_path))
+    assert daily["active_min"].sum() / 60 == pytest.approx(total.active_hours)
+
+
+@pytest.mark.parametrize("mode", [re.BREAK_FIXED, re.BREAK_ADAPTIVE])
+def test_daily_breakdown_matches_project_total_under_either_rule(tmp_path, mode):
+    offsets = np.cumsum([0] + [1.0, 1.2, 0.9] * 20 + [90.0] + [1.0] * 30 + [5000.0]
+                        + [40.0, 60.0, 150.0, 50.0] * 10)
+    _write_decisions(tmp_path, [_decision(float(t), start=i * 15)
+                                for i, t in enumerate(offsets)])
+    daily = re.daily_breakdown(tmp_path, break_mode=mode)
+    total = re.measure_project(_project(tmp_path), break_mode=mode)
+    assert daily["clips_timed"].sum() == total.n_timed
     assert daily["active_min"].sum() / 60 == pytest.approx(total.active_hours)
 
 

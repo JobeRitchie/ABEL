@@ -16,6 +16,41 @@ def _startup_step(message: str) -> None:
     print(f"[INFO] {message}", flush=True)
 
 
+def _set_native_class_icon(win, ico_path) -> None:
+    """Give the Win32 window class the ABEL icon, not the generic default.
+
+    The taskbar asks a new window for its icon with a short timeout. ABEL's UI
+    thread is busy right after the main window appears, so that query times out
+    and Windows falls back to the window class icon, which Qt leaves as the
+    generic application icon. The button then keeps that icon for the session.
+    Setting the class icon makes the fallback the ABEL logo too.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.LoadImageW.argtypes = [
+            wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT,
+        ]
+        user32.SetClassLongPtrW.restype = ctypes.c_void_p
+        user32.SetClassLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+        hwnd = wintypes.HWND(int(win.winId()))
+        IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+        # (class slot, size metric): GCLP_HICON/SM_CXICON, GCLP_HICONSM/SM_CXSMICON
+        for slot, metric in ((-14, 11), (-34, 49)):
+            size = user32.GetSystemMetrics(metric)
+            hicon = user32.LoadImageW(None, str(ico_path), IMAGE_ICON, size, size, LR_LOADFROMFILE)
+            if hicon:
+                user32.SetClassLongPtrW(hwnd, slot, hicon)
+    except Exception:
+        pass
+
+
 def run() -> int:
     _startup_step("Loading Qt...")
     try:
@@ -57,6 +92,7 @@ def run() -> int:
     install_wheel_guard(app)
     _startup_step("Building the main window...")
     win = MainWindow()
+    _set_native_class_icon(win, icon_path())
     win.showMaximized()
     _startup_step("ABEL is running. Keep this window open; close ABEL to exit.")
     return app.exec()

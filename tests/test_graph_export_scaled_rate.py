@@ -100,7 +100,7 @@ def _make_widget(scaling: bool = True, style: str = "bar", mode: str = "individu
     stub._checked_groups = lambda: set()
     stub._get_data_range_seconds = lambda: (None, None)
     stub._is_data_range_active = lambda: False
-    stub._apply_latency_fallbacks = lambda r: r
+    stub._apply_latency_fallbacks = lambda r, metric=None: r
     stub._get_first_n_bouts = lambda: 0
     stub._session_analysis_end_s = lambda _sid: _SESSION_END_S
     stub._bout_filter_mode = SimpleNamespace(

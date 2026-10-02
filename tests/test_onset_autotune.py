@@ -26,14 +26,17 @@ def test_squashed_probabilities_get_a_low_threshold() -> None:
     preds = _preds(rng.uniform(0.06, 0.09, 40), rng.uniform(0.0, 0.04, 400))
     s = suggest_for_predictions("b", "Allogroom", 0.3, preds)
     assert s.is_change
-    assert 0.04 <= s.suggested <= 0.06
+    # Window midpoint ~0.05, shrunk toward the 0.1 prior.
+    assert 0.08 <= s.suggested <= 0.095
     assert s.f1_current == 0.0
-    assert s.f1_suggested == 1.0
 
 
-def test_near_optimal_threshold_is_left_alone() -> None:
+def test_threshold_at_the_suggestion_is_left_alone() -> None:
     preds = _preds(np.full(40, 0.9), np.full(400, 0.1))
-    s = suggest_for_predictions("b", "Dig", 0.5, preds)
+    first = suggest_for_predictions("b", "Dig", 0.5, preds)
+    # Flat plateau 0.1-0.9, midpoint ~0.5, shrunk to ~0.2.
+    assert abs(first.suggested - 0.2) < 0.01
+    s = suggest_for_predictions("b", "Dig", first.suggested, preds)
     assert not s.is_change
     assert "already at the suggestion" in s.note
 
@@ -44,13 +47,13 @@ def test_too_few_positives_is_not_tuned() -> None:
     assert s.val_positives == 2
 
 
-def test_accept_everything_optimum_is_rejected() -> None:
+def test_weak_model_is_flagged_but_still_shrunk() -> None:
     # Positives indistinguishable from negatives: best F1 flags nearly every window.
     rng = np.random.default_rng(1)
     preds = _preds(rng.uniform(0.0, 1.0, 20), rng.uniform(0.0, 1.0, 400))
     s = suggest_for_predictions("b", "Dominate", 0.9, preds)
-    assert not s.is_change
-    assert "too weak" in s.note
+    assert s.is_change and s.suggested <= 0.32
+    assert "Weak model" in s.note
 
 
 def test_model_found_by_recorded_target_not_folder_name(tmp_path: Path) -> None:
@@ -61,16 +64,6 @@ def test_model_found_by_recorded_target_not_folder_name(tmp_path: Path) -> None:
     out = suggest_onset_thresholds(tmp_path, [("uuid-1", "Groom"), ("uuid-2", "Rear")], {"uuid-1": 0.3})
     assert out[0].is_change
     assert not out[1].is_change and "No trained model" in out[1].note
-
-
-def test_threshold_below_deployed_trace_baseline_is_rejected() -> None:
-    # Held-out windows favor 0.06, but the deployed trace idles at 0.11: 0.06 would mark every frame.
-    rng = np.random.default_rng(0)
-    preds = _preds(rng.uniform(0.06, 0.09, 40), rng.uniform(0.0, 0.04, 400))
-    trace = np.full(1000, 0.11)
-    s = suggest_for_predictions("b", "Sniff Body", 0.3, preds, trace_values=trace)
-    assert not s.is_change
-    assert "baseline" in s.note
 
 
 def test_bout_cleanup_scales_with_fps() -> None:
@@ -97,7 +90,6 @@ def test_threshold_at_plateau_edge_moves_even_at_equal_f1() -> None:
     assert s.is_change
     assert s.suggested < 0.85
     assert s.f1_suggested == s.f1_current
-    assert "fewer short bouts" in s.note
 
 
 def test_recall_beta_lowers_the_threshold() -> None:
@@ -109,41 +101,7 @@ def test_recall_beta_lowers_the_threshold() -> None:
     assert recall.suggested < f1.suggested
 
 
-def test_threshold_is_capped_below_the_peaks_of_low_bouts() -> None:
-    # Windows separate cleanly at ~0.5, but a fifth of the labeled bouts peak at ~0.3 on
-    # the averaged trace, so the held-out best would leave them uncounted.
-    rng = np.random.default_rng(4)
-    preds = _preds(rng.uniform(0.6, 0.9, 50), rng.uniform(0.0, 0.4, 500))
-    peaks = np.r_[rng.uniform(0.28, 0.32, 20), rng.uniform(0.7, 0.95, 80)]
-    plain = suggest_for_predictions("b", "Sniff Anogenital", 0.56, preds)
-    capped = suggest_for_predictions("b", "Sniff Anogenital", 0.56, preds, bout_peaks=peaks)
-    assert plain.suggested is None or plain.suggested > 0.4
-    assert capped.suggested <= np.quantile(peaks, 0.1)
-    assert np.mean(peaks >= capped.suggested) >= 0.9
-    assert "never reach the current threshold" in capped.note
-
-
-def test_cap_needs_enough_labeled_bouts() -> None:
-    rng = np.random.default_rng(5)
-    preds = _preds(rng.uniform(0.6, 0.9, 50), rng.uniform(0.0, 0.4, 500))
-    few = suggest_for_predictions("b", "Rare", 0.3, preds, bout_peaks=np.full(5, 0.1))
-    assert few.suggested is None or few.suggested > 0.4
-
-
-def test_labeled_bout_peaks_read_the_deployed_trace(tmp_path: Path) -> None:
-    from abel.temporal_refinement.onset_autotune import _labeled_bout_peaks
-
-    traces = tmp_path / "derived" / "temporal_refinement" / "target_behavior" / "inference_x" / "animal_probability_traces"
-    traces.mkdir(parents=True)
-    x = np.zeros(300, dtype=np.float32)
-    x[40:60] = 0.3   # low bout
-    x[200:240] = 0.9  # strong bout
-    pd.DataFrame({"frame": np.arange(300), "prob_b": x}).to_parquet(traces / "s1__track_0_trace.parquet")
-    labels = pd.DataFrame({
-        "session_id": ["s1"] * 4, "animal_id": ["track_0"] * 4,
-        "start_frame": [40, 50, 205, 120], "end_frame": [55, 60, 220, 135],
-        "label": ["b", "b|a", "b", "a"],
-    })
-    peaks = np.sort(_labeled_bout_peaks(tmp_path, "b", labels))
-    assert len(peaks) == 2  # the two overlapping low windows are one bout; "a" alone is not b
-    assert abs(peaks[0] - 0.3) < 0.01 and abs(peaks[1] - 0.9) < 0.01
+def test_shrunk_suggestions_stay_in_a_narrow_band() -> None:
+    from abel.temporal_refinement.onset_autotune import shrink_threshold
+    assert shrink_threshold(0.01) >= 0.075
+    assert shrink_threshold(0.95) <= 0.32

@@ -243,7 +243,7 @@ class ActiveLearningTab(QWidget):
         self._query_size = QSpinBox()
         self._query_size.setRange(0, 99999)
         self._query_size.setSpecialValueText("All")
-        self._query_size.setValue(100)
+        self._query_size.setValue(200)
 
         self._segment_window_value = QLabel("-")
         self._segment_stride_value = QLabel("-")
@@ -435,7 +435,7 @@ class ActiveLearningTab(QWidget):
         self._guided_settings_btn.clicked.connect(self._run_guided_settings_helper)
 
         self._queue_weighted_enable = QCheckBox("Enable weighted queue scoring")
-        self._queue_weighted_enable.setChecked(False)
+        self._queue_weighted_enable.setChecked(True)
         self._queue_weighted_enable.setToolTip(
             "Opt-in: combine modular queue scores (candidate, uncertainty, disagreement, diversity, confound, hard-negative, exploration)."
         )
@@ -450,7 +450,7 @@ class ActiveLearningTab(QWidget):
         self._queue_enable_confound.setChecked(True)
 
         self._queue_enable_hardneg = QCheckBox("Use hard-negative component")
-        self._queue_enable_hardneg.setChecked(True)
+        self._queue_enable_hardneg.setChecked(False)
 
         self._queue_diversity_mode = QComboBox()
         self._queue_diversity_mode.addItem("Distance to reviewed", userData="distance_to_reviewed")
@@ -468,13 +468,14 @@ class ActiveLearningTab(QWidget):
         self._candidate_focus_pct = QSpinBox()
         self._candidate_focus_pct.setRange(0, 100)
         self._candidate_focus_pct.setSingleStep(10)
-        self._candidate_focus_pct.setValue(50)
+        self._candidate_focus_pct.setValue(20)
         self._candidate_focus_pct.setSuffix(" % edge cases")
         self._candidate_focus_pct.setToolTip(
             "Controls what fraction of candidates are edge cases (hard negatives, confound "
             "boundaries, disagreements) vs strong/confident predictions.\n"
             "0% = surface only strong candidates.\n"
-            "50% = balanced mix (default).\n"
+            "20% = mostly strong candidates plus some edge cases (default).\n"
+            "50% = balanced mix.\n"
             "100% = surface only edge cases for targeted refinement."
         )
         self._focus_queue_weights: dict[str, float] | None = None
@@ -1016,7 +1017,7 @@ class ActiveLearningTab(QWidget):
         self._target_behavior.setCurrentIndex(0)
         self._saved_model_combo.setCurrentIndex(0)
         self._model_name.clear()
-        self._query_size.setValue(100)
+        self._query_size.setValue(200)
         self._quick_test.setChecked(False)
         self._examples_per_session.setValue(0)
         self._max_segments.setValue(0)
@@ -1039,12 +1040,12 @@ class ActiveLearningTab(QWidget):
         idx_split = self._split_strategy.findData("group_shuffle_session")
         if idx_split >= 0:
             self._split_strategy.setCurrentIndex(idx_split)
-        self._candidate_focus_pct.setValue(50)
-        self._queue_weighted_enable.setChecked(False)
+        self._candidate_focus_pct.setValue(20)
+        self._queue_weighted_enable.setChecked(True)
         self._queue_enable_disagreement.setChecked(True)
         self._queue_enable_diversity.setChecked(True)
         self._queue_enable_confound.setChecked(True)
-        self._queue_enable_hardneg.setChecked(True)
+        self._queue_enable_hardneg.setChecked(False)
         self._selected_session_ids = set()
         idx_div = self._queue_diversity_mode.findData("distance_to_reviewed")
         if idx_div >= 0:
@@ -1308,7 +1309,7 @@ class ActiveLearningTab(QWidget):
             self._use_r3d_features.setChecked(bool(cfg.get("use_r3d_features", True)))
             self._skip_evaluation.setChecked(bool(cfg.get("skip_evaluation", False)))
             self._enable_umap.setChecked(bool(cfg.get("enable_umap", True)))
-            self._query_size.setValue(int(cfg.get("query_size", 100)))
+            self._query_size.setValue(int(cfg.get("query_size", 200)))
             self._validation_pct.setValue(int(cfg.get("validation_pct", 25)))
             if "queue_weighted_enable" in cfg:
                 self._queue_weighted_enable.setChecked(bool(cfg["queue_weighted_enable"]))
@@ -1521,6 +1522,17 @@ class ActiveLearningTab(QWidget):
         50 % → balanced defaults
         100% → mostly edge cases (disagreement, confound, hard-neg heavy)
         """
+        self._focus_queue_weights = self._focus_weights(pct)
+
+        # Auto-enable weighted queue when the user moves off center.
+        if pct != 50 and not self._queue_weighted_enable.isChecked():
+            self._queue_weighted_enable.setChecked(True)
+
+        self._persist_ui_settings_to_project()
+        self._refresh_active_settings_summary()
+
+    @staticmethod
+    def _focus_weights(pct: int) -> dict[str, float]:
         t = max(0.0, min(1.0, pct / 100.0))  # normalize to [0, 1]
 
         # Linearly interpolate between 'strong' and 'edge' weight profiles.
@@ -1530,7 +1542,7 @@ class ActiveLearningTab(QWidget):
         def _lerp(a: float, b: float) -> float:
             return round(a + (b - a) * t, 3)
 
-        self._focus_queue_weights = {
+        return {
             "candidate":     _lerp(0.70, 0.05),
             "uncertainty":   _lerp(0.15, 0.25),
             "disagreement":  _lerp(0.05, 0.25),
@@ -1539,13 +1551,6 @@ class ActiveLearningTab(QWidget):
             "hard_negative": _lerp(0.02, 0.13),
             "exploration":   _lerp(0.02, 0.05),
         }
-
-        # Auto-enable weighted queue when the user moves off center.
-        if pct != 50 and not self._queue_weighted_enable.isChecked():
-            self._queue_weighted_enable.setChecked(True)
-
-        self._persist_ui_settings_to_project()
-        self._refresh_active_settings_summary()
 
     def _ui_settings_payload(self) -> dict[str, Any]:
         return {
@@ -1661,7 +1666,7 @@ class ActiveLearningTab(QWidget):
                 if idx_saved >= 0:
                     self._saved_model_combo.setCurrentIndex(idx_saved)
 
-            self._query_size.setValue(int(ui.get("query_size", model.get("active_learning_query_size", 100))))
+            self._query_size.setValue(int(ui.get("query_size", model.get("active_learning_query_size", 200))))
             self._quick_test.setChecked(bool(ui.get("quick_test", False)))
             self._examples_per_session.setValue(int(ui.get("examples_per_session", 0)))
             self._selected_session_ids = {
@@ -1704,12 +1709,12 @@ class ActiveLearningTab(QWidget):
                 if idx_split >= 0:
                     self._split_strategy.setCurrentIndex(idx_split)
 
-            self._candidate_focus_pct.setValue(int(ui.get("candidate_focus_pct", 50)))
-            self._queue_weighted_enable.setChecked(bool(ui.get("queue_weighted_enable", False)))
+            self._candidate_focus_pct.setValue(int(ui.get("candidate_focus_pct", 20)))
+            self._queue_weighted_enable.setChecked(bool(ui.get("queue_weighted_enable", True)))
             self._queue_enable_disagreement.setChecked(bool(ui.get("queue_enable_disagreement", True)))
             self._queue_enable_diversity.setChecked(bool(ui.get("queue_enable_diversity", True)))
             self._queue_enable_confound.setChecked(bool(ui.get("queue_enable_confound", True)))
-            self._queue_enable_hardneg.setChecked(bool(ui.get("queue_enable_hardneg", True)))
+            self._queue_enable_hardneg.setChecked(bool(ui.get("queue_enable_hardneg", False)))
             idx_div = self._queue_diversity_mode.findData(str(ui.get("queue_diversity_mode", "distance_to_reviewed")))
             if idx_div >= 0:
                 self._queue_diversity_mode.setCurrentIndex(idx_div)
@@ -8757,10 +8762,11 @@ class ActiveLearningTab(QWidget):
 
     def _resolved_queue_weights(self) -> dict[str, float]:
         """Return queue_weight_* kwargs derived from the candidate focus slider."""
-        w = getattr(self, "_focus_queue_weights", None)
-        if not w:
-            # No focus adjustment yet: use dataclass defaults.
-            return {}
+        # The slider's valueChanged never fires when the saved value equals the
+        # widget's initial value, so derive the weights from the shown value.
+        w = getattr(self, "_focus_queue_weights", None) or self._focus_weights(
+            int(self._candidate_focus_pct.value())
+        )
         return {
             "queue_weight_candidate":     w["candidate"],
             "queue_weight_uncertainty":   w["uncertainty"],

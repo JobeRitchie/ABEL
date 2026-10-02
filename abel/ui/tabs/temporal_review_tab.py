@@ -3009,14 +3009,14 @@ class TemporalReviewTab(QWidget):
         autotune_btn = QPushButton("Auto-Tune Settings", dlg)
         autotune_btn.setToolTip(
             "Suggest each behavior's positive threshold from its model's held-out "
-            "validation predictions, plus audited min bout and merge gap. Fills the "
-            "table only; nothing is saved until you click Apply + Process."
+            "validation predictions, shrunk toward a low global value that suits the "
+            "dense trace, plus audited min bout and merge gap. Fills the table only; "
+            "nothing is saved until you click Apply + Process."
         )
         favor_recall_cb = QCheckBox("Favor recall (fewer missed bouts)", dlg)
         favor_recall_cb.setToolTip(
-            "Tune for F-beta 1.5 instead of F1. Thresholds come out lower, so fewer real "
-            "bouts are missed and more false bouts are called. In a leak-free test this cost "
-            "about 0.01 F1 for about 8% more recall."
+            "Tune the held-out windows for F-beta 1.5 instead of F1. Thresholds come out "
+            "a little lower, so fewer real bouts are missed and more false bouts are called."
         )
 
         def _autotune() -> None:
@@ -3058,6 +3058,12 @@ class TemporalReviewTab(QWidget):
             parts = [
                 "Suggested settings are filled in. Review them, then click "
                 "Apply + Process All Behaviors to save.",
+                "",
+                "Thresholds are the held-out window optimum pulled toward a low global "
+                "value, because bouts are cut from a smoothed, inhibited trace that runs "
+                "lower than single windows. In a leak-free test on 120 behaviors this "
+                "halved the average loss of the previous auto-tune. The F1 shown is on "
+                "held-out windows, so it can drop even when trace bouts improve.",
                 "",
                 f"Min bout {min_bout} frames (0.4 s) and merge gap {merge_gap} frames (0.2 s) "
                 "for every behavior. These come from a leak-free audit of 108 behaviors: "

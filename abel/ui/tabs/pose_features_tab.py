@@ -275,7 +275,7 @@ class PoseFeaturesTab(QWidget):
         self._p_win_dur = QDoubleSpinBox()
         self._p_win_dur.setRange(0.1, 30.0)
         self._p_win_dur.setSuffix(" s")
-        self._p_win_dur.setValue(2.0)
+        self._p_win_dur.setValue(0.5)
         self._p_win_dur.setToolTip(
             "Duration of each feature window in seconds.\n\n"
             "Shorter windows (0.5–1 s) capture brief behaviors (e.g. head dips, freezing bouts).\n"
@@ -287,7 +287,7 @@ class PoseFeaturesTab(QWidget):
         self._p_stride = QDoubleSpinBox()
         self._p_stride.setRange(0.05, 30.0)
         self._p_stride.setSuffix(" s")
-        self._p_stride.setValue(1.0)
+        self._p_stride.setValue(0.5)
         self._p_stride.setToolTip(
             "Time between the start of consecutive windows.\n\n"
             "Stride < window duration means windows overlap, this increases resolution "
@@ -315,7 +315,7 @@ class PoseFeaturesTab(QWidget):
         self._p_smooth = QSpinBox()
         self._p_smooth.setRange(1, 31)
         self._p_smooth.setSuffix(" frames")
-        self._p_smooth.setValue(5)
+        self._p_smooth.setValue(3)
         self._p_smooth.setToolTip("Rolling-mean smoothing width applied after interpolation")
 
         param_form.addRow("Window duration:", self._p_win_dur)
@@ -888,12 +888,12 @@ class PoseFeaturesTab(QWidget):
             for w in widgets:
                 w.blockSignals(True)
 
-            self._p_win_dur.setValue(float(cfg.get("window_duration_sec", 2.0)))
-            self._p_stride.setValue(float(cfg.get("stride_sec", 1.0)))
+            self._p_win_dur.setValue(float(cfg.get("window_duration_sec", 0.5)))
+            self._p_stride.setValue(float(cfg.get("stride_sec", 0.5)))
             self._p_fps.setValue(float(cfg.get("source_fps", 30.0)))
             self._p_likelihood.setValue(float(cfg.get("likelihood_threshold", 0.2)))
             self._p_interp.setChecked(bool(cfg.get("interpolate_dropouts", True)))
-            self._p_smooth.setValue(int(cfg.get("smoothing_window", 5)))
+            self._p_smooth.setValue(int(cfg.get("smoothing_window", 3)))
             self._p_use_video.setChecked(bool(cfg.get("use_video_features", False)))
             self._p_use_r3d.setChecked(bool(cfg.get("use_r3d_features", True)))
             # Default on: projects saved before this setting existed should gain

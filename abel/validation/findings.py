@@ -858,6 +858,18 @@ def _throughput_findings(inp: FindingsInput) -> list[Finding]:
     return out
 
 
+def _effort_break_rule(results: list) -> str:
+    """How breaks were defined in these results, as a clause for the caveat."""
+    from abel.validation.analyses import review_effort  # noqa: PLC0415
+
+    if all(r.break_mode == review_effort.BREAK_FIXED for r in results):
+        return f"gaps over {review_effort.BREAK_SEC:g} s are breaks"
+    return ("gaps far above the reviewer's local pace are breaks (more than "
+            f"{review_effort.ADAPTIVE_Z:g} robust SDs above the median log gap of the "
+            f"neighbouring clips, never under {review_effort.ADAPTIVE_MIN_SEC:g} s, "
+            f"always over {review_effort.ADAPTIVE_MAX_SEC:g} s)")
+
+
 def _review_effort_findings(inp: FindingsInput) -> list[Finding]:
     """What the labels cost a human, and the caveats on reading that as a total."""
     from abel.validation.analyses import review_effort  # noqa: PLC0415
@@ -919,8 +931,9 @@ def _review_effort_findings(inp: FindingsInput) -> list[Finding]:
         "Review effort",
         "Review hours are a floor, not a total, only time *between* consecutive "
         "decisions is counted.",
-        f"Gaps under {review_effort.BATCH_SEC:g} s are one bulk UI action and gaps "
-        f"over {review_effort.BREAK_SEC:g} s are breaks; neither is charged to a "
+        f"Gaps under {review_effort.BATCH_SEC:g} s are one bulk UI action and "
+        + _effort_break_rule(usable)
+        + "; neither is charged to a "
         "clip, so the first clip after every break contributes nothing. Adding those "
         "back at each project's median rate gives "
         f"{_f(pooled.get('active_hours_adjusted'), 1)} h. Time spent thinking before "
