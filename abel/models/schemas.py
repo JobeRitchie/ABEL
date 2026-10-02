@@ -573,6 +573,29 @@ class ReviewerLabelRecord(BaseModel):
     for directed interactions; ``mutual`` for symmetric ones; ``none`` for solo
     behaviors (the default, so single-animal projects are unaffected)."""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_legacy_nulls(cls, data: Any) -> Any:
+        # Rows saved before the multi-animal fields existed come back from the
+        # parquet with None/NaN in those columns.  Rejecting them silently
+        # dropped most of a project's labels from every consumer of
+        # load_segment_labels (measured: 5555 of 6271 rows on NSF-NewLights).
+        if not isinstance(data, dict):
+            return data
+
+        def _missing(v: Any) -> bool:
+            return v is None or (isinstance(v, float) and v != v)
+
+        out = dict(data)
+        if _missing(out.get("social_role")):
+            out["social_role"] = "none"
+        if _missing(out.get("notes")):
+            out["notes"] = ""
+        for key in ("focal_animal_id", "partner_animal_id"):
+            if key in out and _missing(out[key]):
+                out[key] = None
+        return out
+
 
 class TrainingSetRecord(BaseModel):
     segment_id: str

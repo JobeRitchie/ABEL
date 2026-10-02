@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,6 +11,8 @@ import pandas as pd
 
 from abel.models.schemas import ReviewDecision, ReviewDecisionType, ReviewerLabelRecord
 from abel.storage.file_store import atomic_write_parquet, read_json, write_json
+
+logger = logging.getLogger(__name__)
 
 
 def _read_existing_labels(path: Path) -> pd.DataFrame:
@@ -213,11 +216,19 @@ class ReviewService:
             return []
         df = pd.read_parquet(path)
         rows: list[ReviewerLabelRecord] = []
+        dropped = 0
+        first_error = ""
         for rec in df.to_dict(orient="records"):
             try:
                 rows.append(ReviewerLabelRecord.model_validate(rec))
-            except Exception:
-                continue
+            except Exception as exc:
+                dropped += 1
+                first_error = first_error or str(exc)
+        if dropped:
+            logger.warning(
+                "Skipped %d of %d reviewer labels in %s that failed validation: %s",
+                dropped, len(df), path, first_error,
+            )
         return rows
 
     def delete_decisions(self, clip_ids: list[str]) -> int:
