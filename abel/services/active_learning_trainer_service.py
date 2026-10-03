@@ -896,9 +896,9 @@ class ActiveLearningTrainerService:
                         drop_indices.append(i)
                         continue
                     if any(lbl_clean.startswith(p) for p in _negative_prefixes):
-                        # Explicit negative (not_xxx): collapse to has_behavior
-                        df.iat[i, df.columns.get_loc("label")] = "has_behavior"
-                        n_remapped += 1
+                        # not_xxx only says "not that behavior"; it says nothing
+                        # about whether some behavior is present, so drop it.
+                        drop_indices.append(i)
                         continue
                     # Specific behavior → negative for no_behavior model
                     df.iat[i, df.columns.get_loc("label")] = "has_behavior"
@@ -924,10 +924,14 @@ class ActiveLearningTrainerService:
                         drop_indices.append(i)
                         continue
                     if any(lbl_clean.startswith(p) for p in _negative_prefixes):
-                        # Explicit negative (not_xxx): collapse to no_behavior
-                        # so the binary encoder sees exactly two classes.
-                        df.iat[i, df.columns.get_loc("label")] = "no_behavior"
-                        n_remapped += 1
+                        # not_<target> is a negative for this model.  A false
+                        # positive of another behavior (not_<other>) is no
+                        # evidence about the target, so it is dropped.
+                        if lbl_clean == f"not_{target_label}":
+                            df.iat[i, df.columns.get_loc("label")] = "no_behavior"
+                            n_remapped += 1
+                        else:
+                            drop_indices.append(i)
                         continue
                     # This is an alternate behavior name → treat as negative
                     df.iat[i, df.columns.get_loc("label")] = "no_behavior"
@@ -943,8 +947,8 @@ class ActiveLearningTrainerService:
             if drop_indices:
                 df = df.drop(index=df.index[drop_indices]).reset_index(drop=True)
                 logger.info(
-                    "Dropped %d co-occurring sibling row(s) for target '%s' "
-                    "(same clip is a positive for a different behavior, not a negative).",
+                    "Dropped %d row(s) for target '%s' that are no evidence about it "
+                    "(co-occurring siblings, or false positives of a different behavior).",
                     len(drop_indices),
                     target_label,
                 )

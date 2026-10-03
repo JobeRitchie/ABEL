@@ -67,7 +67,7 @@ from abel.services.candidate_service import CandidateGenerationService
 from abel.services.seed_service import SeedService
 from abel.services.import_service import ImportService
 from abel.services.preprocessing_service import ClipExtractionService, regenerate_clips_for_windows
-from abel.services.review_service import ReviewService
+from abel.services.review_service import ReviewService, reject_review_label
 from abel.services.dissimilarity_service import run_dissimilarity_analysis, DissimilarityReport
 from abel.services.clip_metrics_service import (
     ClipMetricsService,
@@ -3999,7 +3999,7 @@ class ReviewTab(QWidget):
         if decision == ReviewDecisionType.ACCEPT:
             return selected_label
         if decision == ReviewDecisionType.REJECT:
-            return NO_BEHAVIOR_ID
+            return reject_review_label(selected_label)
         if decision == ReviewDecisionType.AMBIGUOUS:
             return "ambiguous"
         if decision == ReviewDecisionType.RELABEL:

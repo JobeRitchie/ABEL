@@ -42,7 +42,7 @@ from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.ui.flow_layout import flow_row
 from abel.ui.mpl_theme import style_navigation_toolbar
-from abel.services.review_service import ReviewService
+from abel.services.review_service import ReviewService, reject_review_label
 from abel.models.schemas import CandidateWindow, ReviewDecisionType, ReviewerLabelRecord
 from abel.temporal_refinement.bout_postprocess import (
     binary_trace_to_intervals,
@@ -647,7 +647,7 @@ class TemporalReviewTab(QWidget):
                     )
                     self._write_temporal_review_decisions(
                         session_id=sid, start=start, end=end,
-                        review_label="no_behavior", concept_id=concept_id,
+                        review_label=reject_review_label(concept_id), concept_id=concept_id,
                         decision_type=ReviewDecisionType.REJECT, behavior_label=concept_id,
                     )
                     n_fp += 1
@@ -914,7 +914,8 @@ class TemporalReviewTab(QWidget):
         """Tile FP/FN feedback intervals into non-overlapping AL-sized windows and write
         them to the reviewer label store.
 
-        False-positive windows are labeled ``"no_behavior"`` (hard negative).
+        False-positive windows are labeled ``not_<concept_id>`` (a negative for
+        this behavior only).
         False-negative windows are labeled with *concept_id* (positive).
 
         Returns the number of new label records written.
@@ -966,9 +967,8 @@ class TemporalReviewTab(QWidget):
 
         for session_id, intervals in fp_by_session.items():
             for (interval_start, interval_end) in intervals:
-                # FP tiles: parquet label = "no_behavior" (not a positive example
-                # of the concept for AL training).
-                _tile_interval(session_id, interval_start, interval_end, "no_behavior")
+                # FP tiles: a negative for this concept only, not for every behavior.
+                _tile_interval(session_id, interval_start, interval_end, reject_review_label(concept_id))
 
         for session_id, intervals in fn_by_session.items():
             for (interval_start, interval_end) in intervals:
@@ -1204,13 +1204,13 @@ class TemporalReviewTab(QWidget):
 
         # Determine decision type and labels:
         # - concept selected (default): REJECT for that behavior specifically.
-        #   Parquet label = "no_behavior" so AL training doesn't treat it as a positive.
+        #   Parquet label = "not_<concept>": a negative for that behavior only.
         # - "no_behavior": ACCEPT with no_behavior, universal hard negative.
         # - other behavior: ACCEPT for that behavior, was actually something else.
         if selected == concept_id_fp:
             fp_decision = ReviewDecisionType.REJECT
             fp_behavior_label = concept_id_fp   # decisions JSON: REJECT for Dig
-            fp_parquet_label = "no_behavior"    # parquet: not a positive example
+            fp_parquet_label = reject_review_label(concept_id_fp)  # parquet: negative for this behavior only
         else:
             fp_decision = ReviewDecisionType.ACCEPT
             fp_behavior_label = selected        # "no_behavior" or other behavior id

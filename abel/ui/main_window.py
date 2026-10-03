@@ -528,6 +528,63 @@ class MainWindow(QMainWindow):
         # Deferred so the window paints first (the check touches the filesystem).
         self._raw_data_warning.reset(root)
         QTimer.singleShot(0, lambda: self._raw_data_warning.check(root))
+        QTimer.singleShot(0, lambda: self._offer_false_positive_label_repair(root))
+
+    def _offer_false_positive_label_repair(self, root: Path) -> None:
+        """Offer to fix false-positive rejections saved as universal negatives.
+
+        Older versions stored every rejected clip as ``no_behavior``, a negative
+        for every behavior model.  See :mod:`abel.services.false_positive_label_repair`.
+        """
+        if self._project is None or self._project.project_root != root:
+            return
+        from abel.services.false_positive_label_repair import FalsePositiveLabelRepair  # noqa: PLC0415
+        from abel.storage.file_store import read_yaml  # noqa: PLC0415
+
+        try:
+            raw = read_yaml(root / "config" / "behavior_definitions.yaml", {})
+            ids = [str(b.get("behavior_id", "")) for b in raw.get("behaviors", []) if isinstance(b, dict)]
+            names = {str(b.get("behavior_id", "")): str(b.get("name", "")) for b in raw.get("behaviors", []) if isinstance(b, dict)}
+            repair = FalsePositiveLabelRepair(root, ids)
+            plan = repair.plan()
+        except Exception:
+            self._logger.warning("False-positive label check failed", exc_info=True)
+            return
+        if not plan.needed:
+            return
+        per = "\n".join(
+            f"  \u2022 {names.get(bid, bid)}: {n} clip(s)"
+            for bid, n in sorted(plan.per_behavior.items(), key=lambda kv: -kv[1])
+        )
+        response = QMessageBox.question(
+            self,
+            "Repair false-positive labels?",
+            "This project has false-positive rejections saved with an older version of "
+            "ABEL, which stored them as 'No Behavior'. That made each rejected clip a "
+            "negative example for every behavior, not just the one you rejected, which "
+            "can stop similar behaviors from being told apart.\n\n"
+            f"Rejected clips affected:\n{per}\n\n"
+            "Repair now? Each clip becomes a negative only for the behavior it was "
+            "rejected from. False negatives were saved correctly and are not changed. "
+            "A backup is kept in derived/backups. Retrain the affected behaviors afterwards.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            done = repair.apply()
+        except Exception as exc:
+            self._logger.exception("False-positive label repair failed")
+            QMessageBox.warning(self, "Repair failed", f"Nothing further was changed.\n\n{exc}")
+            return
+        QMessageBox.information(
+            self,
+            "False-positive labels repaired",
+            f"Relabelled {done.reviewer_label_rows} reviewer label(s) and "
+            f"{done.training_set_rows} training row(s).\n\nBackup: {done.backup_dir}\n\n"
+            "Retrain the affected behaviors to use the corrected labels.",
+        )
 
     def _on_num_animals_changed(self, n: int) -> None:
         """Persist a change to the project's animal count (keeps in-memory config in sync)."""

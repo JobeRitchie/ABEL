@@ -14,6 +14,29 @@ from abel.storage.file_store import atomic_write_parquet, read_json, write_json
 
 logger = logging.getLogger(__name__)
 
+NO_BEHAVIOR_ID = "no_behavior"
+NEGATIVE_LABEL_PREFIX = "not_"
+
+
+def reject_review_label(behavior_label: str | None) -> str:
+    """Training label for a clip rejected as a false positive of *behavior_label*.
+
+    A rejection says "this is not that behavior", not "this is no behavior", so
+    it is stored as ``not_<behavior_id>``: a negative for that behavior's model
+    only.  Rejecting with no behavior selected (or with No Behavior itself)
+    keeps the universal negative.
+    """
+    bid = str(behavior_label or "").strip()
+    if (
+        not bid
+        or bid == NO_BEHAVIOR_ID
+        or "|" in bid
+        or bid in {"ambiguous", "boundary_error"}
+        or bid.startswith(NEGATIVE_LABEL_PREFIX)
+    ):
+        return NO_BEHAVIOR_ID
+    return f"{NEGATIVE_LABEL_PREFIX}{bid}"
+
 
 def _read_existing_labels(path: Path) -> pd.DataFrame:
     """Read the reviewer-label table before adding to it.

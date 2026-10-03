@@ -198,7 +198,7 @@ class BehaviorCoverageService:
         for sid, parts in self._label_sets(self._labels()).items():
             if sid in want:
                 for p in parts:
-                    if p != "no_behavior":
+                    if p != "no_behavior" and not p.startswith("not_"):
                         counts[p] = counts.get(p, 0) + 1
         return max(counts, key=counts.get) if counts else None
 

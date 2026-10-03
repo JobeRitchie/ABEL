@@ -11,6 +11,22 @@ VERSION_DATE = "October 2, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.28.0", "October 3, 2026", [
+        "False positives are now negatives only for the behavior they were "
+        "rejected from. Before, Reject in Review and the false-positive "
+        "tools in Temporal Review saved the clip as No Behavior, a negative "
+        "for every behavior model, so a clip of one behavior rejected from "
+        "a similar behavior's queue taught the model its own positives were "
+        "nothing. Rejecting with No Behavior selected still saves a "
+        "universal negative. False negatives were already saved correctly.",
+        "Training treats a false positive of behavior X as a negative for "
+        "X's model only. Other behavior models and the No Behavior model "
+        "leave it out.",
+        "Projects with rejections saved the old way ask on open whether to "
+        "repair them. The repair relabels the affected reviewer labels and "
+        "training rows, keeps a backup in derived/backups, and lists the "
+        "behaviors involved. Retrain those behaviors afterwards.",
+    ]),
     ("0.27.0", "October 2, 2026", [
         "Sessions can now switch to new pose tracking (a new DeepLabCut or "
         "SLEAP run) without being re-imported. Data Import has a Replace "
