@@ -265,8 +265,7 @@ class ValidationService:
                 row["refined_f1"] = refined.get("refined_target_f1")
                 row["refined_precision"] = refined.get("refined_target_precision")
                 row["refined_recall"] = refined.get("refined_target_recall")
-                # Macro kept alongside so the UI can name both in a tooltip and
-                # nothing that used to be shown is silently lost.
+                # Macro kept alongside so the UI can name both in a tooltip.
                 row["frame_f1_macro"] = refined.get("raw_f1")
                 row["frame_precision_macro"] = refined.get("raw_precision")
                 row["frame_recall_macro"] = refined.get("raw_recall")
@@ -274,8 +273,8 @@ class ValidationService:
                 row["refined_precision_macro"] = refined.get("refined_precision")
                 row["refined_recall_macro"] = refined.get("refined_recall")
                 # Held-out window-level counts against the reviewer's accepted
-                # labels, raw vs refined.  Event-level ("bout") counts used to be
-                # reported here and were removed: bouts are not identifiable from
+                # labels, raw vs refined.  Event-level ("bout") counts are
+                # deliberately omitted: bouts are not identifiable from
                 # a sparse labeled holdout, so they read as extreme FP/FN for
                 # every model.  See refined_eval._refined_bout_counts.
                 row["refined_evaluable"] = refined.get("refined_evaluable", True)
@@ -327,8 +326,8 @@ class ValidationService:
     # Badge cut-points, per metric basis.  Target-class F1 starts at 0 for a
     # model that detects nothing, so its bar sits lower than the macro bar in
     # absolute terms while being a strictly harder test: macro F1 has a ~0.50
-    # floor (the not-target class alone scores ~0.97), which is why a 0.80 macro
-    # cut used to hand "Good" to models with target F1 near 0.65.
+    # floor (the not-target class alone scores ~0.97), so a 0.80 macro cut
+    # would hand "Good" to models with target F1 near 0.65.
     _QUALITY_CUTS = {
         "target": (0.75, 0.55),
         "macro": (0.80, 0.60),

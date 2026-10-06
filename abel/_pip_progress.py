@@ -1,8 +1,7 @@
 """Run ``pip install`` with readable, live progress in the launcher window.
 
-Used by ``run_abel.bat``. The launcher used to run pip with ``--quiet`` and
-send everything to the log, so a first install sat silent for minutes. This
-wrapper streams pip's output, rewrites it as short status lines (what is being
+Used by ``run_abel.bat`` so a first install does not sit silent for minutes.
+This wrapper streams pip's output, rewrites it as short status lines (what is being
 resolved, downloaded, built and installed), draws a download bar, and prints a
 heartbeat while pip works without saying anything (unpacking PySide6 alone can
 take a minute). The full raw pip output still goes to the launcher log.

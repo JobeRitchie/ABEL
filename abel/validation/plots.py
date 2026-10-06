@@ -65,7 +65,7 @@ def _non_degenerate_points(points: list) -> list:
     prevalence-agnostic and flags 9 of them.
 
     If *every* point is degenerate we keep them all rather than draw an empty
-    panel, better to show the ugly truth than nothing.
+    panel.
     """
     keep = [p for p in points if not getattr(p, "is_degenerate", False)]
     return keep or list(points)

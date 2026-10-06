@@ -1,9 +1,8 @@
-"""Compact, self-populating "telemetry" panel for long pipeline runs.
+"""Run status panel for long pipeline runs.
 
 Sits between the progress bar and the run log on the Active Learning tab and
-surfaces the most useful facts from the live progress stream, current phase,
-which behavior of how many, elapsed / ETA / projected finish, the last model
-metric, in a compact, lightly sci-fi readout. It is driven entirely by the
+shows the current phase, which behavior of how many, elapsed / ETA / projected
+finish, and the last model metric. It is driven entirely by the
 same ``(value, maximum, log_line, status)`` updates that feed the progress bar,
 so it needs no extra plumbing: call :meth:`update_from` on each progress event,
 :meth:`set_running` when a run starts/stops.
@@ -23,7 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# ── Palette (muted sci-fi: deep navy, cyan/green accents) ──────────────────
+# ── Palette ──────────────────────────────────────────────────────────────
 _BG = "#070C12"
 _BORDER = "#16323C"
 _DIM = "#8FA6B4"          # key labels / inactive (6.9:1 on the panel ground)
@@ -43,7 +42,7 @@ _PRAUC_RE = re.compile(r"PR-AUC=([0-9.]+)")
 
 
 class ProgressNotesPanel(QFrame):
-    """A compact readout of live run telemetry, populated from progress events."""
+    """Live run status, populated from progress events."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -186,7 +185,7 @@ class ProgressNotesPanel(QFrame):
         try:
             self._update_from(value, maximum, log_line, status, step_scale)
         except Exception:
-            pass  # telemetry is cosmetic: never let it break a run
+            pass  # display only: never let it break a run
 
     def _update_from(
         self, value: int, maximum: int, log_line: str, status: str, step_scale: int

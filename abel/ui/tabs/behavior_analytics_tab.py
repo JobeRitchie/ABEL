@@ -2757,11 +2757,10 @@ class BehaviorAnalyticsTab(QWidget):
     # Pseudo-behavior rows (distance + ROI occupancy)
     #
     # Both are derived from pose files, which the behavior analytics cache
-    # does not store: so before this cache they were re-read in full on every
-    # refresh, on the main thread, even on a cache hit (~7 s of frozen UI for a
-    # 69-session project).  They now have their own on-disk cache keyed by the
-    # pose files and the settings that feed them, and the miss path runs on a
-    # worker thread.
+    # does not store.  They get their own on-disk cache keyed by the pose files
+    # and the settings that feed them, and the miss path runs on a worker
+    # thread; re-reading pose on every refresh froze the UI for ~7 s on a
+    # 69-session project.
     # ------------------------------------------------------------------
 
     def _pose_path_for_session(self, session_id: str) -> Path | None:
@@ -9756,8 +9755,8 @@ class _HeatmapWidget(QWidget):
             # video and take the per-pixel TEMPORAL MEDIAN.  Because the animal
             # occupies any given pixel only briefly, the median collapses to the
             # static arena and the moving mouse blob disappears.  (Averaging
-            # first-frames: the old approach: left a ghost mouse wherever an
-            # animal happened to be sitting at t=0.)
+            # first frames instead leaves a ghost mouse wherever an animal
+            # happened to be sitting at t=0.)
             AUTO_MEDIAN_VIDEOS = 3   # few videos suffice; time-sampling one already cleans the plate
             FRAMES_PER_VIDEO = 48    # temporal samples per video (median needs a spread)
             plate_key = ("auto", tuple(target_sids[:AUTO_MEDIAN_VIDEOS]))
@@ -9888,12 +9887,10 @@ class _HeatmapWidget(QWidget):
         # by _load_raw_bouts from (1) per-behavior temporal-refinement postprocess
         # output and (2) the target_behavior probability traces recomputed with
         # the per-behavior thresholds from temporal_review_settings.json, i.e.
-        # exactly what passes the temporal-review filter.  The Spatial Heatmap
-        # previously used its own _load_tr_bouts, which skipped the
-        # target_behavior trace recompute and so plotted nothing for
-        # multi-behavior target_behavior projects even after TR had been run.
-        # We only ever graph bouts that pass the filter; unify on _raw_bouts so
-        # this tab matches Density Analysis exactly.
+        # exactly what passes the temporal-review filter.  Using _raw_bouts
+        # keeps this tab identical to Density Analysis; a separate loader that
+        # skips the target_behavior trace recompute plots nothing for
+        # multi-behavior target_behavior projects.
         raw_bouts = self._host._raw_bouts
         target_sid_set = {str(s) for s in target_sids}
         behavior_bouts: dict[str, pd.DataFrame] = {}
@@ -13967,8 +13964,8 @@ class _BehaviorMotifWidget(QWidget):
             ax.set_aspect("equal")
             vmax = vmax_ref if vmax_ref > 0 else (float(mat.max()) or 1.0)
             # Use source-node color for each arc so every transition is visible
-            # regardless of its strength value (fixes the RdYlBu_r yellow-on-
-            # white invisibility problem for mid-range probabilities ~0.3-0.6).
+            # regardless of its strength value (RdYlBu_r renders mid-range
+            # probabilities ~0.3-0.6 as yellow on white, which is invisible).
             _MIN_V = 0.005  # skip truly zero transitions
             # Collect and sort edges weakest-first so strong arcs render on top.
             edges = [

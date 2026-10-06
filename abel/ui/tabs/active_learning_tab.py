@@ -704,13 +704,13 @@ class ActiveLearningTab(QWidget):
             "}"
         )
 
-        # Live "telemetry" readout: auto-populated from the progress stream and
-        # shown between the progress bar and the (now shorter) run log.
+        # Run status panel, populated from the progress stream; sits between
+        # the progress bar and the run log.
         self._progress_notes = ProgressNotesPanel()
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        # Half the previous height: the freed space goes to the telemetry panel.
+        # Kept short so the status panel above gets the space.
         self._log.setMinimumHeight(32)
         self._log.verticalScrollBar().rangeChanged.connect(
             lambda _min, _max: self._log.verticalScrollBar().setValue(_max)
@@ -894,7 +894,7 @@ class ActiveLearningTab(QWidget):
         viz_row.addStretch(0)
         viz_layout.addLayout(viz_row, 1)
 
-        # Right: progress bar + live telemetry readout + run log.
+        # Right: progress bar + run status panel + run log.
         log_widget = QWidget()
         log_layout = QVBoxLayout(log_widget)
         log_layout.setContentsMargins(0, 0, 0, 0)
@@ -3466,7 +3466,7 @@ class ActiveLearningTab(QWidget):
     def _batch_status(self, beh_idx: int, n_total: int, bname: str, log_line: str) -> str:
         """Compose a broad, behavior-aware status line for a batch run.
 
-        Always includes an explicit "behavior N/M" marker so the telemetry panel
+        Always includes an explicit "behavior N/M" marker so the status panel
         can read the behavior counter unambiguously.
         """
         phase = self._broad_phase(log_line.split(" | ", 1)[0])
@@ -3791,7 +3791,7 @@ class ActiveLearningTab(QWidget):
 
         # Record this run's true end-to-end wall time as the whole-run ETA anchor
         # so future retrain-all ETAs start calibrated (see the helper for why the
-        # _set_busy finish hook alone was leaving the anchor stale).
+        # _set_busy finish hook alone leaves the anchor stale).
         self._timing_record_run_total_now(_run_kind, _all_started_at, n_total)
         return {"retrain_all": True, "results": results, "succeeded": succeeded, "total": n_total}
 
@@ -4405,11 +4405,9 @@ class ActiveLearningTab(QWidget):
         self._pipeline_all_saved_any = False
 
         # ── Whole-run ETA across ALL selected models ─────────────────────────
-        # Previously this loop only printed "Model i/N" separators and let each
-        # model's own linear per-step estimate show through, so the ETA reset on
-        # every model and never reflected how long ALL selected models would take.
-        # Use the same per-stage estimator + measured whole-run anchor the batch
-        # retrain/pipeline flows use so the number spans the whole run.
+        # One per-stage estimator + measured whole-run anchor (as in the batch
+        # retrain/pipeline flows) so the ETA spans every selected model instead
+        # of resetting per model.
         _all_started_at = time.monotonic()
         _mode = str(self._mode.currentData() or "uncertainty")
         _run_evaluation = not bool(self._skip_evaluation.isChecked())
@@ -6457,7 +6455,7 @@ class ActiveLearningTab(QWidget):
         cached_pose_sessions: set[str] = set()
         cached_ctx_sessions: set[str] = set()
         if reuse_cached_features:
-            # Fast path: the preprocessing stage now writes one parquet per
+            # Fast path: the preprocessing stage writes one parquet per
             # session into sessions/ subdirectories.  A directory listing is
             # O(1) versus loading the entire monolithic parquet just to get
             # the session_id column.
@@ -7455,8 +7453,8 @@ class ActiveLearningTab(QWidget):
         skipped_ids: set[str] = set()
         meta_path = cache_path.with_name("enriched_segments_meta.json")
         if cache_path.exists():
-            # Enriched rows used to be written back into segment_features.parquet
-            # by the scoring step. Those copies shadow the cache (the merge keeps
+            # Older projects have enriched rows written back into
+            # segment_features.parquet by the scoring step. Those copies shadow the cache (the merge keeps
             # segment_df's row), so every id the cache owns is dropped from
             # segment_df and served from the cache, or recomputed.
             try:

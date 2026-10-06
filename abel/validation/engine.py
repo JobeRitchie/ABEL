@@ -7,22 +7,21 @@ rows are physically appended and flagged as validation, **no held-out row can
 ever enter training**, the same mechanism guarantees zero leakage for
 learning-curve, ablation, and generalization runs alike.
 
-That guarantee covers the *model* but originally not the *calibrator*.  ABEL's
-trainer fits its probability calibrator on the validation split (right for the
-product, the calibrator must see unseen data, and the shipped model is refit
-and CV-calibrated separately), and this engine hands it the held-out set as
-that split.  Every calibrated cell was therefore scored on rows its calibrator
-had been fit to.  Measured across 7 projects / 23 behaviors at a 50-clip
-budget, that inflated the ablation's calibration gain from +0.064 to +0.073
-(the enhancement is overwhelmingly real, the leak is ~12% of the bar, not the
-bar itself) and understated held-out ECE by ~13%.  So we now carve a dedicated
-**calibration slice** off the training
-pool, split by group, and pass it as ``cal_idx``: the calibrator sees only pool
-rows, and the held-out set stays untouched by every part of the pipeline.  The
-slice comes out of the caller's budget rather than being free extra data, so
-the reported ``n_pos_train`` still describes the labels the run actually
-consumed.  When a pool is too small to carve a usable slice we disable
-calibration for that cell instead of falling back to the leaky path.
+The *calibrator* needs the same protection.  ABEL's trainer fits its
+probability calibrator on the validation split (right for the product: the
+calibrator must see unseen data, and the shipped model is refit and
+CV-calibrated separately).  Handing it the held-out set as that split would
+score every calibrated cell on rows its calibrator was fit to.  Measured across
+7 projects / 23 behaviors at a 50-clip budget, that leak inflated the ablation's
+calibration gain from +0.064 to +0.073 (~12% of the bar) and understated
+held-out ECE by ~13%.  The engine therefore carves a dedicated **calibration
+slice** off the training pool, split by group, and passes it as ``cal_idx``:
+the calibrator sees only pool rows, and the held-out set stays untouched by
+every part of the pipeline.  The slice comes out of the caller's budget rather
+than being free extra data, so the reported ``n_pos_train`` still describes the
+labels the run consumed.  When a pool is too small to carve a usable slice,
+calibration is disabled for that cell rather than falling back to the leaky
+path.
 """
 
 from __future__ import annotations

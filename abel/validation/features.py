@@ -18,15 +18,14 @@ Four families are separated so each can be ablated on its own:
 * **social**: inter-animal interaction features (``social_*``): distance to the
   nearest animal, approach velocity, heading alignment, contact state.
 
-**Why context MUST be its own family (learned the hard way).** It used to be folded
-into "pose", so the ablation baseline labeled "Pose only" was silently handed the
-environment. On a novel-object project that is catastrophic: *Sniff Novel* vs
+**Why context MUST be its own family.** Folded into "pose", it hands the
+ablation baseline labeled "Pose only" the environment. On a novel-object project that is catastrophic: *Sniff Novel* vs
 *Sniff Familiar* are the same motor act differing only in which object the animal
 is at, and a single ``body_centroid_to_roi_2_dist`` column separates them at
-AUC 0.999 on its own. The "pose-only" baseline scored **1.000** on that pair,
-while true pose (ROI removed) scores **0.66**. Every gain the environment was
-producing was being credited to pose, and the pairs that most needed interrogating
-were reported as trivially solved.
+AUC 0.999 on its own. A "pose-only" baseline with context folded in scores
+**1.000** on that pair, while true pose (ROI removed) scores **0.66**: every gain
+from the environment is credited to pose, and the hardest pairs look trivially
+solved.
 
 The classifier is shared with :mod:`abel.validation.analyses.behaviorscape` (which
 re-exports it) so the ablation bars and the behaviorscape modality bands can never

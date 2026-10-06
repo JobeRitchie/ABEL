@@ -5,8 +5,8 @@ The standard ablation (:mod:`abel.validation.analyses.ablation`) asks a
 **detection** question: with feature family F on, how well is behavior X found
 against everything else?  Because "everything else" is dominated by easy
 negatives (no_behavior, locomotion, …), a feature family can look worthless there
-while doing the one job that actually matters scientifically, separating the two
-behaviors a human scorer would agonise over (Freeze vs. Groom; Sniff vs. Eat).
+while still separating the two behaviors a human scorer finds hardest to tell
+apart (Freeze vs. Groom; Sniff vs. Eat).
 
 This module asks the **discrimination** question instead.  For every pair of
 behaviors (A, B) in a project:

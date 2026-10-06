@@ -778,7 +778,7 @@ class SeedExamplesTab(QWidget):
         self._player.seek(frame)
 
     def _on_frame_changed(self, frame: int) -> None:
-        pass  # Could be used to update timeline overlays in future
+        pass
 
     # ------------------------------------------------------------------
     # Seed actions

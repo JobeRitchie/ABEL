@@ -1,4 +1,4 @@
-"""A polished, stage-aware progress + ETA panel.
+"""Stage-aware progress + ETA panel.
 
 Renders a :class:`~abel.utils.run_timeline.TimelineSnapshot`: an overall bar,
 elapsed / remaining / finish-clock readouts, and a per-stage checklist with live

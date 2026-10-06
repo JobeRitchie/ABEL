@@ -546,7 +546,7 @@ class EvaluationService:
         target_idx: int | None = None
         if target_behavior_id:
             tbid = str(target_behavior_id).strip()
-            # bid_list now uses directory-derived keys (e.g. "Freeze").
+            # bid_list uses directory-derived keys (e.g. "Freeze").
             # The caller may pass a UUID or a display name: check both.
             for idx, bid in enumerate(bid_list):
                 if bid == tbid:

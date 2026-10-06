@@ -286,9 +286,8 @@ def _learning_curve_findings(inp: FindingsInput) -> list[Finding]:
                    if _meds.size else "")
         worst_lc, worst_k = max(valid, key=lambda kv: kv[1])
         best_lc, best_k = min(valid, key=lambda kv: kv[1])
-        # Quote the threshold the detector actually uses. This read "95%" twice while
-        # the shipped knee was computed at 98% (learning_curve.KNEE_EPS = 0.02);
-        # deriving the number here means the prose cannot drift from the code again.
+        # Derive the quoted threshold from learning_curve.KNEE_EPS so the prose
+        # cannot drift from the knee the detector uses.
         knee_pct = f"{(1.0 - learning_curve.KNEE_EPS) * 100:g}%"
         out.append(Finding(
             "Learning curves",

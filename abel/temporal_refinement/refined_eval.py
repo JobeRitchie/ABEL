@@ -679,8 +679,8 @@ def score_raw_and_refined(
         else (float("nan"), float("nan"), float("nan"))
     )
 
-    # NOTE: event-level ("bout") TP/FP/FN used to be reported here and has been
-    # removed: it was not identifiable from a held-out labeled subset.  Bouts
+    # Event-level ("bout") TP/FP/FN is deliberately not reported: it is not
+    # identifiable from a held-out labeled subset.  Bouts
     # need contiguous observation, but the evaluated unit is an isolated ~15-frame
     # window; scoring them inflated FP (interpolation across unobserved gaps
     # manufactured bouts) and FN (sparse labels fragment one real bout into

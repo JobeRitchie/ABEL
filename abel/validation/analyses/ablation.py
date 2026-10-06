@@ -236,9 +236,8 @@ class AblationResult:
 def _ci95(values) -> float:
     """95% CI half-width across seeds (t-based: see :func:`metrics.ci95`).
 
-    Previously used a 1.96 multiplier, which at the default 3 seeds is really an
-    81% interval and over-called significance; the t multiplier (4.303 at df=2)
-    is the honest one. Consistent with the paired t-test in :func:`_paired_p`.
+    Not 1.96: at the default 3 seeds that is really an 81% interval and
+    over-calls significance; the t multiplier (4.303 at df=2) is correct. Consistent with the paired t-test in :func:`_paired_p`.
     """
     from abel.validation import metrics as vmetrics  # noqa: PLC0415
 

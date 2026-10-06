@@ -47,8 +47,8 @@ ALL_ANALYSES = [
 ]
 
 # Everything the "Run All" tab offers, in report order.  This is a superset of
-# ALL_ANALYSES: behaviorscape/video_value/throughput used to live only as their own
-# GUI workers, outside the runner and outside the shared holdout split.
+# ALL_ANALYSES that also runs behaviorscape/video_value/throughput inside the
+# runner and on the shared holdout split.
 FULL_SUITE = [
     ANALYSIS_LEARNING_CURVE, ANALYSIS_ABLATION, ANALYSIS_DISCRIMINATION,
     ANALYSIS_GENERALIZATION, ANALYSIS_AL_CURVE, ANALYSIS_RARE_DISCOVERY,

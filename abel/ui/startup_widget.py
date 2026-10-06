@@ -119,9 +119,8 @@ class StartupWidget(QWidget):
         )
 
         # ── Layout ───────────────────────────────────────────────────────────
-        # The splash's own minimum height (771 px) was setting the floor for the
-        # whole window, so ABEL refused to render on a 720p display. Scrolling
-        # the splash costs nothing; blocking the app on it costs everything.
+        # Scroll the splash so its minimum height (771 px) does not set the
+        # floor for the whole window, which blocks rendering on a 720p display.
         content = QWidget()
         self.outer = QVBoxLayout(content)
         self.outer.setContentsMargins(80, 30, 80, 30)
