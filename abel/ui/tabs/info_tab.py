@@ -1,6 +1,6 @@
-"""Info tab: app version, in-app updater, methods documentation, version history.
+"""Info tab: glossary, app version, in-app updater, methods documentation, version history.
 
-A sub-notebook keeps the "About & Updates" controls, the "Methods" references /
+A sub-notebook keeps the "Glossary" search, the "About & Updates" controls, the "Methods" references /
 formulas / write-up helper, and the "Version History" changelog together. Updates are **manual only**: nothing is checked on launch;
 the user clicks *Check for Updates*, and *Install Update* pulls the latest
 version and relaunches the app.
@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from abel import __version__
 from abel.changelog import VERSION_DATE, format_changelog
 from abel.services.update_service import UpdateService, UpdateStatus
+from abel.ui.tabs.glossary_tab import GlossaryTab
 from abel.ui.tabs.methods_tab import MethodsTab
 
 logger = logging.getLogger("abel")
@@ -85,6 +86,7 @@ class InfoTab(QWidget):
 
         inner = QTabWidget()
         inner.setTabPosition(QTabWidget.TabPosition.North)
+        inner.addTab(GlossaryTab(), "Glossary")
         inner.addTab(self._build_about_tab(), "About && Updates")
         inner.addTab(self.methods_tab, "Methods")
         inner.addTab(self._build_history_tab(), "Version History")

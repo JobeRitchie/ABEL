@@ -118,15 +118,18 @@ class MethodsWriteupTab(QWidget):
 
     def _build_warning_banner(self) -> QWidget:
         box = QWidget()
+        box.setObjectName("draftWarningBanner")
+        box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         box.setStyleSheet(
-            "background: #3B1616; border: 2px solid #EF5350; border-radius: 6px;"
+            "#draftWarningBanner { background: #33261A; border: 1px solid #D9904A;"
+            " border-radius: 6px; }"
         )
         layout = QVBoxLayout(box)
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(4)
 
         title = QLabel("⚠  THIS IS A DRAFT: DO NOT COPY IT INTO A MANUSCRIPT")
-        title.setStyleSheet("font-size: 15px; font-weight: 800; color: #FF8A80;")
+        title.setStyleSheet("font-size: 15px; font-weight: 800; color: #F0B070;")
         title.setWordWrap(True)
 
         body = QLabel(
@@ -137,7 +140,7 @@ class MethodsWriteupTab(QWidget):
             "delete anything you did not actually do. You are responsible for the "
             "accuracy of what you publish."
         )
-        body.setStyleSheet("font-size: 12px; color: #FFCDD2;")
+        body.setStyleSheet("font-size: 12px; color: #EBD9C4;")
         body.setWordWrap(True)
 
         layout.addWidget(title)

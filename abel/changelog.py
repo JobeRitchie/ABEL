@@ -7,10 +7,21 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "October 2, 2026"
+VERSION_DATE = "October 18, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.29.0", "October 18, 2026", [
+        "New Glossary tab under Info. Type any word you see in ABEL, such "
+        "as a button, a setting, a tab or a term, and read what it does and "
+        "where to find it. Over 400 entries, with links between related "
+        "terms. Help now points to it.",
+        "The draft warning in the Methods Write-up Helper is now a calm "
+        "orange instead of bright red, and the extra boxes drawn around its "
+        "title and text are gone.",
+        "Comments and docstrings across the code were trimmed of filler "
+        "wording. No behavior changed.",
+    ]),
     ("0.28.0", "October 3, 2026", [
         "False positives are now negatives only for the behavior they were "
         "rejected from. Before, Reject in Review and the false-positive "
