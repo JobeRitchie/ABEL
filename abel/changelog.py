@@ -7,10 +7,23 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "October 18, 2026"
+VERSION_DATE = "October 22, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.30.0", "October 22, 2026", [
+        "New Free Up Disk Space button on the Home tab. It removes large files "
+        "a finished project no longer needs: old training-set snapshots, old "
+        "repair backups, a scratch cache and review clips. Exported labeled "
+        "videos and the frame and segment feature tables can be removed too. "
+        "Raw data, extracted features, models, labels and review decisions are "
+        "always kept.",
+        "Clean the open project or every project in a chosen folder. Each "
+        "category shows its size before anything is deleted, and you confirm "
+        "first.",
+        "Removed feature tables are rebuilt from the extracted features without "
+        "the videos, and the rebuilt tables are identical to the originals.",
+    ]),
     ("0.29.0", "October 18, 2026", [
         "New Glossary tab under Info. Type any word you see in ABEL, such "
         "as a button, a setting, a tab or a term, and read what it does and "

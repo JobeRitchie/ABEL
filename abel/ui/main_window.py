@@ -126,6 +126,7 @@ class MainWindow(QMainWindow):
         self.home_tab.open_models_btn.clicked.connect(self.open_models_folder)
         self.home_tab.create_project_btn.clicked.connect(self.create_project_from_home)
         self.home_tab.open_project_requested.connect(self._open_project_from_home)
+        self.home_tab.cleanup_requested.connect(self._free_up_disk_space)
 
     def _rebuild_tabs_for_project_switch(self) -> None:
         """Recreate tab widgets to guarantee per-project UI isolation."""
@@ -813,6 +814,21 @@ class MainWindow(QMainWindow):
             if response != QMessageBox.StandardButton.Yes:
                 return
         self.open_project_dialog()
+
+    def _free_up_disk_space(self) -> None:
+        """Open the disk cleanup dialog for the current project."""
+        if self._project is None:
+            self._error("No project is loaded.")
+            return
+        from abel.ui.project_cleanup_dialog import ProjectCleanupDialog
+
+        root = self._project.project_root
+        dlg = ProjectCleanupDialog(root, self)
+        dlg.exec()
+        if dlg.freed_bytes:
+            self._logger.info("Disk cleanup freed %d bytes in %s", dlg.freed_bytes, root)
+            # Clip counts and cached feature tables may have changed.
+            self.home_tab.update_stats(self._compute_project_stats(root))
 
     def _open_session_quality(self) -> None:
         """Validation → Session Quality: runs on Temporal Review's loaded outputs."""

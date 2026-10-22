@@ -45,6 +45,8 @@ def _stat_label(value: str, description: str) -> QWidget:
 class HomeTab(QWidget):
     # Emitted when user clicks "Open Another Project"
     open_project_requested = Signal()
+    # Emitted when user clicks "Free Up Disk Space"
+    cleanup_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -171,7 +173,15 @@ class HomeTab(QWidget):
         self._open_project_btn = QPushButton("Open Another Project")
         self._open_project_btn.setToolTip("Browse for and open an existing ABEL project")
 
+        self._cleanup_btn = QPushButton("Free Up Disk Space…")
+        self._cleanup_btn.setEnabled(False)
+        self._cleanup_btn.setToolTip(
+            "Remove large files a finished project no longer needs (old training "
+            "snapshots, backups, review clips, rebuildable caches)"
+        )
+
         self._open_project_btn.clicked.connect(self.open_project_requested)
+        self._cleanup_btn.clicked.connect(self.cleanup_requested)
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.create_project_btn)
@@ -180,6 +190,10 @@ class HomeTab(QWidget):
         btn_row.addWidget(self.open_outputs_btn)
         btn_row.addWidget(self.open_models_btn)
         btn_row.addStretch()
+
+        btn_row_2 = QHBoxLayout()
+        btn_row_2.addWidget(self._cleanup_btn)
+        btn_row_2.addStretch()
 
         # Wrap everything in a scroll area so the page handles any screen height
         content = QWidget()
@@ -194,6 +208,7 @@ class HomeTab(QWidget):
         content_layout.addWidget(self._metrics_box)
         content_layout.addWidget(behaviors_box)
         content_layout.addLayout(btn_row)
+        content_layout.addLayout(btn_row_2)
         content_layout.addStretch(1)
 
         scroll = QScrollArea()
@@ -215,6 +230,7 @@ class HomeTab(QWidget):
         self.open_folder_btn.setEnabled(True)
         self.open_outputs_btn.setEnabled(True)
         self.open_models_btn.setEnabled(True)
+        self._cleanup_btn.setEnabled(True)
 
     def update_stats(self, stats: dict) -> None:
         def _val(key: str) -> str:
