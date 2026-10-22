@@ -351,11 +351,10 @@ class ValidationService:
         return "poor"
 
     def _behavior_model_map(self) -> dict[str, str]:
-        """Map behavior_id -> model_version from the workflow snapshot when present."""
-        snap_path = self._root() / "derived" / "workflow_snapshot.json"
-        raw = read_json(snap_path, {})
-        sbm = raw.get("selected_behavior_models") or {}
-        return {str(k): str(v) for k, v in sbm.items() if str(v).strip()}
+        """Map behavior_id -> its newest trained model directory."""
+        from abel.services.workflow_snapshot_service import WorkflowSnapshotService  # noqa: PLC0415
+
+        return WorkflowSnapshotService()._auto_resolve_behavior_models(self._root())
 
     def _resolve_model_dir(self, bid: str, name: str, snapshot_version: str) -> Path | None:
         """Locate a behavior's model directory under derived/models.

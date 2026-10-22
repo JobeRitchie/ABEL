@@ -210,23 +210,15 @@ def read_behavior_model_metrics(project: "ProjectRef") -> dict[str, dict[str, fl
 
     Returns ``{behavior_id: {"f1": .., "pr_auc": .., "precision": .., "recall": ..}}``.
     A behavior with no trained model maps to an empty dict.  Model directories are
-    resolved the same way the product does: the workflow snapshot's recorded
-    version first, then the conventional ``behavior_model_<SafeName>`` folder.
+    resolved the same way the product does: the newest trained model for the
+    behavior first, then the conventional ``behavior_model_<SafeName>`` folder.
     """
-    import json  # noqa: PLC0415
+    from abel.services.workflow_snapshot_service import WorkflowSnapshotService  # noqa: PLC0415
 
     root = project.root
     models_root = root / "derived" / "models"
 
-    snapshot: dict[str, str] = {}
-    snap_path = root / "derived" / "workflow_snapshot.json"
-    if snap_path.exists():
-        try:
-            raw = json.loads(snap_path.read_text(encoding="utf-8"))
-            sbm = raw.get("selected_behavior_models") or {}
-            snapshot = {str(k): str(v) for k, v in sbm.items() if str(v).strip()}
-        except Exception:
-            snapshot = {}
+    snapshot = WorkflowSnapshotService()._auto_resolve_behavior_models(root)
 
     def _resolve(bid: str, name: str) -> "Path | None":
         candidates: list[str] = []

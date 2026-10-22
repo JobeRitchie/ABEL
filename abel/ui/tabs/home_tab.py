@@ -43,12 +43,8 @@ def _stat_label(value: str, description: str) -> QWidget:
 
 
 class HomeTab(QWidget):
-    # Emitted when user clicks "Create Snapshot Workflow"
-    snapshot_requested = Signal()
     # Emitted when user clicks "Open Another Project"
     open_project_requested = Signal()
-    # Emitted when user clicks "Direct Use Workflow"
-    direct_use_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -175,20 +171,7 @@ class HomeTab(QWidget):
         self._open_project_btn = QPushButton("Open Another Project")
         self._open_project_btn.setToolTip("Browse for and open an existing ABEL project")
 
-        self._snapshot_btn = QPushButton("Create Snapshot Workflow")
-        self._snapshot_btn.setEnabled(False)
-        self._snapshot_btn.setToolTip(
-            "Export the current pipeline, model, and settings as a reusable Snapshot Workflow"
-        )
-
-        self._direct_use_btn = QPushButton("⚡ Direct Use Workflow")
-        self._direct_use_btn.setToolTip(
-            "Apply a trained model from any project to new data"
-        )
-
         self._open_project_btn.clicked.connect(self.open_project_requested)
-        self._snapshot_btn.clicked.connect(self.snapshot_requested)
-        self._direct_use_btn.clicked.connect(self.direct_use_requested)
 
         btn_row = QHBoxLayout()
         btn_row.addWidget(self.create_project_btn)
@@ -197,11 +180,6 @@ class HomeTab(QWidget):
         btn_row.addWidget(self.open_outputs_btn)
         btn_row.addWidget(self.open_models_btn)
         btn_row.addStretch()
-
-        btn_row_2 = QHBoxLayout()
-        btn_row_2.addWidget(self._snapshot_btn)
-        btn_row_2.addWidget(self._direct_use_btn)
-        btn_row_2.addStretch()
 
         # Wrap everything in a scroll area so the page handles any screen height
         content = QWidget()
@@ -216,7 +194,6 @@ class HomeTab(QWidget):
         content_layout.addWidget(self._metrics_box)
         content_layout.addWidget(behaviors_box)
         content_layout.addLayout(btn_row)
-        content_layout.addLayout(btn_row_2)
         content_layout.addStretch(1)
 
         scroll = QScrollArea()
@@ -233,12 +210,11 @@ class HomeTab(QWidget):
         self._project_name.setText(f"Project: {name}")
         self._project_path.setText(f"Path: {path}")
         self._status.setText(
-            "Ready - import data, define behaviors, run Active Learning, create Snapshot workflows, apply Direct Use, and export results."
+            "Ready - import data, define behaviors, run Active Learning, apply models with Direct Use, and export results."
         )
         self.open_folder_btn.setEnabled(True)
         self.open_outputs_btn.setEnabled(True)
         self.open_models_btn.setEnabled(True)
-        self._snapshot_btn.setEnabled(True)
 
     def update_stats(self, stats: dict) -> None:
         def _val(key: str) -> str:

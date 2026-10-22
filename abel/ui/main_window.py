@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 
 from abel.core.exceptions import ProjectError
 from abel.models.schemas import ProjectContext
-from abel.services.behavior_service import BehaviorService, behavior_label
+from abel.services.behavior_service import BehaviorService
 from abel.services.candidate_service import CandidateGenerationService
 from abel.services.dependency_service import DependencyService
 from abel.services.export_service import ExportService
@@ -64,7 +64,6 @@ from abel.ui.tabs.transfer_feedback_tab import TransferFeedbackTab
 from abel.ui.tabs.model_refinement_tab import ModelRefinementTab
 from abel.ui.tabs.validation_tab import ValidationTab
 from abel.services.validation_service import ValidationService
-from abel.services.workflow_snapshot_service import WorkflowSnapshotService
 from abel.utils.cancellation import request_shutdown
 from abel.workers.task_worker import active_task_count
 
@@ -127,8 +126,6 @@ class MainWindow(QMainWindow):
         self.home_tab.open_models_btn.clicked.connect(self.open_models_folder)
         self.home_tab.create_project_btn.clicked.connect(self.create_project_from_home)
         self.home_tab.open_project_requested.connect(self._open_project_from_home)
-        self.home_tab.snapshot_requested.connect(self._create_snapshot_workflow)
-        self.home_tab.direct_use_requested.connect(self._show_direct_use_tab)
 
     def _rebuild_tabs_for_project_switch(self) -> None:
         """Recreate tab widgets to guarantee per-project UI isolation."""
@@ -711,45 +708,42 @@ class MainWindow(QMainWindow):
                 pass
 
         # ── Pipeline settings ────────────────────────────────────────────
+        # Window/stride come from project.yaml; model and query mode from the
+        # most recently trained model's run_settings.json.
         pipeline: dict = {}
-        snapshot_path = project_root / "derived" / "workflow_snapshot.json"
-        if snapshot_path.exists():
+        proj_yaml = project_root / "project.yaml"
+        if proj_yaml.exists():
             try:
-                snap = json.loads(snapshot_path.read_text(encoding="utf-8"))
-                fps = float(snap.get("fps") or 30.0)
-                win_fr = int(snap.get("segment_window_frames") or 0)
-                str_fr = int(snap.get("segment_stride_frames") or 0)
-                rs = snap.get("run_settings") or {}
+                raw_p = yaml.safe_load(proj_yaml.read_text(encoding="utf-8")) or {}
+                bm = raw_p.get("behavior_model") or {}
+                fps = float(raw_p.get("default_fps") or 30.0)
+                win_fr = int(bm.get("segment_window_frames") or 0)
+                str_fr = int(bm.get("segment_stride_frames") or 0)
                 pipeline = {
                     "window_frames": win_fr,
                     "window_sec": round(win_fr / fps, 3) if fps > 0 and win_fr else None,
                     "stride_frames": str_fr,
                     "stride_sec": round(str_fr / fps, 3) if fps > 0 and str_fr else None,
                     "fps": fps,
-                    "model_version": snap.get("model_version") or "-",
-                    "query_mode": rs.get("mode") or "-",
-                    "classifier": None,
+                    "model_version": "-",
+                    "query_mode": "-",
+                    "classifier": bm.get("classifier_type") or "-",
                 }
             except Exception:
                 pass
-        proj_yaml = project_root / "project.yaml"
-        if proj_yaml.exists():
+        models_root = project_root / "derived" / "models"
+        if pipeline and models_root.is_dir():
             try:
-                raw_p = yaml.safe_load(proj_yaml.read_text(encoding="utf-8")) or {}
-                bm = raw_p.get("behavior_model") or {}
-                pipeline["classifier"] = bm.get("classifier_type") or "-"
-                # Fill window/stride from project config if snapshot didn't supply them
-                if not pipeline.get("window_frames"):
-                    fps = pipeline.get("fps") or float(raw_p.get("default_fps") or 30.0)
-                    win_fr = int(bm.get("segment_window_frames") or 0)
-                    str_fr = int(bm.get("segment_stride_frames") or 0)
-                    pipeline.update({
-                        "window_frames": win_fr,
-                        "window_sec": round(win_fr / fps, 3) if fps > 0 and win_fr else None,
-                        "stride_frames": str_fr,
-                        "stride_sec": round(str_fr / fps, 3) if fps > 0 and str_fr else None,
-                        "fps": fps,
-                    })
+                latest = max(
+                    (d / "run_settings.json" for d in models_root.iterdir()
+                     if (d / "run_settings.json").exists()),
+                    key=lambda f: f.stat().st_mtime,
+                    default=None,
+                )
+                if latest is not None:
+                    rs = json.loads(latest.read_text(encoding="utf-8"))
+                    pipeline["model_version"] = latest.parent.name
+                    pipeline["query_mode"] = rs.get("mode") or (rs.get("ui_settings") or {}).get("mode") or "-"
             except Exception:
                 pass
         if pipeline:
@@ -819,50 +813,6 @@ class MainWindow(QMainWindow):
             if response != QMessageBox.StandardButton.Yes:
                 return
         self.open_project_dialog()
-
-    def _create_snapshot_workflow(self) -> None:
-        """Serialize the current project's pipeline settings into a snapshot."""
-        if self._project is None:
-            self._error("No project is loaded.")
-            return
-        svc = WorkflowSnapshotService()
-        try:
-            snapshot = svc.build_from_project(self._project.project_root)
-            svc.save(self._project.project_root, snapshot)
-
-            # Build a summary of captured behaviors
-            sbm = snapshot.selected_behavior_models or {}
-            excluded = set(snapshot.excluded_behavior_ids or [])
-            beh_lookup: dict[str, str] = {}
-            for b in snapshot.behavior_definitions:
-                bid = b.get("behavior_id", b.get("name", ""))
-                beh_lookup[bid] = b.get("name", b.get("short_name", bid))
-
-            model_lines: list[str] = []
-            for bid, mver in sbm.items():
-                name = behavior_label(bid, beh_lookup)
-                if bid not in excluded:
-                    model_lines.append(f"  • {name} → {mver}")
-
-            models_text = "\n".join(model_lines) if model_lines else f"  • {snapshot.model_version}"
-
-            QMessageBox.information(
-                self,
-                "Snapshot Created",
-                f"Workflow snapshot saved to:\n"
-                f"{self._project.project_root / 'derived' / 'workflow_snapshot.json'}\n\n"
-                f"Behavior Models:\n{models_text}\n\n"
-                "This snapshot can be used in a Direct Use workflow.",
-            )
-        except Exception as exc:
-            self._error(f"Failed to create workflow snapshot:\n{exc}")
-
-    def _show_direct_use_tab(self) -> None:
-        """Switch to the Direct Use tab, pre-seeding the source from the current project."""
-        if self._project is not None:
-            self.direct_use_tab.set_source_from_current(self._project.project_root)
-        self.tabs.setCurrentWidget(self._direct_use_group)
-        self._direct_use_group.setCurrentWidget(self.direct_use_tab)
 
     def _open_session_quality(self) -> None:
         """Validation → Session Quality: runs on Temporal Review's loaded outputs."""

@@ -39,7 +39,7 @@ import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -106,14 +106,17 @@ def pick_session(project_root: Path, need_video: bool) -> SessionPick | None:
     return None
 
 
-def _snapshot(project_root: Path) -> dict[str, Any]:
-    p = Path(project_root) / "derived" / "workflow_snapshot.json"
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+def _segment_settings(project_root: Path) -> tuple[int, int]:
+    """(window, stride) in frames from project.yaml's behavior_model block."""
+    import yaml  # noqa: PLC0415
+
+    p = Path(project_root) / "project.yaml"
+    try:
+        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        raw = {}
+    bm = raw.get("behavior_model") or {}
+    return int(bm.get("segment_window_frames") or 60), int(bm.get("segment_stride_frames") or 15)
 
 
 # ── Result record ───────────────────────────────────────────────────────────
@@ -179,9 +182,7 @@ def time_extraction(
         return out
     out.video_seconds = pick.duration_sec
 
-    snap = _snapshot(project_root)
-    win = int(snap.get("segment_window_frames") or 60)
-    stride = int(snap.get("segment_stride_frames") or 15)
+    win, stride = _segment_settings(project_root)
 
     # Isolated temp project so we never overwrite the real feature caches.
     tmp_root = project_root / "derived" / "_benchmark_tmp"

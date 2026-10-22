@@ -33,9 +33,9 @@ def _e(
 ENTRIES: tuple[GlossaryEntry, ...] = (
     # ── Main tabs ────────────────────────────────────────────────────────
     _e("Home", "Main tab",
-       "The start page. Create or open a project, see its stats, and start a "
-       "Direct Use run or a workflow snapshot.",
-       see=("Project", "Create Snapshot Workflow")),
+       "The start page. Create or open a project, see its stats, and free up "
+       "disk space.",
+       see=("Project",)),
     _e("Data Import", "Main tab",
        "Add videos and pose files, pair each video with its pose file, and set "
        "each session's subject, session type and px/mm.",
@@ -1487,12 +1487,11 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        aliases=("Behaviogram",),),
 
     # ── Direct Use and model reuse ───────────────────────────────────────
-    _e("Workflow snapshot", "Home, Direct Use",
-       "A saved copy of a project's models, window settings, thresholds and bout "
-       "settings, so the same workflow can run on new videos.",
-       aliases=("Snapshot",),),
-    _e("Create Snapshot Workflow", "Home",
-       "Saves the current project's models and settings as a workflow snapshot.",),
+    _e("Workflow snapshot", "Direct Use",
+       "The source project's models, window settings, thresholds and bout "
+       "settings, read fresh each time Direct Use runs so new videos are scored "
+       "exactly as the source project scores its own.",
+       aliases=("Snapshot", "Create Snapshot Workflow"),),
     _e("Run Direct Use Pipeline", "Direct Use > Run",
        "Runs the snapshot on the new videos: features, scoring, refinement and "
        "bouts.",

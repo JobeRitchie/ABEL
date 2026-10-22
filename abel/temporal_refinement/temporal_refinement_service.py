@@ -45,7 +45,7 @@ from abel.services.feature_coverage_service import (
 )
 from abel.services.r3d_feature_service import R3DFeatureService, is_r3d_column
 from abel.services.roi_service import ROIService, is_roi_column
-from abel.storage.file_store import read_json, write_json
+from abel.storage.file_store import read_json, read_yaml, write_json
 from abel.temporal_refinement.bout_postprocess import (
     binary_trace_to_intervals,
     merge_close_bouts,
@@ -311,13 +311,27 @@ class TemporalRefinementService:
         project_root = self._require_project_root()
         seg_path = project_root / "derived" / "representations" / "segment_features.parquet"
         if not seg_path.exists():
-            return 30
+            return self._configured_window_frames(project_root)
         seg_df = pd.read_parquet(seg_path, columns=["start_frame", "end_frame"])
         if seg_df.empty:
-            return 30
+            return self._configured_window_frames(project_root)
         lengths = seg_df["end_frame"].to_numpy(dtype=int) - seg_df["start_frame"].to_numpy(dtype=int) + 1
         lengths = lengths[lengths > 0]
         return int(max(1, int(np.median(lengths)))) if lengths.size else 30
+
+    @staticmethod
+    def _configured_window_frames(project_root: Path) -> int:
+        """Segment window from project.yaml, for projects with no segment table yet.
+
+        A hard-coded 30 here scored 15-frame models on 1 s windows in Direct Use
+        projects, which shifted every behavior's trace.
+        """
+        try:
+            bm = (read_yaml(project_root / "project.yaml", {}) or {}).get("behavior_model") or {}
+            frames = int(bm.get("segment_window_frames") or 0)
+        except (TypeError, ValueError):
+            frames = 0
+        return frames if frames > 0 else 30
 
     # ------------------------------------------------------------------
     # Frame features

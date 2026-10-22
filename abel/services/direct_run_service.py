@@ -307,6 +307,15 @@ class DirectRunService:
                 len(keypoint_aliases),
             )
 
+        # Per-step failures are collected rather than swallowed, so a run that
+        # lost sessions or a whole step never reports a clean success.
+        failures: list[str] = []
+
+        def _fail(step_id: str, where: str, exc: object) -> None:
+            msg = f"{STEP_LABELS.get(step_id, step_id)} failed for {where}: {exc}"
+            logger.warning(msg)
+            failures.append(msg)
+
         try:
             # ── Step 1: Pose Cleaning ────────────────────────────────
             step_start = time.monotonic()
@@ -319,9 +328,11 @@ class DirectRunService:
                     return {"status": "cancelled"}
                 pa = pose_by_id.get(s.pose_asset_id)
                 if pa is None:
+                    _fail("pose_clean", str(s.session_id), "no pose file is linked")
                     continue
                 pp = Path(pa.local_path) if pa.local_path and Path(pa.local_path).exists() else Path(pa.source_path)
                 if not pp.exists():
+                    _fail("pose_clean", str(s.session_id), f"pose file not found: {pp}")
                     continue
                 # Write cleaned pose to derived
                 clean_dir = target_project_root / "derived" / "pose_clean"
@@ -341,7 +352,7 @@ class DirectRunService:
                     })
                     df.to_parquet(out_path, index=False)
                 except Exception as exc:
-                    logger.warning("Pose clean failed for %s: %s", s.session_id, exc)
+                    _fail("pose_clean", str(s.session_id), exc)
             state.step_timings["pose_clean"] = time.monotonic() - step_start
             state.completed_steps.append("pose_clean")
 
@@ -380,12 +391,12 @@ class DirectRunService:
                         keypoint_aliases=keypoint_aliases,
                     )
                 except Exception as exc:
-                    logger.warning("Pose features failed for %s: %s", sid, exc)
+                    _fail("pose_features", sid, exc)
             # Consolidate
             try:
                 self._pose.consolidate_session_files(target_project_root)
             except Exception as exc:
-                logger.warning("Pose consolidation failed: %s", exc)
+                _fail("pose_features", "consolidation", exc)
             state.step_timings["pose_features"] = time.monotonic() - step_start
             state.completed_steps.append("pose_features")
 
@@ -405,10 +416,12 @@ class DirectRunService:
                     va = video_by_id.get(s.video_asset_id)
                     pa = pose_by_id.get(s.pose_asset_id)
                     if va is None or pa is None:
+                        _fail("context_features", str(s.session_id), "video or pose file is not linked")
                         continue
                     vp = Path(va.local_path) if va.local_path and Path(va.local_path).exists() else Path(va.source_path)
                     pp = Path(pa.local_path) if pa.local_path and Path(pa.local_path).exists() else Path(pa.source_path)
                     if not vp.exists() or not pp.exists():
+                        _fail("context_features", str(s.session_id), "video or pose file not found")
                         continue
                     sid = str(s.session_id)
                     animal_id = str(s.subject_id or sid)
@@ -428,12 +441,12 @@ class DirectRunService:
                             keypoint_aliases=keypoint_aliases,
                         )
                     except Exception as exc:
-                        logger.warning("Context features failed for %s: %s", sid, exc)
+                        _fail("context_features", sid, exc)
                 # Consolidate
                 try:
                     self._context.consolidate_session_files(target_project_root)
                 except Exception as exc:
-                    logger.warning("Context consolidation failed: %s", exc)
+                    _fail("context_features", "consolidation", exc)
             else:
                 _emit("context_features", 2, 1.0, "Video features disabled: skipping context extraction.")
             state.step_timings["context_features"] = time.monotonic() - step_start
@@ -466,11 +479,14 @@ class DirectRunService:
                     frame_pose_path=pose_feat_path,
                     frame_context_path=ctx_feat_path,
                     config=repr_cfg,
-                    session_ids=set(session_ids),
+                    # Full build (the target holds only these sessions) so the
+                    # segment table is persisted: dense inference reads its
+                    # window length from it, and Review needs it later.
+                    session_ids=None,
                     progress_cb=lambda msg: _emit("representation", 3, 0.5, msg),
                 )
             except Exception as exc:
-                logger.warning("Representation build failed: %s", exc)
+                _fail("representation", "all sessions", exc)
             state.step_timings["representation"] = time.monotonic() - step_start
             state.completed_steps.append("representation")
             _emit("representation", 3, 1.0, "Representations built.")
@@ -501,7 +517,7 @@ class DirectRunService:
             for key in (
                 "inference_step_seconds", "inference_warmup_seconds",
                 "inference_parallel_enabled", "inference_max_workers",
-                "inhibition_weight", "probability_temperature",
+                "inhibition_weight", "suppression_matrix", "probability_temperature",
             ):
                 val = tb_block.get(key, tr_global.get(key))
                 if val is not None:
@@ -511,15 +527,22 @@ class DirectRunService:
             # multi-behavior competitive inference.
             concept_id = "target_behavior"
             try:
-                tr_service.run_temporal_refinement_inference(
+                inf_result = tr_service.run_temporal_refinement_inference(
                     concept_id=concept_id,
                     sessions=session_ids,
                     config=tr_cfg,
                     force=True,
                     progress_cb=lambda msg: _emit("inference", 4, 0.5, msg),
                 )
+                if str(inf_result.get("status", "")) not in {"ok", "success", "skipped"}:
+                    _fail("inference", "all sessions", inf_result.get("error") or inf_result.get("status"))
+                elif inf_result.get("status") == "ok":
+                    scored = set((inf_result.get("trace_paths") or {}).keys())
+                    for sid in session_ids:
+                        if sid not in scored:
+                            _fail("inference", sid, "no probability trace was produced")
             except Exception as exc:
-                logger.warning("Dense inference failed: %s", exc)
+                _fail("inference", "all sessions", exc)
             state.step_timings["inference"] = time.monotonic() - step_start
             state.completed_steps.append("inference")
             _emit("inference", 4, 1.0, "Inference complete.")
@@ -614,9 +637,7 @@ class DirectRunService:
                         ),
                     )
                 except Exception as exc:
-                    logger.warning(
-                        "Temporal postprocess failed for %s: %s", bid, exc,
-                    )
+                    _fail("temporal_refinement", beh_name, exc)
 
             state.step_timings["temporal_refinement"] = time.monotonic() - step_start
             state.completed_steps.append("temporal_refinement")
@@ -642,7 +663,8 @@ class DirectRunService:
                 progress_cb(state)
 
             return {
-                "status": "success",
+                "status": "warning" if failures else "success",
+                "failures": failures,
                 "session_count": total_sessions,
                 "bout_count": bout_count,
                 "elapsed_seconds": state.elapsed_seconds,

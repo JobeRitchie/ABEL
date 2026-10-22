@@ -1395,9 +1395,8 @@ class TemporalReviewTab(QWidget):
 
         Resolution order:
         1. representations.manifest.json  (provenance.config.representation_config.window_size_frames)
-        2. workflow_snapshot.json          (segment_window_frames)
-        3. project.yaml                   (behavior_model.segment_window_frames)
-        4. Hardcoded fallback of 60 frames
+        2. project.yaml                   (behavior_model.segment_window_frames)
+        3. Hardcoded fallback of 60 frames
         """
         window_size = 60
         if self._project_root is None:
@@ -1419,18 +1418,7 @@ class TemporalReviewTab(QWidget):
             except Exception:
                 pass
 
-        # 2. Workflow snapshot (records what was actually used for training)
-        snapshot_path = self._project_root / "derived" / "workflow_snapshot.json"
-        if snapshot_path.exists():
-            try:
-                snap = json.loads(snapshot_path.read_text(encoding="utf-8"))
-                w = int(snap.get("segment_window_frames") or 0)
-                if w >= 8:
-                    return w
-            except Exception:
-                pass
-
-        # 3. Project config
+        # 2. Project config
         project_yaml = self._project_root / "project.yaml"
         if project_yaml.exists():
             try:

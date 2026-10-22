@@ -1,10 +1,10 @@
-"""Workflow snapshot: serialize the current trained-pipeline state.
+"""Workflow snapshot: the trained-pipeline state Direct Use replays.
 
 A *workflow snapshot* records everything needed to apply a trained ABEL
 model to a new batch of videos, without re-running the full active-learning
-loop.  It is written automatically every time a model is successfully trained
-(full pipeline or retrain) and can be applied to arbitrary new sessions via
-the "Batch Run" panel.
+loop.  ``build_from_project`` assembles it fresh from the source project's
+config files and model directories each time Direct Use runs, so it never
+goes stale.
 
 Snapshot layout (derived/workflow_snapshot.json):
 {
@@ -34,9 +34,7 @@ the live inference path) so the snapshot replays the full multi-behavior
 competition rather than collapsing to a single model.  ``no_behavior`` is not
 run as a competitor unless explicitly selected in the Temporal Refinement tab.
 
-The snapshot is *always overwritten* to reflect the most recent trained state.
-Previous snapshots are archived to derived/workflow_snapshot_archive/ so the
-user can audit history but the live snapshot is never stale.
+``save`` archives the previous file to derived/workflow_snapshot_archive/.
 """
 
 from __future__ import annotations
@@ -243,17 +241,15 @@ class WorkflowSnapshotService:
     # ------------------------------------------------------------------
 
     def build_from_project(self, project_root: Path) -> WorkflowSnapshot:
-        """Assemble a snapshot from the current project's persisted state.
+        """Assemble a snapshot from the project's live config and models.
 
-        Reads the existing snapshot (if any) as a baseline, then overlays
-        current config/model data so every setting the Direct Run pipeline
-        needs is captured.  Raises if no model version can be determined.
+        Never reads a saved ``workflow_snapshot.json``: every field comes from
+        the project's config files or the trained models' ``run_settings.json``.
+        Raises if no model version can be determined.
         """
         import yaml  # noqa: PLC0415
 
-        base = self.load(project_root)
-        if base is None:
-            base = WorkflowSnapshot(model_version="", target_behavior="")
+        base = WorkflowSnapshot(model_version="", target_behavior="")
 
         # ── Model version: pick the latest model directory ──────────
         models_dir = project_root / "derived" / "models"
@@ -376,7 +372,6 @@ class WorkflowSnapshotService:
             base.selected_behavior_models = resolved
         elif auto_sbm:
             base.selected_behavior_models = auto_sbm
-        # else: leave whatever the baseline snapshot had.
 
         # ── Exclusions ───────────────────────────────────────────────
         # Carry forward whatever the user excluded in the TR tab.  We do
@@ -384,10 +379,9 @@ class WorkflowSnapshotService:
         # _auto_resolve_behavior_models), so there is no need to special-
         # case it here: it simply never enters the map unless the user
         # picked it explicitly, in which case we honor that choice.
-        excluded_set = set(explicit_excluded) | set(base.excluded_behavior_ids or [])
         # Drop any stale exclusions that no longer name a captured behavior.
         base.excluded_behavior_ids = sorted(
-            bid for bid in excluded_set if bid in base.selected_behavior_models
+            bid for bid in set(explicit_excluded) if bid in base.selected_behavior_models
         )
 
         # ── Derive target_behavior (first active, non-excluded) ──────
@@ -423,8 +417,51 @@ class WorkflowSnapshotService:
         if base.target_behavior and base.target_behavior in base.selected_behavior_models:
             base.model_version = base.selected_behavior_models[base.target_behavior]
 
+        # ── Settings the target model was trained with ───────────────
+        # The AL tab records its UI settings in each model's run_settings.json
+        # at training time; that is the ground truth for the flow stride and
+        # the feature columns the user excluded.
+        rs = read_json(
+            project_root / "derived" / "models" / base.model_version / "run_settings.json", {},
+        ) or {}
+        ui = rs.get("ui_settings") if isinstance(rs.get("ui_settings"), dict) else {}
+        base.run_settings = dict(ui)
+        base.excluded_feature_cols = sorted(str(c) for c in (ui.get("excluded_feature_cols") or []))
+        base.context_feature_config = self._context_config_dict(ui.get("flow_temporal_stride"))
+
+        # ── Pose feature preset ──────────────────────────────────────
+        pose_cfg_path = project_root / "config" / "pose_features.yaml"
+        if pose_cfg_path.exists():
+            try:
+                pose_raw = yaml.safe_load(pose_cfg_path.read_text(encoding="utf-8")) or {}
+                base.pose_preset_id = str(pose_raw.get("active_preset_id") or "") or None
+            except Exception:
+                pass
+
         base.source_project_path = str(project_root)
         return base
+
+    @staticmethod
+    def _context_config_dict(flow_temporal_stride: Any) -> dict[str, Any]:
+        """ContextFeatureConfig defaults with the trained flow stride applied."""
+        import dataclasses  # noqa: PLC0415
+
+        from abel.services.context_feature_service import ContextFeatureConfig  # noqa: PLC0415
+
+        cfg = ContextFeatureConfig()
+        try:
+            stride = int(flow_temporal_stride)
+            if stride > 0:
+                cfg.flow_temporal_stride = stride
+        except (TypeError, ValueError):
+            pass
+        keys = (
+            "farneback_pyr_scale", "farneback_levels", "farneback_winsize",
+            "farneback_iterations", "farneback_poly_n", "farneback_poly_sigma",
+            "downsample_factor", "flow_temporal_stride",
+        )
+        values = dataclasses.asdict(cfg)
+        return {k: values[k] for k in keys if k in values}
 
     # ------------------------------------------------------------------
     # Behavior-model auto-discovery (mirrors TemporalRefinementService)

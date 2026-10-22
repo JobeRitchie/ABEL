@@ -859,8 +859,12 @@ class DirectUseTab(QWidget):
 
     def set_project(self, project_root: Path) -> None:
         """Called when the currently open project changes.
-        For Direct Use the target is always chosen explicitly, this is a no-op."""
-        pass
+
+        Offers the open project as the model source until the user picks one;
+        the target is always chosen explicitly.
+        """
+        if self._source_root is None:
+            self.set_source_from_current(project_root)
 
     def set_source_from_current(self, project_root: Path) -> None:
         """Pre-populate the source project from the currently open project."""
@@ -878,11 +882,18 @@ class DirectUseTab(QWidget):
             self._load_snapshot(Path(path))
 
     def _load_snapshot(self, project_root: Path) -> None:
-        snapshot = self._snap_svc.load(project_root)
+        # Built from the source project's current models and settings every
+        # time, never from the saved workflow_snapshot.json, which goes stale
+        # (the post-training auto-save drops review thresholds and exclusions).
+        try:
+            snapshot = self._snap_svc.build_from_project(project_root)
+        except Exception as exc:
+            logger.warning("Could not read source project %s: %s", project_root, exc)
+            snapshot = None
         if snapshot is None:
             self._source_info.setText(
-                f"{project_root.name}, No workflow snapshot found. "
-                "Create one via Home → Create Snapshot Workflow."
+                f"{project_root.name}, no trained models found. "
+                "Train at least one behavior model in that project first."
             )
             self._snap_detail.hide()
             self._snapshot = None
@@ -1882,6 +1893,14 @@ class DirectUseTab(QWidget):
             )
             return
 
+        # Re-read the source so models or settings changed since it was
+        # selected are the ones that run.
+        try:
+            self._snapshot = self._snap_svc.build_from_project(self._source_root)
+        except Exception as exc:
+            QMessageBox.warning(self, "Direct Use", f"Could not read the source project:\n{exc}")
+            return
+
         # Build target project root
         target_root = self._output_root / f"direct_use_{self._source_root.name}"
         target_root.mkdir(parents=True, exist_ok=True)
@@ -2057,7 +2076,8 @@ class DirectUseTab(QWidget):
         self._update_run_button()
 
         status = result.get("status", "error")
-        if status == "success":
+        failures = list(result.get("failures") or [])
+        if status in ("success", "warning"):
             self._overall_progress.setValue(100)
             self._overall_progress.setStyleSheet(
                 "QProgressBar { background: #1A2027; border-radius: 4px; border: none; }"
@@ -2073,6 +2093,22 @@ class DirectUseTab(QWidget):
                 f"Complete: {sessions} session(s), {bouts} bout(s). "
                 "Open the output folder or switch to the Analytics tab."
             )
+            if failures:
+                self._overall_progress.setStyleSheet(
+                    "QProgressBar { background: #1A2027; border-radius: 4px; border: none; }"
+                    "QProgressBar::chunk { background: #F9A825; border-radius: 4px; }"
+                )
+                self._status.setStyleSheet("font-size: 11px; color: #FFB74D; padding-top: 2px;")
+                self._status.setText(
+                    f"Finished with {len(failures)} problem(s): {sessions} session(s), "
+                    f"{bouts} bout(s). Results may be incomplete."
+                )
+                shown = "\n".join(f"• {f}" for f in failures[:15])
+                more = f"\n…and {len(failures) - 15} more (see Logs)." if len(failures) > 15 else ""
+                QMessageBox.warning(
+                    self, "Direct Use finished with problems",
+                    f"Some steps failed, so results may be incomplete:\n\n{shown}{more}",
+                )
             if self._output_root and self._source_root:
                 self.pipeline_complete.emit(
                     self._output_root / f"direct_use_{self._source_root.name}"
