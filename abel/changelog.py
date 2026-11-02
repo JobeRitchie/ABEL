@@ -7,10 +7,25 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "October 22, 2026"
+VERSION_DATE = "November 2, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.31.0", "November 2, 2026", [
+        "New Delay Fear Extinction 50x session-section preset: the same as "
+        "Delay Fear Extinction but with 50 tone and ITI repeats instead of 20.",
+        "New option on Pose & Features: Ignore keypoints outside the ROIs. "
+        "A body part more than 30 px outside every drawn target zone is "
+        "treated as a missed detection. It fixes frames where DLC tracked an "
+        "object beside the apparatus, such as a cable clamp next to an EPM, "
+        "and pulled the centroid off the maze. Off by default. Redrawing the "
+        "zones rebuilds the pose cache when it is on.",
+        "Long tracking dropouts are no longer filled part of the way along a "
+        "line toward the far end. Short gaps are still interpolated; longer "
+        "ones are held at the last known position.",
+        "Direct Use and the position CSV export now clean pose with the "
+        "project's Pose & Features settings.",
+    ]),
     ("0.30.0", "October 22, 2026", [
         "New Free Up Disk Space button on the Home tab. It removes large files "
         "a finished project no longer needs: old training-set snapshots, old "

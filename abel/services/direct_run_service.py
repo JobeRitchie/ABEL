@@ -345,7 +345,12 @@ class DirectRunService:
                     # The target project.yaml carries the source's Pose &
                     # Features block, the same smoothing pose features use.
                     settings = PoseSmoothingSettings.load_from_project(target_project_root)
-                    pose_data = self._pose.load_and_clean(pp, settings=settings, keypoint_aliases=keypoint_aliases)
+                    keep_zones = self._pose.roi_keep_zones(
+                        target_project_root, f"{s.subject_id or s.session_id}::{s.session_id}", settings,
+                    )
+                    pose_data = self._pose.load_and_clean(
+                        pp, settings=settings, keypoint_aliases=keypoint_aliases, keep_zones=keep_zones,
+                    )
                     df = pd.DataFrame({
                         "centroid_x": pose_data.centroid_x,
                         "centroid_y": pose_data.centroid_y,

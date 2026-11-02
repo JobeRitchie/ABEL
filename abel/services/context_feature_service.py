@@ -1296,6 +1296,9 @@ class ContextFeatureService:
         else:
             pose = self._pose.load_and_clean(
                 pose_path, settings=smoothing, keypoint_aliases=keypoint_aliases,
+                keep_zones=self._pose.roi_keep_zones(
+                    project_root, f"{roi_subject_id or animal_id}::{session_id}", smoothing,
+                ),
             )
         _roi_key = f"{roi_subject_id or animal_id}::{session_id}"
         target_rois = self._rois.resolve_target_rois(project_root, _roi_key)

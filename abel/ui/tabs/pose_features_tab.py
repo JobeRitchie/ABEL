@@ -318,12 +318,21 @@ class PoseFeaturesTab(QWidget):
         self._p_smooth.setValue(3)
         self._p_smooth.setToolTip("Rolling-mean smoothing width applied after interpolation")
 
+        self._p_roi_mask = QCheckBox("Ignore keypoints outside the ROIs")
+        self._p_roi_mask.setChecked(False)
+        self._p_roi_mask.setToolTip(
+            "Treat a body part more than 30 px outside every drawn target zone as\n"
+            "a missed detection. Use it when the zones cover the whole apparatus\n"
+            "(e.g. the four EPM arms) and DLC sometimes tracks an object beside it."
+        )
+
         param_form.addRow("Window duration:", self._p_win_dur)
         param_form.addRow("Stride (overlap):", self._p_stride)
         param_form.addRow("Source FPS:", self._p_fps)
         param_form.addRow("Min likelihood:", self._p_likelihood)
         param_form.addRow("", self._p_interp)
         param_form.addRow("Smoothing window:", self._p_smooth)
+        param_form.addRow("", self._p_roi_mask)
 
         # Wire auto-save on every parameter change
         self._p_win_dur.valueChanged.connect(self._save_extraction_settings)
@@ -332,6 +341,7 @@ class PoseFeaturesTab(QWidget):
         self._p_likelihood.valueChanged.connect(self._save_extraction_settings)
         self._p_interp.stateChanged.connect(self._save_extraction_settings)
         self._p_smooth.valueChanged.connect(self._save_extraction_settings)
+        self._p_roi_mask.stateChanged.connect(self._save_extraction_settings)
 
         self._preview_btn = QPushButton("Preview Video Settings…")
         self._preview_btn.setToolTip(
@@ -836,13 +846,16 @@ class PoseFeaturesTab(QWidget):
         try:
             path = self._project_root / "project.yaml"
             raw = read_yaml(path, {})
+            # Merge so keys with no widget (roi_mask_margin_px) survive a save.
             raw[self._SETTINGS_KEY] = {
+                **(raw.get(self._SETTINGS_KEY) or {}),
                 "window_duration_sec": round(self._p_win_dur.value(), 4),
                 "stride_sec": round(self._p_stride.value(), 4),
                 "source_fps": round(self._p_fps.value(), 4),
                 "likelihood_threshold": round(self._p_likelihood.value(), 4),
                 "interpolate_dropouts": self._p_interp.isChecked(),
                 "smoothing_window": self._p_smooth.value(),
+                "roi_keypoint_mask": self._p_roi_mask.isChecked(),
                 "use_video_features": self._p_use_video.isChecked(),
                 "use_r3d_features": self._p_use_r3d.isChecked(),
                 "advanced_roi_features": self._p_advanced_roi.isChecked(),
@@ -882,7 +895,7 @@ class PoseFeaturesTab(QWidget):
             # Block signals while bulk-loading to avoid N redundant writes
             widgets = [
                 self._p_win_dur, self._p_stride, self._p_fps,
-                self._p_likelihood, self._p_interp, self._p_smooth,
+                self._p_likelihood, self._p_interp, self._p_smooth, self._p_roi_mask,
                 self._p_use_video, self._p_use_r3d, self._p_advanced_roi,
             ]
             for w in widgets:
@@ -894,6 +907,7 @@ class PoseFeaturesTab(QWidget):
             self._p_likelihood.setValue(float(cfg.get("likelihood_threshold", 0.2)))
             self._p_interp.setChecked(bool(cfg.get("interpolate_dropouts", True)))
             self._p_smooth.setValue(int(cfg.get("smoothing_window", 3)))
+            self._p_roi_mask.setChecked(bool(cfg.get("roi_keypoint_mask", False)))
             self._p_use_video.setChecked(bool(cfg.get("use_video_features", False)))
             self._p_use_r3d.setChecked(bool(cfg.get("use_r3d_features", True)))
             # Default on: projects saved before this setting existed should gain

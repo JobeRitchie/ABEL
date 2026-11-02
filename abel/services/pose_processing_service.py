@@ -523,13 +523,15 @@ class PoseProcessingService:
         path: Path,
         settings: "PoseSmoothingSettings | None" = None,
         keypoint_aliases: "dict[str, str] | None" = None,
+        keep_zones: list[dict] | None = None,
     ) -> PoseData:
         """Load a pose file and apply temporal smoothing with the given settings.
 
         This is the preferred entry point for all downstream services.  Pass
-        ``manifest.smoothing_settings`` to apply the project-level smoothing
-        that was configured at import time.  ``keypoint_aliases`` renames body
-        parts on load (see :meth:`load`).
+        ``PoseSmoothingSettings.load_from_project(root)`` to apply the project's
+        Pose & Features settings.  ``keypoint_aliases`` renames body parts on
+        load (see :meth:`load`).  ``keep_zones`` (from :meth:`roi_keep_zones`)
+        is applied only when the settings enable the ROI keypoint mask.
         """
         from abel.models.schemas import PoseSmoothingSettings as _S
         s = settings or _S()
@@ -541,7 +543,72 @@ class PoseProcessingService:
             interpolate_max_gap=s.interpolate_max_gap,
             smoothing_window=s.smoothing_window,
             absence_max_fill_frames=s.absence_max_fill_frames,
+            keep_zones=keep_zones if s.roi_keypoint_mask else None,
+            keep_margin_px=s.roi_mask_margin_px,
         )
+
+    @staticmethod
+    def roi_keep_zones(
+        project_root: Path,
+        roi_key: str,
+        settings: "PoseSmoothingSettings",
+    ) -> list[dict] | None:
+        """Target-zone ROIs that bound where keypoints may be, or None.
+
+        None when the project has the ROI keypoint mask off or the session has
+        no drawn zone, so callers can pass the result straight to
+        :meth:`load_and_clean` / :meth:`clean_pose`.
+        """
+        if not settings.roi_keypoint_mask:
+            return None
+        from abel.services.roi_service import ROIService  # noqa: PLC0415
+        from abel.utils.roi_geometry import roi_has_area  # noqa: PLC0415
+        try:
+            zones = ROIService().resolve_target_rois(project_root, roi_key)
+        except Exception:
+            logger.debug("Could not resolve ROIs for %s", roi_key, exc_info=True)
+            return None
+        zones = [z for z in zones if roi_has_area(z)]
+        return zones or None
+
+    @staticmethod
+    def _outside_zones(
+        x: pd.DataFrame, y: pd.DataFrame, zones: list[dict], margin_px: float,
+    ) -> pd.DataFrame:
+        """True where a keypoint lies farther than *margin_px* outside every zone."""
+        from abel.utils.roi_geometry import roi_signed_distance  # noqa: PLC0415
+        xs = x.to_numpy(dtype=float)
+        ys = y.to_numpy(dtype=float)
+        inside = np.zeros(xs.shape, dtype=bool)
+        for zone in zones:
+            d = roi_signed_distance(zone, xs.ravel(), ys.ravel()).reshape(xs.shape)
+            inside |= d >= -float(margin_px)
+        outside = ~inside & np.isfinite(xs) & np.isfinite(ys)
+        return pd.DataFrame(outside, index=x.index, columns=x.columns)
+
+    @staticmethod
+    def _interpolate_short_gaps(df: pd.DataFrame, max_gap: int) -> pd.DataFrame:
+        """Linearly fill interior gaps of at most *max_gap* frames, per column.
+
+        ``DataFrame.interpolate(limit=n)`` fills the first *n* frames of a
+        longer gap along the line toward the far end, so a long dropout drifts
+        part of the way across the arena and then sits there.  A longer gap is
+        left NaN here and later held at the last known position instead.
+        """
+        filled = df.interpolate(method="linear", limit_area="inside")
+        for col in df.columns:
+            isna = df[col].isna().to_numpy()
+            if not isna.any():
+                continue
+            edges = np.flatnonzero(np.diff(np.concatenate(([0], isna.astype(np.int8), [0]))))
+            long_runs = [(a, b) for a, b in zip(edges[::2], edges[1::2]) if b - a > max_gap]
+            if not long_runs:
+                continue
+            vals = filled[col].to_numpy(dtype=float, copy=True)
+            for a, b in long_runs:
+                vals[a:b] = np.nan
+            filled[col] = vals
+        return filled
 
     def _parse_pose_df(self, df: pd.DataFrame, source: Path | None = None) -> PoseData:
         """Convert a (bodypart, coord) MultiIndex DataFrame into PoseData."""
@@ -593,6 +660,8 @@ class PoseProcessingService:
         interpolate_max_gap: int = 10,
         smoothing_window: int = 5,
         absence_max_fill_frames: int = 30,
+        keep_zones: list[dict] | None = None,
+        keep_margin_px: float = 30.0,
     ) -> PoseData:
         """Apply likelihood masking, gap interpolation, and temporal smoothing.
 
@@ -601,9 +670,15 @@ class PoseProcessingService:
         being filled with the nearest known pose: the animal is absent, not
         stationary.  Shorter dropouts are still filled, so ordinary tracking
         jitter behaves exactly as before.  Pass 0 to fill everything.
+
+        With *keep_zones*, a keypoint more than *keep_margin_px* outside every
+        zone is treated as a missed detection (likelihood 0).  This removes
+        confident detections on clutter beside the apparatus (a cable clamp
+        next to an EPM), which would otherwise pull the centroid off the maze.
         """
         x = pose.x.copy()
         y = pose.y.copy()
+        likelihood = pose.likelihood
 
         # 1. Mask low-likelihood detections
         mask = pose.likelihood < likelihood_threshold
@@ -615,10 +690,20 @@ class PoseProcessingService:
         # dropout apart from a stretch where the animal simply is not there.
         undetected = x.isna().all(axis=1).to_numpy()
 
+        # 1b. Drop keypoints outside the apparatus.  After ``undetected`` on
+        #     purpose: a frame where DLC tracked only the clutter means the
+        #     animal was missed, not that it left, so it is held, not blanked.
+        if keep_zones:
+            outside = self._outside_zones(x, y, keep_zones, keep_margin_px)
+            if outside.to_numpy().any():
+                x = x.mask(outside)
+                y = y.mask(outside)
+                likelihood = likelihood.mask(outside, 0.0)
+
         # 2. Interpolate short gaps
         if interpolate and interpolate_max_gap > 0:
-            x = x.interpolate(method="linear", limit=interpolate_max_gap)
-            y = y.interpolate(method="linear", limit=interpolate_max_gap)
+            x = self._interpolate_short_gaps(x, interpolate_max_gap)
+            y = self._interpolate_short_gaps(y, interpolate_max_gap)
 
         # 3. Smooth
         if smoothing_window > 1:
@@ -639,10 +724,13 @@ class PoseProcessingService:
             x = x.mask(pd.Series(absent, index=x.index), other=np.nan, axis=0)
             y = y.mask(pd.Series(absent, index=y.index), other=np.nan, axis=0)
 
-        cx, cy = self._compute_centroid(x, y, pose.likelihood, threshold=likelihood_threshold)
+        # A zone-masked keypoint now has likelihood 0, so a positive threshold
+        # keeps it out of the centroid even when the user's threshold is 0.
+        centroid_threshold = likelihood_threshold if keep_zones is None else max(likelihood_threshold, 1e-9)
+        cx, cy = self._compute_centroid(x, y, likelihood, threshold=centroid_threshold)
         return PoseData(
             body_parts=pose.body_parts,
-            x=x, y=y, likelihood=pose.likelihood,
+            x=x, y=y, likelihood=likelihood,
             centroid_x=cx, centroid_y=cy,
             n_frames=pose.n_frames,
         )
@@ -981,6 +1069,7 @@ class PoseProcessingService:
         invariant_config: "InvariantFeatureConfig | None" = None,
         keypoint_aliases: "dict[str, str] | None" = None,
         smoothing: "PoseSmoothingSettings | None" = None,
+        roi_subject_id: str | None = None,
     ) -> pd.DataFrame:
         # ``smoothing`` defaults to the project's own Pose & Features settings.
         # Pass it explicitly when ``project_root`` is a scratch folder (batch
@@ -988,8 +1077,12 @@ class PoseProcessingService:
         if smoothing is None:
             from abel.models.schemas import PoseSmoothingSettings as _S
             smoothing = _S.load_from_project(project_root)
+        keep_zones = self.roi_keep_zones(
+            project_root, f"{roi_subject_id or animal_id}::{session_id}", smoothing,
+        )
         pose = self.load_and_clean(
             pose_path, settings=smoothing, keypoint_aliases=keypoint_aliases,
+            keep_zones=keep_zones,
         )
         df = self.compute_frame_pose_features(
             pose=pose,

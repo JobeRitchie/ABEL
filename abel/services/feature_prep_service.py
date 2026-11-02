@@ -275,6 +275,14 @@ class FeaturePrepService:
         smoothing = cls._smoothing_signature(project_root)
         if smoothing:
             sig["smoothing"] = smoothing
+            # With the ROI keypoint mask on, the zones decide which keypoints
+            # survive, so redrawing them must rebuild the pose cache too.
+            if smoothing.get("roi_keypoint_mask"):
+                roi_path = project_root / "config" / "environment_rois.yaml"
+                try:
+                    sig["roi_mask_zones"] = roi_path.read_text(encoding="utf-8") if roi_path.exists() else ""
+                except Exception:
+                    sig["roi_mask_zones"] = ""
         return cls._hash(sig)
 
     @staticmethod
@@ -910,6 +918,7 @@ class FeaturePrepService:
                         session_id=job.session_id,
                         video_id=job.session_id,
                         keypoint_aliases=aliases,
+                        roi_subject_id=job.subject_id,
                     )
             check_cancel()
             if (

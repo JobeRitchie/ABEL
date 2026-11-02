@@ -17431,6 +17431,14 @@ class _SessionSectionsWidget(QWidget):
             ],
         },
         {
+            "name": "Delay Fear Extinction 50x",
+            "sections": [{"name": "Baseline", "duration": 180}] + [
+                {"name": f"{kind} {i}", "duration": 20 if kind == "Tone" else 60}
+                for i in range(1, 51)
+                for kind in ("Tone", "ITI")
+            ],
+        },
+        {
             "name": "LPT Conditioning 1",
             "sections": [
                 {"name": "Baseline",  "duration": 180},

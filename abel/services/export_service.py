@@ -15,7 +15,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from abel.models.schemas import CandidateWindow, ReviewDecision, ReviewDecisionType
+from abel.models.schemas import CandidateWindow, PoseSmoothingSettings, ReviewDecision, ReviewDecisionType
 from abel.services.behavior_service import BehaviorService
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
@@ -804,6 +804,9 @@ class ExportService:
         output_paths: list[Path] = []
         total_rows = 0
         used_names: set[str] = set()
+        # The track must come from the same cleaning the behavior features
+        # used (Pose & Features settings), not the import-time defaults.
+        smoothing = PoseSmoothingSettings.load_from_project(self._project_root)
 
         for session in sessions:
             session_id = session.session_id
@@ -813,7 +816,12 @@ class ExportService:
                 continue
 
             try:
-                pose = self._pose.load_and_clean(pose_path, manifest.smoothing_settings)
+                keep_zones = self._pose.roi_keep_zones(
+                    self._project_root,
+                    f"{(session.subject_id or session_id).strip()}::{session_id}",
+                    smoothing,
+                )
+                pose = self._pose.load_and_clean(pose_path, smoothing, keep_zones=keep_zones)
             except Exception as exc:
                 out.warnings.append(f"[{session_id}] failed to load pose: {exc}")
                 continue

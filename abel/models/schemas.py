@@ -166,10 +166,22 @@ class PoseSmoothingSettings(BaseModel):
     already there.  0 disables the bound (fill everything, the pre-0.22 behavior).
     """
 
-    # The Pose & Features tab edits these three and saves them to
-    # ``project.yaml`` under ``feature_extraction``.
+    roi_keypoint_mask: bool = False
+    """Ignore keypoints outside every target-zone ROI (plus ``roi_mask_margin_px``).
+
+    For apparatus such as an EPM where the drawn zones cover everywhere the
+    animal can be, this removes confident detections on objects beside it.
+    Off by default because in most projects the zones mark only part of the arena.
+    """
+
+    roi_mask_margin_px: float = 30.0
+    """How far outside the zones a keypoint may sit (head dips over an open arm)."""
+
+    # The Pose & Features tab edits these and saves them to ``project.yaml``
+    # under ``feature_extraction``.
     PROJECT_KEYS: ClassVar[tuple[str, ...]] = (
         "likelihood_threshold", "interpolate_dropouts", "smoothing_window",
+        "roi_keypoint_mask", "roi_mask_margin_px",
     )
 
     @classmethod
