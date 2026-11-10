@@ -323,8 +323,15 @@ def build_segment_df_fast(
     include_periodicity: bool = True,
     include_posture_deltas: bool = False,
     presence_cols: "list[str] | None" = None,
+    time_scale: float = 1.0,
 ) -> "pd.DataFrame":
     """Build a segment-summary DataFrame for one (animal, session) group.
+
+    *time_scale* is this session's frame rate over the project's, for a session
+    whose window was resized to cover the same seconds as the rest of the
+    project.  Two statistics depend on the frame count rather than on time and
+    are converted back to project frames: ``_periodicity`` (an FFT peak grows
+    with the number of samples) and ``_trend`` (a slope per frame).
 
     This is a drop-in replacement for the per-window Python loop used in
     ``BehaviorRepresentationService``.
@@ -463,5 +470,13 @@ def build_segment_df_fast(
             col = feature_cols[feat_idx]
             result[f"{col}_delta"] = sub_delta[:, local_idx].astype(np.float32, copy=False)
             result[f"{col}_trend"] = sub_trend[:, local_idx].astype(np.float32, copy=False)
+
+    if time_scale and abs(float(time_scale) - 1.0) > 1e-9:
+        scale = np.float32(time_scale)
+        for name, values in result.items():
+            if name.endswith("_periodicity"):
+                result[name] = (values / scale).astype(np.float32, copy=False)
+            elif name.endswith("_trend"):
+                result[name] = (values * scale).astype(np.float32, copy=False)
 
     return pd.DataFrame(result)

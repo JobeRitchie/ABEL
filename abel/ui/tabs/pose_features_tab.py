@@ -73,6 +73,12 @@ from abel.ui.smoothing_preview_dialog import BG_THRESHOLD_TOOLTIP, SmoothingPrev
 from abel.ui.widgets.progress_panel import ProgressPanel
 from abel.utils.cancellation import is_cancel_traceback
 from abel.utils.run_timeline import RunTimeline, Stage
+from abel.utils.session_fps import (
+    describe_mixed,
+    session_fps,
+    session_fps_scales,
+    video_fps_by_session,
+)
 from abel.workers.task_worker import TaskWorker
 from abel.utils.error_text import format_task_error
 
@@ -1182,7 +1188,19 @@ class PoseFeaturesTab(QWidget):
                         except Exception:
                             pass
 
-        detected_fps = round(sum(fps_values) / len(fps_values), 2) if fps_values else None
+        # The most common rate, not the mean: averaging 30 and 60 gives 45,
+        # which is wrong for every video.  Other sessions are rescaled to it.
+        video_rates = video_fps_by_session(manifest=self._manifest) if self._manifest else {}
+        mixed_note = ""
+        if len({round(v, 1) for v in video_rates.values()}) > 1:
+            fps_values = list(video_rates.values())
+            mixed_note = (
+                " Your videos mix frame rates (" + describe_mixed(video_rates) + "). "
+                "The most common rate is used here; the other sessions keep the same "
+                "window length in seconds."
+            )
+        rounded = [round(v, 2) for v in fps_values]
+        detected_fps = max(set(rounded), key=rounded.count) if rounded else None
         working_fps = detected_fps or self._p_fps.value()
 
         # ── Compute recommendations ─────────────────────────────────────
@@ -1240,7 +1258,8 @@ class PoseFeaturesTab(QWidget):
 
         if detected_fps is not None:
             lines.append(
-                f"<b>Source FPS:</b> Detected {detected_fps} fps from your pose files.<br><br>"
+                f"<b>Source FPS:</b> Detected {detected_fps} fps from your pose files."
+                f"{mixed_note}<br><br>"
             )
         else:
             lines.append(
@@ -1480,9 +1499,24 @@ class PoseFeaturesTab(QWidget):
     def _run_all(self, configs: list[PoseFeatureConfig], preset: PoseFeaturePreset) -> list:
         from abel.services.pose_features_service import PoseFeatureResult  # noqa: PLC0415
         results: list[PoseFeatureResult] = []
+        scales = self._fps_scales(preset)
+        if scales:
+            self._prep_log.emit(
+                "Videos were recorded at different frame rates ("
+                + describe_mixed(video_fps_by_session(manifest=self._manifest))
+                + f"). Windows stay {preset.window_duration_sec:g} s long in every video; "
+                f"{len(scales)} session(s) use their own frame rate instead of "
+                f"{preset.source_fps:g} fps."
+            )
         for i, cfg in enumerate(configs):
             if self._cancel_flag[0]:
                 break
+            scale = scales.get(str(cfg.session_id))
+            if scale:
+                import dataclasses  # noqa: PLC0415
+                cfg = dataclasses.replace(cfg, preset=cfg.preset.model_copy(
+                    update={"source_fps": session_fps(cfg.preset.source_fps, scale)}
+                ))
             result = self._service.extract_features(cfg, cancel_flag=self._cancel_flag)
             results.append(result)
             done = i + 1
@@ -1646,6 +1680,14 @@ class PoseFeaturesTab(QWidget):
 
     # ── Prep timeline plumbing ──────────────────────────────────────────
 
+    def _fps_scales(self, preset: PoseFeaturePreset | None) -> dict[str, float]:
+        """Per-session fps scale; empty unless the videos mix frame rates."""
+        if self._manifest is None or preset is None:
+            return {}
+        return session_fps_scales(
+            self._project_root, self._manifest, reference=float(preset.source_fps)
+        )
+
     def _build_prep_jobs(self, session_ids: list[str], preset: PoseFeaturePreset | None) -> list:
         if not session_ids or self._manifest is None or preset is None:
             return []
@@ -1653,6 +1695,7 @@ class PoseFeaturesTab(QWidget):
             str(s.session_id): s
             for s in getattr(self._manifest, "linked_sessions", [])
         }
+        scales = self._fps_scales(preset)
         jobs: list[SessionJob] = []
         for sid in session_ids:
             pose_path = self._imports.pose_path_for_session(self._manifest, sid)
@@ -1669,7 +1712,7 @@ class PoseFeaturesTab(QWidget):
                 subject_id=subject_id,
                 pose_path=pose_path,
                 video_path=video_path,
-                fps=float(preset.source_fps),
+                fps=session_fps(preset.source_fps, scales.get(str(sid))),
                 individuals=individuals,
                 individual_subject_map=ind_map,
                 identity_corrections=corrections,

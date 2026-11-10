@@ -41,6 +41,7 @@ def _make_widget(lo: float | None, from_range: bool):
         setattr(stub, name, getattr(_GraphsWidget, name).__get__(stub))
     stub._host = SimpleNamespace(
         _project_fps=lambda: FPS,
+        _session_fps=lambda _sid: FPS,
         _raw_bouts=_raw_bouts(),
         _summary_rows=[],
         _selected_behavior_ids=lambda: {"b1"},
@@ -118,6 +119,7 @@ def _distance_host():
     host = SimpleNamespace(
         _get_pose_for_session=lambda sid: pose,
         _project_fps=lambda: fps,
+        _session_fps=lambda _sid: fps,
         _analysis_prechop_for_session=lambda sid: 0,
     )
     host._compute_session_distance_binned = (

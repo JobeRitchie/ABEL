@@ -716,6 +716,7 @@ class TemporalRefinementService:
         step_frames: int,
         include_posture_deltas: bool = False,
         presence_cols: "list[str] | None" = None,
+        time_scale: float = 1.0,
     ) -> pd.DataFrame:
         n_frames = len(session_df)
         if n_frames <= 0:
@@ -741,6 +742,7 @@ class TemporalRefinementService:
             include_periodicity=True,
             include_posture_deltas=include_posture_deltas,
             presence_cols=presence_cols,
+            time_scale=time_scale,
         )
 
         if result.empty:
@@ -1092,6 +1094,9 @@ class TemporalRefinementService:
         self._emit(progress_cb, f"Behavior models: {', '.join(f'{bid}={ver}' for bid, ver in model_versions.items())}")
 
         fps_by_session = self._fps_by_session(manifest) if manifest else {}
+        from abel.utils.session_fps import scaled_frames, session_fps_scales  # noqa: PLC0415
+
+        fps_scales = session_fps_scales(project_root, manifest) if manifest else {}
         window_frames = self._infer_behavior_window_frames()
         step_seconds = max(0.01, float(cfg.inference_step_seconds))
         warmup_seconds = max(0.0, float(cfg.inference_warmup_seconds))
@@ -1195,6 +1200,8 @@ class TemporalRefinementService:
             n_chunks: int,
             step_f: int,
             fps: float,
+            window_frames: int = window_frames,
+            time_scale: float = 1.0,
         ) -> "tuple[dict[str, np.ndarray], int] | None":
             """Score one animal's frame table into per-chunk probabilities.
 
@@ -1208,6 +1215,7 @@ class TemporalRefinementService:
                 session_df, repr_feature_cols, window_frames, step_f,
                 include_posture_deltas=posture_deltas,
                 presence_cols=[c for c in _PRESENCE_COLS if c in session_df.columns],
+                time_scale=time_scale,
             )
             if dense_segs.empty:
                 return None
@@ -1399,6 +1407,9 @@ class TemporalRefinementService:
                 return None
             fps = max(1.0, float(fps_by_session.get(sid, 30.0) or 30.0))
             step_f = max(1, int(round(step_seconds * fps)))
+            # A session at another frame rate is windowed over the same seconds
+            # its training segments were (None for a single-rate project).
+            fps_scale = fps_scales.get(sid)
             n_chunks = int(np.ceil(n_frames / step_f))
             if n_chunks <= 0:
                 return None
@@ -1421,7 +1432,11 @@ class TemporalRefinementService:
             per_behavior_prob: dict[str, np.ndarray] = {}
             n_windows = 0
             for animal_id, animal_df in animal_tables:
-                scored = _score_animal(sid, animal_df, n_chunks, step_f, fps)
+                scored = _score_animal(
+                    sid, animal_df, n_chunks, step_f, fps,
+                    window_frames=scaled_frames(window_frames, fps_scale, minimum=2),
+                    time_scale=float(fps_scale or 1.0),
+                )
                 if scored is None:
                     continue
                 animal_prob, animal_windows = scored
@@ -1694,6 +1709,13 @@ class TemporalRefinementService:
 
         manifest = self._imports.load_manifest(self._require_project_root())
         fps_by_session = self._fps_by_session(manifest) if manifest else {}
+        # Bout cleanup is set in project frames; a session at another frame rate
+        # gets the same durations in its own frames.
+        from abel.utils.session_fps import scaled_frames, session_fps_scales  # noqa: PLC0415
+
+        fps_scales = (
+            session_fps_scales(self._require_project_root(), manifest) if manifest else {}
+        )
 
         metrics_by_session: dict[str, dict[str, Any]] = {}
         bout_paths: dict[str, str] = {}
@@ -1718,8 +1740,13 @@ class TemporalRefinementService:
                     continue
 
                 binary = threshold_probabilities(smooth, onset_thresh=float(cfg.onset_threshold))
-                binary = merge_close_bouts(binary, cfg.merge_gap_frames)
-                binary = remove_short_bouts(binary, cfg.min_bout_duration_frames)
+                fps_scale = fps_scales.get(str(sid))
+                binary = merge_close_bouts(
+                    binary, scaled_frames(cfg.merge_gap_frames, fps_scale, minimum=0)
+                )
+                binary = remove_short_bouts(
+                    binary, scaled_frames(cfg.min_bout_duration_frames, fps_scale)
+                )
                 intervals = binary_trace_to_intervals(binary)
 
                 out_df = pd.DataFrame(intervals, columns=["start_frame", "end_frame"])

@@ -87,6 +87,7 @@ def _make_widget(scaling: bool = True, style: str = "bar", mode: str = "individu
         _filtered_rows=lambda: list(rows),
         _raw_bouts=raw,
         _project_fps=lambda: FPS,
+        _session_fps=lambda _sid: FPS,
         _session_label_by_session=dict(_LABEL_BY_SESSION),
         ordered_session_labels=lambda: list(SUBJECTS),
         _ordered_group_list=lambda names, *a: sorted({n for n in names if n}),

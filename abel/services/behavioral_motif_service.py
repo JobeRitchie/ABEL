@@ -180,6 +180,12 @@ class MotifSettings:
     state, used by the latency metric.  0 counts every entry, including
     single-bout flickers through a state."""
 
+    # -- Session filter -----------------------------------------------------
+    session_filter: dict[str, str] = field(default_factory=dict)
+    """Factor name -> level. Transition, motif and HMM analyses use only the
+    sessions whose level matches for every listed factor (for example
+    ``{"Phase": "Conditioning"}``). An empty dict uses every checked session."""
+
     # -- Permutation testing ------------------------------------------------
     n_permutations: int = 1000
     permutation_seed: int = 42

@@ -206,6 +206,13 @@ class TemporalRefinementTab(QWidget):
 
         self._configure_models_btn.clicked.connect(self._open_behavior_model_mapping_dialog)
 
+        self._reload_behaviors_btn = QPushButton("Refresh Behaviors")
+        self._reload_behaviors_btn.setToolTip(
+            "Reload behaviors and trained models from the project, so ones "
+            "added or trained since this page opened show up."
+        )
+        self._reload_behaviors_btn.clicked.connect(self._reload_behaviors)
+
         self._model_selection_summary = QLabel("Behavior models: auto")
 
         self._model_selection_summary.setWordWrap(True)
@@ -582,6 +589,8 @@ class TemporalRefinementTab(QWidget):
 
         model_row.addWidget(self._configure_models_btn)
 
+        model_row.addWidget(self._reload_behaviors_btn)
+
         model_row.addWidget(self._model_selection_summary, 1)
 
         config_layout.addLayout(model_row)
@@ -793,6 +802,15 @@ class TemporalRefinementTab(QWidget):
         from PySide6.QtCore import QTimer  # noqa: PLC0415
 
         QTimer.singleShot(0, self._deferred_project_init)
+
+    def _reload_behaviors(self) -> None:
+        """Re-read behaviors and trained models from disk."""
+        if self._project_root is None:
+            return
+        self._behaviors.set_project(self._project_root)
+        self._refresh_config_summary()
+        self._refresh_results_view()
+        self._status.setText("Behaviors refreshed.")
 
     def _open_tr_graph_size_dialog(self) -> None:
         """Open a dialog to set max display width/height for the temporal refinement graph."""

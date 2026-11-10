@@ -78,6 +78,7 @@ def test_fingerprint_tracks_pose_files_rois_and_prechop(tmp_path: Path) -> None:
     host = SimpleNamespace(
         _project_root=tmp_path,
         _project_fps=lambda: 30.0,
+        _session_fps=lambda _sid: 30.0,
         _pose_path_for_session=lambda sid: pose,
         _analysis_prechop_for_session=lambda sid: prechop[sid],
     )
@@ -104,6 +105,7 @@ def test_fingerprint_survives_a_session_without_pose(tmp_path: Path) -> None:
     host = SimpleNamespace(
         _project_root=tmp_path,
         _project_fps=lambda: 30.0,
+        _session_fps=lambda _sid: 30.0,
         _pose_path_for_session=lambda sid: None,
         _analysis_prechop_for_session=lambda sid: 0,
     )

@@ -201,8 +201,15 @@ def scope_bouts_to_roi(
 
 def summarize_bouts(
     bouts: pd.DataFrame, fps: float,
+    fps_by_session: "dict[str, float] | None" = None,
 ) -> dict[tuple[str, str], tuple[float, float, float, float]]:
-    """Aggregate a bout table into ``(sid, bid)`` -> (n, time_s, mean_s, latency_s)."""
+    """Aggregate a bout table into ``(sid, bid)`` -> (n, time_s, mean_s, latency_s).
+
+    ``fps_by_session`` overrides ``fps`` for the sessions it names, for projects
+    whose videos were recorded at different frame rates.
+    """
+    default_fps = fps if fps > 0 else 1.0
+    session_rates = fps_by_session or {}
     stats: dict[tuple[str, str], tuple[float, float, float, float]] = {}
     if bouts is None or bouts.empty or not set(_BOUT_KEYS).issubset(bouts.columns):
         return stats
@@ -210,6 +217,9 @@ def summarize_bouts(
         fps = 1.0
     has_bid = "behavior_id" in bouts.columns
     for sid, grp in bouts.groupby(bouts["session_id"].astype(str), sort=False):
+        fps = float(session_rates.get(str(sid)) or 0.0)
+        if fps <= 0:
+            fps = default_fps
         sub_iter = (
             grp.groupby(grp["behavior_id"].astype(str), sort=False)
             if has_bid else [("", grp)]

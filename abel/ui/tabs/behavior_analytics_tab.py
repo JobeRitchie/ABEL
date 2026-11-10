@@ -1484,6 +1484,7 @@ class BehaviorAnalyticsTab(QWidget):
                 continue
             for sid, grp in bdf.groupby("session_id"):
                 sid_str = str(sid)
+                fps = self._session_fps(sid_str)
                 n_b = float(len(grp))
                 total_frames = float((grp["end_frame"] - grp["start_frame"] + 1).sum())
                 time_s = total_frames / fps
@@ -1692,6 +1693,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._velocity_tab.on_groups_updated()
         self._social_tab.on_groups_updated()
         self._density_tab.on_groups_updated()
+        self._relationships_tab._rebuild_session_filter()
 
     def _session_groups_for_controls(
         self, controls: dict[str, str]
@@ -3036,7 +3038,7 @@ class BehaviorAnalyticsTab(QWidget):
             pose = self._get_pose_for_session(sid)
             for zi in range(roi_count):
                 roi = rois[zi] if zi < len(rois) else None
-                stats = self._compute_session_roi_stats(sid, pose, roi, fps)
+                stats = self._compute_session_roi_stats(sid, pose, roi, self._session_fps(sid))
                 if stats is None:
                     continue
                 time_s, n_entries, mean_s, latency_s = stats
@@ -3055,8 +3057,33 @@ class BehaviorAnalyticsTab(QWidget):
                 })
         return rows
 
+    def _roi_stats_in_range(
+        self, session_id: str, behavior_id: str,
+        lo_s: float | None, hi_s: float | None,
+    ) -> tuple[float, int, float, float] | None:
+        """ROI occupancy stats for one session/zone limited to the Data Range."""
+        if self._project_root is None:
+            return None
+        try:
+            zi = int(str(behavior_id)[len(ROI_BEHAVIOR_PREFIX):]) - 1
+        except ValueError:
+            return None
+        subject = self._subject_by_session.get(session_id, session_id)
+        try:
+            rois = self._roi_service.resolve_target_rois(
+                self._project_root, f"{subject}::{session_id}"
+            )
+        except Exception:
+            return None
+        roi = rois[zi] if 0 <= zi < len(rois) else None
+        return self._compute_session_roi_stats(
+            session_id, self._get_pose_for_session(session_id), roi,
+            self._project_fps(), lo_s, hi_s,
+        )
+
     def _compute_session_roi_stats(
         self, session_id: str, pose: Any, roi: dict | None, fps: float,
+        lo_s: float | None = None, hi_s: float | None = None,
     ) -> tuple[float, int, float, float] | None:
         """Return ``(time_in_s, n_entries, mean_visit_s, latency_s)`` for one ROI.
 
@@ -3084,6 +3111,18 @@ class BehaviorAnalyticsTab(QWidget):
         min_run = max(1, int(round(0.2 * fps))) if fps > 0 else 1
         inside = _debounce_bool(inside, min_run)
 
+        # Data Range window (seconds from the analysis start), applied after
+        # debouncing so the window edges don't change which frames are inside.
+        i0 = 0
+        if lo_s is not None and fps > 0:
+            i0 = min(inside.size, max(0, int(round(lo_s * fps))))
+        i1 = inside.size
+        if hi_s is not None and fps > 0:
+            i1 = min(inside.size, max(i0, int(round(hi_s * fps))))
+        inside = inside[i0:i1]
+        if inside.size == 0:
+            return 0.0, 0, 0.0, float("nan")
+
         n_inside = int(inside.sum())
         time_s = (n_inside / fps) if fps > 0 else 0.0
         # Entries = out→in transitions; an initial inside run counts as one.
@@ -3091,7 +3130,7 @@ class BehaviorAnalyticsTab(QWidget):
         n_entries = int(entries_mask.sum())
         mean_s = (time_s / n_entries) if n_entries > 0 else 0.0
         if n_entries > 0 and fps > 0:
-            latency_s = float(int(np.argmax(inside))) / fps
+            latency_s = float(i0 + int(np.argmax(inside))) / fps
         else:
             latency_s = float("nan")
         return time_s, n_entries, mean_s, latency_s
@@ -3279,7 +3318,7 @@ class BehaviorAnalyticsTab(QWidget):
                 rois = []
             roi = rois[zone_index - 1] if zone_index - 1 < len(rois) else None
             mask = roi_behavior_service.roi_inside_mask(
-                self._get_pose_for_session(str(session_id)), roi, self._project_fps()
+                self._get_pose_for_session(str(session_id)), roi, self._session_fps(session_id)
             )
         self._roi_mask_cache[key] = mask
         return mask
@@ -3368,7 +3407,7 @@ class BehaviorAnalyticsTab(QWidget):
             stats_by_key.update({
                 (sid, str(bid)): vals
                 for (sid, _b), vals in roi_behavior_service.summarize_bouts(
-                    bdf, fps
+                    bdf, fps, fps_by_session=self._fps_by_session()
                 ).items()
             })
 
@@ -3619,10 +3658,11 @@ class BehaviorAnalyticsTab(QWidget):
                         total_frames = float((bout_df["end_frame"] - bout_df["start_frame"] + 1).sum())
                     else:
                         total_frames = 0.0
-                    time_s = total_frames / fps
+                    sid_fps = self._session_fps(sid)
+                    time_s = total_frames / sid_fps
                     mean_dur = time_s / n_bouts if n_bouts > 0 else 0.0
                     if n_bouts > 0 and "start_frame" in bout_df.columns:
-                        latency_s = float(bout_df["start_frame"].min()) / fps
+                        latency_s = float(bout_df["start_frame"].min()) / sid_fps
                     else:
                         latency_s = float("nan")
                     subject = self._subject_by_session.get(str(sid), str(sid))
@@ -3684,10 +3724,11 @@ class BehaviorAnalyticsTab(QWidget):
                     continue
                 n_bouts = len(grp)
                 total_frames = float((grp["end_frame"] - grp["start_frame"] + 1).sum())
-                time_s = total_frames / fps
+                sid_fps = self._session_fps(sid_str)
+                time_s = total_frames / sid_fps
                 mean_dur = time_s / n_bouts if n_bouts > 0 else 0.0
                 if n_bouts > 0 and "start_frame" in grp.columns:
-                    latency_s = float(grp["start_frame"].min()) / fps
+                    latency_s = float(grp["start_frame"].min()) / sid_fps
                 else:
                     latency_s = float("nan")
                 subject = self._subject_by_session.get(sid_str, sid_str)
@@ -3729,6 +3770,30 @@ class BehaviorAnalyticsTab(QWidget):
                     break
         self._fps_cache = fps
         return fps
+
+    def _fps_by_session(self) -> dict[str, float]:
+        """Each session's own fps, or empty when every video shares one rate.
+
+        Empty for a single-rate project so its numbers come from
+        ``_project_fps`` exactly as before.
+        """
+        from abel.utils.session_fps import is_mixed, video_fps_by_session  # noqa: PLC0415
+
+        manifest = self._manifest()
+        if manifest is None:
+            return {}
+        cached = getattr(self, "_fps_by_session_cache", None)
+        if cached is not None and cached[0] is manifest:
+            return cached[1]
+        rates = video_fps_by_session(manifest=manifest)
+        if not is_mixed(rates.values()):
+            rates = {}
+        self._fps_by_session_cache = (manifest, rates)
+        return rates
+
+    def _session_fps(self, session_id: object) -> float:
+        """Frame rate to convert one session's frames to seconds."""
+        return self._fps_by_session().get(str(session_id)) or self._project_fps()
 
     def _get_pose_for_session(self, session_id: str) -> Any:
         """Return PoseData for a session, using a cache to avoid repeated loads."""
@@ -3783,7 +3848,7 @@ class BehaviorAnalyticsTab(QWidget):
         pose = self._get_pose_for_session(session_id)
         if pose is None or not intervals:
             return 0.0
-        fps = self._project_fps()
+        fps = self._session_fps(session_id)
         step = max(1, round(fps / _DISTANCE_SUBSAMPLE_HZ))
         cx = np.asarray(pose.centroid_x, dtype=np.float64)
         cy = np.asarray(pose.centroid_y, dtype=np.float64)
@@ -3815,7 +3880,7 @@ class BehaviorAnalyticsTab(QWidget):
         pose = self._get_pose_for_session(session_id)
         if pose is None:
             return 0.0
-        fps = self._project_fps()
+        fps = self._session_fps(session_id)
         step = max(1, round(fps / _DISTANCE_SUBSAMPLE_HZ))
         start_idx = self._analysis_prechop_for_session(session_id)
         cx = np.asarray(pose.centroid_x, dtype=np.float64)[start_idx::step]
@@ -3841,7 +3906,7 @@ class BehaviorAnalyticsTab(QWidget):
         pose = self._get_pose_for_session(session_id)
         if pose is None:
             return []
-        fps = self._project_fps()
+        fps = self._session_fps(session_id)
         step = max(1, round(fps / _DISTANCE_SUBSAMPLE_HZ))
         cx = np.asarray(pose.centroid_x, dtype=np.float64)
         cy = np.asarray(pose.centroid_y, dtype=np.float64)
@@ -4122,7 +4187,7 @@ class BehaviorAnalyticsTab(QWidget):
             1-D float64 array of velocity values; empty array if no pose data.
         """
         pose = self._get_pose_for_session(session_id)
-        fps = self._project_fps()
+        fps = self._session_fps(session_id)
         ppm = self._pixels_per_mm_for_session(session_id)
         if pose is None:
             # Fallback: load pre-computed centroid_velocity from the local
@@ -4268,7 +4333,7 @@ class BehaviorAnalyticsTab(QWidget):
                 "start_frame": sf,
                 "end_frame": ef,
                 "duration_frames": dur_frames,
-                "duration_s": dur_frames / fps,
+                "duration_s": dur_frames / max(1e-9, self._session_fps(sid)),
                 "mean_vel": float(np.mean(vel)),
                 "peak_vel": float(np.max(vel)),
                 "velocity_trace": vel,
@@ -6549,7 +6614,7 @@ class _GraphsWidget(QWidget):
         if cached is not None:
             return cached
 
-        fps = max(1e-9, float(self._host._project_fps()))
+        fps = max(1e-9, float(self._host._session_fps(sid)))
         end_s = 0.0
 
         # Prefer imported merged-session end-time overrides when available.
@@ -6790,8 +6855,9 @@ class _GraphsWidget(QWidget):
                         sorted_grp = sorted_grp[sorted_grp["start_frame"] < cutoff]
                     # If no cutoff (target never occurred), keep all bouts
 
-                starts = sorted_grp["start_frame"].to_numpy(dtype=np.float64) / fps
-                ends = (sorted_grp["end_frame"].to_numpy(dtype=np.float64) + 1) / fps
+                sid_fps = self._host._session_fps(sid)
+                starts = sorted_grp["start_frame"].to_numpy(dtype=np.float64) / sid_fps
+                ends = (sorted_grp["end_frame"].to_numpy(dtype=np.float64) + 1) / sid_fps
                 durations = ends - starts
                 valid = durations > 0
                 starts = starts[valid]
@@ -6807,7 +6873,7 @@ class _GraphsWidget(QWidget):
                     scale_factor = self._get_until_scale_factor()
                     cutoff_f = cutoffs.get(str(sid))
                     if cutoff_f is not None:
-                        pre_time_s = float(cutoff_f) / fps
+                        pre_time_s = float(cutoff_f) / sid_fps
                     else:
                         # Target never occurred: use data-range max or full session duration
                         _lo, _hi = self._get_data_range_seconds()
@@ -6880,6 +6946,7 @@ class _GraphsWidget(QWidget):
                     continue
                 template = wanted[key]
 
+                fps = self._host._session_fps(sid)
                 starts = grp["start_frame"].to_numpy(dtype=np.float64) / fps
                 ends = (grp["end_frame"].to_numpy(dtype=np.float64) + 1) / fps
 
@@ -6919,9 +6986,26 @@ class _GraphsWidget(QWidget):
         # with no bouts, or the distance pseudo-behavior)
         for key, template in wanted.items():
             if key not in processed:
-                if is_pseudo_behavior_id(template.get("behavior_id", "")):
-                    # Pseudo-behavior rows (distance / ROI) have no raw bouts,
-                    # keep their whole-session values as-is.
+                bid_t = template.get("behavior_id", "")
+                if is_roi_behavior_id(bid_t):
+                    # ROI occupancy comes from pose, so recompute it inside
+                    # the Data Range instead of keeping whole-session values.
+                    stats = self._host._roi_stats_in_range(
+                        str(template.get("session_id", "")), bid_t, lo_s, hi_s,
+                    )
+                    if stats is None:
+                        result.append(template)
+                    else:
+                        t_s, n_e, mean_s, lat_s = stats
+                        result.append({
+                            **template,
+                            "n_bouts": float(n_e),
+                            "time_spent_s": t_s,
+                            "mean_bout_s": mean_s,
+                            "latency_s": lat_s,
+                        })
+                elif is_pseudo_behavior_id(bid_t):
+                    # Distance rows have no raw bouts, keep whole-session values.
                     result.append(template)
                 else:
                     result.append({
@@ -7444,8 +7528,10 @@ class _GraphsWidget(QWidget):
                             parts.append(grp_uc)
                     bdf_f = pd.concat(parts, ignore_index=True) if parts else bdf.iloc[:0]
                 # Vectorized conversion to seconds
-                starts = bdf_f["start_frame"].astype(float) / fps
-                durs = (bdf_f["end_frame"].astype(float) / fps - starts).clip(lower=0)
+                # Per-row rate: sessions may be recorded at different fps.
+                row_fps = bdf_f["session_id"].map(self._host._session_fps).astype(float)
+                starts = bdf_f["start_frame"].astype(float) / row_fps
+                durs = (bdf_f["end_frame"].astype(float) / row_fps - starts).clip(lower=0)
                 labels = bdf_f["session_id"].astype(str).map(
                     lambda s: _label_map.get(s, s)  # noqa: B023
                 )
@@ -7617,6 +7703,7 @@ class _GraphsWidget(QWidget):
                             grp = grp[grp["start_frame"] < cutoff]
                     starts = grp["start_frame"].to_numpy(dtype=np.int64)
                     ends = grp["end_frame"].to_numpy(dtype=np.int64)
+                    fps = self._host._session_fps(sid)
                     start_s = starts.astype(np.float64) / fps
                     end_s = (ends + 1).astype(np.float64) / fps
 
@@ -8521,6 +8608,7 @@ class _GraphsWidget(QWidget):
                     sess_label = self._host._session_label_by_session.get(sid, sid)
                     if sess_label not in eth_checked:
                         continue
+                    fps = self._host._session_fps(sid)
                     start_s = float(bout["start_frame"]) / fps
                     end_s = float(bout["end_frame"]) / fps
                     out_rows.append({
@@ -8896,6 +8984,7 @@ class _GraphsWidget(QWidget):
                 sess_label = self._host._session_label_by_session.get(sid, sid)
                 if sess_label not in eth_checked:
                     continue
+                fps = self._host._session_fps(sid)
                 start_s = float(bout["start_frame"]) / fps
                 end_s = float(bout["end_frame"]) / fps
                 # Honor the Data Range window (matches the on-screen ethogram).
@@ -12622,6 +12711,15 @@ class _BehaviorMotifWidget(QWidget):
         top_row.addWidget(self._graph_size_btn)
         top_row.addWidget(self._settings_btn)
 
+        # ── session filter: run every analysis on one level of a factor ──
+        self._sess_filter_row = QWidget()
+        self._sess_filter_layout = QHBoxLayout(self._sess_filter_row)
+        self._sess_filter_layout.setContentsMargins(0, 0, 0, 0)
+        self._sess_filter_layout.setSpacing(4)
+        self._sess_filter_combos: dict[str, QComboBox] = {}
+        self._sess_filter_sig: tuple = ()
+        self._sess_filter_row.setVisible(False)
+
         # ── inner sub-tabs ───────────────────────────────────────────
         self._inner_tabs = QTabWidget()
         self._trans_widget = self._build_transition_panel()
@@ -12634,7 +12732,102 @@ class _BehaviorMotifWidget(QWidget):
         root = QVBoxLayout(self)
         root.setSpacing(4)
         root.addLayout(top_row)
+        root.addWidget(self._sess_filter_row)
         root.addWidget(self._inner_tabs, 1)
+
+    # ── Session filter ────────────────────────────────────────────────
+
+    def _rebuild_session_filter(self) -> None:
+        """One "(all levels)" / level dropdown per factor defined in Summary."""
+        factors = list(self._host._factor_definitions)
+        levels = self._host._levels_by_factor()
+        sig = tuple((f, tuple(levels.get(f, []))) for f in factors)
+        if sig == self._sess_filter_sig and self._sess_filter_combos:
+            self._set_session_filter_combos()
+            return
+        self._sess_filter_sig = sig
+        while self._sess_filter_layout.count():
+            item = self._sess_filter_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._sess_filter_combos = {}
+        if not factors:
+            self._sess_filter_row.setVisible(False)
+            return
+        head = QLabel("Use sessions:")
+        head.setToolTip(
+            "Run the transition, motif and HMM analyses on one level of a factor\n"
+            "only, for example just the Conditioning sessions. Factors and levels\n"
+            "are defined in the Summary tab."
+        )
+        self._sess_filter_layout.addWidget(head)
+        for factor in factors:
+            lbl = QLabel(f"{factor}:")
+            lbl.setStyleSheet("color:#90a4ae;")
+            combo = QComboBox()
+            combo.addItem("(all levels)", "")
+            for lvl in levels.get(factor, []):
+                combo.addItem(lvl, lvl)
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(10)
+            combo.currentIndexChanged.connect(lambda _i: self._on_session_filter_changed())
+            self._sess_filter_layout.addWidget(lbl)
+            self._sess_filter_layout.addWidget(combo)
+            self._sess_filter_combos[factor] = combo
+        self._sess_filter_layout.addStretch(1)
+        self._sess_filter_row.setVisible(True)
+        self._set_session_filter_combos()
+
+    def _set_session_filter_combos(self) -> None:
+        """Show the saved filter; a factor or level that no longer exists drops."""
+        saved = self._session_filter()
+        for factor, combo in self._sess_filter_combos.items():
+            combo.blockSignals(True)
+            idx = combo.findData(saved.get(factor, ""))
+            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            combo.blockSignals(False)
+
+    def _session_filter(self) -> dict[str, str]:
+        raw = getattr(self._settings, "session_filter", None)
+        if not isinstance(raw, dict):
+            return {}
+        flt = {str(k): str(v) for k, v in raw.items() if k and v}
+        # A filter on a factor or level that was since renamed or removed
+        # would silently exclude every session, so it is ignored instead.
+        levels = self._host._levels_by_factor()
+        if levels:
+            flt = {f: v for f, v in flt.items() if v in levels.get(f, [])}
+        return flt
+
+    def _on_session_filter_changed(self) -> None:
+        self._settings.session_filter = {
+            f: str(c.currentData() or "")
+            for f, c in self._sess_filter_combos.items()
+            if c.currentData()
+        }
+        self._save_settings()
+        desc = self._session_filter_text()
+        self._status_lbl.setText(
+            f"Session filter: {desc}. Re-run an analysis to apply it."
+        )
+
+    def _session_filter_text(self, flt: dict[str, str] | None = None) -> str:
+        flt = self._session_filter() if flt is None else flt
+        if not flt:
+            return "all checked sessions"
+        return ", ".join(f"{f} = {lvl}" for f, lvl in flt.items())
+
+    def _session_passes_filter(
+        self, label: str, flt: dict[str, str] | None = None
+    ) -> bool:
+        flt = self._session_filter() if flt is None else flt
+        if not flt:
+            return True
+        facs = self._host._session_factors.get(label, {}) or {}
+        return all((facs.get(f, "") or "") == lvl for f, lvl in flt.items())
 
     # ── Panel builders ────────────────────────────────────────────────
 
@@ -13361,6 +13554,7 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_stats_btn.setEnabled(False)
         # Populate group pickers from newly loaded data
         self._refresh_group_combos()
+        self._rebuild_session_filter()
 
         # Redraw the restored HMM against the data that just loaded, so the
         # panel is populated on open instead of demanding a re-fit.
@@ -13448,6 +13642,7 @@ class _BehaviorMotifWidget(QWidget):
         self._hmm_bf_combo.setCurrentIndex(1 if _bf_src == "posterior_topn" else 0)
         self._hmm_topn_spin.setValue(int(getattr(self._settings, "hmm_state_bout_top_n", 5)))
         self._hmm_topn_spin.setVisible(_bf_src == "posterior_topn")
+        self._set_session_filter_combos()
 
     def _save_settings(self) -> None:
         if self._project_root is not None:
@@ -13479,10 +13674,12 @@ class _BehaviorMotifWidget(QWidget):
         fps = self._host._project_fps()
         raw = build_sequences(self._host._raw_bouts, fps, selected_bids=set(bids))
         label_map = self._host._session_label_by_session
+        flt = self._session_filter()
         return {
             sid: events
             for sid, events in raw.items()
             if label_map.get(sid, sid) in checked
+            and self._session_passes_filter(label_map.get(sid, sid), flt)
         }
 
     def _build_session_group_map(
@@ -15040,9 +15237,16 @@ class _BehaviorMotifWidget(QWidget):
             self._status_lbl.setText("No behaviors selected. Use the behavior filter to select at least one.")
             return
         sequences = self._get_sequences_for_analysis()
+        session_filter = self._session_filter()
         if not sequences:
             self._hmm_stats_text = "No session data found."
-            self._status_lbl.setText("No session data found. Ensure sessions are checked in the Summary tab.")
+            if session_filter:
+                self._status_lbl.setText(
+                    f"No checked session matches the session filter "
+                    f"({self._session_filter_text(session_filter)})."
+                )
+            else:
+                self._status_lbl.setText("No session data found. Ensure sessions are checked in the Summary tab.")
             return
 
         self._settings.hmm_n_states_mode = str(self._hmm_mode_combo.currentData() or "auto")
@@ -15246,6 +15450,7 @@ class _BehaviorMotifWidget(QWidget):
             hmm_res["bid_to_name"] = bid_to_name
             hmm_res["session_groups"] = session_group_map
             hmm_res["groups"] = groups
+            hmm_res["session_filter"] = dict(session_filter)
             # Stamped here, from the exact inputs this fit used, so a restored
             # result can tell whether the data has moved under it.
             hmm_res["input_fingerprint"] = input_fingerprint
@@ -15823,6 +16028,11 @@ class _BehaviorMotifWidget(QWidget):
                 ]
         if not self._host._animal_combo.isHidden() or self._hmm_result_scope():
             lines.append(f"Animal: {self._hmm_scope_label(self._hmm_result_scope())}")
+        lines.append(
+            "Sessions: "
+            + self._session_filter_text(dict(result.get("session_filter") or {}))
+            + f" ({len(result.get('session_occupancy') or result.get('state_sequences') or {})} fitted)"
+        )
         lines += [
             f"HMM  |  {n_states} hidden states (auto-selected by {sel_criterion}){criterion_reason}",
             f"Log-likelihood={result.get('log_likelihood', float('nan')):.2f}  "
@@ -17320,7 +17530,7 @@ class _SessionSectionsWidget(QWidget):
         {
             "name": "Trace Fear Extinction",
             "sections": [
-                {"name": "Baseline (Context B)", "duration": 120},
+                {"name": "Baseline (Context B)", "duration": 180},
                 {"name": "Tone 1", "duration": 20},
                 {"name": "ITI 1", "duration": 60},
                 {"name": "Tone 2", "duration": 20},
@@ -18619,6 +18829,7 @@ class _SessionSectionsWidget(QWidget):
                 )
                 if checked_sessions and sess_label not in checked_sessions:
                     continue
+                fps = self._host._session_fps(sid_str)
                 start_s = grp["start_frame"].to_numpy(dtype=float) / fps
                 end_s = grp["end_frame"].to_numpy(dtype=float) / fps
 
@@ -19658,7 +19869,7 @@ class _SessionSectionsWidget(QWidget):
             if sdf.empty:
                 return out
 
-            fps = self._host._project_fps()
+            fps = self._host._session_fps(sid)
             if fps <= 0:
                 fps = 25.0
             starts = sdf["start_frame"].to_numpy(dtype=float) / fps

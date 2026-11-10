@@ -746,6 +746,27 @@ class BehaviorRepresentationService:
             "sources": self._source_signature(frame_pose_path, frame_context_path),
             "config": self._config_signature(config),
         }
+        # Sessions recorded at another frame rate get a window resized to cover
+        # the same seconds.  Empty for a single-rate project, and only added to
+        # the signature when present, so existing caches stay valid.
+        from abel.utils.session_fps import scaled_frames, session_fps_scales
+
+        fps_scales = session_fps_scales(project_root)
+        if fps_scales:
+            cache_signature["fps_scales"] = {
+                sid: round(scale, 4) for sid, scale in sorted(fps_scales.items())
+            }
+
+        def _session_window(session_id: object) -> tuple[int, int, float]:
+            scale = fps_scales.get(str(session_id))
+            if not scale:
+                return int(config.window_size_frames), int(config.window_stride_frames), 1.0
+            return (
+                scaled_frames(config.window_size_frames, scale, minimum=2),
+                scaled_frames(config.window_stride_frames, scale),
+                float(scale),
+            )
+
         if _manifest_cached.exists():
             try:
                 _meta = json.loads(_manifest_cached.read_text(encoding="utf-8"))
@@ -811,7 +832,7 @@ class BehaviorRepresentationService:
                 )
                 _eligible_sessions = {
                     str(s) for s, n in _frame_counts.items()
-                    if n >= config.window_size_frames
+                    if n >= _session_window(s)[0]
                 }
                 _missing_eligible = _eligible_sessions - _seg_sessions
                 if _missing_eligible and len(frame_sub) > 0:
@@ -1004,11 +1025,12 @@ class BehaviorRepresentationService:
         dfs: list[pd.DataFrame] = []
         for idx_group, ((animal_id, session_id), grp) in enumerate(grouped, start=1):
             n = len(grp)
-            if n < config.window_size_frames:
+            win_frames, stride_frames, time_scale = _session_window(session_id)
+            if n < win_frames:
                 if idx_group % 2 == 0 or idx_group == n_groups:
                     _progress(
                         f"Representation: group {idx_group}/{n_groups} ({session_id}) skipped; "
-                        f"frames={n} < window={config.window_size_frames}."
+                        f"frames={n} < window={win_frames}."
                     )
                 continue
             seg_df = build_segment_df_fast(
@@ -1016,11 +1038,12 @@ class BehaviorRepresentationService:
                 feature_cols,
                 str(animal_id),
                 str(session_id),
-                config.window_size_frames,
-                config.window_stride_frames,
+                win_frames,
+                stride_frames,
                 include_periodicity=True,
                 include_posture_deltas=posture_deltas,
                 presence_cols=presence_cols,
+                time_scale=time_scale,
             )
             if not seg_df.empty:
                 dfs.append(seg_df)

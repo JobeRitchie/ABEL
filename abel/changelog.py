@@ -7,10 +7,39 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "November 2, 2026"
+VERSION_DATE = "November 10, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.32.0", "November 10, 2026", [
+        "Projects can now mix videos recorded at different frame rates. Set "
+        "Source FPS to the rate most videos share. Every other session keeps "
+        "the same window, stride and bout cleanup lengths in seconds, and its "
+        "velocities use its own frame rate, so one trained model reads all "
+        "of them the same way. Projects whose videos share one frame rate "
+        "are unchanged.",
+        "In a mixed frame rate project, the sessions at a different rate get "
+        "new segment ids on the next feature extraction, so labels already "
+        "made on those sessions do not carry over.",
+        "Auto-detect on Pose & Features picks the most common frame rate "
+        "instead of the average, and says when the videos are mixed. The "
+        "extraction log lists the frame rates it found.",
+        "Analytics converts frames to seconds with each session's own frame "
+        "rate in the summary table, ROI stats, distance, velocity, ethogram, "
+        "time bins and bout rasters. Motifs, HMM states, peri-event plots, "
+        "the social panel and merged projects still use one frame rate.",
+        "Still frame based in a mixed project: pose smoothing, video context "
+        "features and probability smoothing. Resampling videos to one frame "
+        "rate before pose estimation remains the safest route.",
+        "The Relationships panel can run its transition, motif and HMM "
+        "analyses on one level of a factor, such as only the Conditioning "
+        "sessions.",
+        "ROI occupancy rows now follow the Data Range. Time in zone, entries "
+        "and latency are recomputed inside the chosen window instead of "
+        "showing whole-session values.",
+        "New Refresh Behaviors button on Temporal Refinement. It reloads "
+        "behaviors and trained models added since the page opened.",
+    ]),
     ("0.31.0", "November 2, 2026", [
         "New Delay Fear Extinction 50x session-section preset: the same as "
         "Delay Fear Extinction but with 50 tone and ITI repeats instead of 20.",

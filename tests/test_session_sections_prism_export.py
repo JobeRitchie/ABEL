@@ -72,6 +72,7 @@ def _host(raw_bouts, summary_rows, groups=None, order=None):
         _summary_rows=summary_rows,
         _session_label_by_session=labels,
         _project_fps=lambda: 10.0,
+        _session_fps=lambda _sid: 10.0,
         _summary_tab=SimpleNamespace(_checked_subjects=lambda: set()),
         _roi_scope_zone=0,
         _animal_scope="",
