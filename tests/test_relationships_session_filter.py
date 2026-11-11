@@ -29,6 +29,7 @@ def _panel(session_filter: dict[str, str]) -> SimpleNamespace:
         _summary_tab=SimpleNamespace(_checked_subjects=lambda: set(session_factors)),
         _project_fps=lambda: 30.0,
         _session_fps=lambda _sid: 30.0,
+        _fps_by_session=lambda: {},
         _raw_bouts=[1],
         _session_label_by_session={
             "s1": "M1 cond", "s2": "M1 ext", "s3": "M2 cond", "s4": "M2 ext",

@@ -7589,6 +7589,11 @@ class ActiveLearningTab(QWidget):
 
         from abel.services.behavior_representation_service import BehaviorRepresentationService as _BRS
 
+        # Sessions at another frame rate: the same conversion the segment
+        # builder applies, so these rows match extracted segments.
+        from abel.utils.session_fps import session_fps_scales  # noqa: PLC0415
+
+        fps_scales = session_fps_scales(self._project_root)
         monolith_df: pd.DataFrame | None = None
         new_rows: list[dict] = []
         attempted_ids: set[str] = set()
@@ -7664,6 +7669,13 @@ class ActiveLearningTab(QWidget):
                 if len(window_df) < 2:
                     continue
                 summary = _BRS._segment_summary(window_df, available_features, orig_seg_id)
+                fps_scale = fps_scales.get(str(session_id))
+                if fps_scale:
+                    for name in list(summary):
+                        if name.endswith("_periodicity"):
+                            summary[name] = summary[name] / fps_scale
+                        elif name.endswith("_trend"):
+                            summary[name] = summary[name] * fps_scale
                 summary["session_id"] = session_id
                 summary["start_frame"] = start
                 summary["end_frame"] = end

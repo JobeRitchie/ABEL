@@ -3078,7 +3078,7 @@ class BehaviorAnalyticsTab(QWidget):
         roi = rois[zi] if 0 <= zi < len(rois) else None
         return self._compute_session_roi_stats(
             session_id, self._get_pose_for_session(session_id), roi,
-            self._project_fps(), lo_s, hi_s,
+            self._session_fps(session_id), lo_s, hi_s,
         )
 
     def _compute_session_roi_stats(
@@ -13672,7 +13672,10 @@ class _BehaviorMotifWidget(QWidget):
         checked = self._host._summary_tab._checked_subjects()
         bids, _, _ = self._get_behavior_ids_and_names()
         fps = self._host._project_fps()
-        raw = build_sequences(self._host._raw_bouts, fps, selected_bids=set(bids))
+        raw = build_sequences(
+            self._host._raw_bouts, fps, selected_bids=set(bids),
+            fps_by_session=self._host._fps_by_session(),
+        )
         label_map = self._host._session_label_by_session
         flt = self._session_filter()
         return {

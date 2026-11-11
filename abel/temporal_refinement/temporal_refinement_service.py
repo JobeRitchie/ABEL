@@ -1020,7 +1020,8 @@ class TemporalRefinementService:
         cfg = config or TemporalRefinementConfig()
         self._emit(progress_cb, "Dense temporal inference started.")
 
-        manifest = self._imports.load_manifest(self._require_project_root())
+        project_root = self._require_project_root()
+        manifest = self._imports.load_manifest(project_root)
         manifest_sids: set[str] = set()
         if manifest is not None:
             manifest_sids = {str(s.session_id) for s in list(getattr(manifest, "linked_sessions", []) or [])}
@@ -1105,7 +1106,6 @@ class TemporalRefinementService:
         prob_temp = max(0.1, float(cfg.probability_temperature))
 
         # Load all model payloads once
-        project_root = self._require_project_root()
         model_payloads: dict[str, dict[str, Any]] = {}
         gpu_or_xgb = False
         for bid, ver in model_versions.items():
@@ -1735,12 +1735,16 @@ class TemporalRefinementService:
                 tdf = trace_frames[sid]
                 col = pcol if pcol in tdf.columns else "probability"
                 raw = np.nan_to_num(tdf[col].to_numpy(dtype=np.float32), nan=0.0)
-                smooth = smooth_probabilities(raw, cfg.smoothing_method, cfg.smoothing_window)
+                fps_scale = fps_scales.get(str(sid))
+                # A window of 1 means smoothing is off and must stay off.
+                smooth_window = int(cfg.smoothing_window)
+                if smooth_window > 1:
+                    smooth_window = scaled_frames(smooth_window, fps_scale, minimum=2)
+                smooth = smooth_probabilities(raw, cfg.smoothing_method, smooth_window)
                 if smooth.size == 0:
                     continue
 
                 binary = threshold_probabilities(smooth, onset_thresh=float(cfg.onset_threshold))
-                fps_scale = fps_scales.get(str(sid))
                 binary = merge_close_bouts(
                     binary, scaled_frames(cfg.merge_gap_frames, fps_scale, minimum=0)
                 )

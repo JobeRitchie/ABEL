@@ -163,6 +163,8 @@ class UncertaintyScoringService:
     # Below this many query x reference pairs the CPU search is already quick.
     _GPU_KNN_MIN_PAIRS = 50_000_000
     _GPU_KNN_QUERY_ROWS = 8192
+    # Memory the float64 re-check may hold at once.
+    _GPU_KNN_EXACT_BYTES = 512 * 1024 * 1024
     # Extra nearest candidates re-checked exactly, so float32 rounding in the
     # fast pass cannot swap a true neighbor out of the final k.
     _GPU_KNN_SLACK = 6
@@ -194,17 +196,27 @@ class UncertaintyScoringService:
                 r_sq = (r32 * r32).sum(dim=1)
                 short = min(n_ref, k + UncertaintyScoringService._GPU_KNN_SLACK)
                 step = UncertaintyScoringService._GPU_KNN_QUERY_ROWS
+                per_row = 2 * short * int(r32.shape[1]) * 8
+                exact_rows = max(1, min(step, UncertaintyScoringService._GPU_KNN_EXACT_BYTES // per_row))
                 for start in range(0, n, step):
                     q32 = torch.from_numpy(np.ascontiguousarray(features[start : start + step])).to(dev)
                     approx = (q32 * q32).sum(dim=1, keepdim=True) - 2.0 * (q32 @ r32.T) + r_sq
                     cand = approx.topk(short, dim=1, largest=False).indices
                     del approx
-                    diff = q32.double().unsqueeze(1) - r64[cand]
-                    exact = diff.pow_(2).sum(dim=2).sqrt_()
-                    nearest = exact.topk(k, dim=1, largest=False).values
-                    # float32 distances averaged in float64, as the CPU search does.
-                    out[start : start + step] = nearest.float().double().mean(dim=1).cpu().numpy()
-                    del q32, cand, diff, exact, nearest
+                    # The exact re-check gathers (rows, short, dims) in float64
+                    # twice over, so it runs in slices sized to a fixed budget;
+                    # a wide feature table would otherwise exhaust the card.
+                    for lo in range(0, len(q32), exact_rows):
+                        sub = cand[lo : lo + exact_rows]
+                        diff = q32[lo : lo + exact_rows].double().unsqueeze(1) - r64[sub]
+                        exact = diff.pow_(2).sum(dim=2).sqrt_()
+                        nearest = exact.topk(k, dim=1, largest=False).values
+                        # float32 distances averaged in float64, as the CPU search does.
+                        out[start + lo : start + lo + len(sub)] = (
+                            nearest.float().double().mean(dim=1).cpu().numpy()
+                        )
+                        del sub, diff, exact, nearest
+                    del q32, cand
             return out
         except Exception as exc:
             logger.warning("GPU density search failed (%s); using the CPU search.", exc)

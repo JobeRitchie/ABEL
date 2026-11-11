@@ -11,6 +11,24 @@ VERSION_DATE = "November 11, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.33.1", "November 11, 2026", [
+        "Fixed Temporal Refinement failing on every run. It stopped with an "
+        "error right after listing the sessions and behavior models, before "
+        "scoring any frames. This started in 0.32.0.",
+        "Projects that mix frame rates: the Relationships tab (transitions, "
+        "motifs and the HMM) now converts each session's bouts with that "
+        "session's own frame rate.",
+        "Projects that mix frame rates: ROI stats inside a Data Range now use "
+        "each session's own frame rate, matching the whole-session ROI stats.",
+        "Projects that mix frame rates: Temporal Refinement smooths every "
+        "session over the same length of time, and reviewed clips added to "
+        "training get the same feature scaling as extracted segments.",
+        "The GPU density search used when scoring clips now works in smaller "
+        "pieces, so it no longer runs out of GPU memory on projects with "
+        "many features.",
+        "The Trace Fear Extinction session-section preset has used a 180 "
+        "second baseline since 0.32.0 (it was 120 seconds before).",
+    ]),
     ("0.33.0", "November 11, 2026", [
         "Feature extraction is faster on long videos. Video features now run "
         "in worker processes when a run has a lot of video to get through, "

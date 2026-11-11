@@ -242,8 +242,12 @@ def build_sequences(
     raw_bouts: dict[str, pd.DataFrame],
     fps: float,
     selected_bids: set[str] | None = None,
+    fps_by_session: dict[str, float] | None = None,
 ) -> dict[str, list[tuple[float, float, str]]]:
     """Convert raw bout DataFrames into per-session ordered event lists.
+
+    ``fps_by_session`` overrides ``fps`` for the sessions it names, for projects
+    whose videos were recorded at different frame rates.
 
     Parameters
     ----------
@@ -261,6 +265,7 @@ def build_sequences(
     Each session's list contains ALL selected behaviors interleaved in time.
     """
     events: dict[str, list[tuple[float, float, str]]] = {}
+    rates = fps_by_session or {}
     for bid, bdf in raw_bouts.items():
         if selected_bids is not None and bid not in selected_bids:
             continue
@@ -268,8 +273,11 @@ def build_sequences(
             continue
         for _, row in bdf.iterrows():
             sid = str(row["session_id"])
-            start_s = float(row["start_frame"]) / fps
-            end_s = float(row["end_frame"]) / fps
+            sid_fps = float(rates.get(sid) or 0.0)
+            if sid_fps <= 0:
+                sid_fps = fps
+            start_s = float(row["start_frame"]) / sid_fps
+            end_s = float(row["end_frame"]) / sid_fps
             events.setdefault(sid, []).append((start_s, end_s, bid))
 
     for sid in events:

@@ -156,3 +156,50 @@ def test_summarize_bouts_uses_each_sessions_rate():
     assert stats[("a", "x")][1] == pytest.approx(1.0)
     assert stats[("b", "x")][1] == pytest.approx(1.0)
     assert stats[("b", "x")][3] == pytest.approx(1.0)
+
+
+def test_dense_inference_reaches_model_loading_with_a_manifest(tmp_path, monkeypatch):
+    # The frame-rate scale lookup runs before any frame is scored. It must not
+    # depend on a variable assigned later in the method.
+    from types import SimpleNamespace
+
+    from abel.temporal_refinement.temporal_refinement_service import (
+        TemporalRefinementService,
+    )
+
+    root = _project(tmp_path, {"s30": 30.0, "s60": 60.0})
+    manifest = SimpleNamespace(
+        videos=[
+            SimpleNamespace(asset_id="v_s30", fps=30.0),
+            SimpleNamespace(asset_id="v_s60", fps=60.0),
+        ],
+        linked_sessions=[
+            SimpleNamespace(session_id="s30", video_asset_id="v_s30"),
+            SimpleNamespace(session_id="s60", video_asset_id="v_s60"),
+        ],
+    )
+    service = TemporalRefinementService()
+    service.set_project(root)
+    frames = pd.DataFrame({"frame": np.arange(10), "speed": np.zeros(10)})
+    monkeypatch.setattr(service._imports, "load_manifest", lambda _root: manifest)
+    monkeypatch.setattr(
+        service,
+        "_load_representation_frame_features",
+        lambda **_kw: ({"s30": frames, "s60": frames}, ["speed"]),
+    )
+    monkeypatch.setattr(
+        service, "_resolve_competition_model_versions", lambda _cfg: {"beh": "v_missing"}
+    )
+    with pytest.raises(FileNotFoundError, match="Model missing"):
+        service.run_temporal_refinement_inference("concept")
+
+
+def test_build_sequences_uses_each_sessions_rate():
+    from abel.services.behavioral_motif_service import build_sequences
+
+    bouts = {"x": pd.DataFrame({
+        "session_id": ["a", "b"], "start_frame": [30, 60], "end_frame": [60, 120],
+    })}
+    seqs = build_sequences(bouts, 30.0, fps_by_session={"b": 60.0})
+    assert seqs["a"][0][:2] == pytest.approx((1.0, 2.0))
+    assert seqs["b"][0][:2] == pytest.approx((1.0, 2.0))
