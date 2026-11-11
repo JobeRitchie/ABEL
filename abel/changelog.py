@@ -7,10 +7,33 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "November 10, 2026"
+VERSION_DATE = "November 11, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.33.0", "November 11, 2026", [
+        "Feature extraction is faster on long videos. Video features now run "
+        "in worker processes when a run has a lot of video to get through, "
+        "and R3D sends clips to the GPU while the video is still decoding. "
+        "Four 66 minute sessions went from 376 s to 249 s in testing. The "
+        "extracted features are identical to before.",
+        "R3D uses far less memory. A 66 minute session peaked near 9 GB of "
+        "clips before and now stays under 1 GB.",
+        "Scoring after training is faster. The segment feature table is no "
+        "longer rewritten for every behavior, which saved about 36 s per "
+        "behavior on a large project. Scores are still saved with each model.",
+        "The density part of the uncertainty score runs on the GPU when one "
+        "is available, about twice as fast. Scores match the old ones to "
+        "seven digits, so windows with near equal scores can swap places in "
+        "the review queue.",
+        "A Features run that has nothing new to extract no longer rewrites "
+        "the merged pose and context files. This also keeps the cached "
+        "features of reviewed clips valid, so the next retrain does not "
+        "recompute them.",
+        "Clip Mining can search every extracted feature by its readable "
+        "label or its column name, so features from a newly added keypoint "
+        "show up as soon as Feature Extraction has written them.",
+    ]),
     ("0.32.0", "November 10, 2026", [
         "Projects can now mix videos recorded at different frame rates. Set "
         "Source FPS to the rate most videos share. Every other session keeps "

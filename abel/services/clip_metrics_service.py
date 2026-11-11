@@ -360,6 +360,9 @@ class ClipRef:
     session_id: str
     start_frame: int
     end_frame: int
+    # Focal animal, when the caller knows it (seed examples in multi-animal
+    # sessions); used only to pick the right extracted-feature window.
+    animal_id: str | None = None
 
 
 @dataclass
@@ -600,6 +603,53 @@ class ClipMetricsService:
             out.append(ClipRef(seg, sid, int(s), int(e)))
         return out
 
+    def feature_window_ids(self, clips: list[ClipRef]) -> dict[str, str]:
+        """Map each clip to the extracted-feature window that stands in for it.
+
+        A clip whose id is a feature-table ``segment_id`` maps to itself.  Any
+        other clip (a seed example carries a ``seed_...`` id and its own frame
+        span) maps to the window with the greatest frame overlap in the same
+        recording, and for the same animal when the recording holds several.
+        Clips that overlap no window are left out, so callers can count them.
+        """
+        path = self.rich_features_path()
+        if not clips or path is None or not path.exists():
+            return {}
+        try:
+            import pyarrow.parquet as pq
+
+            cols = ["segment_id", "session_id", "start_frame", "end_frame"]
+            if "animal_id" in pq.read_schema(path).names:
+                cols.append("animal_id")
+            df = pd.read_parquet(path, columns=cols)
+        except Exception as exc:  # pragma: no cover - corrupt/locked cache
+            logger.warning("Clip mining: could not read segment pool (%s)", exc)
+            return {}
+        df["segment_id"] = df["segment_id"].astype(str)
+        known = set(df["segment_id"])
+        out = {c.window_id: c.window_id for c in clips if c.window_id in known}
+        by_session: dict[str, pd.DataFrame] = {}
+        for c in clips:
+            if c.window_id in out:
+                continue
+            sid = str(c.session_id)
+            if sid not in by_session:
+                by_session[sid] = df[df["session_id"].astype(str) == sid]
+            rows = by_session[sid]
+            if c.animal_id and "animal_id" in rows and rows["animal_id"].nunique() > 1:
+                rows = rows[rows["animal_id"].astype(str) == str(c.animal_id)]
+            if rows.empty:
+                continue
+            overlap = (
+                np.minimum(rows["end_frame"].to_numpy(), int(c.end_frame))
+                - np.maximum(rows["start_frame"].to_numpy(), int(c.start_frame))
+                + 1
+            )
+            best = int(np.argmax(overlap))
+            if overlap[best] > 0:
+                out[c.window_id] = rows["segment_id"].iloc[best]
+        return out
+
     def unresolved_pose_clips(self, clips: list[ClipRef]) -> dict[str, str | None]:
         """Return sessions whose raw pose file can't be read, keyed by session id.
 
@@ -826,6 +876,7 @@ class ClipMetricsService:
         ex_metrics: "pd.DataFrame | None" = None,
         bg_metrics: "pd.DataFrame | None" = None,
         min_exemplars: int = 2,
+        feature_ids: "dict[str, str] | None" = None,
     ) -> "EssenceFrames":
         """Assemble the exemplar/background tables essence extraction ranges over.
 
@@ -842,6 +893,9 @@ class ClipMetricsService:
         shipped features alone (and no pose drive needed); neither → an empty
         frame the caller reports.  ``ex_metrics``/``bg_metrics`` are pre-computed
         clip-metric tables (the caller already has them, and they are expensive).
+        ``feature_ids`` maps an exemplar id to the feature-table window that
+        stands in for it (see :meth:`feature_window_ids`), for exemplars such as
+        seed examples whose own id is not a ``segment_id``.
         """
         ex_ids = [str(w) for w in exemplar_ids]
         bg_ids = [str(w) for w in background_ids]
@@ -858,16 +912,30 @@ class ClipMetricsService:
             used.append("pose metrics")
 
         if self.has_rich_features():
-            rich = self.rich_essence_frame(set(ex_ids) | set(bg_ids))
-            rich_ex = rich.reindex(ex_ids).dropna(how="all") if not rich.empty else rich
+            fmap = feature_ids or {}
+            feat_ids = [str(fmap.get(w, w)) for w in ex_ids]
+            rich = self.rich_essence_frame(set(feat_ids) | set(bg_ids))
+            rich_all = rich
+            if not rich.empty:
+                # Exemplar rows keep the caller's ids so both spaces share rows.
+                rich_all = rich.reindex(feat_ids)
+                rich_all.index = ex_ids
+            rich_ex = rich_all.dropna(how="all")
             rich_bg = rich.reindex(bg_ids).dropna(how="all") if not rich.empty else rich
             if len(rich_ex) >= int(min_exemplars) and not rich_bg.empty:
                 # Reindex back onto the full id lists so both spaces share rows;
                 # windows absent from the feature table simply carry NaN, which the
                 # per-metric finite-data floor already handles.
-                parts_ex.append(rich.reindex(ex_ids))
+                parts_ex.append(rich_all)
                 parts_bg.append(rich.reindex(bg_ids).dropna(how="all"))
                 used.append("extracted features")
+                n_lost = len(ex_ids) - len(rich_ex)
+                if n_lost:
+                    notes.append(
+                        f"{n_lost} of {len(ex_ids)} selected clip(s) have no usable "
+                        "extracted features (no overlapping feature window), so "
+                        "they contributed pose metrics only."
+                    )
             elif not rich.empty:
                 notes.append(
                     "The selected clips aren't in this project's extracted feature "

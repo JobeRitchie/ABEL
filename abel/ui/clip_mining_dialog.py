@@ -96,6 +96,7 @@ from abel.services.clip_metrics_service import (
     is_rich_metric,
     metric_def_for,
     metric_label,
+    rich_column,
     rich_metric_def,
     select_even_by_group,
 )
@@ -305,11 +306,15 @@ class ClipMiningDialog(QDialog):
         # a lowercased blob (group + label + description) for substring matching.
         self._feature_display: dict[str, str] = {}
         self._feature_index: list[tuple[str, str]] = []  # (metric_id, searchable)
+        self._feature_raw: dict[str, str] = {}  # id / raw column (lowercase) → id
         for m in self._metric_defs:
-            self._feature_display[f"{m.group}, {m.label}"] = m.id
-            self._feature_index.append(
-                (m.id, f"{m.group} {m.label} {m.description}".lower())
-            )
+            self._index_feature(m)
+        # Every extracted feature in the project's feature table is searchable
+        # too (by readable label or raw column name), so a feature from a newly
+        # added keypoint shows up as soon as Feature Extraction has written it.
+        # They stay out of ``_metric_defs`` (the row dropdown) until one is added.
+        for mid in self._metrics.rich_feature_ids():
+            self._index_feature(rich_metric_def(mid))
         # Full pool is loaded lazily on the first Find-matches; keep the map so
         # matched window_ids can be turned back into ClipRefs for extraction.
         self._clip_by_id: dict[str, ClipRef] = {}
@@ -1341,12 +1346,26 @@ class ClipMiningDialog(QDialog):
 
     # -- feature search / persistence ----------------------------------------
 
+    def _index_feature(self, d: MetricDef) -> None:
+        """Add a metric to the search bar's index (no-op when already there)."""
+        if d.id.lower() in self._feature_raw:
+            return
+        self._feature_raw[d.id.lower()] = d.id
+        display, blob = f"{d.group}, {d.label}", f"{d.group} {d.label} {d.description}"
+        if is_rich_metric(d.id):
+            col = rich_column(d.id)
+            self._feature_raw[col.lower()] = d.id
+            display = f"{display} [{col}]"
+            blob = f"{blob} {col.replace('_', ' ')}"
+        self._feature_display[display] = d.id
+        self._feature_index.append((d.id, blob.lower()))
+
     def _resolve_feature(self, text: str) -> str | None:
-        """Map a search string to a metric id (exact display, else substring)."""
+        """Map a search string to a metric id (exact display/raw name, else substring)."""
         text = (text or "").strip()
         if not text:
             return None
-        mid = self._feature_display.get(text)
+        mid = self._feature_display.get(text) or self._feature_raw.get(text.lower())
         if mid is not None:
             return mid
         needle = text.lower()
@@ -1367,6 +1386,7 @@ class ClipMiningDialog(QDialog):
                 "No feature matches that search: try 'speed', 'zone', 'distance', 'body'…"
             )
             return
+        self._register_metrics([mid])
         self._add_row(mid)
         self._search.clear()
 
@@ -1386,10 +1406,7 @@ class ClipMiningDialog(QDialog):
             d = rich_metric_def(mid)
             self._metric_defs.append(d)
             known.add(mid)
-            self._feature_display[f"{d.group}, {d.label}"] = d.id
-            self._feature_index.append(
-                (d.id, f"{d.group} {d.label} {d.description}".lower())
-            )
+            self._index_feature(d)
 
     def _ensure_rich_columns(self) -> None:
         """Join any extracted-feature columns the criteria/ranker need onto the pool.
@@ -1688,8 +1705,19 @@ class ClipMiningDialog(QDialog):
             bg_df, bg_ids = self._essence_background(exemplars)
         except Exception:
             bg_df, bg_ids = None, []
+        # Seed examples carry their own ids; look their extracted features up
+        # through the feature window they overlap, and keep those windows (and
+        # the exemplars themselves) out of the background they are contrasted with.
+        try:
+            fmap = self._metrics.feature_window_ids(exemplars)
+        except Exception:
+            fmap = {}
+        exclude = {c.window_id for c in exemplars} | set(fmap.values())
+        bg_ids = [w for w in bg_ids if w not in exclude]
+        if bg_df is not None:
+            bg_df = bg_df[~bg_df.index.astype(str).isin(exclude)]
         frames = self._metrics.essence_frames(
-            [c.window_id for c in exemplars], bg_ids, ex_df, bg_df
+            [c.window_id for c in exemplars], bg_ids, ex_df, bg_df, feature_ids=fmap
         )
         notes = list(frames.notes)
         if missing and "pose metrics" not in frames.sources:

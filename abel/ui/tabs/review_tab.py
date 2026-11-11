@@ -2183,6 +2183,8 @@ class ReviewTab(QWidget):
                     str(self._visible_candidates[r].session_id),
                     int(self._visible_candidates[r].start_frame),
                     int(self._visible_candidates[r].end_frame),
+                    getattr(self._seed_by_row_id.get(
+                        str(self._visible_candidates[r].window_id)), "animal_id", None),
                 )
                 for r in rows if 0 <= r < len(self._visible_candidates)
             ]

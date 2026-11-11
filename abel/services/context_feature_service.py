@@ -1244,6 +1244,7 @@ class ContextFeatureService:
         save: bool = True,
         smoothing: "PoseSmoothingSettings | None" = None,
         cancel_check: "Callable[[], None] | None" = None,
+        use_chunk_processes: bool = False,
     ) -> pd.DataFrame:
         """Compute per-frame context features, optionally across parallel frame chunks.
 
@@ -1477,10 +1478,33 @@ class ContextFeatureService:
                 return chunk_fn(frame_start=start_f, frame_end=end_f, **chunk_kwargs)
             return _run
 
+        # Worker processes when the caller asked for them (long extraction
+        # runs): same chunk functions and frame ranges, without the interpreter
+        # lock capping throughput.  ``None`` means the pool could not be used,
+        # and the chunks run on threads below as they always have.
+        pooled: "list[dict] | None" = None
+        if use_chunk_processes and "_cv2_cuda_algo" not in chunk_kwargs:
+            from abel.services import context_chunk_pool  # noqa: PLC0415
+
+            pooled = context_chunk_pool.run_chunks(
+                "gpu" if flow_backend == "torch" else "cpu",
+                chunk_kwargs,
+                chunk_boundaries,
+                progress_cb=progress_cb,
+                cancel_check=cancel_check,
+                warning_cb=warning_cb,
+            )
+        if pooled is not None:
+            ordered_results = pooled
+
         with cf.ThreadPoolExecutor(max_workers=n_workers) as executor:
+            if pooled is not None:
+                chunk_boundaries_to_run: list = []
+            else:
+                chunk_boundaries_to_run = list(enumerate(chunk_boundaries))
             future_to_chunk_idx = {
                 executor.submit(_make_chunk_runner(start, end, idx)): idx
-                for idx, (start, end) in enumerate(chunk_boundaries)
+                for idx, (start, end) in chunk_boundaries_to_run
             }
             chunks_done = 0
             for future in cf.as_completed(future_to_chunk_idx):
@@ -1693,6 +1717,7 @@ class ContextFeatureService:
         identity_corrections: "list[dict] | None" = None,
         smoothing: "PoseSmoothingSettings | None" = None,
         cancel_check: "Callable[[], None] | None" = None,
+        use_chunk_processes: bool = False,
     ) -> pd.DataFrame:
         """Multi-animal context: compute per-individual context and write one
         combined per-session parquet whose ``animal_id`` matches the per-individual
@@ -1721,6 +1746,7 @@ class ContextFeatureService:
                 save=False,
                 smoothing=smoothing,
                 cancel_check=cancel_check,
+                use_chunk_processes=use_chunk_processes,
             )
             parts.append(d)
 

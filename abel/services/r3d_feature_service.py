@@ -84,6 +84,8 @@ _CROP_BODY_MULT = 2.5
 _CROP_MIN_PX = 96
 _CACHE_VERSION = "r3d_v1"
 _DENSE_CACHE_VERSION = "r3d_dense_v1"
+# Decoded batches allowed to wait for the forward thread (~39 MB each).
+_STREAM_QUEUE_BATCHES = 4
 # Frames held as 112x112 crops at once during the dense pass (~310 MB).
 _STACK_CHUNK = 8192
 
@@ -259,12 +261,11 @@ class R3DFeatureService:
             raise FileNotFoundError(f"pose not reachable for {session_id}")
 
         tracks, animal_row = self._session_geometry(manifest, session_id, Path(pose_path), grp)
-        clips, kept = self._decode_clips(
+        emb, kept = self._decode_and_embed(
             Path(video_path), starts[todo], ends[todo], tracks, animal_row[todo]
         )
         if not kept:
             raise RuntimeError("no clip could be decoded")
-        emb = self._embed(clips)
 
         fresh = pd.DataFrame(emb, columns=cols)
         fresh.insert(0, "segment_id", [seg_ids[todo[k]] for k in kept])
@@ -377,10 +378,96 @@ class R3DFeatureService:
     ) -> tuple[np.ndarray, list[int]]:
         """Decode ``(n, 16, 112, 112, 3)`` uint8 crops in one forward pass.
 
+        Holds every clip of the call in memory at once; the extraction path
+        uses :meth:`_decode_and_embed`, which streams the same clips instead.
+        """
+        clips: list[np.ndarray] = []
+        kept: list[int] = []
+        for i, clip in R3DFeatureService._stream_clips(
+            video_path, starts, ends, tracks, animal_row
+        ):
+            kept.append(i)
+            clips.append(clip)
+        if not clips:
+            return np.zeros((0, N_SAMPLE_FRAMES, 112, 112, 3), dtype=np.uint8), kept
+        return np.stack(clips), kept
+
+    def _decode_and_embed(
+        self,
+        video_path: Path,
+        starts: np.ndarray,
+        ends: np.ndarray,
+        tracks: list[tuple[np.ndarray, np.ndarray, int]],
+        animal_row: np.ndarray,
+    ) -> tuple[np.ndarray, list[int]]:
+        """Embed the segments' clips while the video is still being decoded.
+
+        Decoding (CPU) feeds full batches to a forward thread (GPU) through a
+        short queue, so the two overlap and only a few batches are ever held in
+        memory.  Clips reach the model in the same order and the same batches
+        as decoding everything first would give, so the embeddings are the same.
+        """
+        import queue
+
+        from abel.utils.cancellation import propagate_scope
+
+        pending: "queue.Queue[np.ndarray | None]" = queue.Queue(maxsize=_STREAM_QUEUE_BATCHES)
+        out: list[np.ndarray] = []
+        failure: list[BaseException] = []
+
+        def _consume() -> None:
+            try:
+                while True:
+                    batch = pending.get()
+                    if batch is None:
+                        return
+                    out.append(self._embed(batch))
+            except BaseException as exc:  # includes a user cancel
+                failure.append(exc)
+                # Keep taking batches so the decoder never blocks on a full queue.
+                while pending.get() is not None:
+                    pass
+
+        worker = threading.Thread(target=propagate_scope(_consume), name="r3d-forward", daemon=True)
+        worker.start()
+        kept: list[int] = []
+        batch: list[np.ndarray] = []
+        try:
+            for i, clip in self._stream_clips(video_path, starts, ends, tracks, animal_row):
+                kept.append(i)
+                batch.append(clip)
+                if len(batch) == _BATCH:
+                    if failure:
+                        break
+                    pending.put(np.stack(batch))
+                    batch = []
+            if batch and not failure:
+                pending.put(np.stack(batch))
+        finally:
+            pending.put(None)
+            worker.join()
+        if failure:
+            raise failure[0]
+        emb = np.concatenate(out, axis=0) if out else np.zeros((0, R3D_DIMS), dtype=np.float32)
+        return emb, kept
+
+    @staticmethod
+    def _stream_clips(
+        video_path: Path,
+        starts: np.ndarray,
+        ends: np.ndarray,
+        tracks: list[tuple[np.ndarray, np.ndarray, int]],
+        animal_row: np.ndarray,
+    ):
+        """Yield ``(i, clip)`` for each decodable segment, in ascending ``i``.
+
         Frames are read in ascending order and dispatched to every segment that
         wants them, so a video is decoded once no matter how much its segments
         overlap, including when the segments belong to different animals in the
         same video, each with its own crop track (``tracks[animal_row[i]]``).
+        A segment's ``(16, 112, 112, 3)`` uint8 clip is yielded as soon as the
+        decoder has passed its last sampled frame and every earlier segment has
+        been settled; segments with too few decodable frames are skipped.
         """
         import cv2
 
@@ -412,40 +499,60 @@ class R3DFeatureService:
                 for s in range(N_SAMPLE_FRAMES):
                     wanted.setdefault(int(idx[i, s]), []).append((i, s))
 
-            clips = np.zeros((n_seg, N_SAMPLE_FRAMES, 112, 112, 3), dtype=np.uint8)
+            # Clip buffers exist only from a segment's first sampled frame until
+            # it is yielded, so memory follows the overlap, not the session.
+            clips: dict[int, np.ndarray] = {}
             filled = np.zeros(n_seg, dtype=int)
-            lo, hi = int(idx.min()), int(idx.max())
-            cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
-            frame_no = lo
-            while frame_no <= hi:
-                if not frame_no & 255:
-                    checkpoint()
-                ok, frame = cap.read()
-                if not ok:
-                    break
-                for i, s in wanted.get(frame_no, ()):
-                    f = int(idx[i, s])
-                    row = int(animal_row[i])
-                    cx, cy, _ = tracks[row]
-                    side = sides[row]
-                    x0 = int(np.clip(cx[f] - side / 2.0, 0, max(0, width - side)))
-                    y0 = int(np.clip(cy[f] - side / 2.0, 0, max(0, height - side)))
-                    crop = frame[y0 : y0 + side, x0 : x0 + side]
-                    if crop.size == 0:
-                        continue
-                    clips[i, s] = cv2.resize(
-                        cv2.cvtColor(crop, cv2.COLOR_BGR2RGB),
-                        (112, 112),
-                        interpolation=cv2.INTER_AREA,
-                    )
-                    filled[i] += 1
-                frame_no += 1
+            last_wanted = idx.max(axis=1) if n_seg else np.zeros(0, dtype=np.int64)
+            next_out = 0
+
+            def _settled(upto: int):
+                """Yield, in order, the leading segments whose frames are all read."""
+                nonlocal next_out
+                while next_out < n_seg and last_wanted[next_out] < upto:
+                    clip = clips.pop(next_out, None)
+                    # A segment needs most of its frames to be a fair embedding.
+                    if clip is not None and filled[next_out] >= N_SAMPLE_FRAMES // 2:
+                        yield next_out, clip
+                    next_out += 1
+
+            if n_seg:
+                lo, hi = int(idx.min()), int(idx.max())
+                cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
+                frame_no = lo
+                while frame_no <= hi:
+                    if not frame_no & 255:
+                        checkpoint()
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    for i, s in wanted.get(frame_no, ()):
+                        f = int(idx[i, s])
+                        row = int(animal_row[i])
+                        cx, cy, _ = tracks[row]
+                        side = sides[row]
+                        x0 = int(np.clip(cx[f] - side / 2.0, 0, max(0, width - side)))
+                        y0 = int(np.clip(cy[f] - side / 2.0, 0, max(0, height - side)))
+                        crop = frame[y0 : y0 + side, x0 : x0 + side]
+                        if crop.size == 0:
+                            continue
+                        clip = clips.get(i)
+                        if clip is None:
+                            clip = clips[i] = np.zeros(
+                                (N_SAMPLE_FRAMES, 112, 112, 3), dtype=np.uint8
+                            )
+                        clip[s] = cv2.resize(
+                            cv2.cvtColor(crop, cv2.COLOR_BGR2RGB),
+                            (112, 112),
+                            interpolation=cv2.INTER_AREA,
+                        )
+                        filled[i] += 1
+                    frame_no += 1
+                    yield from _settled(frame_no)
+                # The video ended (or ran out) before the remaining segments.
+                yield from _settled(int(last_wanted.max()) + 1)
         finally:
             cap.release()
-
-        # A segment needs most of its frames to be a fair embedding.
-        kept = [i for i in range(len(starts)) if filled[i] >= N_SAMPLE_FRAMES // 2]
-        return clips[kept], kept
 
     # ── Dense inference: anchor grid + interpolation ─────────────────────
     def attach_dense(

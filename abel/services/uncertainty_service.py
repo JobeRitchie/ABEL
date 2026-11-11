@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger("abel")
 
 
 @dataclass
@@ -149,10 +152,71 @@ class UncertaintyScoringService:
         # neighbors, not an approximation) and is the faster choice anyway at
         # this dimensionality, where trees degenerate to a full scan; sklearn
         # chunks its distance computation, so its working set stays bounded.
+        on_gpu = UncertaintyScoringService._knn_mean_distance_gpu(features, ref, k_actual)
+        if on_gpu is not None:
+            return on_gpu
         nn = NearestNeighbors(n_neighbors=k_actual, algorithm="brute", n_jobs=n_jobs)
         nn.fit(ref)
         dists, _ = nn.kneighbors(features)
         return np.mean(dists, axis=1)
+
+    # Below this many query x reference pairs the CPU search is already quick.
+    _GPU_KNN_MIN_PAIRS = 50_000_000
+    _GPU_KNN_QUERY_ROWS = 8192
+    # Extra nearest candidates re-checked exactly, so float32 rounding in the
+    # fast pass cannot swap a true neighbor out of the final k.
+    _GPU_KNN_SLACK = 6
+
+    @staticmethod
+    def _knn_mean_distance_gpu(features: np.ndarray, ref: np.ndarray, k: int) -> np.ndarray | None:
+        """The same brute-force k-NN mean distance, computed on the GPU.
+
+        A fast float32 pass shortlists ``k`` plus a few nearest references per
+        row; the distances to that shortlist are then recomputed in float64 and
+        the ``k`` smallest averaged.  Returns ``None`` (caller uses the CPU
+        search) when CUDA is unavailable, the job is small, or anything fails.
+        """
+        n, n_ref = len(features), len(ref)
+        if k < 1 or n * n_ref < UncertaintyScoringService._GPU_KNN_MIN_PAIRS:
+            return None
+        try:
+            import torch
+
+            from abel.utils.torch_cuda import cuda_usable
+
+            if not cuda_usable():
+                return None
+            dev = torch.device("cuda")
+            out = np.empty(n, dtype=np.float64)
+            with torch.no_grad():
+                r32 = torch.from_numpy(np.ascontiguousarray(ref)).to(dev)
+                r64 = r32.double()
+                r_sq = (r32 * r32).sum(dim=1)
+                short = min(n_ref, k + UncertaintyScoringService._GPU_KNN_SLACK)
+                step = UncertaintyScoringService._GPU_KNN_QUERY_ROWS
+                for start in range(0, n, step):
+                    q32 = torch.from_numpy(np.ascontiguousarray(features[start : start + step])).to(dev)
+                    approx = (q32 * q32).sum(dim=1, keepdim=True) - 2.0 * (q32 @ r32.T) + r_sq
+                    cand = approx.topk(short, dim=1, largest=False).indices
+                    del approx
+                    diff = q32.double().unsqueeze(1) - r64[cand]
+                    exact = diff.pow_(2).sum(dim=2).sqrt_()
+                    nearest = exact.topk(k, dim=1, largest=False).values
+                    # float32 distances averaged in float64, as the CPU search does.
+                    out[start : start + step] = nearest.float().double().mean(dim=1).cpu().numpy()
+                    del q32, cand, diff, exact, nearest
+            return out
+        except Exception as exc:
+            logger.warning("GPU density search failed (%s); using the CPU search.", exc)
+            return None
+        finally:
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:  # pragma: no cover - cleanup only
+                pass
 
     # ------------------------------------------------------------------
     # Main entry point

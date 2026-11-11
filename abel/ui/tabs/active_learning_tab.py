@@ -7470,6 +7470,11 @@ class ActiveLearningTab(QWidget):
             _feature_sources = [
                 self._project_root / "derived" / "pose_features" / "frame_pose.parquet",
                 self._project_root / "derived" / "context_features" / "frame_context.parquet",
+                # The two files above are no longer rewritten by a Features run
+                # that re-extracted nothing; a rebuilt segment table (new window
+                # or feature settings) still has to invalidate, and it always
+                # rewrites this manifest.
+                self._project_root / "derived" / "representations" / "representations.manifest.json",
             ]
             _cache_stale = any(
                 p.exists() and p.stat().st_mtime > _cache_mtime
@@ -8236,9 +8241,8 @@ class ActiveLearningTab(QWidget):
 
         if self._project_root is None:
             return segment_df
-        # Columns the representation builder actually produced. The scored frame is
-        # written back over segment_features.parquet at the end of this method, so
-        # anything not in this set (bar the prediction columns) must not survive.
+        # Columns the representation builder actually produced. Anything not in
+        # this set (bar the prediction columns) must not survive on the result.
         original_cols = set(segment_df.columns)
         _log("Loading model state…")
         with open(model_dir / "model_state.pkl", "rb") as handle:
@@ -8434,27 +8438,23 @@ class ActiveLearningTab(QWidget):
         scored["prediction_prob"] = tgt_prob
 
 
-        repr_path = self._project_root / "derived" / "representations" / "segment_features.parquet"
-        # This write-back is how a scoring run can permanently corrupt the feature
-        # store: anything materialised onto segment_df to satisfy a model lands
-        # here and is indistinguishable from a real extracted feature on the next
-        # run. Never persist a column the representation builder did not produce.
+        # The returned frame carries only columns the representation builder
+        # produced plus the prediction columns: anything materialised onto
+        # segment_df to satisfy a model is a placeholder, not an extracted feature.
         phantom = [c for c in scored.columns if c not in original_cols and c not in _PRED_COLS]
         if phantom:
             logger.warning(
-                "Refusing to persist %d column(s) into segment_features.parquet that "
-                "feature extraction did not produce: %s",
+                "Dropping %d placeholder column(s) that feature extraction did "
+                "not produce: %s",
                 len(phantom), ", ".join(phantom[:8]),
             )
             scored = scored.drop(columns=phantom)
-        # Same for rows: segment_df carries the enrichment path's reviewed
-        # windows, which live in enriched_segments.parquet. Persisting them here
-        # made them "extracted" rows that the enrichment path never refreshed.
-        foreign = self._enriched_segment_ids()
-        to_write = scored
-        if foreign and "segment_id" in scored.columns:
-            to_write = scored.loc[~scored["segment_id"].astype(str).isin(foreign)]
-        to_write.to_parquet(repr_path, index=False)
+        # The scores are not written back into segment_features.parquet. Every
+        # caller saves them per model (segment_predictions.parquet and
+        # segment_uncertainty.parquet), which is what the readers use; the copy
+        # in the feature store only ever held the last behavior scored, and
+        # rewriting the whole table for it cost a full multi-GB write per
+        # behavior (35 s on a 634k x 1957 table).
         return scored
 
     def _enriched_segment_ids(self) -> set[str]:

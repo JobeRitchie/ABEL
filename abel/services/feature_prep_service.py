@@ -35,7 +35,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 
 from abel.services.behavior_representation_service import (
     BehaviorRepresentationService,
@@ -729,10 +729,16 @@ class FeaturePrepService:
             self._preflight_inputs(pending, config)
             obs.stage_start(STAGE_PREPROCESS, f"Extract {feat_label}", len(pending))
             t0 = time.monotonic()
-            self._extract_sessions(
-                project_root, pending, config, aliases, obs, result, _check_cancel,
-                cached_pose=cached_pose, cached_ctx=cached_ctx,
-            )
+            try:
+                self._extract_sessions(
+                    project_root, pending, config, aliases, obs, result, _check_cancel,
+                    cached_pose=cached_pose, cached_ctx=cached_ctx,
+                )
+            finally:
+                # Frees the chunk workers' GPU memory before the R3D stage.
+                from abel.services import context_chunk_pool  # noqa: PLC0415
+
+                context_chunk_pool.shutdown()
             result.timings["preprocess"] = time.monotonic() - t0
             obs.stage_done(STAGE_PREPROCESS)
         else:
@@ -743,18 +749,25 @@ class FeaturePrepService:
         # ── Stage 2: consolidate per-session parquet into monolithic ─────
         obs.stage_start(STAGE_CONSOLIDATE, "Consolidate feature caches", 1)
         t0 = time.monotonic()
-        PoseProcessingService.consolidate_session_files(project_root)
-        if config.use_video_features:
-            ContextFeatureService.consolidate_session_files(project_root)
-        # Guarantee the monolithic files exist even when every session was cached.
         pose_mono = project_root / "derived" / "pose_features" / "frame_pose.parquet"
-        if not pose_mono.exists():
-            PoseProcessingService.consolidate_session_files(project_root)
         ctx_mono = project_root / "derived" / "context_features" / "frame_context.parquet"
-        if config.use_video_features and not ctx_mono.exists():
-            ContextFeatureService.consolidate_session_files(project_root)
+        # A merged file is rebuilt only when a per-session file (or the merged
+        # file itself) changed since the last merge.  Rewriting it unchanged
+        # cost time and, by bumping its timestamp, made every cache keyed on
+        # that timestamp look stale.
+        n_merged = int(self._consolidate_if_changed(
+            pose_mono, PoseProcessingService.consolidate_session_files, project_root
+        ))
+        if config.use_video_features:
+            n_merged += int(self._consolidate_if_changed(
+                ctx_mono, ContextFeatureService.consolidate_session_files, project_root
+            ))
         result.timings["consolidate"] = time.monotonic() - t0
-        obs.stage_advance(STAGE_CONSOLIDATE, 1, "Feature caches consolidated.")
+        obs.stage_advance(
+            STAGE_CONSOLIDATE, 1,
+            "Feature caches consolidated." if n_merged
+            else "Feature caches already up to date.",
+        )
         obs.stage_done(STAGE_CONSOLIDATE)
 
         result.frame_pose_path = pose_mono
@@ -815,6 +828,82 @@ class FeaturePrepService:
     # Internals
     # ------------------------------------------------------------------
 
+    _CONSOLIDATE_STAMP = "consolidated.stamp.json"
+
+    @staticmethod
+    def _consolidation_state(mono_path: Path) -> dict[str, list[int]] | None:
+        """Size and mtime of the merged file and of every per-session file."""
+        try:
+            files = [mono_path, *sorted((mono_path.parent / "sessions").glob("*.parquet"))]
+            state: dict[str, list[int]] = {}
+            for f in files:
+                st = f.stat()
+                state[f.name] = [int(st.st_size), int(st.st_mtime_ns)]
+            return state
+        except OSError:
+            return None
+
+    @classmethod
+    def _consolidate_if_changed(
+        cls, mono_path: Path, consolidate: Callable[[Path], Path | None], project_root: Path
+    ) -> bool:
+        """Merge the per-session files unless the merged file is already current.
+
+        The merge is a pure function of the per-session files and the existing
+        merged file, so when none of them changed since the last merge the
+        result would be the same bytes.  Returns True when a merge ran.
+        """
+        stamp_path = mono_path.parent / cls._CONSOLIDATE_STAMP
+        if mono_path.exists():
+            try:
+                recorded = json.loads(stamp_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                recorded = None
+            if recorded and recorded == cls._consolidation_state(mono_path):
+                return False
+        consolidate(project_root)
+        state = cls._consolidation_state(mono_path) if mono_path.exists() else None
+        try:
+            if state is None:
+                stamp_path.unlink(missing_ok=True)
+            else:
+                stamp_path.write_text(json.dumps(state), encoding="utf-8")
+        except OSError as exc:  # pragma: no cover - read-only project
+            logger.debug("Could not record the consolidation stamp: %s", exc)
+        return True
+
+    # Starting the chunk worker processes costs roughly 15-20 s once per run
+    # (each imports the app and opens a GPU context).  Below about a minute of
+    # thread-path video work that start-up is not repaid.
+    _CHUNK_PROCESS_MIN_FRAMES = 150_000
+
+    @classmethod
+    def _worth_chunk_processes(
+        cls, jobs: list[SessionJob], config: PrepConfig, cached_ctx: set[str]
+    ) -> bool:
+        """True when the pending video work is long enough for worker processes."""
+        if not config.use_video_features:
+            return False
+        total = 0
+        try:
+            import cv2  # noqa: PLC0415
+
+            for job in jobs:
+                if job.video_path is None or str(job.session_id) in cached_ctx:
+                    continue
+                cap = cv2.VideoCapture(str(job.video_path))
+                try:
+                    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                finally:
+                    cap.release()
+                # Multi-animal sessions make one pass over the video per animal.
+                total += frames * max(1, len(job.individuals))
+                if total >= cls._CHUNK_PROCESS_MIN_FRAMES:
+                    return True
+        except Exception as exc:  # pragma: no cover - probe is best-effort
+            logger.debug("Chunk-process probe failed: %s", exc)
+        return False
+
     def _extract_sessions(
         self,
         project_root: Path,
@@ -851,6 +940,9 @@ class FeaturePrepService:
         )
 
         warn_lock = threading.Lock()
+        use_chunk_processes = self._worth_chunk_processes(jobs, config, cached_ctx)
+        if use_chunk_processes:
+            obs.log("Video features: frame chunks run in worker processes for this run.")
 
         # Project-level invariance/social toggles.  Loaded once here (not baked
         # into the per-frame default) so multi-animal jobs honor the social flag.
@@ -946,6 +1038,7 @@ class FeaturePrepService:
                         keypoint_aliases=aliases,
                         identity_corrections=list(job.identity_corrections or []),
                         cancel_check=check_cancel,
+                        use_chunk_processes=use_chunk_processes,
                     )
                 else:
                     ContextFeatureService().compute_frame_context(
@@ -961,6 +1054,7 @@ class FeaturePrepService:
                         warning_cb=_collect_warning,
                         keypoint_aliases=aliases,
                         cancel_check=check_cancel,
+                        use_chunk_processes=use_chunk_processes,
                     )
             return str(job.session_id)
 
