@@ -24,6 +24,7 @@ import numpy as np
 from abel.models.schemas import PoseFeaturePreset, SessionFeatureSummary
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.storage.file_store import read_json, read_yaml, write_json, write_yaml
+from abel.utils.cancellation import wait_if_paused
 
 logger = logging.getLogger("abel")
 
@@ -276,6 +277,7 @@ class PoseFeaturesService:
         window_frames = np.zeros((n_windows, 2), dtype=np.int32)
 
         for i, sf in enumerate(starts):
+            wait_if_paused(cancel_flag)
             if cancel_flag and cancel_flag[0]:
                 # Unfilled rows are zeros: saving them would cache a truncated
                 # session that later runs treat as complete.

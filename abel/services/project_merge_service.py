@@ -23,6 +23,9 @@ from typing import Any
 
 import pandas as pd
 
+from abel.temporal_refinement.bout_postprocess import review_default_settings
+from abel.utils.session_fps import session_fps_scales
+
 logger = logging.getLogger("abel")
 
 
@@ -307,6 +310,8 @@ class ProjectMergeService:
         # These are applied in both Source 1 and Source 1b below so that every
         # merged project's data is processed with *its own* saved settings.
         ext_thresholds = self._read_tr_thresholds(root)
+        # Cleanup frames are project frames; sessions at another rate rescale.
+        ext_fps_scales = session_fps_scales(root)
 
         # ── Source 1: temporal_refinement, re-apply per-project thresholds ──
         # For each behavior we prefer to re-compute bouts from the raw inference
@@ -319,13 +324,7 @@ class ProjectMergeService:
         if tr_root.exists():
             try:
                 import numpy as np
-                from abel.temporal_refinement.bout_postprocess import (
-                    smooth_probabilities,
-                    threshold_probabilities,
-                    merge_close_bouts,
-                    remove_short_bouts,
-                    binary_trace_to_intervals,
-                )
+                from abel.temporal_refinement.bout_postprocess import trace_to_intervals
                 _bout_postprocess_available = True
             except Exception:
                 _bout_postprocess_available = False
@@ -351,15 +350,11 @@ class ProjectMergeService:
                     continue
 
                 # Resolve per-behavior threshold params
-                defaults_p = ext_thresholds.get("__defaults__", {
-                    "onset_threshold": 0.5,
-                    "min_bout_duration_frames": 6,
-                    "merge_gap_frames": 3,
-                })
+                defaults_p = {**review_default_settings(), **ext_thresholds.get("__defaults__", {})}
                 params = ext_thresholds.get(ext_bid, defaults_p)
-                onset     = float(params.get("onset_threshold",          defaults_p.get("onset_threshold", 0.5)))
-                min_bout  = int(params.get("min_bout_duration_frames",   defaults_p.get("min_bout_duration_frames", 6)))
-                merge_gap = int(params.get("merge_gap_frames",           defaults_p.get("merge_gap_frames", 3)))
+                onset     = float(params.get("onset_threshold",          defaults_p["onset_threshold"]))
+                min_bout  = int(params.get("min_bout_duration_frames",   defaults_p["min_bout_duration_frames"]))
+                merge_gap = int(params.get("merge_gap_frames",           defaults_p["merge_gap_frames"]))
 
                 # Resolve smoothing settings from the postprocess manifest
                 sm_method = "moving_average"
@@ -417,11 +412,15 @@ class ProjectMergeService:
                             .fillna(0.0)
                             .to_numpy(dtype=float)
                         )
-                        smoothed = smooth_probabilities(raw, method=sm_method, window=sm_window)
-                        binary   = threshold_probabilities(smoothed, onset_thresh=onset)
-                        binary   = merge_close_bouts(binary, max_gap_frames=merge_gap)
-                        binary   = remove_short_bouts(binary, min_duration_frames=min_bout)
-                        intervals = binary_trace_to_intervals(binary)
+                        intervals = trace_to_intervals(
+                            raw,
+                            onset_threshold=onset,
+                            min_bout_duration_frames=min_bout,
+                            merge_gap_frames=merge_gap,
+                            smoothing_method=sm_method,
+                            smoothing_window=sm_window,
+                            fps_scale=ext_fps_scales.get(str(ext_sid)),
+                        )
 
                         namespaced_sid = ns(ext_sid)
                         if namespaced_sid not in session_label_map:
@@ -513,6 +512,7 @@ class ProjectMergeService:
                 ext_fps,
                 tb_sm_method,
                 tb_sm_window,
+                fps_scales=session_fps_scales(root),
             )
             for (host_bid, host_name, ext_sid), bout_rows in tb_bouts.items():
                 namespaced_sid = ns(ext_sid)
@@ -945,22 +945,20 @@ class ProjectMergeService:
         ``merge_gap_frames``.
         """
         settings_path = root / "config" / "temporal_review_settings.json"
-        defaults: dict[str, Any] = {
-            "onset_threshold": 0.5,
-            "min_bout_duration_frames": 6,
-            "merge_gap_frames": 3,
-        }
+        # Same fallbacks as the Temporal Review tab, so a combined project gets
+        # the bouts it shows when opened on its own.
+        defaults: dict[str, Any] = dict(review_default_settings())
         if not settings_path.exists():
             return {"__defaults__": defaults}
         try:
             data = json.loads(settings_path.read_text(encoding="utf-8"))
         except Exception:
             return {"__defaults__": defaults}
-        raw_defaults = data.get("__all__", {})
+        raw_defaults = data.get("__all__", {}) or {}
         defaults = {
-            "onset_threshold": float(raw_defaults.get("onset_threshold", 0.5)),
-            "min_bout_duration_frames": int(raw_defaults.get("min_bout_duration_frames", 6)),
-            "merge_gap_frames": int(raw_defaults.get("merge_gap_frames", 3)),
+            "onset_threshold": float(raw_defaults.get("onset_threshold", defaults["onset_threshold"])),
+            "min_bout_duration_frames": int(raw_defaults.get("min_bout_duration_frames", defaults["min_bout_duration_frames"])),
+            "merge_gap_frames": int(raw_defaults.get("merge_gap_frames", defaults["merge_gap_frames"])),
         }
         result: dict[str, dict[str, Any]] = {"__defaults__": defaults}
         for bid, vals in (data.get("by_behavior") or {}).items():
@@ -1028,29 +1026,25 @@ class ProjectMergeService:
         fps: float,
         smoothing_method: str,
         smoothing_window: int,
+        fps_scales: dict[str, float] | None = None,
     ) -> dict[tuple[str, str, str], list[dict]]:
         """Recompute bouts from target_behavior probability traces.
+
+        ``fps_scales`` (session fps / project fps, from
+        :func:`abel.utils.session_fps.session_fps_scales`) rescales the cleanup
+        frame counts for sessions recorded at another rate.
 
         Returns a dict keyed by ``(host_bid, host_name, namespaced_sid)``
         with a list of raw bout row dicts.
         """
         try:
             import numpy as np
-            from abel.temporal_refinement.bout_postprocess import (
-                smooth_probabilities,
-                threshold_probabilities,
-                merge_close_bouts,
-                remove_short_bouts,
-                binary_trace_to_intervals,
-            )
+            from abel.temporal_refinement.bout_postprocess import trace_to_intervals
         except Exception:
             return {}
 
-        defaults = thresholds.get("__defaults__", {
-            "onset_threshold": 0.5,
-            "min_bout_duration_frames": 6,
-            "merge_gap_frames": 3,
-        })
+        fps_scales = fps_scales or {}
+        defaults = {**review_default_settings(), **thresholds.get("__defaults__", {})}
 
         result: dict[tuple[str, str, str], list[dict]] = {}
 
@@ -1082,19 +1076,16 @@ class ProjectMergeService:
                     .fillna(0.0)
                     .to_numpy(dtype=float)
                 )
-                smoothed = smooth_probabilities(
-                    raw, method=smoothing_method, window=smoothing_window,
-                )
-
                 params = thresholds.get(ext_bid, defaults)
-                onset = float(params.get("onset_threshold", defaults["onset_threshold"]))
-                min_bout = int(params.get("min_bout_duration_frames", defaults["min_bout_duration_frames"]))
-                merge_gap = int(params.get("merge_gap_frames", defaults["merge_gap_frames"]))
-
-                binary = threshold_probabilities(smoothed, onset_thresh=onset)
-                binary = merge_close_bouts(binary, max_gap_frames=merge_gap)
-                binary = remove_short_bouts(binary, min_duration_frames=min_bout)
-                intervals = binary_trace_to_intervals(binary)
+                intervals = trace_to_intervals(
+                    raw,
+                    onset_threshold=float(params.get("onset_threshold", defaults["onset_threshold"])),
+                    min_bout_duration_frames=int(params.get("min_bout_duration_frames", defaults["min_bout_duration_frames"])),
+                    merge_gap_frames=int(params.get("merge_gap_frames", defaults["merge_gap_frames"])),
+                    smoothing_method=smoothing_method,
+                    smoothing_window=smoothing_window,
+                    fps_scale=fps_scales.get(str(ext_sid)),
+                )
 
                 # Use tag-namespaced session id: caller must have built session_label_map
                 # before this call, but we only have ext_sid here; let the caller namespace

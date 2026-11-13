@@ -23,6 +23,7 @@ import os
 import pickle
 import sys
 import threading
+import time
 from concurrent.futures.process import BrokenProcessPool
 from typing import Any, Callable
 
@@ -37,14 +38,17 @@ MAX_WORKERS = 8
 _WORKER_VRAM_MB = 600.0
 _VRAM_RESERVE_MB = 1536.0
 _POLL_SEC = 0.5
+_PAUSE_POLL_SEC = 0.1
 
 _state_lock = threading.Lock()
 _pool: cf.ProcessPoolExecutor | None = None
 _pool_cancel: Any = None
+_pool_pause: Any = None
 _pool_size = 0
 _disabled_reason: str | None = None
 
 # Set once in each worker by ``_init_worker``.
+_worker_pause: Any = None
 _worker_cancel: Any = None
 _worker_gpu_lock: Any = None
 
@@ -86,13 +90,24 @@ def planned_workers(use_gpu: bool) -> int:
     return n if n >= 2 else 0
 
 
-def _init_worker(cancel_event: Any, gpu_lock: Any) -> None:
-    global _worker_cancel, _worker_gpu_lock
+def _init_worker(cancel_event: Any, gpu_lock: Any, pause_event: Any = None) -> None:
+    global _worker_cancel, _worker_gpu_lock, _worker_pause
     _worker_cancel = cancel_event
     _worker_gpu_lock = gpu_lock
+    _worker_pause = pause_event
 
 
 def _worker_cancel_check() -> None:
+    # Paused: wait here, between frame batches and outside the GPU lock.  A
+    # cancel ends the wait, and so does losing the parent, so a worker never
+    # outlives ABEL because it was paused.
+    while _worker_pause is not None and _worker_pause.is_set():
+        if _worker_cancel is not None and _worker_cancel.is_set():
+            break
+        parent = mp.parent_process()
+        if parent is not None and not parent.is_alive():
+            raise OperationCancelled()
+        time.sleep(_PAUSE_POLL_SEC)
     if _worker_cancel is not None and _worker_cancel.is_set():
         raise OperationCancelled()
 
@@ -116,42 +131,44 @@ def _run_chunk(kind: str, kwargs: dict, frame_start: int, frame_end: int) -> tup
     return out, warnings
 
 
-def _get_pool(use_gpu: bool) -> tuple[cf.ProcessPoolExecutor, Any] | None:
-    global _pool, _pool_cancel, _pool_size, _disabled_reason
+def _get_pool(use_gpu: bool) -> tuple[cf.ProcessPoolExecutor, Any, Any] | None:
+    global _pool, _pool_cancel, _pool_pause, _pool_size, _disabled_reason
     with _state_lock:
         if _disabled_reason is not None:
             return None
         if _pool is not None:
-            return _pool, _pool_cancel
+            return _pool, _pool_cancel, _pool_pause
         n = planned_workers(use_gpu)
         if n < 2:
             return None
         try:
             ctx = mp.get_context("spawn")
             cancel_event = ctx.Event()
+            pause_event = ctx.Event()
             # One GPU optical-flow batch at a time across workers, as the
             # thread path does with its in-process lock.
             gpu_lock = ctx.Lock()
             _pool = cf.ProcessPoolExecutor(
                 max_workers=n, mp_context=ctx,
-                initializer=_init_worker, initargs=(cancel_event, gpu_lock),
+                initializer=_init_worker, initargs=(cancel_event, gpu_lock, pause_event),
             )
         except Exception as exc:
             _disabled_reason = str(exc)
             logger.warning("Context chunk processes unavailable (%s); using threads.", exc)
             return None
         _pool_cancel = cancel_event
+        _pool_pause = pause_event
         _pool_size = n
         logger.info("Context features: running frame chunks in %d worker process(es).", n)
-        return _pool, _pool_cancel
+        return _pool, _pool_cancel, _pool_pause
 
 
 def shutdown(cancel: bool = False) -> None:
     """Stop the pool (if any) and release its workers' GPU memory."""
-    global _pool, _pool_cancel, _pool_size
+    global _pool, _pool_cancel, _pool_pause, _pool_size
     with _state_lock:
         pool, event = _pool, _pool_cancel
-        _pool, _pool_cancel, _pool_size = None, None, 0
+        _pool, _pool_cancel, _pool_pause, _pool_size = None, None, None, 0
     if pool is None:
         return
     if cancel and event is not None:
@@ -183,7 +200,41 @@ def run_chunks(
     got = _get_pool(use_gpu=(kind == "gpu"))
     if got is None:
         return None
-    pool, cancel_event = got
+    pool, cancel_event, pause_event = got
+
+    # A pause must reach the workers themselves: this loop only waits on them,
+    # so blocking here alone would leave every submitted chunk running.
+    job_flag = getattr(cancel_check, "flag", None)
+    follow_pause = None
+    if pause_event is not None and hasattr(job_flag, "add_pause_listener"):
+        def follow_pause(paused: bool) -> None:
+            if paused:
+                pause_event.set()
+            else:
+                pause_event.clear()
+
+        job_flag.add_pause_listener(follow_pause)
+    try:
+        return _run_chunks_in_pool(
+            pool, kind, chunk_kwargs, chunk_boundaries,
+            progress_cb=progress_cb, cancel_check=cancel_check, warning_cb=warning_cb,
+        )
+    finally:
+        if follow_pause is not None:
+            job_flag.remove_pause_listener(follow_pause)
+
+
+def _run_chunks_in_pool(
+    pool: cf.ProcessPoolExecutor,
+    kind: str,
+    chunk_kwargs: dict,
+    chunk_boundaries: list[tuple[int, int]],
+    *,
+    progress_cb: Callable[[int, int, str], None] | None,
+    cancel_check: Callable[[], None] | None,
+    warning_cb: Callable[[str], None] | None,
+) -> list[dict] | None:
+    global _disabled_reason
 
     # Locks and callbacks stay in this process; workers get their own.
     kwargs = {

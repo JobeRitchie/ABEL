@@ -231,3 +231,62 @@ def test_preset_hunt_ranks_without_a_pose_pass(tmp_path, _app):
     dlg = _dialog(tmp_path, _synthetic_pool())
     dlg._arm_preset()
     assert dlg._feature_only_criteria() is True
+
+
+# -- single-animal presets (immobility, locomotion, grooming) ----------------
+
+_SINGLE_ANIMAL_IDS = ("immobility", "locomotion", "grooming")
+
+
+def _planted_pool(preset, n: int = 600, planted: int = 60) -> pd.DataFrame:
+    """A pool whose last ``planted`` windows sit on the preset's side of every feature."""
+    rng = np.random.default_rng(1)
+    out = pd.DataFrame({"segment_id": [f"w{i:04d}" for i in range(n)]})
+    hit = slice(n - planted, n)
+    for feat in preset.features:
+        col = rng.normal(10.0, 1.0, n)
+        col[hit] = rng.normal(10.0 + 4.0 * np.sign(feat.weight), 0.3, planted)
+        out[feat.columns[0]] = col
+    return out
+
+
+def test_preset_ids_are_unique_and_registered():
+    ids = [p.id for p in PRESETS]
+    assert len(ids) == len(set(ids))
+    for pid in _SINGLE_ANIMAL_IDS:
+        assert preset_by_id(pid) in PRESETS
+
+
+@pytest.mark.parametrize("pid", _SINGLE_ANIMAL_IDS)
+def test_single_animal_preset_names_no_rig_specific_feature(pid):
+    """ROI, target and arena-direction columns mean something else in every rig."""
+    cols = [c for f in preset_by_id(pid).features for c in f.columns]
+    assert len(cols) == len(set(cols))
+    for c in cols:
+        assert "roi_" not in c and "target" not in c
+        assert "velocity_x" not in c and "velocity_y" not in c
+
+
+@pytest.mark.parametrize("pid", _SINGLE_ANIMAL_IDS)
+def test_single_animal_preset_ranks_planted_windows_first(tmp_path, pid):
+    preset = preset_by_id(pid)
+    svc = _service(tmp_path, _planted_pool(preset))
+    fit = fit_preset(svc, preset)
+    assert fit.usable()
+    assert not fit.missing
+    assert fit.criteria  # the descriptive box is drawn
+
+    pool = svc.load_rich_features(metric_ids=fit.used)
+    top = set(fit.scorer.score(pool).sort_values(ascending=False).head(60).index)
+    assert len(top & {f"w{i:04d}" for i in range(540, 600)}) >= 55
+
+
+@pytest.mark.parametrize("pid", _SINGLE_ANIMAL_IDS)
+def test_single_animal_preset_runs_without_video_features(tmp_path, pid):
+    """A project extracted with video features off lacks the flow column only."""
+    preset = preset_by_id(pid)
+    frame = _planted_pool(preset)
+    frame = frame.drop(columns=[c for c in frame.columns if c.startswith("flow_")])
+    fit = fit_preset(_service(tmp_path, frame), preset)
+    assert fit.usable()
+    assert len(fit.missing) == 1

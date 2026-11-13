@@ -275,6 +275,9 @@ class MainWindow(QMainWindow):
             self._validation_service,
             self._behavior_service,
         )
+        self.behavior_analytics_tab.manual_corrections_changed.connect(
+            self._refresh_manual_corrections_flag
+        )
         self.validation_tab.session_quality_requested.connect(self._open_session_quality)
         self.export_tab = ExportTab(
             self._export_service,
@@ -600,8 +603,18 @@ class MainWindow(QMainWindow):
             self._close_open_popup()
             return
         self.home_tab.update_stats(self._compute_project_stats(project_root))
+        self._refresh_manual_corrections_flag()
         self._logger.info("Project loaded: %s", project_root)
         self._close_open_popup()
+
+    def _refresh_manual_corrections_flag(self) -> None:
+        """Show or hide the manual-corrections flag on Home and Validation."""
+        from abel.services.manual_corrections_service import flag_text  # noqa: PLC0415
+
+        root = self._project.project_root if self._project is not None else None
+        text = flag_text(root)
+        self.home_tab.set_manual_corrections_flag(text)
+        self.validation_tab.set_manual_corrections_flag(text)
 
     def _lazy_init_tab(self, widget: QWidget) -> None:
         """Call set_project on *widget* exactly once; no-op if already done."""
@@ -672,7 +685,6 @@ class MainWindow(QMainWindow):
     def _compute_project_stats(self, project_root: Path) -> dict:
         """Fast stats read from persisted files for the home tab."""
         import json  # noqa: PLC0415
-        import re    # noqa: PLC0415
         import yaml  # noqa: PLC0415
         stats: dict = {}
         manifest_path = project_root / "derived" / "review_tables" / "import_manifest.json"
@@ -751,33 +763,42 @@ class MainWindow(QMainWindow):
             stats["pipeline"] = pipeline
 
         # ── Model performance metrics ────────────────────────────────────
-        metrics_path = project_root / "derived" / "evaluation" / "model_metrics.json"
-        if metrics_path.exists():
-            try:
-                text = metrics_path.read_text(encoding="utf-8")
-                # JSON does not allow bare NaN: replace before parsing
-                text = re.sub(r'\bNaN\b', 'null', text)
-                raw_m = json.loads(text)
+        # Held-out validation scores from each behavior model's own
+        # metrics.json.  derived/evaluation/model_metrics.json is not used: it
+        # holds only the last behavior trained, scored on its training labels.
+        try:
+            from abel.services.model_performance_summary import held_out_summary  # noqa: PLC0415
 
-                def _fmt(v: object) -> str:
-                    if v is None:
-                        return "-"
-                    try:
-                        return f"{float(v):.3f}"
-                    except (TypeError, ValueError):
-                        return "-"
-
-                fl = raw_m.get("frame_level") or {}
-                sl = raw_m.get("segment_level") or {}
-                stats["model_metrics"] = {
-                    "frame_f1":        _fmt(fl.get("f1")),
-                    "frame_precision": _fmt(fl.get("precision")),
-                    "frame_recall":    _fmt(fl.get("recall")),
-                    "frame_pr_auc":    _fmt(fl.get("pr_auc")),
-                    "segment_f1":      _fmt(sl.get("f1")),
+            names: dict[str, str] = {}
+            if behavior_path.exists():
+                raw_b = yaml.safe_load(behavior_path.read_text(encoding="utf-8")) or {}
+                names = {
+                    str(b.get("behavior_id", "")): str(b.get("name") or b.get("behavior_id") or "")
+                    for b in raw_b.get("behaviors", [])
                 }
-            except Exception:
-                pass
+            summary = held_out_summary(project_root, names)
+        except Exception:
+            summary = None
+        if summary:
+
+            def _fmt(v: object) -> str:
+                if v is None:
+                    return "-"
+                try:
+                    return f"{float(v):.3f}"
+                except (TypeError, ValueError):
+                    return "-"
+
+            stats["model_metrics"] = {
+                "f1":        _fmt(summary.get("f1")),
+                "precision": _fmt(summary.get("precision")),
+                "recall":    _fmt(summary.get("recall")),
+                "pr_auc":    _fmt(summary.get("pr_auc")),
+                "lowest_f1": _fmt(summary.get("lowest_f1")),
+                "lowest_behavior": str(summary.get("lowest_behavior") or ""),
+                "basis": str(summary.get("basis") or "macro"),
+                "n_models": int(summary.get("n_models") or 0),
+            }
 
         return stats
 

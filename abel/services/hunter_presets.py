@@ -221,7 +221,196 @@ SOCIAL_PRESET = HunterPreset(
     ),
 )
 
-PRESETS: tuple[HunterPreset, ...] = (SOCIAL_PRESET,)
+# The three single-animal presets below came out of a sweep over 19 projects
+# sharing the current feature schema.  For each behavior, every extracted
+# feature was scored by how far the reviewed clips sit from that project's own
+# pool, and the features kept are the ones whose direction agreed across
+# projects.  Each preset was then tested leave-one-project-out, with its
+# features chosen from the other projects.  Weights are the median signed
+# separation, scaled so the strongest feature is 1.  ROI, target and
+# arena-direction features were left out: they mean something different in
+# every rig.
+
+# Freeze, 8 projects: held-out AUC against other reviewed clips 0.92 to 0.99,
+# top 100 a median 7x enriched.  Eating and stationary sniffing share most of
+# this signature, hence "Immobility" and not "Freezing".
+IMMOBILITY_PRESET = HunterPreset(
+    id="immobility",
+    name="Immobility",
+    tagline="The animal holds still: freezing, and other motionless bouts",
+    description=(
+        "Hunts windows where the head, nose and body barely move, the signature "
+        "shared by freezing across fear conditioning, open field, EPM and "
+        "home cage recordings.\n\n"
+        "It is a *family* hunt: expect freezing first, plus the other things an "
+        "animal does while staying put, such as eating, stationary sniffing and "
+        "resting. Use it to build a first review set, then switch to Extract "
+        "essence once you have exemplars of the one behavior you want.\n\n"
+        "Everything it measures is relative to this project's own spread, so it "
+        "ranks the stillest windows of this recording, not windows under a fixed "
+        "speed."
+    ),
+    requires="Pose features with nose and tail base keypoints",
+    features=(
+        PresetFeature(
+            columns=("head_angular_velocity_energy",),
+            weight=-1.0,
+            note="how much the head turns",
+        ),
+        PresetFeature(
+            columns=("nose_lateral_velocity_energy", "nose_vertical_velocity_energy"),
+            weight=-1.0,
+            note="side-to-side nose movement",
+        ),
+        PresetFeature(
+            columns=("head_forward_speed_std",),
+            weight=-1.0,
+            note="variability of head speed",
+        ),
+        PresetFeature(
+            columns=("nose_speed_max", "nose_velocity_max"),
+            weight=-0.95,
+            box="low",
+            note="fastest nose movement in the window",
+        ),
+        PresetFeature(
+            columns=("flow_mag_near_nose_p90",),
+            weight=-0.95,
+            note="pixel motion around the head (needs video features)",
+        ),
+        PresetFeature(
+            columns=("body_orientation_std",),
+            weight=-0.95,
+            note="how much the body axis swings",
+        ),
+        PresetFeature(
+            columns=("body_length_px_std", "dist_nose_to_tail_base_std"),
+            weight=-0.95,
+            box="low",
+            note="how much the body stretches and shortens",
+        ),
+    ),
+)
+
+# Walk, 9 projects: held-out AUC 0.92 to 0.99, top 100 a median 8x enriched.
+# Explore (4 projects, 0.89 to 0.94) has the same signature.
+LOCOMOTION_PRESET = HunterPreset(
+    id="locomotion",
+    name="Locomotion",
+    tagline="The animal travels: walking, running and exploring",
+    description=(
+        "Hunts windows where the whole animal moves forward, head, nose and tail "
+        "base together. This is the signature shared by walking and by "
+        "exploration.\n\n"
+        "It is a *family* hunt: expect walking, running and ambulatory "
+        "exploration, plus approaches and escapes, which are also fast forward "
+        "movement. Use it to build a first review set, then switch to Extract "
+        "essence once you have exemplars of the one behavior you want.\n\n"
+        "Everything it measures is relative to this project's own spread, so it "
+        "ranks the fastest-travelling windows of this recording, not windows "
+        "over a fixed speed."
+    ),
+    requires="Pose features with nose and tail base keypoints",
+    features=(
+        PresetFeature(
+            columns=("head_forward_speed_mean",),
+            weight=1.0,
+            note="head moving in the direction it points",
+        ),
+        PresetFeature(
+            columns=("tail_base_forward_velocity_p90", "tail_base_forward_velocity_mean"),
+            weight=1.0,
+            note="the rear of the body following along",
+        ),
+        PresetFeature(
+            columns=("nose_forward_velocity_mean",),
+            weight=0.95,
+            note="nose moving forward",
+        ),
+        PresetFeature(
+            columns=("centroid_velocity_mean",),
+            weight=0.95,
+            box="high",
+            note="speed of the body center",
+        ),
+        PresetFeature(
+            columns=("tail_base_speed_mean",),
+            weight=0.95,
+            box="high",
+            note="tail base speed (separates travel from head-only movement)",
+        ),
+        PresetFeature(
+            columns=("nose_speed_median", "nose_velocity_median"),
+            weight=0.9,
+            note="sustained nose speed",
+        ),
+        PresetFeature(
+            columns=("flow_mag_near_nose_mean",),
+            weight=0.85,
+            note="pixel motion around the head (needs video features)",
+        ),
+    ),
+)
+
+# Groom, 18 projects: held-out AUC 0.78 to 0.98 (median 0.91), top 100 a
+# median 5x enriched.  The short-body feature agreed in sign in all 18.
+GROOMING_PRESET = HunterPreset(
+    id="grooming",
+    name="Grooming",
+    tagline="Hunched and stationary, nose drawn in toward the body",
+    description=(
+        "Hunts windows where the animal is shorter than usual from nose to tail "
+        "base and is not travelling, the hunched posture shared by self-grooming "
+        "across every kind of recording it was checked on.\n\n"
+        "Expect grooming first, plus other hunched, stationary moments such as "
+        "eating or a curled-up rest. Use it to build a first review set, then "
+        "switch to Extract essence once you have exemplars.\n\n"
+        "Everything it measures is relative to this project's own spread, so no "
+        "body size or pixel scale is carried over from another project."
+    ),
+    requires="Pose features with nose and tail base keypoints",
+    features=(
+        PresetFeature(
+            columns=("body_length_px_p90", "dist_nose_to_tail_base_max"),
+            weight=-1.0,
+            box="low",
+            note="body length at its longest in the window",
+        ),
+        PresetFeature(
+            columns=("nose_autocorr_peak_mean",),
+            weight=-0.75,
+            note="how regular the nose movement is",
+        ),
+        PresetFeature(
+            columns=("centroid_velocity_mean",),
+            weight=-0.65,
+            box="low",
+            note="speed of the body center",
+        ),
+        PresetFeature(
+            columns=("nose_speed_mean", "nose_velocity_mean"),
+            weight=-0.6,
+            note="nose speed",
+        ),
+        PresetFeature(
+            columns=("tail_base_speed_median",),
+            weight=-0.55,
+            note="tail base speed",
+        ),
+        PresetFeature(
+            columns=("flow_mag_near_nose_max",),
+            weight=-0.55,
+            note="pixel motion around the head (needs video features)",
+        ),
+    ),
+)
+
+PRESETS: tuple[HunterPreset, ...] = (
+    SOCIAL_PRESET,
+    IMMOBILITY_PRESET,
+    LOCOMOTION_PRESET,
+    GROOMING_PRESET,
+)
 
 
 def preset_by_id(preset_id: str) -> HunterPreset | None:

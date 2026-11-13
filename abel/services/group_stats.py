@@ -14,7 +14,7 @@ needed to write it up; nothing is computed that the report does not name.
 from __future__ import annotations
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 from typing import Any, Sequence
 
@@ -781,8 +781,15 @@ def two_factor(
     rep = opts.repeated_factor
     if rep and rep in (name_a, name_b):
         if rep == name_a:
+            # _mixed takes the between factor first, so the factors trade
+            # places here.  "first"/"second" in twoway_compare name the
+            # caller's factors and must trade places with them.
             sw = df.rename(columns={"a": "b", "b": "a"})
-            out = _mixed(sw, name_b, name_a, lb, la, opts, res, lambda w, b: label(b, w))
+            flipped = {"first": "second", "second": "first"}.get(
+                opts.twoway_compare, opts.twoway_compare
+            )
+            sw_opts = replace(opts, twoway_compare=flipped)
+            out = _mixed(sw, name_b, name_a, lb, la, sw_opts, res, lambda w, b: label(b, w))
             return out
         return _mixed(df, name_a, name_b, la, lb, opts, res, label)
     y = df["value"].to_numpy(float)

@@ -47,7 +47,12 @@ from abel.services.context_feature_service import (
 )
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.storage.file_store import atomic_write_parquet, read_json, write_json
-from abel.utils.cancellation import OperationCancelled, cancel_scope, cancellable
+from abel.utils.cancellation import (
+    OperationCancelled,
+    cancel_scope,
+    cancellable,
+    wait_if_paused,
+)
 
 logger = logging.getLogger("abel")
 
@@ -676,8 +681,12 @@ class FeaturePrepService:
         aliases = self.keypoint_aliases(project_root)
 
         def _check_cancel() -> None:
+            wait_if_paused(cancel_flag)
             if cancel_flag and cancel_flag[0]:
                 raise PrepCancelledError("PREP_CANCELLED_BY_USER")
+
+        # Lets the chunk worker processes follow a pause (see context_chunk_pool).
+        _check_cancel.flag = cancel_flag  # type: ignore[attr-defined]
 
         # ── Decide which sessions actually need (re)building ──────────────
         # Pose features go stale when body parts are renamed; context features

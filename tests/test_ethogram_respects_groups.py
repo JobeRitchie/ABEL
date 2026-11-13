@@ -39,6 +39,7 @@ def _make_widget(controls: dict[str, str], mode: str, ticked: set[str] | None = 
     stub = SimpleNamespace()
     for name in (
         "_export_sessions", "_ethogram_roster", "_ethogram_sessions", "_ethogram",
+        "_ethogram_bouts",
     ):
         setattr(stub, name, getattr(_GraphsWidget, name).__get__(stub))
 
@@ -70,6 +71,7 @@ def _make_widget(controls: dict[str, str], mode: str, ticked: set[str] | None = 
     stub._get_first_n_bouts = lambda: 0
     stub._cutoff_frames_for_until_behavior = lambda: {}
     stub._get_data_range_seconds = lambda: (None, None)
+    stub._clip_bouts_to_range = _GraphsWidget._clip_bouts_to_range
     stub._ethogram_cache = None
     stub._ethogram_cache_key = None
     stub._figure = plt.figure()

@@ -85,11 +85,15 @@ def _host(raw_bouts, summary_rows, groups=None, order=None):
 
 
 def _bouts(bid, name, spans):
-    """spans: list of (session_id, start_s, end_s) at 10 fps."""
+    """spans: list of (session_id, start_s, end_s) at 10 fps.
+
+    ``end_frame`` is the bout's last frame (inclusive), as everywhere in ABEL,
+    so a bout that ends at ``end_s`` has its last frame one before it.
+    """
     return pd.DataFrame({
         "session_id": [s for s, _a, _b in spans],
         "start_frame": [int(a * 10) for _s, a, _b in spans],
-        "end_frame": [int(b * 10) for _s, _a, b in spans],
+        "end_frame": [int(b * 10) - 1 for _s, _a, b in spans],
         "behavior": name,
         "behavior_id": bid,
     })

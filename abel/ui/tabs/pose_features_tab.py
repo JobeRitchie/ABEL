@@ -70,8 +70,9 @@ from abel.services.roi_service import (
 )
 from abel.storage.file_store import read_json, read_yaml, write_yaml
 from abel.ui.smoothing_preview_dialog import BG_THRESHOLD_TOOLTIP, SmoothingPreviewDialog
+from abel.ui.widgets.pause_button import PauseButton
 from abel.ui.widgets.progress_panel import ProgressPanel
-from abel.utils.cancellation import is_cancel_traceback
+from abel.utils.cancellation import JobFlag, is_cancel_traceback, wait_if_paused
 from abel.utils.run_timeline import RunTimeline, Stage
 from abel.utils.session_fps import (
     describe_mixed,
@@ -166,7 +167,7 @@ class PoseFeaturesTab(QWidget):
         self._suspend_settings_save = False
         self._manifest = None
         self._pool = QThreadPool.globalInstance()
-        self._cancel_flag: list[bool] = [False]
+        self._cancel_flag = JobFlag()
         self._current_preset: PoseFeaturePreset | None = None
         self._last_run_preset: PoseFeaturePreset | None = None
         self._last_run_session_ids: list[str] = []
@@ -610,8 +611,13 @@ class PoseFeaturesTab(QWidget):
         self._run_btn = QPushButton("▶  Extract Pose Features")
         self._cancel_btn = QPushButton("■  Cancel")
         self._cancel_btn.setEnabled(False)
+        self._pause_btn = PauseButton(self._cancel_flag)
+        self._pause_btn.pause_requested.connect(self._on_pause_requested)
+        self._pause_btn.pause_reached.connect(self._on_pause_reached)
+        self._pause_btn.resumed.connect(self._on_resumed)
         run_row = QHBoxLayout()
         run_row.addWidget(self._run_btn)
+        run_row.addWidget(self._pause_btn)
         run_row.addWidget(self._cancel_btn)
         run_row.addStretch()
         self._run_btn.clicked.connect(self._run)
@@ -1458,6 +1464,7 @@ class PoseFeaturesTab(QWidget):
         self._last_run_session_ids = [c.session_id for c in configs]
         self._run_btn.setEnabled(False)
         self._cancel_btn.setEnabled(True)
+        self._pause_btn.set_job_running(True)
         self._result_table.setRowCount(0)
         self._progress.setMaximum(len(configs))
         self._progress.setValue(0)
@@ -1474,7 +1481,9 @@ class PoseFeaturesTab(QWidget):
             Stage(STAGE_CONSOLIDATE, "Consolidate feature caches", weight=0.5),
             Stage(STAGE_REPRESENTATIONS, "Build representations", weight=3.0),
         ]
-        self._timeline = RunTimeline(stages, history=self._load_timeline_history())
+        self._timeline = RunTimeline(
+            stages, history=self._load_timeline_history(), now_fn=self._cancel_flag.clock,
+        )
         self._prep_panel.set_stages([(s.key, s.label) for s in stages])
         self._prep_panel.set_activity("")
         self._prep_panel.set_snapshot_provider(
@@ -1509,6 +1518,7 @@ class PoseFeaturesTab(QWidget):
                 f"{preset.source_fps:g} fps."
             )
         for i, cfg in enumerate(configs):
+            wait_if_paused(self._cancel_flag)
             if self._cancel_flag[0]:
                 break
             scale = scales.get(str(cfg.session_id))
@@ -1660,6 +1670,7 @@ class PoseFeaturesTab(QWidget):
     def _finish_prep_ui(self, status: str) -> None:
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
+        self._pause_btn.set_job_running(False)
         self._prep_panel.set_activity("")
         self._refresh_prep_panel()
         self._prep_panel.stop()
@@ -1672,6 +1683,7 @@ class PoseFeaturesTab(QWidget):
             return
         self._run_btn.setEnabled(True)
         self._cancel_btn.setEnabled(False)
+        self._pause_btn.set_job_running(False)
         self._progress.setFormat("Error")
         self._prep_panel.stop()
         self._append_log("Feature preparation failed:")
@@ -1792,9 +1804,29 @@ class PoseFeaturesTab(QWidget):
         self._progress.setValue(value)
         self._progress.setFormat(text)
 
+    def _on_pause_requested(self) -> None:
+        self._progress_format_before_pause = self._progress.format()
+        self._progress.setFormat("Pausing…")
+        self._append_log("Pause requested. Pausing at the next checkpoint…")
+
+    def _on_pause_reached(self) -> None:
+        self._progress.setFormat("Paused")
+        self._prep_panel.set_activity("Paused")
+        self._append_log(
+            "Paused. Press Resume to continue from here, or Cancel to end this run. "
+            "Sessions already finished are kept either way."
+        )
+
+    def _on_resumed(self) -> None:
+        self._progress.setFormat(getattr(self, "_progress_format_before_pause", "") or "Running…")
+        self._prep_panel.set_activity("")
+        self._append_log("Resumed.")
+
     def _cancel(self) -> None:
+        # Works while paused too: the paused job wakes and stops where it stands.
         self._cancel_flag[0] = True
         self._cancel_btn.setEnabled(False)
+        self._pause_btn.set_job_running(False)
         self._progress.setFormat("Canceling…")
         self._append_log("Cancellation requested. Stopping at the next checkpoint…")
 

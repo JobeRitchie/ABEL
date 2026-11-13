@@ -110,6 +110,7 @@ from abel.ui.mpl_theme import style_navigation_toolbar
 from abel.ui.stats_options_dialog import StatsOptionsWidget, StatsReportDialog, describe_test
 from abel.services.group_stats_options import StatsOptions
 from abel.services.import_service import ImportService
+from abel.services.manual_corrections_service import METRICS as MANUAL_METRICS, ManualCorrections
 from abel.services.project_merge_service import ProjectMergeService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.roi_service import ROIService
@@ -637,6 +638,33 @@ def _band_halfwidth(sem: Any, count: Any, style: str) -> "np.ndarray":
     return sem_a
 
 
+def _smooth_trace(values: Any, window: int) -> "np.ndarray":
+    """Centered moving average that does not bias the ends of a trace.
+
+    ``np.convolve(..., mode="same")`` pads with zeros, so the first and last
+    ``window // 2`` samples are averaged with zeros and read low: a 12-frame
+    bout at constant speed lost 11% of its mean velocity, a 30-frame bout 4%,
+    so shorter bouts looked slower.  Here each sample is averaged over the
+    real samples inside its window only.  NaN samples (untracked frames) are
+    left out of their neighbors' averages and stay NaN themselves.
+    """
+    arr = np.asarray(values, dtype=np.float64)
+    k = max(1, int(window))
+    if k <= 1 or arr.size < 2:
+        return arr
+    valid = np.isfinite(arr)
+    kernel = np.ones(k, dtype=np.float64)
+    # "full" then a centered slice: mode="same" returns the kernel's length
+    # when the trace is shorter than the window.
+    lo = (k - 1) // 2
+    total = np.convolve(np.where(valid, arr, 0.0), kernel, mode="full")[lo:lo + arr.size]
+    count = np.convolve(valid.astype(np.float64), kernel, mode="full")[lo:lo + arr.size]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = total / count
+    out[~valid | (count <= 0)] = np.nan
+    return out
+
+
 def _aggregate_metric(df: pd.DataFrame, keys: list[str], metric: str) -> pd.DataFrame:
     """One value of *metric* per *keys* combination (a session, or session x behavior).
 
@@ -786,8 +814,13 @@ class BehaviorAnalyticsTab(QWidget):
     """Summarize bout counts / durations, visualize graphs, and render
     spatial heatmaps, organised across three sub-tabs."""
 
+    # Emitted after manual corrections are saved, so the project-level flag on
+    # the Home and Validation tabs stays current.
+    manual_corrections_changed = Signal()
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._manual_corrections = ManualCorrections()
 
         # -- shared state ---------------------------------------------
         self._project_root: Path | None = None
@@ -1075,6 +1108,8 @@ class BehaviorAnalyticsTab(QWidget):
     def set_project(self, project_root: Path) -> None:
         self._project_root = project_root
         self._manager = ProjectManager(project_root)
+        # Small file; loaded here so the first paint already uses it.
+        self._manual_corrections = ManualCorrections.load(project_root)
         self._group_state_loaded = False
         self._session_labels = SessionLabels()
         self._group_state_anchors = {}
@@ -1472,12 +1507,20 @@ class BehaviorAnalyticsTab(QWidget):
         df["end_frame"] = (ends + offsets).astype(np.int64)
         return df.reset_index(drop=True)
 
-    def _recompute_summary_stats_from_shifted_bouts(self) -> None:
-        """Recompute summary metrics from prechopped/rebased raw bouts when available."""
+    def _recompute_summary_stats_from_shifted_bouts(
+        self, had_bouts: "set[tuple[str, str]] | None" = None,
+    ) -> None:
+        """Recompute summary metrics from prechopped/rebased raw bouts when available.
+
+        *had_bouts* names the (session, behavior) pairs that had raw bouts
+        before the prechop trim.  A pair in it with no bouts left did the
+        behavior only before the test started, so it is written down to zero
+        instead of keeping its whole-video numbers.
+        """
         if not self._summary_rows or not self._raw_bouts:
             return
+        had_bouts = had_bouts or set()
 
-        fps = self._project_fps()
         stats_by_key: dict[tuple[str, str], tuple[float, float, float, float]] = {}
         for bid, bdf in self._raw_bouts.items():
             if bdf.empty or not {"session_id", "start_frame", "end_frame"}.issubset(bdf.columns):
@@ -1511,6 +1554,15 @@ class BehaviorAnalyticsTab(QWidget):
                 adjusted_rows.append(updated)
                 continue
 
+            if key in had_bouts:
+                updated = dict(row)
+                updated["n_bouts"] = 0.0
+                updated["time_spent_s"] = 0.0
+                updated["mean_bout_s"] = 0.0
+                updated["latency_s"] = float("nan")
+                adjusted_rows.append(updated)
+                continue
+
             # If no raw bouts are available for this row, keep legacy values but
             # still shift latency to keep the analysis timeline aligned.
             pre = self._analysis_prechop_for_session(sid)
@@ -1519,7 +1571,9 @@ class BehaviorAnalyticsTab(QWidget):
                 try:
                     lat = float(updated.get("latency_s", float("nan")))
                     if np.isfinite(lat):
-                        updated["latency_s"] = max(0.0, lat - (pre / fps))
+                        updated["latency_s"] = max(
+                            0.0, lat - (pre / self._session_fps(sid))
+                        )
                 except Exception:
                     pass
                 adjusted_rows.append(updated)
@@ -2100,6 +2154,16 @@ class BehaviorAnalyticsTab(QWidget):
         except OSError:
             pass
 
+        # Source FPS is the fallback rate when no video fps was probed.
+        project_yaml = project_root / "project.yaml"
+        try:
+            st = project_yaml.stat()
+            parts.append(f"{project_yaml}:{st.st_mtime:.3f}:{st.st_size}")
+        except OSError:
+            pass
+        # Bump when the cached numbers would be computed differently.
+        parts.append("calc:v2")
+
         raw = "|".join(sorted(parts))
         return hashlib.md5(raw.encode()).hexdigest()
 
@@ -2271,6 +2335,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._summary_rows = result["summary_rows"]
         self._raw_bouts = result["raw_bouts"]
         self._graphs_tab._session_end_s_cache.clear()
+        self._graphs_tab.__dict__.pop("_dist_range_cache", None)
         self._session_prechop_overrides.clear()
         self._session_end_s_overrides.clear()
         for sid, end_s in (result.get("extra_session_end_s") or {}).items():
@@ -2289,11 +2354,17 @@ class BehaviorAnalyticsTab(QWidget):
                 self._session_prechop_overrides[str(sid)] = val
 
         if self._subject_prechop_frames or self._session_prechop_overrides:
+            had_bouts = {
+                (str(sid), str(bid))
+                for bid, df in self._raw_bouts.items()
+                if df is not None and not df.empty and "session_id" in df.columns
+                for sid in df["session_id"].astype(str).unique()
+            }
             self._raw_bouts = {
                 bid: self._apply_prechop_to_bout_df(df, rebase=True)
                 for bid, df in self._raw_bouts.items()
             }
-            self._recompute_summary_stats_from_shifted_bouts()
+            self._recompute_summary_stats_from_shifted_bouts(had_bouts)
 
         # Snapshot the fully-corrected bouts as the unscoped baseline so the
         # ROI scope can be switched later without another reload.
@@ -2405,6 +2476,8 @@ class BehaviorAnalyticsTab(QWidget):
             for b in behavior_list
         }
         fps = self._project_fps()
+        # Sessions recorded at another rate convert with their own fps.
+        fps_by_session: dict[str, float] = dict(self._fps_by_session())
         active_tb_inference = self._get_active_target_behavior_inference_dir()
 
         # ── Try disk cache ─────────────────────────────────────────────────
@@ -2483,10 +2556,11 @@ class BehaviorAnalyticsTab(QWidget):
                 total_f = float((grp["end_frame"] - grp["start_frame"] + 1).sum())
             else:
                 total_f = 0.0
-            time_s = total_f / fps
+            sid_fps = fps_by_session.get(sid_str) or fps
+            time_s = total_f / sid_fps
             mean_dur = time_s / n_b if n_b > 0 else 0.0
             lat = (
-                float(grp["start_frame"].min()) / fps
+                float(grp["start_frame"].min()) / sid_fps
                 if n_b > 0 and "start_frame" in grp.columns
                 else float("nan")
             )
@@ -3762,12 +3836,19 @@ class BehaviorAnalyticsTab(QWidget):
         if self._project_root is None:
             return 30.0
         manifest = self._manifest()
-        fps = 30.0
+        fps = 0.0
         if manifest is not None:
             for v in manifest.videos:
                 if v.fps and v.fps > 0:
                     fps = float(v.fps)
                     break
+        if fps <= 0:
+            # No probed video rate (e.g. the videos were unreachable at
+            # import): use the project's configured Source FPS, the rate the
+            # features were extracted at, rather than assuming 30.
+            from abel.utils.session_fps import reference_fps  # noqa: PLC0415
+
+            fps = float(reference_fps(self._project_root))
         self._fps_cache = fps
         return fps
 
@@ -3938,6 +4019,47 @@ class BehaviorAnalyticsTab(QWidget):
             result[t_key] = result.get(t_key, 0.0) + float(d)
         return sorted(result.items())
 
+    def _session_distance_in_range(
+        self, session_id: str, lo_s: float | None, hi_s: float | None,
+    ) -> float:
+        """Distance traveled inside the Data Range, in cm (px if uncalibrated).
+
+        The same subsampled path as :meth:`_compute_session_distance`, keeping
+        only the steps that start inside ``[lo_s, hi_s)``, so it equals the sum
+        of the time-binned distance over the range.
+        """
+        # One bin wide enough to hold any session: its total is the distance.
+        dist_px = sum(
+            d for _t, d in self._compute_session_distance_binned(
+                session_id, 1e9, 0.0, lo_s, hi_s,
+            )
+        )
+        ppm = self._pixels_per_mm_for_session(session_id)
+        return (dist_px / ppm / 10.0) if ppm and ppm > 0 else dist_px
+
+    def distance_unit(self) -> str:
+        """Unit the Distance Traveled values are in for the loaded sessions.
+
+        ``cm`` needs a pixels-per-mm calibration.  A session without one
+        reports raw pixels, so the label must not call them centimeters.
+        """
+        sids = {
+            str(r.get("session_id", ""))
+            for r in self._summary_rows
+            if r.get("behavior_id") == DISTANCE_BEHAVIOR_ID
+        }
+        if not sids:
+            return "cm"
+        calibrated = [
+            bool((ppm := self._pixels_per_mm_for_session(sid)) and ppm > 0)
+            for sid in sids
+        ]
+        if all(calibrated):
+            return "cm"
+        if not any(calibrated):
+            return "px, not calibrated"
+        return "cm; px where not calibrated"
+
     def _distance_for_bouts_df(
         self, session_id: str, bout_df: pd.DataFrame,
     ) -> float:
@@ -3996,21 +4118,26 @@ class BehaviorAnalyticsTab(QWidget):
             data = json.loads(settings_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
-        defaults = data.get("__all__", {})
+        from abel.temporal_refinement.bout_postprocess import (  # noqa: PLC0415
+            review_default_settings,
+        )
+
+        # Same fallbacks as the Temporal Review tab and the exports.
+        defaults = {**review_default_settings(), **(data.get("__all__", {}) or {})}
         by_behavior = data.get("by_behavior", {})
         result: dict[str, dict[str, float]] = {}
         for key, vals in by_behavior.items():
             if key == "target_behavior":
                 continue
             result[key] = {
-                "onset_threshold": float(vals.get("onset_threshold", defaults.get("onset_threshold", 0.5))),
-                "min_bout_duration_frames": int(vals.get("min_bout_duration_frames", defaults.get("min_bout_duration_frames", 6))),
-                "merge_gap_frames": int(vals.get("merge_gap_frames", defaults.get("merge_gap_frames", 3))),
+                "onset_threshold": float(vals.get("onset_threshold", defaults["onset_threshold"])),
+                "min_bout_duration_frames": int(vals.get("min_bout_duration_frames", defaults["min_bout_duration_frames"])),
+                "merge_gap_frames": int(vals.get("merge_gap_frames", defaults["merge_gap_frames"])),
             }
         result["__defaults__"] = {
-            "onset_threshold": float(defaults.get("onset_threshold", 0.5)),
-            "min_bout_duration_frames": int(defaults.get("min_bout_duration_frames", 6)),
-            "merge_gap_frames": int(defaults.get("merge_gap_frames", 3)),
+            "onset_threshold": float(defaults["onset_threshold"]),
+            "min_bout_duration_frames": int(defaults["min_bout_duration_frames"]),
+            "merge_gap_frames": int(defaults["merge_gap_frames"]),
         }
         return result
 
@@ -4027,19 +4154,17 @@ class BehaviorAnalyticsTab(QWidget):
         [session_id, start_frame, end_frame, behavior_id, behavior].
         """
         from abel.temporal_refinement.bout_postprocess import (
-            smooth_probabilities,
-            threshold_probabilities,
-            merge_close_bouts,
-            remove_short_bouts,
-            binary_trace_to_intervals,
+            review_default_settings,
+            trace_to_intervals,
         )
+        from abel.utils.session_fps import session_fps_scales  # noqa: PLC0415
 
         all_thresholds = self._load_temporal_review_thresholds()
-        defaults = all_thresholds.pop("__defaults__", {
-            "onset_threshold": 0.5,
-            "min_bout_duration_frames": 6,
-            "merge_gap_frames": 3,
-        })
+        # No settings file: the defaults of the Temporal Review tab, so the
+        # bouts here are the ones that tab and the exports show.
+        defaults = all_thresholds.pop("__defaults__", review_default_settings())
+        # Cleanup frames are project frames; sessions at another rate rescale.
+        fps_scales = session_fps_scales(self._project_root, self._manifest())
 
         result: dict[str, list[dict]] = {bid: [] for bid in bid_name_map}
 
@@ -4067,19 +4192,17 @@ class BehaviorAnalyticsTab(QWidget):
                 raw = pd.to_numeric(
                     trace_df[prob_col], errors="coerce",
                 ).fillna(0.0).to_numpy(dtype=float)
-                smoothed = smooth_probabilities(
-                    raw, method=smoothing_method, window=smoothing_window,
-                )
 
                 params = all_thresholds.get(bid, defaults)
-                onset = float(params.get("onset_threshold", defaults["onset_threshold"]))
-                min_bout = int(params.get("min_bout_duration_frames", defaults["min_bout_duration_frames"]))
-                merge_gap = int(params.get("merge_gap_frames", defaults["merge_gap_frames"]))
-
-                binary = threshold_probabilities(smoothed, onset_thresh=onset)
-                binary = merge_close_bouts(binary, max_gap_frames=merge_gap)
-                binary = remove_short_bouts(binary, min_duration_frames=min_bout)
-                intervals = binary_trace_to_intervals(binary)
+                intervals = trace_to_intervals(
+                    raw,
+                    onset_threshold=float(params.get("onset_threshold", defaults["onset_threshold"])),
+                    min_bout_duration_frames=int(params.get("min_bout_duration_frames", defaults["min_bout_duration_frames"])),
+                    merge_gap_frames=int(params.get("merge_gap_frames", defaults["merge_gap_frames"])),
+                    smoothing_method=smoothing_method,
+                    smoothing_window=smoothing_window,
+                    fps_scale=fps_scales.get(str(sid)),
+                )
 
                 for s_idx, e_idx in intervals:
                     sf = int(frame_arr[s_idx]) if s_idx < len(frame_arr) else s_idx
@@ -4197,11 +4320,7 @@ class BehaviorAnalyticsTab(QWidget):
             )
             if len(vel) == 0:
                 return np.array([], dtype=np.float64)
-            k = max(1, int(smooth_window))
-            if k > 1 and len(vel) >= k:
-                kernel = np.ones(k, dtype=np.float64) / k
-                vel = np.convolve(vel, kernel, mode="same")
-            return vel
+            return _smooth_trace(vel, smooth_window)
         cx = np.asarray(pose.centroid_x, dtype=np.float64)
         cy = np.asarray(pose.centroid_y, dtype=np.float64)
         n = len(cx)
@@ -4219,12 +4338,8 @@ class BehaviorAnalyticsTab(QWidget):
             vel = vel_px_frame / ppm / 10.0 * fps   # px → mm → cm, × fps → /s
         else:
             vel = vel_px_frame * fps                 # px/s (uncalibrated)
-        # Moving-average smoothing
-        k = max(1, int(smooth_window))
-        if k > 1 and len(vel) >= k:
-            kernel = np.ones(k, dtype=np.float64) / k
-            vel = np.convolve(vel, kernel, mode="same")
-        return vel
+        # Moving-average smoothing (edge-normalized, NaN-aware)
+        return _smooth_trace(vel, smooth_window)
 
     def _load_centroid_velocity_from_features(
         self,
@@ -4321,7 +4436,9 @@ class BehaviorAnalyticsTab(QWidget):
             sf = int(row["start_frame"]) + pre
             ef = int(row["end_frame"]) + pre
             vel = self._compute_bout_velocities(sid, sf, ef, smooth_window)
-            if len(vel) == 0:
+            # Untracked frames carry NaN velocity; a bout with no tracked
+            # frame at all has no velocity to report.
+            if len(vel) == 0 or not np.isfinite(vel).any():
                 continue
             slbl = self._session_label_by_session.get(sid, sid)
             grp = self._session_groups.get(slbl, "")
@@ -4334,8 +4451,8 @@ class BehaviorAnalyticsTab(QWidget):
                 "end_frame": ef,
                 "duration_frames": dur_frames,
                 "duration_s": dur_frames / max(1e-9, self._session_fps(sid)),
-                "mean_vel": float(np.mean(vel)),
-                "peak_vel": float(np.max(vel)),
+                "mean_vel": float(np.nanmean(vel)),
+                "peak_vel": float(np.nanmax(vel)),
                 "velocity_trace": vel,
             })
         return records
@@ -4344,7 +4461,101 @@ class BehaviorAnalyticsTab(QWidget):
         selected = self._selected_behavior_ids()
         if not selected:
             return []
-        return [r for r in self._summary_rows if r["behavior_id"] in selected]
+        rows = [r for r in self._summary_rows if r["behavior_id"] in selected]
+        if self._manual_rows_active():
+            rows = self._manual_corrections.apply_to_rows(
+                rows, selected, self._manual_session_templates(),
+                self._manual_behavior_names(),
+            )
+        return rows
+
+    # ------------------------------------------------------------------
+    # Manual corrections
+    # ------------------------------------------------------------------
+
+    def _manual_rows_active(self) -> bool:
+        """Whether whole-session manual values replace the summary rows.
+
+        They describe the whole arena, so an ROI scope switches them off.
+        """
+        return bool(self._manual_corrections) and self._roi_scope_zone == 0
+
+    def _manual_session_templates(self) -> dict[str, dict[str, Any]]:
+        """Identity fields per loaded session, for rows ABEL never produced."""
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._summary_rows:
+            sid = str(row.get("session_id", ""))
+            if sid and sid not in out:
+                out[sid] = {
+                    "session_id": sid,
+                    "subject": row.get("subject", sid),
+                    "session_label": row.get("session_label", sid),
+                    "session_type": row.get("session_type", ""),
+                }
+        return out
+
+    def _manual_behavior_names(self) -> dict[str, str]:
+        return {
+            str(b.behavior_id): str(b.name or b.behavior_id)
+            for b in self._behaviors.behaviors
+            if str(b.behavior_id) != NO_BEHAVIOR_ID
+        }
+
+    def _open_manual_corrections_dialog(self) -> None:
+        if self._project_root is None:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        names = self._manual_behavior_names()
+        base_rows = [
+            r for r in self._summary_rows
+            if not is_pseudo_behavior_id(str(r.get("behavior_id", "")))
+        ]
+        if not names or not base_rows:
+            QMessageBox.information(
+                self, "Manual Corrections",
+                "Click Refresh Analytics first so the scored values are loaded.",
+            )
+            return
+        if self._roi_scope_zone > 0:
+            QMessageBox.information(
+                self, "Manual Corrections",
+                "Manual corrections are whole-arena values. Set ROI scope to "
+                "the whole arena before editing them.",
+            )
+            return
+        from abel.ui.manual_corrections_dialog import ManualCorrectionsDialog
+
+        labels = self.ordered_session_labels()
+        rank = {label: i for i, label in enumerate(labels)}
+        sessions = sorted(
+            self._manual_session_templates().values(),
+            key=lambda t: (rank.get(t["session_label"], len(rank)), str(t["session_label"])),
+        )
+        dlg = ManualCorrectionsDialog(
+            self, names, sessions, base_rows, self._manual_corrections,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        updated = dlg.corrections()
+        if updated == self._manual_corrections:
+            return
+        updated.behavior_names = {**updated.behavior_names, **names}
+        try:
+            updated.save(self._project_root)
+        except Exception as exc:
+            logger.exception("Could not save manual corrections")
+            QMessageBox.critical(
+                self, "Manual Corrections", f"Could not save the corrections.\n\n{exc}",
+            )
+            return
+        self._manual_corrections = updated
+        n_total = sum(updated.counts().values())
+        self._status.setText(
+            f"Manual corrections saved ({n_total} corrected value(s))."
+            if n_total else "All manual corrections removed."
+        )
+        self._refresh_all_views()
+        self.manual_corrections_changed.emit()
 
 
 # ======================================================================
@@ -5146,6 +5357,7 @@ class _SummaryStatsWidget(QWidget):
             label_rank = {lbl: i for i, lbl in enumerate(ordered_labels)}
             rows.sort(key=lambda r: (label_rank.get(r["session_label"], 9999), r["behavior"]))
             self._table.setRowCount(0)
+            manual_active = self._host._manual_rows_active()
             # Update column count to include all factors
             factors = self._host._factor_definitions
             n_data_cols = 5 + len(factors)  # Session, Type, [factors...], Behavior, N Bouts, Duration, Mean, Dist
@@ -5154,7 +5366,7 @@ class _SummaryStatsWidget(QWidget):
             metric_headers = ["Behavior", "N Bouts",
                               "Total Duration (s)", "Mean Bout Duration (s)",
                               "Latency to First (s)",
-                              "Distance Traveled (cm)"]
+                              f"Distance Traveled ({self._host.distance_unit()})"]
             self._table.setColumnCount(len(base_headers) + len(factor_headers) + len(metric_headers))
             self._table.setHorizontalHeaderLabels(
                 base_headers + factor_headers + metric_headers
@@ -5180,8 +5392,34 @@ class _SummaryStatsWidget(QWidget):
                 )
                 for c, v in enumerate(vals):
                     self._table.setItem(r, c, QTableWidgetItem(v))
+                if manual_active:
+                    self._mark_manual_cells(r, len(vals) - 5, row_data)
         finally:
             self._rebuilding = False
+
+    def _mark_manual_cells(self, row: int, first_metric_col: int, row_data: dict) -> None:
+        """Bold the manually corrected cells of one summary row.
+
+        ``first_metric_col`` is the N Bouts column; the four correctable
+        metrics follow it in ``MANUAL_METRICS`` order.
+        """
+        manual = self._host._manual_corrections
+        bid = str(row_data.get("behavior_id", ""))
+        sid = str(row_data.get("session_id", ""))
+        for offset, metric in enumerate(MANUAL_METRICS):
+            if manual.get(bid, sid, metric) is None:
+                continue
+            item = self._table.item(row, first_metric_col + offset)
+            if item is None:
+                continue
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            abel = manual.abel_value(bid, sid, metric)
+            item.setToolTip(
+                "Manually corrected. ABEL value: "
+                + ("none" if abel is None else f"{abel:.2f}")
+            )
 
     def _refresh_session_table_if_changed(self) -> None:
         current_labels = set(r["session_label"] for r in self._host._summary_rows)
@@ -5445,6 +5683,14 @@ class _SummaryStatsWidget(QWidget):
         df["roi_scope"] = self._host.roi_scope_label()
         if self._host._animal_scope:
             df["animal"] = self._host.animal_scope_label()
+        # Only present when the project has corrections: names the columns of
+        # each row that were entered by hand.
+        if self._host._manual_rows_active():
+            manual = self._host._manual_corrections
+            df["manual_values"] = [
+                "; ".join(manual.metrics_for(str(b), str(s)))
+                for b, s in zip(df["behavior_id"], df["session_id"])
+            ]
         df.to_csv(path, index=False, encoding="utf-8-sig")
         self._host._status.setText(f"Exported summary CSV to {path}")
 
@@ -5615,7 +5861,9 @@ class _GraphsWidget(QWidget):
         self._time_bin_spin.editingFinished.connect(self.update_graph)
 
         self._settings_btn = QPushButton("Settings…")
-        self._settings_btn.setToolTip("Adjust fonts, DPI, legend placement.")
+        self._settings_btn.setToolTip(
+            "Adjust fonts, DPI, legend placement. Also holds Manual Corrections."
+        )
         self._settings_btn.clicked.connect(self._open_settings_dialog)
         self._graph_stats_btn = QPushButton("Statistics…")
         self._graph_stats_btn.setToolTip(
@@ -6445,8 +6693,9 @@ class _GraphsWidget(QWidget):
             "time_spent_s": "Total Duration (s)",
             "mean_bout_s": "Mean Bout Duration (s)",
             "latency_s": "Latency to First (s)",
-            "distance_cm": "Distance Traveled (cm)",
         }.get(metric, metric)
+        if metric == "distance_cm":
+            base = f"Distance Traveled ({self._host.distance_unit()})"
         if self._is_until_scaling_active() and metric in ("n_bouts", "time_spent_s"):
             sf = self._get_until_scale_factor()
             if sf == 60.0:
@@ -6455,7 +6704,11 @@ class _GraphsWidget(QWidget):
                 rate_sfx = "/ hr"
             else:
                 rate_sfx = f"/ {sf:.0f}s"
-            base = base.replace(" (s)", "") + f" ({rate_sfx})"
+            if metric == "time_spent_s":
+                # Seconds of behavior per unit of pre-behavior time.
+                base = base.replace(" (s)", "") + f" (s {rate_sfx})"
+            else:
+                base = base + f" ({rate_sfx})"
         return base
 
     # -- faceted grouping controls -------------------------------------
@@ -6608,7 +6861,14 @@ class _GraphsWidget(QWidget):
         return lo_val, hi_val
 
     def _session_analysis_end_s(self, session_id: str) -> float:
-        """Return analysis timeline end (seconds) for a session."""
+        """Return analysis timeline end (seconds) for a session.
+
+        On the analysis clock: 0 is test onset, so the session's prechop is
+        taken off the recorded length.  Bout times are rebased the same way,
+        and "time available" (the latency of an animal that never did the
+        behavior, the pre-behavior interval of a rate) has to share their
+        clock.  The raw video length overstated both by the prechop.
+        """
         sid = str(session_id)
         cached = self._session_end_s_cache.get(sid)
         if cached is not None:
@@ -6616,13 +6876,19 @@ class _GraphsWidget(QWidget):
 
         fps = max(1e-9, float(self._host._session_fps(sid)))
         end_s = 0.0
+        try:
+            prechop_s = max(0, int(self._host._analysis_prechop_for_session(sid))) / fps
+        except Exception:
+            prechop_s = 0.0
 
         # Prefer imported merged-session end-time overrides when available.
+        # They are raw video durations, like the pose length below.
         override_end = self._host._session_end_s_overrides.get(sid)
         if override_end is not None:
             try:
                 ov = float(override_end)
                 if ov > 0:
+                    ov = max(0.0, ov - prechop_s)
                     self._session_end_s_cache[sid] = ov
                     return ov
             except Exception:
@@ -6633,7 +6899,7 @@ class _GraphsWidget(QWidget):
             pose = self._host._get_pose_for_session(sid)
             if pose is not None and int(getattr(pose, "n_frames", 0)) > 0:
                 n_frames = int(getattr(pose, "n_frames", 0))
-                end_s = max(0.0, float(n_frames) / fps)
+                end_s = max(0.0, float(n_frames) / fps - prechop_s)
         except Exception:
             end_s = 0.0
 
@@ -6680,10 +6946,23 @@ class _GraphsWidget(QWidget):
             return rows
 
         lo_s, hi_s = self._get_data_range_seconds()
+        # Whole-session rows carry manual latencies; rows recomputed for a
+        # Data Range or bout filter do not.
+        manual = self._host._manual_corrections
+        manual_rows = (
+            self._host._manual_rows_active()
+            and not self._is_data_range_active()
+            and not self._is_bout_filter_active()
+        )
         changed = False
         out: list[dict[str, Any]] = []
         for row in rows:
             if str(row.get("behavior_id", "")) == DISTANCE_BEHAVIOR_ID:
+                out.append(row)
+                continue
+            if manual_rows and manual.get(
+                str(row.get("behavior_id", "")), str(row.get("session_id", "")), "latency_s",
+            ) is not None:
                 out.append(row)
                 continue
 
@@ -6796,11 +7075,15 @@ class _GraphsWidget(QWidget):
             return {}
         raw = self._host._raw_bouts
         target_df = raw.get(target_bid)
-        if target_df is None or target_df.empty:
-            return {}
         cutoffs: dict[str, float] = {}
-        for sid, grp in target_df.groupby("session_id"):
-            cutoffs[str(sid)] = float(grp["start_frame"].min())
+        if target_df is not None and not target_df.empty:
+            for sid, grp in target_df.groupby("session_id"):
+                cutoffs[str(sid)] = float(grp["start_frame"].min())
+        # A manually corrected latency is the hand-scored first onset, so it
+        # replaces ABEL's first bout as the cutoff (also where ABEL found none).
+        manual = self._host._manual_corrections.latency_by_session(target_bid)
+        for sid, latency_s in manual.items():
+            cutoffs[sid] = float(latency_s) * float(self._host._session_fps(sid))
         return cutoffs
 
     def _recompute_rows_for_first_n(
@@ -7004,8 +7287,22 @@ class _GraphsWidget(QWidget):
                             "mean_bout_s": mean_s,
                             "latency_s": lat_s,
                         })
+                elif bid_t == DISTANCE_BEHAVIOR_ID:
+                    # Distance comes from pose, so it is recomputed inside the
+                    # Data Range like the ROI rows and the time-binned view.
+                    sid_t = str(template.get("session_id", ""))
+                    cache = self.__dict__.setdefault("_dist_range_cache", {})
+                    ckey = (
+                        sid_t, lo_s, hi_s,
+                        self._host._analysis_prechop_for_session(sid_t),
+                        self._host._animal_scope,
+                    )
+                    if ckey not in cache:
+                        cache[ckey] = self._host._session_distance_in_range(
+                            sid_t, lo_s, hi_s,
+                        )
+                    result.append({**template, "distance_cm": cache[ckey]})
                 elif is_pseudo_behavior_id(bid_t):
-                    # Distance rows have no raw bouts, keep whole-session values.
                     result.append(template)
                 else:
                     result.append({
@@ -7460,37 +7757,17 @@ class _GraphsWidget(QWidget):
             self._draw_stats(ax, res, group_names, [float(i + 1) for i in range(len(group_names))], y_top)
         self._apply(ax, title=f"Box Plot: {metric_label}", ylabel=metric_label)
 
-    def _ethogram(self, df: pd.DataFrame) -> None:
-        """Raster/ethogram showing behavior bouts across time for each subject.
+    def _ethogram_bouts(self) -> dict[str, dict[str, list[tuple[float, float]]]]:
+        """``{behavior_id: {session_label: [(start_s, duration_s), ...]}}``.
 
-        Expensive DataFrame processing is cached keyed on raw bout data + settings.
-        Changing only the session filter re-renders from the cache without
-        re-scanning the parquets, so toggling sessions is near-instant.
+        Selected behaviors only, with the bout filter (First N / Until
+        Behavior) applied.  The plot and both ethogram exports read this, so
+        they always describe the same bouts.  Cached on the raw bout data and
+        the settings; the Data Range and the session filter are applied by the
+        callers.
         """
-        ax = self._figure.add_subplot(111)
         raw = self._host._raw_bouts
-        if not raw:
-            ax.text(0.5, 0.5, "No raw bout data available (need bout parquet files)",
-                    ha="center", va="center", transform=ax.transAxes)
-            return
         fps = self._host._project_fps()
-
-        # -- Build color/name lookups (fast, no iteration) ------------------------
-        bid_to_name: dict[str, str] = {}
-        bid_to_color: dict[str, str] = {}
-        _DEFAULT_COLOR = "#4A90E2"
-        all_default = all(
-            (b.color or _DEFAULT_COLOR) == _DEFAULT_COLOR
-            for b in self._host._behaviors.behaviors
-        )
-        for idx, b in enumerate(self._host._behaviors.behaviors):
-            bid = str(b.behavior_id)
-            bid_to_name[bid] = str(b.name or bid)
-            if all_default or not b.color or b.color == _DEFAULT_COLOR:
-                bid_to_color[bid] = _PALETTE[idx % len(_PALETTE)]
-            else:
-                bid_to_color[bid] = str(b.color)
-
         selected_bids = self._host._selected_behavior_ids()
         first_n = self._get_first_n_bouts()
         until_cutoffs = self._cutoff_frames_for_until_behavior()
@@ -7531,7 +7808,8 @@ class _GraphsWidget(QWidget):
                 # Per-row rate: sessions may be recorded at different fps.
                 row_fps = bdf_f["session_id"].map(self._host._session_fps).astype(float)
                 starts = bdf_f["start_frame"].astype(float) / row_fps
-                durs = (bdf_f["end_frame"].astype(float) / row_fps - starts).clip(lower=0)
+                # end_frame is the bout's last frame, so it ends one frame later.
+                durs = ((bdf_f["end_frame"].astype(float) + 1.0) / row_fps - starts).clip(lower=0)
                 labels = bdf_f["session_id"].astype(str).map(
                     lambda s: _label_map.get(s, s)  # noqa: B023
                 )
@@ -7543,6 +7821,62 @@ class _GraphsWidget(QWidget):
                 new_cache[bid] = sess_bouts
             self._ethogram_cache = new_cache
             self._ethogram_cache_key = _cache_key
+        return self._ethogram_cache
+
+    @staticmethod
+    def _clip_bouts_to_range(
+        bouts: list[tuple[float, float]], lo_s: float | None, hi_s: float | None,
+    ) -> list[tuple[float, float]]:
+        """Clip ``(start_s, duration_s)`` bouts to the Data Range window."""
+        if lo_s is None and hi_s is None:
+            return list(bouts)
+        clipped: list[tuple[float, float]] = []
+        for start_s, dur_s in bouts:
+            end_s = start_s + dur_s
+            if lo_s is not None:
+                if end_s <= lo_s:
+                    continue
+                start_s = max(start_s, lo_s)
+            if hi_s is not None:
+                if start_s >= hi_s:
+                    continue
+                end_s = min(end_s, hi_s)
+            if end_s - start_s > 0:
+                clipped.append((start_s, end_s - start_s))
+        return clipped
+
+    def _ethogram(self, df: pd.DataFrame) -> None:
+        """Raster/ethogram showing behavior bouts across time for each subject.
+
+        Expensive DataFrame processing is cached keyed on raw bout data + settings.
+        Changing only the session filter re-renders from the cache without
+        re-scanning the parquets, so toggling sessions is near-instant.
+        """
+        ax = self._figure.add_subplot(111)
+        raw = self._host._raw_bouts
+        if not raw:
+            ax.text(0.5, 0.5, "No raw bout data available (need bout parquet files)",
+                    ha="center", va="center", transform=ax.transAxes)
+            return
+        fps = self._host._project_fps()
+
+        # -- Build color/name lookups (fast, no iteration) ------------------------
+        bid_to_name: dict[str, str] = {}
+        bid_to_color: dict[str, str] = {}
+        _DEFAULT_COLOR = "#4A90E2"
+        all_default = all(
+            (b.color or _DEFAULT_COLOR) == _DEFAULT_COLOR
+            for b in self._host._behaviors.behaviors
+        )
+        for idx, b in enumerate(self._host._behaviors.behaviors):
+            bid = str(b.behavior_id)
+            bid_to_name[bid] = str(b.name or bid)
+            if all_default or not b.color or b.color == _DEFAULT_COLOR:
+                bid_to_color[bid] = _PALETTE[idx % len(_PALETTE)]
+            else:
+                bid_to_color[bid] = str(b.color)
+
+        bouts_by_behavior = self._ethogram_bouts()
 
         # -- Render from cache (fast path, even on session filter changes) --------
         # The data range is intentionally excluded from the cache key so it can
@@ -7552,31 +7886,16 @@ class _GraphsWidget(QWidget):
         sessions = self._ethogram_sessions()
         session_idx = {s: i for i, s in enumerate(sessions)}
 
-        for bid, sess_bouts in self._ethogram_cache.items():
+        for bid, sess_bouts in bouts_by_behavior.items():
             color = bid_to_color.get(bid, _PALETTE[0])
             label = behavior_label(bid, bid_to_name)
             label_used = False
             for sess_label, bouts in sess_bouts.items():
                 if sess_label not in session_idx or not bouts:
                     continue
-                if lo_s is not None or hi_s is not None:
-                    clipped: list[tuple[float, float]] = []
-                    for start_s, dur_s in bouts:
-                        end_s = start_s + dur_s
-                        if lo_s is not None:
-                            if end_s <= lo_s:
-                                continue
-                            start_s = max(start_s, lo_s)
-                        if hi_s is not None:
-                            if start_s >= hi_s:
-                                continue
-                            end_s = min(end_s, hi_s)
-                        new_dur = end_s - start_s
-                        if new_dur > 0:
-                            clipped.append((start_s, new_dur))
-                    bouts = clipped
-                    if not bouts:
-                        continue
+                bouts = self._clip_bouts_to_range(bouts, lo_s, hi_s)
+                if not bouts:
+                    continue
                 y = session_idx[sess_label]
                 # broken_barh draws all segments as one PatchCollection, much
                 # faster than individual barh calls for large bout counts.
@@ -7642,6 +7961,9 @@ class _GraphsWidget(QWidget):
             id(self._host._raw_bouts), len(self._host._raw_bouts),
             fps, bin_seconds, selected_bids, checked, need_distance, data_range,
             origin_s, first_n, until_bid,
+            tuple(sorted(
+                self._host._manual_corrections.latency_by_session(until_bid).items()
+            )) if until_bid else (),
         )
         if self._bin_cache is not None and self._bin_cache_key == cache_key:
             return self._bin_cache
@@ -7674,6 +7996,7 @@ class _GraphsWidget(QWidget):
                         "time_bin_s": t_bin,
                         "n_bouts": 0,
                         "duration_s": 0.0,
+                        "bout_dur_s": 0.0,
                         "distance_cm": d_cm,
                     })
 
@@ -7743,6 +8066,9 @@ class _GraphsWidget(QWidget):
                                 "behavior": bname, "time_bin_s": cur_bin,
                                 "n_bouts": 1 if is_first_slice else 0,
                                 "duration_s": slice_dur,
+                                # Whole (range-clipped) bout, credited to
+                                # the bin it starts in.
+                                "bout_dur_s": (b_end - b_start) if is_first_slice else 0.0,
                                 "distance_cm": 0.0,
                             })
                             cursor = slice_end
@@ -7755,9 +8081,15 @@ class _GraphsWidget(QWidget):
         df = pd.DataFrame(rows)
         agg = df.groupby(["session_label", "behavior_id", "behavior", "time_bin_s"]).agg(
             n_bouts=("n_bouts", "sum"), duration_s=("duration_s", "sum"),
+            bout_dur_s=("bout_dur_s", "sum"),
             distance_cm=("distance_cm", "sum"),
         ).reset_index()
-        agg["mean_bout_s"] = agg["duration_s"] / agg["n_bouts"].clip(lower=1)
+        # Mean duration of the bouts that START in the bin, each at its whole
+        # length.  Dividing the in-bin time by the in-bin onsets instead cut a
+        # bout that crossed a bin edge into two short "bouts" (a 10 s bout
+        # across an edge read as 5 s in each bin).  A bin with no onset has no
+        # mean bout duration, so it is blank rather than 0.
+        agg["mean_bout_s"] = (agg["bout_dur_s"] / agg["n_bouts"]).where(agg["n_bouts"] > 0)
         self._bin_cache = agg
         self._bin_cache_key = cache_key
         return agg
@@ -8198,6 +8530,14 @@ class _GraphsWidget(QWidget):
         buttons.accepted.connect(dlg.accept)
         buttons.rejected.connect(dlg.reject)
 
+        manual_btn = QPushButton("Manual Corrections…", dlg)
+        manual_btn.setToolTip(
+            "Replace ABEL's scored value for a behavior with a hand-scored one,\n"
+            "per session. For behaviors you have scored yourself."
+        )
+        manual_btn.clicked.connect(self._host._open_manual_corrections_dialog)
+        form.addRow("Scored values:", manual_btn)
+
         layout = QVBoxLayout(dlg)
         layout.addLayout(form)
         layout.addWidget(buttons)
@@ -8593,29 +8933,29 @@ class _GraphsWidget(QWidget):
             return agg
 
         elif style == "ethogram":
-            raw = self._host._raw_bouts
-            if not raw:
+            if not self._host._raw_bouts:
                 return None
-            fps = self._host._project_fps()
-            selected_bids = self._host._selected_behavior_ids()
-            eth_checked = set(self._ethogram_sessions())
+            # The bouts the on-screen ethogram draws: bout filter applied,
+            # clipped to the Data Range, checked sessions in display order.
+            lo_s, hi_s = self._get_data_range_seconds()
+            bid_to_name = {
+                str(b.behavior_id): str(b.name or b.behavior_id)
+                for b in self._host._behaviors.behaviors
+            }
+            sessions = self._ethogram_sessions()
             out_rows = []
-            for bid, bdf in raw.items():
-                if bid not in selected_bids:
-                    continue
-                for _, bout in bdf.iterrows():
-                    sid = str(bout.get("session_id", ""))
-                    sess_label = self._host._session_label_by_session.get(sid, sid)
-                    if sess_label not in eth_checked:
-                        continue
-                    fps = self._host._session_fps(sid)
-                    start_s = float(bout["start_frame"]) / fps
-                    end_s = float(bout["end_frame"]) / fps
-                    out_rows.append({
-                        "Session": sess_label, "Behavior": str(bout.get("behavior", bid)),
-                        "Start (s)": round(start_s, 3), "End (s)": round(end_s, 3),
-                        "Duration (s)": round(max(0, end_s - start_s), 3),
-                    })
+            for bid, sess_bouts in self._ethogram_bouts().items():
+                bname = behavior_label(bid, bid_to_name)
+                for sess_label in sessions:
+                    for start_s, dur_s in self._clip_bouts_to_range(
+                        sess_bouts.get(sess_label, []), lo_s, hi_s,
+                    ):
+                        out_rows.append({
+                            "Session": sess_label, "Behavior": bname,
+                            "Start (s)": round(start_s, 3),
+                            "End (s)": round(start_s + dur_s, 3),
+                            "Duration (s)": round(dur_s, 3),
+                        })
             return pd.DataFrame(out_rows) if out_rows else None
 
         elif style == "overview":
@@ -8639,6 +8979,8 @@ class _GraphsWidget(QWidget):
 
             session_label | group | behavior | 0s | 30s | 60s | … | total
 
+        For Mean Bout Duration the last column is ``overall_mean`` (the mean
+        over all in-range bouts) and bins with no bout onset are blank.
         Rows are sorted by group order then session label.
         Returns *None* if no data is available.
         """
@@ -8686,6 +9028,13 @@ class _GraphsWidget(QWidget):
             set(agg["session_label"].unique()) | set(roster), key=_sort_key,
         )
 
+        is_mean_bout = metric == "mean_bout_s"
+        if is_mean_bout:
+            # Overall mean bout duration per session x behavior: all in-range
+            # bouts, not a sum (or mean) of the per-bin means.
+            _tot = binned.groupby(["session_label", "behavior"])[["bout_dur_s", "n_bouts"]].sum()
+            overall_mean = (_tot["bout_dur_s"] / _tot["n_bouts"]).where(_tot["n_bouts"] > 0)
+
         parts = []
         for beh in behaviors:
             beh_data = agg[agg["behavior"] == beh]
@@ -8693,12 +9042,22 @@ class _GraphsWidget(QWidget):
                 index="session_label", columns="time_bin_s",
                 values=col, aggfunc="first",
             )
-            pivot = pivot.reindex(index=sessions, columns=all_bins, fill_value=0).fillna(0)
+            pivot = pivot.reindex(index=sessions, columns=all_bins)
+            if not is_mean_bout:
+                # Counts, durations and distance are a real 0 in an empty bin;
+                # a mean bout duration is undefined there and stays blank.
+                pivot = pivot.fillna(0)
             pivot.columns = bin_col_names
             pivot = pivot.reset_index()
             pivot.insert(1, "group", pivot["session_label"].map(groups_map).fillna(""))
             pivot.insert(2, "behavior", beh)
-            pivot["total"] = pivot[bin_col_names].sum(axis=1)
+            if is_mean_bout:
+                pivot["overall_mean"] = [
+                    overall_mean.get((sess, beh), float("nan"))
+                    for sess in pivot["session_label"]
+                ]
+            else:
+                pivot["total"] = pivot[bin_col_names].sum(axis=1)
             parts.append(pivot)
 
         return pd.concat(parts, ignore_index=True) if parts else None
@@ -8958,8 +9317,6 @@ class _GraphsWidget(QWidget):
             )
             return
 
-        fps = self._host._project_fps()
-        selected_bids = self._host._selected_behavior_ids()
         sessions_sorted = self._ethogram_sessions()
         eth_checked = set(sessions_sorted)
         lo_s, hi_s = self._get_data_range_seconds()
@@ -8970,36 +9327,21 @@ class _GraphsWidget(QWidget):
 
         # Collect bout intervals per behavior per session
         # {behavior_name: {session_label: [(start_s, end_s), ...]}}
+        # Same bouts as the on-screen ethogram: bout filter applied, clipped
+        # to the Data Range.
         beh_sess_bouts: dict[str, dict[str, list[tuple[float, float]]]] = {}
         max_end_s = 0.0
 
-        for bid, bdf in raw.items():
-            if bid not in selected_bids:
-                continue
+        for bid, sess_bouts in self._ethogram_bouts().items():
             bname = behavior_label(bid, bid_to_name)
-            if bname not in beh_sess_bouts:
-                beh_sess_bouts[bname] = {}
-            for _, bout in bdf.iterrows():
-                sid = str(bout.get("session_id", ""))
-                sess_label = self._host._session_label_by_session.get(sid, sid)
+            by_sess = beh_sess_bouts.setdefault(bname, {})
+            for sess_label, bouts in sess_bouts.items():
                 if sess_label not in eth_checked:
                     continue
-                fps = self._host._session_fps(sid)
-                start_s = float(bout["start_frame"]) / fps
-                end_s = float(bout["end_frame"]) / fps
-                # Honor the Data Range window (matches the on-screen ethogram).
-                if lo_s is not None:
-                    if end_s <= lo_s:
-                        continue
-                    start_s = max(start_s, lo_s)
-                if hi_s is not None:
-                    if start_s >= hi_s:
-                        continue
-                    end_s = min(end_s, hi_s)
-                if end_s <= start_s:
-                    continue
-                max_end_s = max(max_end_s, end_s)
-                beh_sess_bouts[bname].setdefault(sess_label, []).append((start_s, end_s))
+                for start_s, dur_s in self._clip_bouts_to_range(bouts, lo_s, hi_s):
+                    end_s = start_s + dur_s
+                    max_end_s = max(max_end_s, end_s)
+                    by_sess.setdefault(sess_label, []).append((start_s, end_s))
 
         if not beh_sess_bouts:
             QMessageBox.information(
@@ -11698,24 +12040,10 @@ class _DensityAnalysisWidget(QWidget):
         if host._project_root is None:
             return {}
 
-        # Determine target session IDs
-        target_sids: list[str] = []
-        candidate_sids = list(host._session_label_by_session.keys())
-        if not candidate_sids:
-            manifest = host._imports.load_manifest(host._project_root)
-            if manifest is not None:
-                candidate_sids = [str(s.session_id) for s in manifest.linked_sessions]
-        for sid in candidate_sids:
-            if group_name and group_name not in ("(all sessions)", "(ungrouped)"):
-                if factor:
-                    label = host._session_label_by_session.get(sid, sid)
-                    grp = host._session_factors.get(label, {}).get(factor, "")
-                else:
-                    label = host._session_label_by_session.get(sid, sid)
-                    grp = host._session_groups.get(label, "")
-                if grp != group_name:
-                    continue
-            target_sids.append(sid)
+        # The sessions the map's "n" counts: in the group and ticked in the
+        # Summary tab.  This used to rebuild the list without the tick filter,
+        # so an animal excluded in Summary still contributed its positions.
+        target_sids = self._get_session_ids_for_group(group_name, factor)
 
         if not target_sids:
             return {}
@@ -16204,6 +16532,11 @@ class _BehaviorMotifWidget(QWidget):
         the same rebased one the state bouts are in, so the prechop is taken
         off the pose length explicitly here.
         """
+        # The session's own rate: its bout times were built with it.
+        try:
+            fps = float(self._host._session_fps(session_id)) or fps
+        except Exception:
+            pass
         try:
             pose = self._host._get_pose_for_session(session_id)
             n_frames = int(getattr(pose, "n_frames", 0) or 0) if pose is not None else 0
@@ -16501,6 +16834,7 @@ class _BehaviorMotifWidget(QWidget):
         matrices = state_frame_matrix(
             result["state_bouts"],
             fps=fps,
+            fps_by_session=self._host._fps_by_session(),
             session_end_s={
                 str(k): float(v) for k, v in (result.get("session_end_s") or {}).items()
             },
@@ -16596,6 +16930,7 @@ class _BehaviorMotifWidget(QWidget):
         intervals = state_bouts_to_frames(
             merged_bouts,
             fps=fps,
+            fps_by_session=self._host._fps_by_session(),
             n_states=n_states,
             frame_offsets={
                 str(k): int(v) for k, v in (result.get("frame_offsets") or {}).items()
@@ -17410,6 +17745,7 @@ class _BehaviorMotifWidget(QWidget):
             for row in state_bout_rows(
                 result.get("state_bouts", {}) or {},
                 fps=fps,
+                fps_by_session=self._host._fps_by_session(),
                 frame_offsets=offsets,
                 session_labels=lm,
                 session_groups=self._host._session_groups,
@@ -18834,7 +19170,9 @@ class _SessionSectionsWidget(QWidget):
                     continue
                 fps = self._host._session_fps(sid_str)
                 start_s = grp["start_frame"].to_numpy(dtype=float) / fps
-                end_s = grp["end_frame"].to_numpy(dtype=float) / fps
+                # end_frame is the bout's last frame, so the bout ends one
+                # frame later (the convention the Summary durations use).
+                end_s = (grp["end_frame"].to_numpy(dtype=float) + 1.0) / fps
 
                 for sec_start, sec_end, sec_name, sec_idx in boundaries:
                     overlap = np.maximum(
@@ -19876,7 +20214,7 @@ class _SessionSectionsWidget(QWidget):
             if fps <= 0:
                 fps = 25.0
             starts = sdf["start_frame"].to_numpy(dtype=float) / fps
-            ends = sdf["end_frame"].to_numpy(dtype=float) / fps
+            ends = (sdf["end_frame"].to_numpy(dtype=float) + 1.0) / fps
 
             for i, (b0, b1) in enumerate(zip(bin_starts, bin_ends, strict=False)):
                 overlap = np.maximum(
@@ -21897,8 +22235,10 @@ class _VelocityWidget(QWidget):
                 n_valid = np.sum(~np.isnan(mat_ctx), axis=0)
                 with np.errstate(invalid="ignore", divide="ignore"):
                     std_v = np.nanstd(mat_ctx, axis=0, ddof=1)
-                    if error_style == "SD":
-                        err_v = std_v
+                    if error_style == "None":
+                        err_v = np.zeros_like(mean_v)
+                    elif error_style == "SD":
+                        err_v = np.where(n_valid > 1, std_v, 0.0)
                     elif error_style == "95% CI":
                         err_v = np.where(n_valid > 1, _t975(n_valid) * std_v / np.sqrt(np.maximum(n_valid, 1)), 0.0)
                     else:  # SEM
@@ -21969,10 +22309,10 @@ class _VelocityWidget(QWidget):
                 if mat.shape[0] == 0:
                     return
                 mean_v = np.nanmean(mat[:, :p95], axis=0)
-                n_valid = np.sum(~np.isnan(mat[:, :p95]), axis=0)
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    std_v = np.nanstd(mat[:, :p95], axis=0)
-                    err_v = np.where(n_valid > 1, std_v / np.sqrt(np.maximum(n_valid, 1)), 0.0)
+                # The band follows the Error Bars setting (SEM / SD / 95% CI /
+                # None) with the sample SD, as the normalized profile does.
+                # It used to be SD(ddof=0)/sqrt(n) whatever the setting.
+                err_v = np.array([_eb_val(mat[:, j], error_style) for j in range(p95)])
                 x_axis = np.arange(p95) / fps
 
             ax.plot(x_axis, mean_v, color=color, label=label, linewidth=1.5)

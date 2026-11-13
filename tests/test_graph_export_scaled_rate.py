@@ -94,6 +94,7 @@ def _make_widget(scaling: bool = True, style: str = "bar", mode: str = "individu
         _sessions_by_label={lbl: [sid] for sid, lbl in _LABEL_BY_SESSION.items()},
         _summary_tab=SimpleNamespace(_checked_subjects=lambda: set(SUBJECTS)),
         _status=SimpleNamespace(setText=lambda _t: None),
+        _manual_corrections=SimpleNamespace(latency_by_session=lambda _bid: {}),
     )
     stub._get_metric = lambda: "n_bouts"
     stub._get_style = lambda: style

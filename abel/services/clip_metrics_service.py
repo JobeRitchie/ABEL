@@ -39,7 +39,7 @@ import logging
 import os
 import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -543,11 +543,20 @@ class ClipMetricsService:
         self._ppm_cache.clear()
         self._subject_by_session.clear()
         self._rich_ids = None
-        cfg = read_yaml(project_root / "project.yaml", {})
+        # Frame rate: each session's own video rate where it was probed,
+        # otherwise the project's Source FPS (the rate features were extracted
+        # at).  One project-wide ``default_fps`` mis-scaled every speed for a
+        # session recorded at another rate.
+        from abel.utils.session_fps import reference_fps, video_fps_by_session  # noqa: PLC0415
+
         try:
-            self._fps = float(cfg.get("default_fps", 30.0)) or 30.0
+            self._fps = float(reference_fps(project_root)) or 30.0
         except Exception:
             self._fps = 30.0
+        try:
+            self._fps_by_session = video_fps_by_session(manifest=self._manifest)
+        except Exception:
+            self._fps_by_session = {}
         try:
             self._roi_count = max(1, int(self._rois.get_roi_count(project_root)))
         except Exception:
@@ -965,8 +974,21 @@ class ClipMetricsService:
         return EssenceFrames(E, B, used, notes)
 
     def available_metrics(self) -> list[MetricDef]:
-        """Metric list for the active project (one ROI block per configured zone)."""
-        return list(self._metric_defs)
+        """Metric list for the active project (one ROI block per configured zone).
+
+        Units follow the project's calibration: without pixels/mm the values
+        are pixels, and the unit shown must say so.
+        """
+        state = self.calibration_state()
+        if state == "all":
+            return list(self._metric_defs)
+        out: list[MetricDef] = []
+        for m in self._metric_defs:
+            unit = m.unit
+            if "mm" in unit:
+                unit = unit.replace("mm", "px") if state == "none" else f"{unit} (px if not calibrated)"
+            out.append(replace(m, unit=unit))
+        return out
 
     def metric_groups(self) -> list[str]:
         seen: list[str] = []
@@ -1088,6 +1110,28 @@ class ClipMetricsService:
         self._roi_cache[session_id] = rois
         return rois
 
+    def _fps_for(self, session_id: str) -> float:
+        """Frame rate for one session's clips (see :meth:`set_project`)."""
+        rate = float(getattr(self, "_fps_by_session", {}).get(str(session_id)) or 0.0)
+        return rate if rate > 0 else self._fps
+
+    def calibration_state(self) -> str:
+        """``"all"``, ``"none"`` or ``"mixed"``: which sessions have pixels/mm.
+
+        Length and speed metrics are in mm only for a calibrated session; an
+        uncalibrated one reports raw pixels.
+        """
+        if self._manifest is None:
+            return "none"
+        flags = [
+            self._imports.pixels_per_mm_for_session(self._manifest, str(s.session_id))
+            is not None
+            for s in self._manifest.linked_sessions
+        ]
+        if flags and all(flags):
+            return "all"
+        return "mixed" if any(flags) else "none"
+
     def _ppm_for(self, session_id: str) -> float:
         if session_id in self._ppm_cache:
             return self._ppm_cache[session_id]
@@ -1120,7 +1164,7 @@ class ClipMetricsService:
         if e < s:
             return out
         ppm = self._ppm_for(ref.session_id)
-        fps = self._fps
+        fps = self._fps_for(ref.session_id)
         sl = slice(s, e + 1)
         nfr = e - s + 1
 

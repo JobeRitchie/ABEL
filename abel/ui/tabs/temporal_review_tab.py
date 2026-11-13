@@ -48,8 +48,10 @@ from abel.temporal_refinement.bout_postprocess import (
     binary_trace_to_intervals,
     merge_close_bouts,
     remove_short_bouts,
+    scaled_cleanup_frames,
     smooth_probabilities,
     threshold_probabilities,
+    trace_to_intervals,
 )
 from abel.temporal_refinement.onset_autotune import (
     RECALL_BETA,
@@ -753,11 +755,25 @@ class TemporalReviewTab(QWidget):
 
     @staticmethod
     def _default_review_settings() -> dict[str, Any]:
-        return {
-            "onset_threshold": 0.65,
-            "min_bout_duration_frames": 8,
-            "merge_gap_frames": 4,
-        }
+        from abel.temporal_refinement.bout_postprocess import review_default_settings  # noqa: PLC0415
+
+        return dict(review_default_settings())
+
+    def _fps_scale_for(self, session_id: str) -> float | None:
+        """Session fps / project fps for a session recorded at another rate.
+
+        None for single-rate projects.  Bout cleanup is set in project frames,
+        so the postprocess stage, Analytics and the exports rescale it for
+        such a session; the bouts drawn here must use the same frame counts.
+        """
+        from abel.utils.session_fps import session_fps_scales  # noqa: PLC0415
+
+        cached = getattr(self, "_fps_scales_cache", None)
+        if cached is None or cached[0] != self._project_root:
+            scales = session_fps_scales(self._project_root) if self._project_root else {}
+            cached = (self._project_root, scales)
+            self._fps_scales_cache = cached
+        return cached[1].get(str(session_id))
 
     def _load_settings(self) -> dict[str, dict[str, Any]]:
         path = self._settings_path()
@@ -1619,11 +1635,13 @@ class TemporalReviewTab(QWidget):
                 prob_arr = pd.to_numeric(
                     trace_df[prob_col], errors="coerce"
                 ).fillna(0.0).to_numpy(dtype=float)
-                smoothed = smooth_probabilities(prob_arr)
-                binary = threshold_probabilities(smoothed, onset_thresh=onset)
-                binary = merge_close_bouts(binary, merge_gap)
-                binary = remove_short_bouts(binary, min_bout)
-                intervals = binary_trace_to_intervals(binary)
+                intervals = trace_to_intervals(
+                    prob_arr,
+                    onset_threshold=onset,
+                    min_bout_duration_frames=min_bout,
+                    merge_gap_frames=merge_gap,
+                    fps_scale=self._fps_scale_for(session_id),
+                )
 
                 for idx_start, idx_end in intervals:
                     bout_start = int(frame_arr[idx_start])
@@ -1813,14 +1831,17 @@ class TemporalReviewTab(QWidget):
                     and {"start_frame", "end_frame"}.issubset(set(bout_df.columns))
                 ):
                     n_bouts = len(bout_df)
-                    durs = (bout_df["end_frame"] - bout_df["start_frame"]).clip(lower=0).to_numpy(dtype=float)
+                    # end_frame is inclusive, as in the on-the-fly branch below.
+                    durs = (bout_df["end_frame"] - bout_df["start_frame"] + 1).clip(lower=0).to_numpy(dtype=float)
                     mean_bout_dur = float(np.mean(durs)) if n_bouts > 0 else float("nan")
                 else:
-                    smoothed = smooth_probabilities(prob_arr)
-                    binary = threshold_probabilities(smoothed, onset_thresh=onset)
-                    binary = merge_close_bouts(binary, merge_gap)
-                    binary = remove_short_bouts(binary, min_bout)
-                    intervals = binary_trace_to_intervals(binary)
+                    intervals = trace_to_intervals(
+                        prob_arr,
+                        onset_threshold=onset,
+                        min_bout_duration_frames=min_bout,
+                        merge_gap_frames=merge_gap,
+                        fps_scale=self._fps_scale_for(sid),
+                    )
                     n_bouts = len(intervals)
                     if n_bouts > 0:
                         durs = np.array([float(e - s + 1) for s, e in intervals])
@@ -3296,7 +3317,11 @@ class TemporalReviewTab(QWidget):
             # Single behavior: plot its trace, threshold lines, and correct bout intervals
             col = selected_col if selected_col in trace_df.columns else ("probability" if "probability" in trace_df.columns else str(prob_cols[0]))
             raw_full = pd.to_numeric(trace_df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-            smoothed_full = smooth_probabilities(raw_full, method=cfg.smoothing_method, window=cfg.smoothing_window)
+            plot_min_bout, plot_merge_gap, plot_window = scaled_cleanup_frames(
+                cfg.min_bout_duration_frames, cfg.merge_gap_frames,
+                cfg.smoothing_window, self._fps_scale_for(sid),
+            )
+            smoothed_full = smooth_probabilities(raw_full, method=cfg.smoothing_method, window=plot_window)
             y = self._maxpool_downsample(smoothed_full, stride)
             self._trace_axes.plot(frame_plot, y, color="#0D47A1", linewidth=1.15,
                                   label=self._behavior_label_from_col(col))
@@ -3317,8 +3342,8 @@ class TemporalReviewTab(QWidget):
             bouts = pd.DataFrame()
             frame_arr = trace_df["frame"].to_numpy(dtype=int)
             binary = threshold_probabilities(smoothed_full, onset_thresh=onset)
-            binary = merge_close_bouts(binary, max_gap_frames=int(cfg.merge_gap_frames))
-            binary = remove_short_bouts(binary, min_duration_frames=int(cfg.min_bout_duration_frames))
+            binary = merge_close_bouts(binary, max_gap_frames=plot_merge_gap)
+            binary = remove_short_bouts(binary, min_duration_frames=plot_min_bout)
             intervals = binary_trace_to_intervals(binary)
             if intervals:
                 rows_data = [

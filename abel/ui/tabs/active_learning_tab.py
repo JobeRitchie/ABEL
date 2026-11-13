@@ -77,15 +77,18 @@ from abel.services.workflow_snapshot_service import WorkflowSnapshotService
 from abel.storage.file_store import atomic_write_parquet, read_json, read_yaml, write_json, write_yaml
 from abel.utils import xgb_predict
 from abel.utils.cancellation import (
+    JobFlag,
     OperationCancelled,
     cancel_scope,
     check_cancel,
     is_cancel_traceback,
     is_cancelled,
+    wait_if_paused,
 )
 from abel.utils.eta_estimator import StageEtaEstimator, blend_whole_run_eta
 from abel.utils.run_timeline import RunTimeline, Stage
 from abel.utils.run_timing_profile import RunTimingProfile
+from abel.ui.widgets.pause_button import PauseButton
 from abel.ui.widgets.progress_panel import ProgressPanel
 from abel.ui.widgets.progress_notes import ProgressNotesPanel
 from abel.ui.widgets.session_selection_dialog import SessionOption, choose_sessions
@@ -194,7 +197,7 @@ class ActiveLearningTab(QWidget):
         self._selected_session_ids: set[str] = set()
         self._snapshot_svc = WorkflowSnapshotService()
         self._pool = QThreadPool.globalInstance()
-        self._cancel_flag: list[bool] = [False]
+        self._cancel_flag = JobFlag()
         self._pipeline_progress_updated.connect(self._apply_pipeline_progress)
 
         # -- graph size settings ------------------------------------------
@@ -675,6 +678,17 @@ class ActiveLearningTab(QWidget):
             "QPushButton:disabled { background: #1A2027; color: #8FA6B4; }"
         )
 
+        self._pause_btn = PauseButton(self._cancel_flag)
+        self._pause_btn.setStyleSheet(
+            "QPushButton { background: #37474F; color: #FFE082; border-radius: 4px; "
+            "padding: 4px 12px; font-weight: 700; }"
+            "QPushButton:hover { background: #F9A825; color: #1A2027; }"
+            "QPushButton:disabled { background: #1A2027; color: #8FA6B4; }"
+        )
+        self._pause_btn.pause_requested.connect(self._on_pause_requested)
+        self._pause_btn.pause_reached.connect(self._on_pause_reached)
+        self._pause_btn.resumed.connect(self._on_resumed)
+
         self._pipeline_panel = ProgressPanel("Active Learning pipeline")
         self._pipeline_panel.hide()
 
@@ -841,6 +855,7 @@ class ActiveLearningTab(QWidget):
         btn_row.addWidget(self._run_existing_btn)
         btn_row.addWidget(self._run_models_btn)
         btn_row.addWidget(self._gen_clips_btn)
+        btn_row.addWidget(self._pause_btn)
         btn_row.addWidget(self._stop_btn)
         btn_row.addStretch()
         btn_row.addWidget(self._viz_menu_btn)
@@ -3483,7 +3498,7 @@ class ActiveLearningTab(QWidget):
         # Whole-run total bookkeeping. Reset every run; a batch task fills these
         # in once it knows its kind + behavior count, so a non-batch run (UMAP,
         # single op) leaves them cleared and records no whole-run total.
-        self._timing_run_started_at = time.monotonic()
+        self._timing_run_started_at = self._cancel_flag.clock()
         self._timing_run_kind = None
         self._timing_run_units = None
         if path is None:
@@ -3491,7 +3506,7 @@ class ActiveLearningTab(QWidget):
             return
         self._timing_profile = RunTimingProfile.load(path)
         self._timing_last_phase = None
-        self._timing_last_ts = time.monotonic()
+        self._timing_last_ts = self._cancel_flag.clock()
 
     def _timing_mark_run(self, kind: str, n_units: int) -> None:
         """Tag the in-flight run so its end-to-end wall time is recorded.
@@ -3509,7 +3524,7 @@ class ActiveLearningTab(QWidget):
         if self._timing_profile is None:
             return
         phase = self._broad_phase(log_line or status)
-        now = time.monotonic()
+        now = self._cancel_flag.clock()
         if self._timing_last_phase is None:
             self._timing_last_phase = phase
             self._timing_last_ts = now
@@ -3526,7 +3541,7 @@ class ActiveLearningTab(QWidget):
         if self._timing_profile is None:
             return
         if self._timing_last_phase is not None:
-            dur = time.monotonic() - self._timing_last_ts
+            dur = self._cancel_flag.clock() - self._timing_last_ts
             if dur >= 0.3:
                 self._timing_profile.record(self._timing_last_phase, dur)
         # The whole-run total is the drift-free ETA anchor: record the true
@@ -3535,8 +3550,8 @@ class ActiveLearningTab(QWidget):
         kind = getattr(self, "_timing_run_kind", None)
         units = getattr(self, "_timing_run_units", None)
         if kind and units:
-            elapsed = time.monotonic() - getattr(
-                self, "_timing_run_started_at", time.monotonic()
+            elapsed = self._cancel_flag.clock() - getattr(
+                self, "_timing_run_started_at", self._cancel_flag.clock()
             )
             self._timing_profile.record_run_total(kind, elapsed, int(units))
         path = self._timing_profile_path()
@@ -3564,7 +3579,7 @@ class ActiveLearningTab(QWidget):
         double-count. Falls back to a direct load/save if no live profile exists.
         """
         try:
-            elapsed = max(0.0, time.monotonic() - float(started_at))
+            elapsed = max(0.0, self._cancel_flag.clock() - float(started_at))
             n = max(1, int(n_units))
             prof = getattr(self, "_timing_profile", None)
             if prof is not None:
@@ -3606,7 +3621,7 @@ class ActiveLearningTab(QWidget):
             return {"retrain_all": True, "results": [], "succeeded": 0, "total": 0}
 
         # Global timer and step scaling so ETA accounts for all behaviors.
-        _all_started_at = time.monotonic()
+        _all_started_at = self._cancel_flag.clock()
         _run_evaluation = not bool(self._skip_evaluation.isChecked())
         _steps_per_behavior = 6 if _run_evaluation else 5
         _global_max = n_total * _steps_per_behavior
@@ -3626,7 +3641,7 @@ class ActiveLearningTab(QWidget):
             if _profile.has_data()
             else None
         )
-        _eta = StageEtaEstimator(n_total, _steps_per_behavior, seed_stage_seconds=_seed)
+        _eta = StageEtaEstimator(n_total, _steps_per_behavior, seed_stage_seconds=_seed, clock=self._cancel_flag.clock)
 
         def _fmt_dur(seconds: float) -> str:
             if seconds < 1.0:
@@ -3651,7 +3666,7 @@ class ActiveLearningTab(QWidget):
                 steps = max(1, maximum)
                 global_value = beh_idx * steps + value
                 g_max = n_total * steps
-                elapsed = max(0.0, time.monotonic() - _all_started_at)
+                elapsed = max(0.0, self._cancel_flag.clock() - _all_started_at)
                 # Per-stage-duration-weighted estimate (handles unequal stages)…
                 eta_seconds = _eta.update(beh_idx, value)
                 # …then anchor it to the measured whole-run total so the number
@@ -4004,7 +4019,7 @@ class ActiveLearningTab(QWidget):
         # finish every remaining behavior × stage. Wall-clock (not CPU) time is
         # used deliberately: a "quick" stage can still spend seconds spinning up,
         # and that spin-up is real time the user waits on.
-        _all_started_at = time.monotonic()
+        _all_started_at = self._cancel_flag.clock()
         # _run_pipeline_task pre-multiplies its bar values by this chunk scale;
         # keep in sync with its local _CHUNK_SCALE.
         _CHUNK_SCALE = 100
@@ -4029,7 +4044,7 @@ class ActiveLearningTab(QWidget):
             return f"{mins}m {rem:02d}s"
 
         def _global_timing(eta_seconds: float | None, calibrated: bool = True) -> str:
-            elapsed = max(0.0, time.monotonic() - _all_started_at)
+            elapsed = max(0.0, self._cancel_flag.clock() - _all_started_at)
             out = f" | elapsed {_fmt_dur(elapsed)}"
             if eta_seconds is not None and calibrated:
                 eta_local = datetime.now() + timedelta(seconds=eta_seconds)
@@ -4065,7 +4080,7 @@ class ActiveLearningTab(QWidget):
                         if _profile.has_data()
                         else None
                     )
-                    est = StageEtaEstimator(n_total, steps, seed_stage_seconds=_seed)
+                    est = StageEtaEstimator(n_total, steps, seed_stage_seconds=_seed, clock=self._cancel_flag.clock)
                     _eta_holder["est"] = est
                     _eta_holder["steps"] = steps
                 # Clamp the stage into the estimator's known range: a transient
@@ -4085,7 +4100,7 @@ class ActiveLearningTab(QWidget):
                     if _profile.has_run_total(_run_kind)
                     else None
                 )
-                _elapsed = max(0.0, time.monotonic() - _all_started_at)
+                _elapsed = max(0.0, self._cancel_flag.clock() - _all_started_at)
                 _frac = g_val / max(1, g_max)
                 _live_cal = est.is_calibrated()
                 eta_seconds = blend_whole_run_eta(
@@ -4125,6 +4140,7 @@ class ActiveLearningTab(QWidget):
 
         try:
             for idx, behavior in enumerate(behaviors):
+                wait_if_paused(cancel_flag)
                 if is_cancelled(cancel_flag):
                     break
                 bid = str(behavior.behavior_id).strip()
@@ -4396,7 +4412,7 @@ class ActiveLearningTab(QWidget):
         # One per-stage estimator + measured whole-run anchor (as in the batch
         # retrain/pipeline flows) so the ETA spans every selected model instead
         # of resetting per model.
-        _all_started_at = time.monotonic()
+        _all_started_at = self._cancel_flag.clock()
         _mode = str(self._mode.currentData() or "uncertainty")
         _run_evaluation = not bool(self._skip_evaluation.isChecked())
         # Mirror _run_existing_model_task's step count so the estimator's stage
@@ -4411,7 +4427,7 @@ class ActiveLearningTab(QWidget):
             if _profile.has_data()
             else None
         )
-        _eta = StageEtaEstimator(n_total, _steps_per_model, seed_stage_seconds=_seed)
+        _eta = StageEtaEstimator(n_total, _steps_per_model, seed_stage_seconds=_seed, clock=self._cancel_flag.clock)
 
         def _fmt_dur(seconds: float) -> str:
             if seconds < 1.0:
@@ -4423,7 +4439,7 @@ class ActiveLearningTab(QWidget):
             return f"{mins}m {rem:02d}s"
 
         def _whole_run_timing(model_idx: int, stage_value: int) -> str:
-            elapsed = max(0.0, time.monotonic() - _all_started_at)
+            elapsed = max(0.0, self._cancel_flag.clock() - _all_started_at)
             eta_seconds = _eta.update(model_idx, stage_value)
             _hist_total = (
                 _profile.run_total_seconds(_run_kind, n_total)
@@ -4468,6 +4484,7 @@ class ActiveLearningTab(QWidget):
 
         try:
             for idx, (bid, bname, model_version) in enumerate(selected):
+                wait_if_paused(cancel_flag)
                 if is_cancelled(cancel_flag):
                     break
                 _sep = "━" * 18
@@ -5308,7 +5325,7 @@ class ActiveLearningTab(QWidget):
         """
         assert self._project_root is not None
 
-        started_at = time.monotonic()
+        started_at = self._cancel_flag.clock()
 
         # Sub-step bar resolution: a run-model pass has only 4-5 steps but two of
         # them (representations, score+enrich) can each run for minutes, so at
@@ -5350,7 +5367,7 @@ class ActiveLearningTab(QWidget):
             """
             if progress_cb is None:
                 return
-            elapsed = max(0.0, time.monotonic() - started_at)
+            elapsed = max(0.0, self._cancel_flag.clock() - started_at)
             steps = max(1, int(maximum))
             # The closing event reports value == steps; the ETA grid only has
             # stages 0..steps-1, but the bar must still read as finished.
@@ -5363,7 +5380,7 @@ class ActiveLearningTab(QWidget):
                     self._project_root / "derived" / "evaluation" / RunTimingProfile.FILENAME
                 )
                 seed = profile.per_step_seed(steps, _run_kind) if profile.has_data() else None
-                est = StageEtaEstimator(1, steps, seed_stage_seconds=seed)
+                est = StageEtaEstimator(1, steps, seed_stage_seconds=seed, clock=self._cancel_flag.clock)
                 _eta_holder["est"] = est
                 _eta_holder["profile"] = profile
             profile = _eta_holder["profile"]
@@ -5465,6 +5482,7 @@ class ActiveLearningTab(QWidget):
             return _relay
 
         def _check_cancel() -> None:
+            wait_if_paused(cancel_flag)
             if is_cancelled(cancel_flag):
                 raise PipelineCancelledError("PIPELINE_CANCELLED_BY_USER")
 
@@ -5526,7 +5544,7 @@ class ActiveLearningTab(QWidget):
 
         if random_absent_mode:
             _check_cancel()
-            step_started = time.monotonic()
+            step_started = self._cancel_flag.clock()
             cfg = self._segment_candidate_config(
                 mode=mode,
                 target_behavior_id=None,
@@ -5549,7 +5567,7 @@ class ActiveLearningTab(QWidget):
                     "without model inference."
                 ),
                 "Sampling random absent windows…",
-                time.monotonic() - step_started,
+                self._cancel_flag.clock() - step_started,
             )
 
             current_step = total_steps
@@ -5581,7 +5599,7 @@ class ActiveLearningTab(QWidget):
             )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
 
         # Use the excluded features from the saved model settings, not the
         # current UI state, so we don't re-assess feature family selection.
@@ -5649,11 +5667,11 @@ class ActiveLearningTab(QWidget):
             total_steps,
             f"Built representations for {len(segment_df)} segment(s).",
             "Building representations…",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         # Assembling the training set can be the longest silent stretch of the
         # whole run: it enriches reviewed windows and backfills their R3D
         # embeddings, which decodes video (measured at ~2.5 min for 1292 segments
@@ -5688,11 +5706,11 @@ class ActiveLearningTab(QWidget):
             total_steps,
             f"Scored segments with saved model '{model_version}'.",
             "Running model inference…",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         _skip_candidates = getattr(self, "_pipeline_all_skip_candidates", False)
         n_candidates = 0
         candidates_out: list[Any] = []
@@ -5726,11 +5744,11 @@ class ActiveLearningTab(QWidget):
                 total_steps,
                 f"Generated {n_candidates} candidate segment(s) from existing model run.",
                 "Selecting review candidates…",
-                time.monotonic() - step_started,
+                self._cancel_flag.clock() - step_started,
             )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         if run_evaluation:
             _progress(
                 current_step,
@@ -5752,7 +5770,7 @@ class ActiveLearningTab(QWidget):
                 total_steps,
                 "Updated evaluation artifacts for existing-model run.",
                 "Evaluation complete.",
-                time.monotonic() - step_started,
+                self._cancel_flag.clock() - step_started,
             )
 
         current_step = total_steps
@@ -5816,7 +5834,7 @@ class ActiveLearningTab(QWidget):
         merge_candidates: bool = False,
     ) -> dict[str, Any]:
         assert self._project_root is not None
-        started_at = time.monotonic()
+        started_at = self._cancel_flag.clock()
 
         # Stage-aware ETA: retrain stages (assemble labels / train / score /
         # candidates / evaluate) have very unequal cost, so a plain per-step
@@ -5836,7 +5854,7 @@ class ActiveLearningTab(QWidget):
 
         def _progress(value: int, maximum: int, log_line: str, status: str) -> None:
             if progress_cb is not None:
-                elapsed = max(0.0, time.monotonic() - started_at)
+                elapsed = max(0.0, self._cancel_flag.clock() - started_at)
                 steps = max(1, int(maximum))
                 est = _eta_holder["est"]
                 if est is None:
@@ -5844,7 +5862,7 @@ class ActiveLearningTab(QWidget):
                         self._project_root / "derived" / "evaluation" / RunTimingProfile.FILENAME
                     )
                     _seed = _prof.per_step_seed(steps, "retrain") if _prof.has_data() else None
-                    est = StageEtaEstimator(1, steps, seed_stage_seconds=_seed)
+                    est = StageEtaEstimator(1, steps, seed_stage_seconds=_seed, clock=self._cancel_flag.clock)
                     _eta_holder["est"] = est
                 eta_seconds = est.update(0, min(steps - 1, max(0, int(value))))
                 if est.is_calibrated():
@@ -6229,7 +6247,7 @@ class ActiveLearningTab(QWidget):
         target_behavior = self._selected_target_behavior_id()
         target_behavior_label = self._behavior_display_name(target_behavior)
         segment_window, segment_stride, segment_source = self._resolved_segment_settings(behavior_cfg)
-        started_at = time.monotonic()
+        started_at = self._cancel_flag.clock()
         step_timings: list[tuple[str, float]] = []
         quick_test = bool(self._quick_test.isChecked())
         examples_per_session = max(0, int(self._examples_per_session.value()))
@@ -6319,12 +6337,12 @@ class ActiveLearningTab(QWidget):
                         step_timings.append((short_label, float(step_seconds)))
                         break
             if progress_cb is not None:
-                elapsed = max(0.0, time.monotonic() - started_at)
+                elapsed = max(0.0, self._cancel_flag.clock() - started_at)
                 remaining_steps = max(0, int(maximum) - int(value))
 
                 # Measure wall time since last _progress call as the step
                 # duration when step_seconds is not explicitly provided.
-                now = time.monotonic()
+                now = self._cancel_flag.clock()
                 wall_step = now - _last_progress_time[0]
                 _last_progress_time[0] = now
                 observed = step_seconds if (step_seconds is not None and step_seconds > 0.0) else wall_step
@@ -6357,6 +6375,7 @@ class ActiveLearningTab(QWidget):
                 progress_cb(int(value) * _CHUNK_SCALE, int(maximum) * _CHUNK_SCALE, f"{log_line}{timing_text}", status or log_line)
 
         def _check_cancel() -> None:
+            wait_if_paused(cancel_flag)
             if is_cancelled(cancel_flag):
                 raise PipelineCancelledError("PIPELINE_CANCELLED_BY_USER")
 
@@ -6522,7 +6541,7 @@ class ActiveLearningTab(QWidget):
             # subject part of every segment id, which a rename must not change.
             subject_id = linked.subject_key or linked.subject_id or session_id
             roi_subject_by_session[str(session_id)] = linked.subject_id or session_id
-            step_started = time.monotonic()
+            step_started = self._cancel_flag.clock()
             video_path = self._imports.video_path_for_session(manifest, session_id)
             pose_path = self._imports.pose_path_for_session(manifest, session_id)
             if not video_path or not pose_path:
@@ -6532,7 +6551,7 @@ class ActiveLearningTab(QWidget):
                     total_steps,
                     f"[{i}/{summary.n_sessions}] Skipping {session_id}: missing video or pose path.",
                     f"Skipping {session_id}: missing required files.",
-                    time.monotonic() - step_started,
+                    self._cancel_flag.clock() - step_started,
                 )
                 continue
 
@@ -6552,7 +6571,7 @@ class ActiveLearningTab(QWidget):
                     total_steps,
                     f"[{i}/{summary.n_sessions}] Reused cached session {session_id} (pose{' + context' if use_video_features else ''} features).",
                     f"Reused cached features for {session_id}",
-                    time.monotonic() - step_started,
+                    self._cancel_flag.clock() - step_started,
                 )
                 continue
 
@@ -6560,7 +6579,7 @@ class ActiveLearningTab(QWidget):
             fps_by_session_id[str(session_id)] = float(fps)
             session_jobs.append((i, session_id, subject_id, video_path, pose_path, fps))
 
-        _preproc_wall_start = time.monotonic()
+        _preproc_wall_start = self._cancel_flag.clock()
         if session_jobs:
             # ── Probe & cache video metadata (width, height, fps, frame_count) ──
             # This is a fast one-time step (~1 ms/video, no frame decoding).
@@ -6741,7 +6760,7 @@ class ActiveLearningTab(QWidget):
 
             def _process_one_session(job: tuple[int, str, str, Path, Path, float]) -> tuple[int, str, float]:
                 job_index, session_id, subject_id, video_path, pose_path, fps = job
-                step_started = time.monotonic()
+                step_started = self._cancel_flag.clock()
                 PoseProcessingService().extract_and_save_frame_pose_features(
                     project_root=self._project_root,
                     pose_path=pose_path,
@@ -6762,7 +6781,7 @@ class ActiveLearningTab(QWidget):
                             _chunk_fracs[session_id] = chunks_done / chunks_total
                         frac_total = sum(_chunk_fracs.values())
                     if progress_cb is not None:
-                        elapsed = max(0.0, time.monotonic() - started_at)
+                        elapsed = max(0.0, self._cancel_flag.clock() - started_at)
                         effective_val = current_step + frac_total
                         remaining_frac = max(0.0, total_steps - effective_val)
                         if _ema_step_seconds and _ema_step_seconds > 0:
@@ -6796,7 +6815,7 @@ class ActiveLearningTab(QWidget):
                         warning_cb=_collect_gpu_warning,
                         keypoint_aliases=kp_aliases,
                     )
-                return job_index, session_id, time.monotonic() - step_started
+                return job_index, session_id, self._cancel_flag.clock() - step_started
 
             with cf.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_job = {
@@ -6825,7 +6844,7 @@ class ActiveLearningTab(QWidget):
                     FeaturePrepService.record_pose_signature(self._project_root)
                 except Exception as _sig_exc:
                     logger.warning("Could not record pose cache signature: %s", _sig_exc)
-            _preproc_wall = time.monotonic() - _preproc_wall_start
+            _preproc_wall = self._cancel_flag.clock() - _preproc_wall_start
             if _preproc_wall > 0.5:
                 step_timings.append(("Session Preprocessing", _preproc_wall))
 
@@ -6868,7 +6887,7 @@ class ActiveLearningTab(QWidget):
             # a single sequential write by design: letting each of N parallel
             # workers read-modify-write one shared file under a lock is O(N²) on
             # a file that grows with every write.
-            _consol_start = time.monotonic()
+            _consol_start = self._cancel_flag.clock()
             _progress(
                 current_step,
                 total_steps,
@@ -6879,7 +6898,7 @@ class ActiveLearningTab(QWidget):
             PoseProcessingService.consolidate_session_files(self._project_root)
             if use_video_features:
                 ContextFeatureService.consolidate_session_files(self._project_root)
-            _consol_dur = time.monotonic() - _consol_start
+            _consol_dur = self._cancel_flag.clock() - _consol_start
             if _consol_dur > 0.3:
                 step_timings.append(("Feature Cache Consolidation", _consol_dur))
 
@@ -6900,7 +6919,7 @@ class ActiveLearningTab(QWidget):
             if use_video_features else None
         )
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         selected_session_ids = {str(s.session_id) for s in linked_sessions}
 
         def _repr_progress(msg: str) -> None:
@@ -7001,11 +7020,11 @@ class ActiveLearningTab(QWidget):
             total_steps,
             "Built frame/segment representations from pose and context features.",
             "Building behavior representations…",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         # Build training set from the FULL (pre-cap) segment grid so that
         # reviewed labels from all frame ranges can be matched, not just the
         # sparse subset selected by the max_segments stratified sample.
@@ -7070,7 +7089,7 @@ class ActiveLearningTab(QWidget):
                 total_steps,
                 f"{fallback_note} Generated {summary.n_candidates} window(s).",
                 "Generated random starter windows.",
-                time.monotonic() - step_started,
+                self._cancel_flag.clock() - step_started,
             )
             return {
                 "summary": summary,
@@ -7084,11 +7103,11 @@ class ActiveLearningTab(QWidget):
             total_steps,
             "Built training set from seed and reviewed labels.",
             "Assembling training labels…",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         self._trainer.merge_and_snapshot_training_set(self._project_root, train_df)
         train_cfg = self._training_config(behavior_cfg, target_behavior)
         gpu_pref_note = self._apply_gpu_training_preference(train_cfg, backend)
@@ -7136,7 +7155,7 @@ class ActiveLearningTab(QWidget):
                 f"F1={summary.f1:.3f}, PR-AUC={summary.pr_auc:.3f}, device={summary.model_device_used}."
             ),
             f"Training model for '{target_behavior_label}'…",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
         if bool(train_result.get("used_cpu_fallback", False)):
             warning = summary.fallback_reason or "XGBoost CUDA fallback occurred"
@@ -7149,7 +7168,7 @@ class ActiveLearningTab(QWidget):
             )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
 
         def _infer_sub_progress(msg: str) -> None:
             _progress(current_step, total_steps, f"[Inference] {msg}", f"Inference: {msg}", None)
@@ -7176,7 +7195,7 @@ class ActiveLearningTab(QWidget):
             total_steps,
             "Completed segment inference and uncertainty scoring.",
             "Scoring segments with uncertainty model…",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
 
         _skip_candidates = getattr(self, "_pipeline_all_skip_candidates", False)
@@ -7202,7 +7221,7 @@ class ActiveLearningTab(QWidget):
                 selected_session_ids=sorted(selected_session_ids),
             )
             _check_cancel()
-            step_started = time.monotonic()
+            step_started = self._cancel_flag.clock()
             result = self._candidates.generate_segment_candidates(cfg, segment_df=segment_df)
             if not result.success:
                 raise ValueError("Segment candidate generation failed: " + "; ".join(result.warnings))
@@ -7215,11 +7234,11 @@ class ActiveLearningTab(QWidget):
                 total_steps,
                 "Generated candidate segments from uncertainty scores.",
                 "Selecting next review candidates…",
-                time.monotonic() - step_started,
+                self._cancel_flag.clock() - step_started,
             )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         if run_evaluation:
             _progress(
                 current_step,
@@ -7252,11 +7271,11 @@ class ActiveLearningTab(QWidget):
             total_steps,
             "Finished evaluation and report writing.",
             "Evaluation complete.",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
 
         _check_cancel()
-        step_started = time.monotonic()
+        step_started = self._cancel_flag.clock()
         write_json(
             self._project_root / "derived" / "active_learning" / "last_run_summary.json",
             {
@@ -7281,7 +7300,7 @@ class ActiveLearningTab(QWidget):
             total_steps,
             f"Pipeline finished successfully. model={summary.model_version}, candidates={summary.n_candidates}.",
             "Pipeline complete.",
-            time.monotonic() - step_started,
+            self._cancel_flag.clock() - step_started,
         )
         timing_chart_path = self._write_pipeline_timing_chart(
             step_timings,
@@ -7290,7 +7309,7 @@ class ActiveLearningTab(QWidget):
         )
         # Persist lightweight per-step timing so the next run can seed its
         # ETA estimate immediately without waiting for several steps to elapse.
-        _total_wall = max(0.0, time.monotonic() - started_at)
+        _total_wall = max(0.0, self._cancel_flag.clock() - started_at)
         if total_steps > 0 and _total_wall > 1.0:
             try:
                 from abel.storage.file_store import write_json as _write_json
@@ -8603,7 +8622,11 @@ class ActiveLearningTab(QWidget):
         if dist_col:
             pos = pos.rename(columns={dist_col: "distance_to_TMT_mean"})
 
-        fps = 30.0
+        # The project's frame rate, not a fixed 30: the bout report converts
+        # frames to seconds with it.
+        from abel.utils.session_fps import reference_fps  # noqa: PLC0415
+
+        fps = float(reference_fps(self._project_root))
         merge_cfg = BoutMergeConfig(
             max_gap_frames=int(behavior_cfg.bout_merge_gap),
             min_bout_duration=int(behavior_cfg.min_bout_duration),
@@ -8959,6 +8982,7 @@ class ActiveLearningTab(QWidget):
         self._awareness_ablation_btn.setEnabled(not busy)
         self._viz_menu_btn.setEnabled(not busy)
         self._stop_btn.setEnabled(busy)
+        self._pause_btn.set_job_running(busy)
         self._progress.setVisible(busy)
         self._progress_notes.set_running(busy)
         if busy:
@@ -8980,10 +9004,33 @@ class ActiveLearningTab(QWidget):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        # Works while paused too: the paused job wakes and stops where it stands.
         self._cancel_flag[0] = True
         self._stop_btn.setEnabled(False)
+        self._pause_btn.set_job_running(False)
         self._status.setText("Stop requested. Stopping at the next checkpoint…")
         self._append_log("Stop requested by user. Stopping at the next checkpoint.")
+
+    def _on_pause_requested(self) -> None:
+        self._status_before_pause = self._status.text()
+        self._progress_format_before_pause = self._progress.format()
+        self._status.setText("Pause requested. Pausing at the next checkpoint…")
+        self._progress.setFormat("Pausing…")
+        self._append_log("Pause requested by user. Pausing at the next checkpoint.")
+
+    def _on_pause_reached(self) -> None:
+        self._status.setText(
+            "Paused. Press Resume to continue from here, or Stop to end this run."
+        )
+        self._progress.setFormat("Paused")
+        self._append_log(
+            "Paused. Models and behaviors that already finished are kept if you stop now."
+        )
+
+    def _on_resumed(self) -> None:
+        self._status.setText(getattr(self, "_status_before_pause", "") or "Running…")
+        self._progress.setFormat(getattr(self, "_progress_format_before_pause", "") or "Running…")
+        self._append_log("Resumed.")
 
     def _append_log(self, message: str) -> None:
         self._log.append(message)
@@ -9804,7 +9851,10 @@ class ActiveLearningTab(QWidget):
             Stage(key, label, weight=weight)
             for key, label, weight, _frags in _AL_PIPELINE_STAGES
         ]
-        self._pipeline_timeline = RunTimeline(stages, history=self._load_pipeline_timeline_history())
+        self._pipeline_timeline = RunTimeline(
+            stages, history=self._load_pipeline_timeline_history(),
+            now_fn=self._cancel_flag.clock,
+        )
         self._pipeline_panel.set_stages([(s.key, s.label) for s in stages])
         self._pipeline_panel.set_snapshot_provider(
             lambda: self._pipeline_timeline.snapshot() if self._pipeline_timeline else None

@@ -53,6 +53,7 @@ from abel.ui.tabs.feature_audit_tab import FeatureAuditTab
 from abel.ui.tabs.review_effort_panel import ReviewEffortPanel
 from abel.models.schemas import ValidationAnswerRecord, ValidationRun, ValidationSettings
 from abel.services.behavior_service import BehaviorService
+from abel.services.manual_corrections_service import MANUAL_FLAG_STYLE, flag_text
 from abel.services.validation_service import NO_BEHAVIOR_ID, ValidationService
 from abel.ui.widgets.clip_player import ClipPlayer
 from abel.workers.task_worker import TaskWorker
@@ -2490,6 +2491,12 @@ class ValidationTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        # Shown only when the project holds manual corrections.
+        self._manual_flag = QLabel("")
+        self._manual_flag.setWordWrap(True)
+        self._manual_flag.setStyleSheet(MANUAL_FLAG_STYLE)
+        self._manual_flag.hide()
+        layout.addWidget(self._manual_flag)
         layout.addWidget(self._tabs)
 
         self.quiz_panel.run_changed.connect(self.results_panel.refresh)
@@ -2500,9 +2507,15 @@ class ValidationTab(QWidget):
             lambda _checked=False: self.session_quality_requested.emit()
         )
 
+    def set_manual_corrections_flag(self, text: str) -> None:
+        """Show the manual-corrections flag, or hide it when ``text`` is empty."""
+        self._manual_flag.setText(text)
+        self._manual_flag.setVisible(bool(text))
+
     def set_project(self, project_root: Path) -> None:
         self._project_root = Path(project_root)
         self._service.set_project(self._project_root)
+        self.set_manual_corrections_flag(flag_text(self._project_root))
         self.overview_panel.refresh()
         self.quiz_panel.set_project(self._project_root)
         self.results_panel.refresh()

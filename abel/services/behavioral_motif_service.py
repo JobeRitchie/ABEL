@@ -590,10 +590,16 @@ def ngram_group_comparison(
                 )
                 if null_diff >= obs:
                     null_count += 1
-            pval_pairs[f"{g1} vs {g2}"] = null_count / n_permutations
+            # (b + 1) / (m + 1): the observed labeling is one of the possible
+            # arrangements, so p can never be exactly zero (Phipson & Smyth 2010).
+            pval_pairs[f"{g1} vs {g2}"] = (null_count + 1) / (n_permutations + 1)
 
-        # Overall pval = minimum across all pairs (most conservative display)
-        pval = min(pval_pairs.values()) if pval_pairs else 1.0
+        # Overall pval = smallest pairwise p, Bonferroni-corrected for the number
+        # of pairs so that "some pair differs" is not read off an uncorrected
+        # minimum.  With two groups this is the single pairwise p.
+        pval = (
+            min(1.0, min(pval_pairs.values()) * len(pval_pairs)) if pval_pairs else 1.0
+        )
 
         if behavior_names:
             label = " → ".join(behavior_names.get(b, b) for b in motif)
@@ -1943,6 +1949,14 @@ def merge_state_bouts(
     return out
 
 
+def _session_rate(
+    fps_by_session: dict[str, float] | None, session_id: str, fps: float,
+) -> float:
+    """A session's own frame rate, or the project rate when it has none."""
+    rate = float((fps_by_session or {}).get(str(session_id)) or 0.0)
+    return rate if rate > 0 else float(fps)
+
+
 def default_state_label(state: int) -> str:
     """Column / sheet name for one HMM state.
 
@@ -2210,11 +2224,15 @@ def state_bouts_to_frames(
     frame_offsets: dict[str, int] | None = None,
     state_label: Any = None,
     include_unclaimed: bool = False,
+    fps_by_session: dict[str, float] | None = None,
 ) -> dict[str, dict[str, list[tuple[int, int]]]]:
     """Convert state bouts to ``{session: {state_label: [(start, end), ...]}}``.
 
     Frame numbers are recovered with the *same* fps that built the sequences, so
-    the round trip through seconds is exact.  *frame_offsets* adds a per-session
+    the round trip through seconds is exact.  ``fps_by_session`` overrides
+    ``fps`` for the sessions it names (projects that mix frame rates), exactly
+    as :func:`build_sequences` does; without it a session at another rate
+    would come back at the wrong frames.  *frame_offsets* adds a per-session
     analysis prechop back on, returning bouts in raw video frame numbering - the
     numbering ABEL's behavior boutframes and ABELposition exports use, and
     therefore the numbering TRACY expects.
@@ -2227,8 +2245,10 @@ def state_bouts_to_frames(
         raise ValueError("fps must be positive to convert state bouts to frames.")
     label = state_label or default_state_label
     offsets = frame_offsets or {}
+    project_fps = fps
     out: dict[str, dict[str, list[tuple[int, int]]]] = {}
     for sid, bouts in state_bouts.items():
+        fps = _session_rate(fps_by_session, sid, project_fps)
         off = int(offsets.get(sid, 0))
         seeded = list(range(n_states))
         if include_unclaimed:
@@ -2254,6 +2274,7 @@ def state_frame_matrix(
     frame_offsets: dict[str, int] | None = None,
     raw_video_frames: bool = False,
     no_state_value: int | None = None,
+    fps_by_session: dict[str, float] | None = None,
 ) -> dict[str, np.ndarray]:
     """Expand state bouts into one state number per frame, per session.
 
@@ -2289,8 +2310,10 @@ def state_frame_matrix(
         raise ValueError("fps must be positive to convert state bouts to frames.")
     ends = session_end_s or {}
     offsets = frame_offsets or {}
+    project_fps = fps
     out: dict[str, np.ndarray] = {}
     for sid, bouts in state_bouts.items():
+        fps = _session_rate(fps_by_session, sid, project_fps)
         off = int(offsets.get(sid, 0)) if raw_video_frames else 0
         n_frames = int(round(float(ends.get(sid, 0.0)) * fps)) + off
         spans: list[tuple[int, int, int]] = []
@@ -2318,14 +2341,17 @@ def state_bout_rows(
     session_labels: dict[str, str] | None = None,
     session_groups: dict[str, str] | None = None,
     behavior_names: dict[str, str] | None = None,
+    fps_by_session: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """Flatten state bouts into one row per state bout, for CSV export."""
     offsets = frame_offsets or {}
     labels = session_labels or {}
     groups = session_groups or {}
     bnames = behavior_names or {}
+    project_fps = fps
     rows: list[dict[str, Any]] = []
     for sid in sorted(state_bouts):
+        fps = _session_rate(fps_by_session, sid, project_fps)
         off = int(offsets.get(sid, 0))
         for order, b in enumerate(state_bouts[sid]):
             member = [bnames.get(x, x) for x in b.get("behavior_ids", [])]

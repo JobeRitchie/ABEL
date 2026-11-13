@@ -135,6 +135,9 @@ class _CriterionRow(QWidget):
     ) -> None:
         super().__init__(parent)
         self._stats = stats
+        # Units as the project reports them (px instead of mm when the
+        # sessions have no pixel calibration).
+        self._unit_by_id = {m.id: m.unit for m in metric_defs}
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -208,7 +211,7 @@ class _CriterionRow(QWidget):
     def _on_metric_changed(self) -> None:
         mid = self.metric.currentData()
         m = metric_def_for(mid)
-        self.unit.setText(m.unit if m else "")
+        self.unit.setText(self._unit_by_id.get(mid, m.unit if m else ""))
         # Extracted features are machine-named; their description is the only
         # place the raw column name is visible, so keep it one hover away.
         self.metric.setToolTip(m.description if m else "")

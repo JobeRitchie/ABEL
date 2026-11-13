@@ -7,10 +7,79 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "November 11, 2026"
+VERSION_DATE = "November 12, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.34.0", "November 12, 2026", [
+        "New: Manual Corrections in Analytics. If you hand-scored a behavior, "
+        "you can replace ABEL's whole-session latency, bout count, total "
+        "duration or mean bout duration for one session and one behavior. "
+        "Each correction keeps the ABEL value it replaced, corrected cells "
+        "are shown in bold, exports name the corrected columns, and the Home "
+        "and Validation tabs flag a project that holds corrections.",
+        "New: Pause and Resume for feature extraction and for training and "
+        "scoring runs. A paused job waits at its next stop point and frees "
+        "the GPU. Stop still works while paused, and ETAs leave the paused "
+        "time out.",
+        "New Auto Hunter presets for single-animal projects: Immobility, "
+        "Locomotion and Grooming. Each was built from features that pointed "
+        "the same way across many projects and was tested on projects it "
+        "was not built from.",
+        "This release follows a full audit of the numbers ABEL reports. The "
+        "fixes below change some values. Refresh Analytics and export again "
+        "if you used an affected view.",
+        "Fixed two-way statistics with a repeated factor. When the first "
+        "factor was the repeated one, the multiple comparisons were run on "
+        "the other factor's levels. The ANOVA table itself was correct.",
+        "Fixed time-binned Mean Bout Duration. A bout that crossed a bin "
+        "edge was counted as two shorter bouts. Each bout now counts once, "
+        "at its full length, in the bin it starts in. Bins with no bout are "
+        "blank, and the wide export ends in an overall mean in place of a "
+        "sum of bin means.",
+        "Fixed Session Sections and ethogram durations. Every bout was one "
+        "frame short compared with the Summary tab, and one-frame bouts "
+        "were missing from the ethogram Excel export.",
+        "The ethogram CSV and Excel exports now follow the Data Range and "
+        "the bout filter, like the ethogram on screen.",
+        "Fixed analysis prechop. A behavior seen only before the test "
+        "started kept its whole-video counts. It is now zero. The latency "
+        "given to an animal that never did a behavior was too long by the "
+        "prechop, and so was the time base of a pre-behavior rate.",
+        "Distance Traveled now follows the Data Range in bar and box graphs "
+        "and in statistics. It used to show the whole session there.",
+        "Fixed velocity during bouts. Smoothing pulled the first and last "
+        "frames of every bout toward zero, so mean velocity read about 11% "
+        "low for 12-frame bouts and 4% low for 30-frame bouts. A frame with "
+        "no tracking no longer blanks the whole session or group mean. The "
+        "absolute-time profile band now follows the Error Bars setting.",
+        "The Home tab's Model Performance now shows held-out validation "
+        "scores, as a median across the behavior models, with the weakest "
+        "model beside it. It used to show how well the last trained model "
+        "fit its own training labels, which read far too high.",
+        "Density and difference maps no longer include subjects unticked in "
+        "the Summary tab.",
+        "Projects that mix frame rates: Summary times, bout cleanup "
+        "(minimum bout, merge gap and smoothing) in Analytics, Temporal "
+        "Review and exports, HMM state frame exports and Clip Mining speeds "
+        "now use each session's own frame rate.",
+        "Distance Traveled and the Clip Mining metrics say px when a "
+        "session has no pixel calibration. They used to say cm or mm.",
+        "The behaviogram and the behavior presence document keep a "
+        "subject's separate sessions apart. They used to merge them onto "
+        "one timeline.",
+        "The motif (n-gram) group test can no longer return a p-value of "
+        "exactly zero, and with three or more groups its overall p-value is "
+        "corrected for the number of group pairs.",
+        "When a video's frame rate was not read at import, Analytics uses "
+        "the project's Source FPS. It used to assume 30.",
+        "Analytics, Temporal Review and exports share one set of default "
+        "bout settings for a project that has never saved its own.",
+        "Multi-animal projects: an animal that enters late keeps its "
+        "oscillation features. Re-extract features to pick this up.",
+        "The label for a duration scaled by pre-behavior time now shows its "
+        "unit (s / min).",
+    ]),
     ("0.33.1", "November 11, 2026", [
         "Fixed Temporal Refinement failing on every run. It stopped with an "
         "error right after listing the sessions and behavior models, before "

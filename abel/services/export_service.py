@@ -20,7 +20,6 @@ from abel.services.behavior_service import BehaviorService
 from abel.services.import_service import ImportService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.project_merge_service import ProjectMergeService
-from abel.temporal_refinement.bout_postprocess import smooth_probabilities
 
 
 @dataclass
@@ -270,8 +269,9 @@ class ExportService:
     ) -> ExportResult:
         """Export per-behavior, per-frame 0/1 presence tables into a Word document.
 
-        Each page corresponds to a behavior. Table columns are subjects (session_id),
-        and each row is a frame index.
+        Each page corresponds to a behavior. Table columns are sessions (the
+        subject, or "subject session" when a subject has several), and each
+        row is a frame index.
         """
         out = ExportResult()
         if not self._project_root:
@@ -299,12 +299,14 @@ class ExportService:
         doc = document_factory()
         first_behavior = True
         total_rows = 0
+        # One column per session: a subject with several sessions keeps them
+        # apart instead of merging their unrelated frame numbers.
+        column_label = self._session_row_labels(intervals_by_session)
         for behavior in sorted(by_behavior):
             session_intervals = by_behavior[behavior]
             by_subject: dict[str, list[tuple[int, int]]] = {}
-            subject_by_session = self._subject_by_session()
             for session_id, intervals in session_intervals.items():
-                subject = subject_by_session.get(session_id, session_id)
+                subject = column_label.get(session_id, session_id)
                 by_subject.setdefault(subject, []).extend((int(s), int(e)) for s, e in intervals)
 
             subjects = self._ordered_subjects(by_subject)
@@ -937,13 +939,51 @@ class ExportService:
         except Exception:
             return None
 
+    def _session_row_labels(self, session_ids: Any) -> dict[str, str]:
+        """Display label per session: the subject, or "subject session".
+
+        A subject recorded more than once gets the session type (or the video
+        name) appended, as in the boutframes workbook.  Keyed by subject alone,
+        such a subject's sessions were merged onto one timeline although their
+        frame numbers are unrelated.
+        """
+        session_ids = [str(s) for s in session_ids]
+        subject_by_session = self._subject_by_session()
+        sessions_of: dict[str, list[str]] = {}
+        for session_id in session_ids:
+            subj = subject_by_session.get(session_id, session_id)
+            sessions_of.setdefault(subj, []).append(session_id)
+        session_type_by_sid = self._session_type_by_session()
+        session_token_by_sid = self._session_token_by_session()
+        labels: dict[str, str] = {}
+        used: set[str] = set()
+        for session_id in sorted(session_ids):
+            subj = subject_by_session.get(session_id, session_id)
+            label = str(subj)
+            if len(sessions_of.get(subj, [])) > 1:
+                stype = (session_type_by_sid.get(session_id) or "").strip()
+                if not stype:
+                    stype = (session_token_by_sid.get(session_id) or "").strip()
+                    if stype == str(subj).strip():
+                        stype = ""
+                label = f"{subj} {stype or self._unique_session_token(session_id)}"
+            if label in used:
+                label = f"{label} {self._unique_session_token(session_id)}"
+            used.add(label)
+            labels[session_id] = label
+        return labels
+
     def build_behaviogram(
         self,
         candidates: list[CandidateWindow],
         decisions: list[ReviewDecision],
         behavior_filter: list[str] | None = None,
     ) -> dict[str, dict[str, Any]]:
-        """Build per-subject accepted behavior intervals for behaviogram rendering."""
+        """Build per-session accepted behavior intervals for behaviogram rendering.
+
+        Keys are the subject, or "subject session" for a subject with more
+        than one session.
+        """
         intervals_by_session = self._confirmed_intervals_by_session(candidates, decisions)
         if behavior_filter is not None:
             selected = {self._normalize_behavior_token(v) for v in behavior_filter if str(v).strip()}
@@ -963,11 +1003,12 @@ class ExportService:
         if not intervals_by_session:
             return {}
 
-        subject_by_session = self._subject_by_session()
         by_subject: dict[str, dict[str, Any]] = {}
+        # One row per session (see _session_row_labels).
+        row_label = self._session_row_labels(intervals_by_session)
 
         for session_id, behavior_map in intervals_by_session.items():
-            subject_id = subject_by_session.get(session_id, session_id)
+            subject_id = row_label.get(session_id, session_id)
             for behavior, intervals in behavior_map.items():
                 for start, end in intervals:
                     start_i = int(start)
@@ -1681,6 +1722,12 @@ class ExportService:
                 if session_id not in all_trace_paths:
                     all_trace_paths[session_id] = str(v)
 
+        # Cleanup frames are project frames; sessions at another rate rescale.
+        from abel.temporal_refinement.bout_postprocess import trace_to_intervals  # noqa: PLC0415
+        from abel.utils.session_fps import session_fps_scales  # noqa: PLC0415
+
+        fps_scales = session_fps_scales(self._project_root)
+
         out: dict[str, dict[str, list[tuple[int, int]]]] = {}
         for session_id, path_raw in all_trace_paths.items():
             path = Path(str(path_raw).strip())
@@ -1717,17 +1764,16 @@ class ExportService:
                     continue
 
                 cfg = self._temporal_review_settings_for_token(token)
-                onset = float(cfg.get("onset_threshold", 0.65))
-                min_bout = int(cfg.get("min_bout_duration_frames", 8))
-                merge_gap = int(cfg.get("merge_gap_frames", 4))
 
                 probs = pd.to_numeric(df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
-                # Apply smoothing BEFORE thresholding, matching Temporal Review UI
-                probs = smooth_probabilities(probs, method="moving_average", window=5)
-                binary = self._threshold_probabilities(probs, onset)
-                binary = self._merge_close_bouts(binary, merge_gap)
-                binary = self._remove_short_bouts(binary, min_bout)
-                intervals = self._binary_trace_to_intervals(binary)
+                # Smoothing BEFORE thresholding, matching the Temporal Review UI
+                intervals = trace_to_intervals(
+                    probs,
+                    onset_threshold=float(cfg["onset_threshold"]),
+                    min_bout_duration_frames=int(cfg["min_bout_duration_frames"]),
+                    merge_gap_frames=int(cfg["merge_gap_frames"]),
+                    fps_scale=fps_scales.get(str(session_id)),
+                )
                 if not intervals:
                     continue
 
@@ -1751,11 +1797,9 @@ class ExportService:
         return out
 
     def _temporal_review_settings_for_token(self, token: str) -> dict[str, Any]:
-        defaults: dict[str, Any] = {
-            "onset_threshold": 0.65,
-            "min_bout_duration_frames": 8,
-            "merge_gap_frames": 4,
-        }
+        from abel.temporal_refinement.bout_postprocess import review_default_settings  # noqa: PLC0415
+
+        defaults: dict[str, Any] = dict(review_default_settings())
         if self._project_root is None:
             return defaults
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
+
+from abel.services.manual_corrections_service import MANUAL_FLAG_STYLE
 from PySide6.QtWidgets import (
     QGridLayout,
     QGroupBox,
@@ -61,6 +63,12 @@ class HomeTab(QWidget):
         self._status.setStyleSheet("font-size: 12px; font-weight: 700; color: #64B5F6; padding: 4px 0;")
         self._status.setWordWrap(True)
 
+        # Shown only when the project holds manual corrections.
+        self._manual_flag = QLabel("")
+        self._manual_flag.setWordWrap(True)
+        self._manual_flag.setStyleSheet(MANUAL_FLAG_STYLE)
+        self._manual_flag.hide()
+
         # Stat cards
         stats_box = QGroupBox("Project Stats")
         stats_grid = QGridLayout(stats_box)
@@ -107,18 +115,18 @@ class HomeTab(QWidget):
             self._pipeline_values[key] = v_lbl
 
         # ── Model Performance ────────────────────────────────────────────
-        self._metrics_box = QGroupBox("Model Performance  (frame level)")
+        self._metrics_box = QGroupBox("Model Performance  (held-out validation)")
         metrics_row = QHBoxLayout(self._metrics_box)
         metrics_row.setSpacing(6)
         metrics_row.setContentsMargins(10, 8, 10, 8)
 
         self._metric_card_labels: dict[str, QLabel] = {}
         _metric_specs = [
-            ("frame_f1",        "F1 Score"),
-            ("frame_precision", "Precision"),
-            ("frame_recall",    "Recall"),
-            ("frame_pr_auc",    "PR-AUC"),
-            ("segment_f1",      "Segment F1"),
+            ("f1",        "F1 Score"),
+            ("precision", "Precision"),
+            ("recall",    "Recall"),
+            ("pr_auc",    "PR-AUC"),
+            ("lowest_f1", "Lowest F1"),
         ]
         for key, label_text in _metric_specs:
             card = QWidget()
@@ -203,6 +211,7 @@ class HomeTab(QWidget):
         content_layout.addWidget(self._project_name)
         content_layout.addWidget(self._project_path)
         content_layout.addWidget(self._status)
+        content_layout.addWidget(self._manual_flag)
         content_layout.addWidget(stats_box)
         content_layout.addWidget(self._pipeline_box)
         content_layout.addWidget(self._metrics_box)
@@ -231,6 +240,11 @@ class HomeTab(QWidget):
         self.open_outputs_btn.setEnabled(True)
         self.open_models_btn.setEnabled(True)
         self._cleanup_btn.setEnabled(True)
+
+    def set_manual_corrections_flag(self, text: str) -> None:
+        """Show the manual-corrections flag, or hide it when ``text`` is empty."""
+        self._manual_flag.setText(text)
+        self._manual_flag.setVisible(bool(text))
 
     def update_stats(self, stats: dict) -> None:
         def _val(key: str) -> str:
@@ -276,6 +290,23 @@ class HomeTab(QWidget):
         if model_metrics:
             for key, lbl in self._metric_card_labels.items():
                 lbl.setText(str(model_metrics.get(key) or "-"))
+            n_models = int(model_metrics.get("n_models") or 0)
+            basis = (
+                "target-class" if model_metrics.get("basis") == "target" else "macro-averaged"
+            )
+            self._metrics_box.setTitle(
+                f"Model Performance  (held-out validation, {basis}, "
+                f"median of {n_models} behavior model{'s' if n_models != 1 else ''})"
+            )
+            weakest = str(model_metrics.get("lowest_behavior") or "")
+            self._metric_card_labels["lowest_f1"].setToolTip(
+                f"Weakest behavior model: {weakest}" if weakest else ""
+            )
+            self._metrics_box.setToolTip(
+                "Scores on reviewed windows each model never trained on, from the "
+                "train / validation split of its last training run. See the "
+                "Validation tab for every behavior."
+            )
             self._metrics_box.show()
         else:
             self._metrics_box.hide()

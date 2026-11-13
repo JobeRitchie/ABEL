@@ -40,6 +40,13 @@ _KNOWN_BODYPART_TOKENS: list[str] = [
 _KNOWN_BODYPART_TOKENS.sort(key=len, reverse=True)
 
 
+def _nanmean_or_nan(values: np.ndarray) -> float:
+    """Mean of the finite values, NaN (without a warning) when there are none."""
+    arr = np.asarray(values, dtype=float)
+    finite = arr[np.isfinite(arr)]
+    return float(finite.mean()) if finite.size else float("nan")
+
+
 def _split_known_tokens(segment: str) -> str:
     """Greedily split a lowercase segment into known tokens separated by ``_``.
 
@@ -966,7 +973,10 @@ class PoseProcessingService:
         cent_vy = self._finite_diff(pose.centroid_y, fps)
         centroid_velocity = np.sqrt(cent_vx * cent_vx + cent_vy * cent_vy)
 
-        forepaw_oscillation_power = np.square(forepaw_speed - np.mean(forepaw_speed))
+        # nanmean, not mean: an animal that enters late (or is lost for a
+        # stretch) has NaN speed on those frames, and one NaN in a plain mean
+        # turned the whole session's oscillation features into NaN.
+        forepaw_oscillation_power = np.square(forepaw_speed - _nanmean_or_nan(forepaw_speed))
         forepaw_autocorr_peak = self._window_autocorr_peak(forepaw_speed, dt_window)
         paw_scrape_frequency = self._window_frequency(forepaw_speed, fps=fps, window=dt_window)
         oscillation_energy = np.convolve(forepaw_oscillation_power, np.ones(dt_window), mode="same") / float(dt_window)
@@ -974,7 +984,7 @@ class PoseProcessingService:
         # ── Nose kinematics (parallel to forepaw features) ───────────────
         # Useful for overhead-camera setups where paw keypoints are absent
         # but nose movement against the substrate is still informative.
-        nose_oscillation_power = np.square(nose_velocity - np.mean(nose_velocity))
+        nose_oscillation_power = np.square(nose_velocity - _nanmean_or_nan(nose_velocity))
         nose_autocorr_peak = self._window_autocorr_peak(nose_velocity, dt_window)
         nose_movement_frequency = self._window_frequency(nose_velocity, fps=fps, window=dt_window)
         nose_oscillation_energy = np.convolve(nose_oscillation_power, np.ones(dt_window), mode="same") / float(dt_window)
