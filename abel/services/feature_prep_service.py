@@ -472,11 +472,13 @@ class FeaturePrepService:
                 derived / "pose_cache" / f"{sid}_frame_features.npz",
                 derived / "pose_clean" / f"{sid}.parquet",
                 derived / "r3d_features" / f"{sid}.parquet",
+                derived / "rn18_features" / f"{sid}.parquet",
             ]
-            dense = derived / "r3d_features" / "dense_anchors"
-            if dense.exists():
-                candidates.extend(dense.glob(f"{sid}__w*.parquet"))
-                candidates.extend(dense.glob(f"{sid}__w*.json"))
+            for emb_dir in ("r3d_features", "rn18_features"):
+                dense = derived / emb_dir / "dense_anchors"
+                if dense.exists():
+                    candidates.extend(dense.glob(f"{sid}__w*.parquet"))
+                    candidates.extend(dense.glob(f"{sid}__w*.json"))
             for path in candidates:
                 try:
                     if path.exists():

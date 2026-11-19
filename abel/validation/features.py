@@ -57,7 +57,7 @@ MODALITY_ORDER = [
 # Token-matched (not naive substring) so aggregation suffixes (_mean/_std/_energy)
 # and embedded words don't cause misclassification.
 _VIDEO_KEYS = (
-    "flow", "surface", "r3d", "optical", "video", "pixel", "texture",
+    "flow", "surface", "r3d", "rn18", "optical", "video", "pixel", "texture",
     # "local": in this codebase a ``local`` column is always a pixel-neighborhood
     # statistic from ContextFeatureService's frame pipeline, never a pose quantity:
     # local_surface_*, flow_entropy_local, and (the reason this key exists)
@@ -158,6 +158,8 @@ def video_only_cols(df: pd.DataFrame) -> list[str]:
 #: taxonomy, imported by every analysis, does not drag in that module's pose/import
 #: service dependencies just to test a prefix.
 R3D_PREFIX = "r3d_"
+#: ResNet-18 appearance embedding, the faster alternative backbone (``rn18_000``…).
+RN18_PREFIX = "rn18_"
 
 
 def is_r3d_column(col: str) -> bool:
@@ -168,8 +170,11 @@ def is_r3d_column(col: str) -> bool:
     deliberately left as one lump so its numbers stay comparable across releases.
     This predicate exists for :mod:`abel.validation.r3d_value`, which isolates the
     family because it is its own user-facing toggle with its own GPU cost.
+
+    A project that selected the ResNet-18 backbone fills the same role with
+    ``rn18_*`` columns, so those count too.
     """
-    return str(col).lower().startswith(R3D_PREFIX)
+    return str(col).lower().startswith((R3D_PREFIX, RN18_PREFIX))
 
 
 def r3d_only_cols(df: pd.DataFrame) -> list[str]:

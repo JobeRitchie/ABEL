@@ -1310,8 +1310,13 @@ class ValidationService:
         keypoint_scale: float = 1.0,
         keypoint_border_scale: float = 1.0,
         layout: str = "strongest",
+        rows: int = 5,
+        cols: int = 5,
     ) -> Path:
-        """Render a 5×5 looping montage of positive bouts to *out_path*.
+        """Render a ``rows``×``cols`` looping montage of positive bouts to *out_path*.
+
+        The longer grid side spans ``grid_px``. In ``"bands"`` layout the first
+        tile of each row is labelled with the mean probability of that row's bouts.
 
         Each cell is a subject-centered crop of one bout (padded by ``pre_seconds``
         / ``post_seconds``) with optional pose-keypoint overlay.  ``crop_scale`` is
@@ -1332,7 +1337,12 @@ class ValidationService:
         if not ClipExtractionService.can_decode_video():
             raise RuntimeError("OpenCV video decoding is not available in this environment.")
 
-        specs = self.select_grid_bouts(behavior_id, layout=layout)
+        rows = max(1, int(rows))
+        cols = max(1, int(cols))
+        n_cells = rows * cols
+        specs = self.select_grid_bouts(
+            behavior_id, n_cells=n_cells, layout=layout, rows=rows, cols=cols
+        )
         if not specs:
             raise RuntimeError(
                 "No positive bouts found for this behavior. Run temporal inference first, "
@@ -1347,9 +1357,8 @@ class ValidationService:
         if preset is None:
             raise RuntimeError("No clip preset configured for this project.")
 
-        rows = cols = 5
-        n_cells = rows * cols
-        cell_px = max(32, int(grid_px) // cols)
+        # Even cell size keeps the stitched frame dimensions codec-friendly.
+        cell_px = max(32, (int(grid_px) // max(rows, cols)) // 2 * 2)
         smoothing = getattr(manifest, "smoothing_settings", None)
         cells_dir = out_path.parent / "cells"
         cells_dir.mkdir(parents=True, exist_ok=True)
@@ -1413,7 +1422,19 @@ class ValidationService:
 
         # Pad to a full grid so trailing cells render black.
         cell_paths += [None] * (n_cells - len(cell_paths))
-        render.stitch_grid(cell_paths, cell_px * cols, out_path, rows=rows, cols=cols)
+        row_labels: list[str | None] | None = None
+        if str(layout).strip().lower() == "bands":
+            row_labels = []
+            for r in range(rows):
+                row_specs = specs[r * cols : (r + 1) * cols]
+                if row_specs:
+                    mean_p = float(np.mean([s.mean_prob for s in row_specs]))
+                    row_labels.append(f"Avg conf {mean_p:.2f}")
+                else:
+                    row_labels.append(None)
+        render.stitch_grid(
+            cell_paths, cell_px * cols, out_path, rows=rows, cols=cols, row_labels=row_labels
+        )
 
         # Clean temp cell clips.
         for p in cells_dir.glob("cell_*.mp4"):
@@ -2111,7 +2132,7 @@ class ValidationService:
         for cid, ans in answers.items():
             if ans.is_unsure or cid not in clip_ids:
                 continue
-            self._reviews.append_segment_label(ReviewerLabelRecord(
+            self._reviews.upsert_segment_label(ReviewerLabelRecord(
                 segment_id=cid,
                 review_label=ans.label,
                 reviewer_id=reviewer_id,

@@ -26,6 +26,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -38,6 +39,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QSplitter,
@@ -382,27 +384,69 @@ class PoseFeaturesTab(QWidget):
         param_form.addRow("", self._auto_refresh_clips)
         self._auto_refresh_clips.stateChanged.connect(self._save_extraction_settings)
 
-        # ── R3D appearance embeddings toggle (a video sub-family) ───────
-        self._p_use_r3d = QCheckBox("R3D appearance embeddings (512 dims per segment)")
+        # ── Video appearance embedding (a video sub-family) ─────────────
+        # Its own section: an on/off switch plus the choice of network.  Each
+        # network writes its own columns (r3d_* or rn18_*), so a trained model
+        # always gets the embedding it was trained on.
+        embed_box = QGroupBox("Video Appearance Embedding")
+        embed_box.setToolTip(
+            "A pretrained image network looks at a pose-centered crop of each segment "
+            "and adds a 512-number description of how the animal looks to the features."
+        )
+        embed_layout = QVBoxLayout(embed_box)
+        self._p_use_r3d = QCheckBox("Add appearance embedding (512 dims per segment)")
         self._p_use_r3d.setChecked(True)
         self._p_use_r3d.setToolTip(
-            "Runs a pretrained R3D-18 video network over a pose-centered crop of each "
-            "segment and adds its 512-dimensional embedding (r3d_000…r3d_511) to the "
-            "feature set before training, so the classifier learns from appearance "
-            "directly.\n\n"
+            "Runs a pretrained network over a pose-centered crop of each segment and "
+            "adds its 512-dimensional embedding to the feature set before training, so "
+            "the classifier learns from appearance directly.\n\n"
             "Helps most for behaviors defined by how the animal or the substrate looks "
-            "rather than by keypoint geometry: digging, grooming, bedding displacement.\n\n"
-            "Cost: roughly a minute of GPU time per 1000 segments (much slower on CPU), "
-            "cached per session so repeat runs are a parquet read. Needs a reachable "
-            "video and pose file per session, and requires video features above."
+            "rather than by keypoint geometry: climbing, rearing on a wall, digging.\n\n"
+            "Cached per session, so repeat runs are a parquet read. Needs a reachable "
+            "video and pose file per session, and requires video-derived features above."
         )
-        param_form.addRow("", self._p_use_r3d)
+        embed_layout.addWidget(self._p_use_r3d)
+
+        self._p_backbone_r3d = QRadioButton("R3D-18 (3D video network, 16 frames, sees motion)")
+        self._p_backbone_r3d.setToolTip(
+            "R3D-18, trained on the Kinetics action videos. Reads 16 frames in order, "
+            "so it can pick up how the animal moves as well as how it looks. "
+            "Columns r3d_000 to r3d_511.\n\n"
+            "Cost: about a minute of GPU time per 1000 segments, much slower on CPU."
+        )
+        self._p_backbone_rn18 = QRadioButton("ResNet-18 (2D image network, 4 frames, about 14x faster)")
+        self._p_backbone_rn18.setToolTip(
+            "ResNet-18, trained on ImageNet photos. Looks at 4 frames from each segment "
+            "separately and averages them, so it describes posture and appearance but "
+            "not motion. Columns rn18_000 to rn18_511.\n\n"
+            "In a pilot on 3-chamber social and EPM it matched most of R3D's accuracy "
+            "gain at about 14x the GPU speed. Behaviors defined by fast movement "
+            "(shakes, twitches) may still need R3D."
+        )
+        self._p_backbone_r3d.setChecked(True)
+        self._p_backbone_group = QButtonGroup(embed_box)
+        self._p_backbone_group.addButton(self._p_backbone_r3d)
+        self._p_backbone_group.addButton(self._p_backbone_rn18)
+        backbone_label = QLabel("Network:")
+        embed_layout.addWidget(backbone_label)
+        embed_layout.addWidget(self._p_backbone_r3d)
+        embed_layout.addWidget(self._p_backbone_rn18)
+        self._p_backbone_note = QLabel(
+            "Switching network rebuilds the segment features on the next extraction. "
+            "Existing models keep using the network they were trained with."
+        )
+        self._p_backbone_note.setWordWrap(True)
+        self._p_backbone_note.setStyleSheet("color: #90A4AE; font-size: 11px; padding: 2px 0;")
+        embed_layout.addWidget(self._p_backbone_note)
+
         self._p_use_r3d.stateChanged.connect(self._save_extraction_settings)
+        self._p_backbone_rn18.toggled.connect(self._save_extraction_settings)
         # Appearance embeddings are pixel-derived, so they cannot outlive the
-        # video-feature toggle: gray the row out rather than letting it claim a
-        # state the extraction run would ignore.
-        self._p_use_video.toggled.connect(self._p_use_r3d.setEnabled)
-        self._p_use_r3d.setEnabled(self._p_use_video.isChecked())
+        # video-feature toggle: gray the section out rather than letting it claim
+        # a state the extraction run would ignore.
+        self._p_use_video.toggled.connect(self._sync_embedding_enabled)
+        self._p_use_r3d.toggled.connect(self._sync_embedding_enabled)
+        self._sync_embedding_enabled()
 
         # ── Advanced ROI features toggle ────────────────────────────────
         self._p_advanced_roi = QCheckBox("Advanced ROI features (edge, corner, position within zone)")
@@ -654,6 +698,7 @@ class PoseFeaturesTab(QWidget):
         left_layout.addLayout(preset_row)
         left_layout.addWidget(param_box)
         left_layout.addWidget(motion_box)
+        left_layout.addWidget(embed_box)
         left_layout.addWidget(feature_box)
         left_layout.addWidget(robustness_box)
         left_layout.addWidget(clipdelta_box)
@@ -870,12 +915,35 @@ class PoseFeaturesTab(QWidget):
                 "roi_keypoint_mask": self._p_roi_mask.isChecked(),
                 "use_video_features": self._p_use_video.isChecked(),
                 "use_r3d_features": self._p_use_r3d.isChecked(),
+                "video_embedding_backbone": self._selected_backbone(),
                 "advanced_roi_features": self._p_advanced_roi.isChecked(),
                 "auto_refresh_clips": self._auto_refresh_clips.isChecked(),
             }
             write_yaml(path, raw)
         except Exception:
             logger.debug("Failed to save extraction settings", exc_info=True)
+
+    def _selected_backbone(self) -> str:
+        """``"resnet18"`` or ``"r3d_18"``, from the Video Appearance Embedding radios."""
+        from abel.services.r3d_feature_service import BACKBONE_R3D, BACKBONE_RESNET18
+
+        return BACKBONE_RESNET18 if self._p_backbone_rn18.isChecked() else BACKBONE_R3D
+
+    def _set_backbone(self, name) -> None:
+        from abel.services.r3d_feature_service import BACKBONE_RESNET18, normalize_backbone
+
+        if normalize_backbone(name) == BACKBONE_RESNET18:
+            self._p_backbone_rn18.setChecked(True)
+        else:
+            self._p_backbone_r3d.setChecked(True)
+
+    def _sync_embedding_enabled(self, *_args) -> None:
+        """Gray the section out without video features, and the radios without the embedding."""
+        video_on = self._p_use_video.isChecked()
+        self._p_use_r3d.setEnabled(video_on)
+        pick = video_on and self._p_use_r3d.isChecked()
+        self._p_backbone_r3d.setEnabled(pick)
+        self._p_backbone_rn18.setEnabled(pick)
 
     def _load_extraction_settings(self) -> None:
         """Restore extraction parameters from project.yaml on project open."""
@@ -901,7 +969,10 @@ class PoseFeaturesTab(QWidget):
                 self._p_advanced_roi.setChecked(bool(
                     cfg.get("advanced_roi_features", model.get("advanced_roi_features", True))
                 ))
-                self._p_use_r3d.setEnabled(self._p_use_video.isChecked())
+                self._set_backbone(
+                    cfg.get("video_embedding_backbone", model.get("video_embedding_backbone"))
+                )
+                self._sync_embedding_enabled()
                 return
 
             # Block signals while bulk-loading to avoid N redundant writes
@@ -909,6 +980,7 @@ class PoseFeaturesTab(QWidget):
                 self._p_win_dur, self._p_stride, self._p_fps,
                 self._p_likelihood, self._p_interp, self._p_smooth, self._p_roi_mask,
                 self._p_use_video, self._p_use_r3d, self._p_advanced_roi,
+                self._p_backbone_r3d, self._p_backbone_rn18,
             ]
             for w in widgets:
                 w.blockSignals(True)
@@ -922,6 +994,7 @@ class PoseFeaturesTab(QWidget):
             self._p_roi_mask.setChecked(bool(cfg.get("roi_keypoint_mask", False)))
             self._p_use_video.setChecked(bool(cfg.get("use_video_features", False)))
             self._p_use_r3d.setChecked(bool(cfg.get("use_r3d_features", True)))
+            self._set_backbone(cfg.get("video_embedding_backbone"))
             # Default on: projects saved before this setting existed should gain
             # the advanced ROI features rather than silently stay on center-only.
             self._p_advanced_roi.setChecked(bool(cfg.get("advanced_roi_features", True)))
@@ -929,7 +1002,7 @@ class PoseFeaturesTab(QWidget):
 
             for w in widgets:
                 w.blockSignals(False)
-            self._p_use_r3d.setEnabled(self._p_use_video.isChecked())
+            self._sync_embedding_enabled()
         except Exception:
             logger.debug("Failed to load extraction settings", exc_info=True)
 
@@ -1885,6 +1958,7 @@ class PoseFeaturesTab(QWidget):
         model["segment_stride_frames"] = int(stride_frames)
         model["use_video_features"] = self._p_use_video.isChecked()
         model["use_r3d_features"] = self._p_use_r3d.isChecked()
+        model["video_embedding_backbone"] = self._selected_backbone()
         model["advanced_roi_features"] = self._p_advanced_roi.isChecked()
         raw["behavior_model"] = model
         write_yaml(path, raw)

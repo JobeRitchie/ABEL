@@ -43,7 +43,7 @@ from abel.services.feature_coverage_service import (
     audit_session_coverage,
     format_coverage_report,
 )
-from abel.services.r3d_feature_service import R3DFeatureService, is_r3d_column
+from abel.services.r3d_feature_service import BACKBONES, R3DFeatureService, backbones_in_columns
 from abel.services.roi_service import ROIService, is_roi_column
 from abel.storage.file_store import read_json, read_yaml, write_json
 from abel.temporal_refinement.bout_postprocess import (
@@ -1129,12 +1129,18 @@ class TemporalRefinementService:
         # Only pay for R3D when a model actually consumes it.  Models trained
         # before video features existed, or with them switched off, carry no
         # ``r3d_*`` columns and must not trigger a decode pass.
-        needs_r3d = any(
-            any(is_r3d_column(c) for c in (payload.get("feature_cols") or []))
-            for payload in model_payloads.values()
+        # Each model's own feature list names the embedding network it was
+        # trained on (``r3d_*`` or ``rn18_*``), whatever the project setting
+        # says now, so every backbone any model reads is computed.
+        needed_backbones = backbones_in_columns(
+            c for payload in model_payloads.values() for c in (payload.get("feature_cols") or [])
         )
-        if needs_r3d:
-            self._emit(progress_cb, "Models use R3D video features; enabling dense R3D extraction.")
+        for _bb in needed_backbones:
+            _label = BACKBONES[_bb]["label"]
+            self._emit(
+                progress_cb,
+                f"Models use {_label} video features; enabling dense {_label} extraction.",
+            )
 
         self._preflight_target_rois(model_payloads, target_sessions, manifest, progress_cb)
         self._preflight_feature_coverage(
@@ -1227,8 +1233,8 @@ class TemporalRefinementService:
             # from 254 detected windows to 0 while inventing Head Dip where
             # there is none.  Anchored embeddings bring the trace back to a
             # probability MAE of 0.005 against a true per-window computation.
-            if needs_r3d:
-                dense_segs = R3DFeatureService().attach_dense(
+            for _bb in needed_backbones:
+                dense_segs = R3DFeatureService(_bb).attach_dense(
                     project_root, dense_segs, sid,
                     manifest=manifest,
                     window_frames=window_frames,

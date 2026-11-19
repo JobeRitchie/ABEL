@@ -28,7 +28,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
-from abel.services.r3d_feature_service import is_r3d_column
+from abel.services.r3d_feature_service import RN18_PREFIX, is_r3d_column
 from abel.services.roi_service import is_roi_column
 
 # Per-session rows sampled when deciding whether a column is populated.  All-NaN
@@ -52,6 +52,8 @@ _NON_FEATURE_COLS = frozenset({
 def _family_of(col: str) -> str:
     if is_r3d_column(col):
         return "R3D video embedding"
+    if str(col).startswith(RN18_PREFIX):
+        return "ResNet-18 video embedding"
     if is_roi_column(col):
         return "ROI / target zone"
     return "pose / kinematics"

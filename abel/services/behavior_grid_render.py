@@ -247,6 +247,29 @@ def render_cell(
     return True
 
 
+def _draw_tile_label(canvas: np.ndarray, text: str, y0: int, x0: int, cell_px: int) -> None:
+    """Draw *text* on a dark translucent strip at the top-left of one tile."""
+    import cv2  # noqa: PLC0415
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    pad = max(2, cell_px // 40)
+    thickness = max(1, cell_px // 120)
+    # Fit the text to ~90% of the tile width.
+    scale = cell_px / 300.0
+    (tw, th), base = cv2.getTextSize(text, font, scale, thickness)
+    if tw > 0.9 * cell_px:
+        scale *= 0.9 * cell_px / tw
+        (tw, th), base = cv2.getTextSize(text, font, scale, thickness)
+    h = th + base + 2 * pad
+    w = min(cell_px, tw + 2 * pad)
+    roi = canvas[y0 : y0 + h, x0 : x0 + w]
+    roi[:] = (roi.astype(np.float32) * 0.35).astype(np.uint8)
+    cv2.putText(
+        canvas, text, (x0 + pad, y0 + pad + th), font, scale, (255, 255, 255),
+        thickness, cv2.LINE_AA,
+    )
+
+
 def stitch_grid(
     cell_paths: list[Path | None],
     grid_px: int,
@@ -255,12 +278,16 @@ def stitch_grid(
     rows: int = 5,
     cols: int = 5,
     out_fps: float = 30.0,
+    row_labels: list[str | None] | None = None,
 ) -> Path:
-    """Tile per-cell clips into one square grid video, looping shorter cells.
+    """Tile per-cell clips into one grid video, looping shorter cells.
 
     *cell_paths* is ``rows*cols`` long (``None`` or a missing file → black tile).
-    The grid runs for as long as the longest cell; every other cell loops on a
-    modulo of its own length so no tile freezes.  Returns *out_path*.
+    *grid_px* is the grid width; tiles are square, so the height is
+    ``rows * (grid_px // cols)``.  The grid runs for as long as the longest cell;
+    every other cell loops on a modulo of its own length so no tile freezes.
+    ``row_labels[r]``, when given, is drawn over the first tile of row *r*.
+    Returns *out_path*.
     """
     import cv2  # noqa: PLC0415
 
@@ -326,6 +353,10 @@ def stitch_grid(
                 r, c = divmod(i, cols)
                 tile = _cell_frame(i, t)
                 canvas[r * cell_px : (r + 1) * cell_px, c * cell_px : (c + 1) * cell_px] = tile
+            if row_labels:
+                for r, text in enumerate(row_labels[:rows]):
+                    if text:
+                        _draw_tile_label(canvas, text, r * cell_px, 0, cell_px)
             writer.write(canvas)
     finally:
         writer.release()

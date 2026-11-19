@@ -7,10 +7,26 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "November 12, 2026"
+VERSION_DATE = "November 19, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.35.0", "November 19, 2026", [
+        'New: Video Appearance Embedding in Pose Features. Pick R3D-18 or ResNet-18. ResNet-18 is about 14x faster on GPU and keeps posture and appearance, but does not see motion. Models remember the network they were trained on.',
+        "New: Per-subject event times in Session Sections. Read each subject's section start and end frames from an .xlsx or .csv file. Includes help and a Save Template button.",
+        'New: Bouts per Minute in Session Sections, with Prism and summary export sheets.',
+        'New: Show data points checkbox on every Analytics page with mean bars.',
+        'New: Copy Current ROI to Selected Subjects, with a filter box and a Tick Without ROI button.',
+        'New: Validation Behavior Grid rows and columns can be set from 1 to 10. Probability bands rows show their average confidence.',
+        'New: Review playback speeds 3x, 4x and 5x, and many new Glossary entries.',
+        'Fixed relabeling in Review. The old and new label both stayed, so the clip trained as ambiguous and was dropped. Relabels now replace your earlier label, and old double labels resolve to the newest one. Retrain to pick this up.',
+        'Fixed Review playback running about 30% slow on Windows.',
+        "Fixed Unified UMAP failing when one behavior's model had failed. It now builds from the remaining behaviors.",
+        'Fixed Motifs and HMM group views going blank when Graphs filtered a factor to one level.',
+        'Fixed the Active Learning preview not rescaling when the panel is resized.',
+        'Changed: the slow-drive warning shows only for network drives, once per drive.',
+        'Changed: Ctrl+A and Ctrl+R no longer accept or reject clips in Review. Ctrl+A selects all again.',
+    ]),
     ("0.34.0", "November 12, 2026", [
         "New: Manual Corrections in Analytics. If you hand-scored a behavior, "
         "you can replace ABEL's whole-session latency, bout count, total "

@@ -17,6 +17,7 @@ Pipeline position:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -142,6 +143,9 @@ class CandidateVideoPlayer(QWidget):
         self._cur_frame = 0
         self._playing = False
         self._timer = QTimer(self)
+        # CoarseTimer (the default) rounds a 33 ms interval up to ~47 ms on
+        # Windows, so every speed played about 30% slow.
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.timeout.connect(self._advance)
         self._show_keypoints = False
         self._last_bgr = None  # cached for re-render on resize
@@ -156,8 +160,9 @@ class CandidateVideoPlayer(QWidget):
         self._pose_conf_thresh = 0.20
         self._loop_enabled = False
         self._speed_multiplier = 1.0
-        _SPEED_LABELS = ["0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x"]
-        self._SPEED_VALUES = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0]
+        self._play_step = 1
+        _SPEED_LABELS = ["0.25x", "0.5x", "0.75x", "1x", "1.5x", "2x", "3x", "4x", "5x"]
+        self._SPEED_VALUES = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0]
 
         # Display
         self._display = QLabel("No clip loaded")
@@ -210,7 +215,9 @@ class CandidateVideoPlayer(QWidget):
         for _lbl in _SPEED_LABELS:
             self._speed_combo.addItem(_lbl)
         self._speed_combo.setCurrentIndex(3)  # default 1x
-        self._speed_combo.setFixedWidth(64)
+        self._speed_combo.setMinimumWidth(
+            self._speed_combo.fontMetrics().horizontalAdvance("0.25x") + 36
+        )
         self._speed_combo.setToolTip("Playback speed multiplier")
         self._speed_combo.currentIndexChanged.connect(self._on_speed_changed)
 
@@ -325,20 +332,52 @@ class CandidateVideoPlayer(QWidget):
         self._playing = not self._playing
         self._play_btn.setText("⏸" if self._playing else "▶")
         if self._playing:
-            interval = max(1, int(1000 / (self._fps * self._speed_multiplier)))
-            self._timer.start(interval)
+            self._start_timer()
         else:
             self._timer.stop()
 
+    # Above this many displayed frames per second the player skips frames
+    # instead of shortening the timer, so 3x-5x play at true speed rather than
+    # being throttled by per-frame decode and render.
+    _MAX_DISPLAY_FPS = 30.0
+
+    def _start_timer(self) -> None:
+        """Start the playback timer for the current fps and speed."""
+        eff_fps = max(1e-6, float(self._fps) * self._speed_multiplier)
+        step = max(1, int(math.ceil(eff_fps / self._MAX_DISPLAY_FPS)))
+        self._play_step = step
+        self._timer.start(max(1, int(round(1000.0 * step / eff_fps))))
+
     def _advance(self) -> None:
-        """Advance to next frame during playback."""
+        """Advance playback by one step (one frame, or several at high speed)."""
         if self._cur_frame >= self._n_frames - 1:
             if self._loop_enabled:
                 self.seek(0)
             else:
                 self.toggle_play()
             return
-        self.seek(self._cur_frame + 1)
+        step = max(1, int(self._play_step))
+        target = min(self._cur_frame + step, self._n_frames - 1)
+        if step > 1 and self._cap is not None:
+            # Decoder is already at _cur_frame + 1; grab() skips frames without
+            # decoding them, which is far cheaper than a random-access seek.
+            try:
+                for _ in range(target - self._cur_frame - 1):
+                    if not self._cap.grab():
+                        break
+                ret, bgr = self._cap.read()
+            except Exception:
+                ret, bgr = False, None
+            if ret:
+                self._cur_frame = target
+                self._render(bgr)
+                self._slider.blockSignals(True)
+                self._slider.setValue(target)
+                self._slider.blockSignals(False)
+                self._frame_label.setText(f"Frame: {target} / {self._n_frames - 1}")
+                self.frame_changed.emit(target)
+                return
+        self.seek(target)
 
     def _on_loop_toggled(self, checked: bool) -> None:
         """Enable or disable clip looping."""
@@ -349,8 +388,7 @@ class CandidateVideoPlayer(QWidget):
         if 0 <= index < len(self._SPEED_VALUES):
             self._speed_multiplier = self._SPEED_VALUES[index]
         if self._playing:
-            interval = max(1, int(1000 / (self._fps * self._speed_multiplier)))
-            self._timer.start(interval)
+            self._start_timer()
 
     def _on_slider_moved(self, value: int) -> None:
         """Handle slider movement."""
@@ -1211,8 +1249,8 @@ class ReviewTab(QWidget):
         QShortcut(QKeySequence("Shift+Left"), self).activated.connect(lambda: self._player.seek(self._player.current_frame - 1))
         QShortcut(QKeySequence("Shift+Right"), self).activated.connect(lambda: self._player.seek(self._player.current_frame + 1))
         QShortcut(QKeySequence(Qt.Key.Key_Return), self).activated.connect(self._save_decision)
-        QShortcut(QKeySequence("Ctrl+A"), self).activated.connect(lambda: self._apply_batch_decision(ReviewDecisionType.ACCEPT))
-        QShortcut(QKeySequence("Ctrl+R"), self).activated.connect(lambda: self._apply_batch_decision(ReviewDecisionType.REJECT))
+        # No Ctrl+A / Ctrl+R accept/reject shortcuts: Ctrl+A keeps its standard
+        # select-all meaning in the clip table and text boxes.
 
     def set_project(self, project_root: Path) -> None:
         self._project_root = project_root
@@ -3025,7 +3063,7 @@ class ReviewTab(QWidget):
                 self._decision_by_clip_id[cand.window_id] = rec
                 review_label = self._decision_to_review_label(dec.decision, behavior_label)
                 if review_label:
-                    self._review_service.append_segment_label(
+                    self._review_service.upsert_segment_label(
                         ReviewerLabelRecord(
                             segment_id=cand.window_id,
                             review_label=review_label,
@@ -3322,7 +3360,7 @@ class ReviewTab(QWidget):
 
             review_label = self._decision_to_review_label(decision, selected_label)
             if review_label:
-                self._review_service.append_segment_label(
+                self._review_service.upsert_segment_label(
                     ReviewerLabelRecord(
                         segment_id=cand.window_id,
                         review_label=review_label,
@@ -3505,7 +3543,7 @@ class ReviewTab(QWidget):
                 adjusted_end_frame=int(cand.end_frame),
             )
             self._decision_by_clip_id[cand.window_id] = rec
-            self._review_service.append_segment_label(
+            self._review_service.upsert_segment_label(
                 ReviewerLabelRecord(
                     segment_id=cand.window_id,
                     review_label=selected_label,
@@ -3967,7 +4005,7 @@ class ReviewTab(QWidget):
 
         review_label = self._decision_to_review_label(decision_type, selected_label)
         if review_label:
-            self._review_service.append_segment_label(
+            self._review_service.upsert_segment_label(
                 ReviewerLabelRecord(
                     segment_id=candidate.window_id,
                     review_label=review_label,

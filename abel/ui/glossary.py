@@ -263,7 +263,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Pose file", "Data Import",
        "The tracking output from DeepLabCut or SLEAP: the x, y position and "
        "confidence of each body part in every frame.",
-       aliases=("Pose", "Tracking file", "DLC file"),
+       aliases=("Pose", "Tracking file", "DLC file", "HDF5", ".h5", ".slp"),
        see=("Keypoint", "DeepLabCut", "SLEAP")),
     _e("Keypoint", "Data Import",
        "One tracked body part, such as the nose or tail base.",
@@ -372,7 +372,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Hotkey", "Behaviors",
        "The key that applies a behavior's label in Review. Each behavior needs a "
        "different key.",
-       aliases=("Shortcut", "Short name"),),
+       aliases=("Shortcut", "Short name", "Hotkeys"),),
     _e("Behavior preset", "Behaviors",
        "A starting set of behavior definitions for a common assay. Applying one "
        "only adds behaviors you do not already have.",
@@ -414,11 +414,16 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        "Copies the zones and crop on screen to every subject. Use it when every "
        "video has the same camera position.",
        aliases=("Copy Current to All Subjects",),),
+    _e("Copy Current ROI to Selected Subjects", "ROI",
+       "Copies the zones and crop on screen to only the subjects you tick. Use it "
+       "when some videos share a camera position and others do not.",
+       aliases=("Copy Current to Selected Subjects", "Tick Without ROI"),),
     _e("Smooth (ROI)", "ROI",
        "Rounds off the corners of a hand-drawn zone.",
-       aliases=("Smooth",),),
+       aliases=("Smooth", "Chaikin"),),
     _e("Angularize", "ROI",
-       "Simplifies a hand-drawn zone to fewer, straighter corners.",),
+       "Simplifies a hand-drawn zone to fewer, straighter corners.",
+       aliases=("Douglas-Peucker", "RDP"),),
     _e("Compact Polygon ROIs", "ROI",
        "Removes extra points from old hand-drawn zones. The shapes stay the same "
        "but the file gets much smaller and switching subjects gets faster.",),
@@ -451,7 +456,8 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        "Time from the start of one window to the start of the next. A stride "
        "shorter than the window makes windows overlap. Smaller strides give finer "
        "timing and more data.",
-       aliases=("Stride (overlap)", "Overlap"), see=("Window duration",)),
+       aliases=("Stride (overlap)", "Overlap", "Half-window overlap", "50% overlap"),
+       see=("Window duration",)),
     _e("Estimate Window Count", "Features",
        "Shows how many windows the current window and stride will make.",),
     _e("Source FPS", "Features",
@@ -485,7 +491,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Optical flow", "Features",
        "How the pixels move from one frame to the next. Picks up small motions, "
        "such as paw or whisker movement, that tracking can miss.",
-       aliases=("Flow", "Flow temporal stride"),),
+       aliases=("Flow", "Flow temporal stride", "Farneback"),),
     _e("Local motion", "Features",
        "How much the pixels change in a small box that follows the animal. Picks "
        "up body movement and disturbed bedding.",
@@ -509,8 +515,15 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        "animal looks like. Helps for digging, grooming and bedding. Slow without "
        "a GPU.",
        aliases=("R3D-18", "R3D appearance features", "Appearance embedding",
-                "R3D appearance embeddings"),
-       see=("Embedding",)),
+                "R3D appearance embeddings", "CNN", "3D ResNet"),
+       see=("Embedding", "Pretrained", "ResNet-18")),
+    _e("ResNet-18", "Features",
+       "An image network trained on photos (ImageNet). The faster choice under "
+       "Video Appearance Embedding: it looks at 4 frames of the crop around the "
+       "animal and adds 512 numbers per window that describe how it looks. It "
+       "does not see motion. About 14 times faster than R3D on a GPU.",
+       aliases=("ResNet", "rn18", "2D ResNet", "Video Appearance Embedding"),
+       see=("R3D", "Embedding")),
     _e("Per-keypoint kinematics", "Features",
        "Velocity, speed, acceleration and jerk (change in acceleration) for each "
        "body part.",
@@ -664,7 +677,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Calibration", "Learning",
        "Adjusting a model's scores so a probability of 0.7 really means right "
        "about 70% of the time. ABEL uses Platt scaling.",
-       aliases=("Platt scaling", "Calibrated"),),
+       aliases=("Platt scaling", "Calibrated", "Sigmoid", "Isotonic regression"),),
     _e("Temperature scale", "Learning settings, Temporal > Refinement",
        "Softens or sharpens probabilities after scoring. Above 1 pulls them "
        "toward 0.5, which helps a model that is too sure of itself. 1 changes "
@@ -693,6 +706,10 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("True positive", "Concept",
        "The model said yes and the label says yes.",
        aliases=("TP",),),
+    _e("True negative", "Concept",
+       "The model said no and the label says no. Most windows are true "
+       "negatives, because most windows are not any one behavior.",
+       aliases=("TN",),),
     _e("False positive", "Concept",
        "The model said yes but the label says no. A false alarm.",
        aliases=("FP",), see=("Flag FP",)),
@@ -706,6 +723,10 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        "Of the windows that really were the behavior, the share the model found. "
        "Low recall means many misses.",
        aliases=("Sensitivity",),),
+    _e("Specificity", "Validation, Learning",
+       "Of the windows that really were not the behavior, the share the model "
+       "also called not the behavior. Low specificity means many false alarms.",
+       see=("True negative", "Recall")),
     _e("F1", "Validation, Learning",
        "One score that balances precision and recall. 1 is perfect. ABEL reports "
        "it for the behavior itself, not averaged with No Behavior.",
@@ -719,7 +740,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        "Area under the precision-recall curve, from 0 to 1. Measures how well the "
        "model ranks true examples above false ones across all thresholds. Suited "
        "to rare behaviors.",
-       aliases=("Average precision", "AP"), see=("PR curve",)),
+       aliases=("Average precision", "AP", "AUC"), see=("PR curve", "ROC-AUC")),
     _e("PR curve", "Learning",
        "A chart of precision against recall as the threshold moves.",
        aliases=("Precision-recall curve",),),
@@ -729,7 +750,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Cross-validation", "Validation",
        "Testing a model several times, each time holding out a different part of "
        "the data, then pooling the results.",
-       aliases=("CV", "Fold", "Folds"),),
+       aliases=("CV", "Fold", "Folds", "K-fold"),),
     _e("Leave-one-mouse-out CV", "Validation > Overview",
        "Trains one model per animal, each time leaving that animal out, and tests "
        "on the left-out animal. Gives one stable score per behavior for how well "
@@ -785,7 +806,45 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Stop", "Active Learning > Learning",
        "Cancels a running pipeline, Pipeline All or model run. Retrain cannot be "
        "stopped.",
-       aliases=("Cancel",),),
+       aliases=("Cancel",), see=("Pause", "Checkpoint")),
+    _e("Pause", "Active Learning > Learning, Features",
+       "Holds the running job at its next checkpoint and frees the CPU. Resume "
+       "carries on from the same place. Keep ABEL open while a job is paused.",
+       aliases=("Resume", "Pause and Resume"), see=("Checkpoint", "Stop")),
+    _e("Checkpoint", "Active Learning > Learning, Temporal > Refinement",
+       "A safe point between steps where a running job can stop or pause "
+       "without losing work. Stop and Pause take effect at the next one, so "
+       "there can be a short wait.",
+       aliases=("Safe point", "Stopping at the next checkpoint"),),
+    _e("Telemetry", "Active Learning > Learning",
+       "Live readouts from a running job. The Active-Learning Telemetry panel "
+       "shows the current phase, which behavior is running, percent done, time "
+       "elapsed, time remaining and the last model's scores.",
+       aliases=("Active-Learning Telemetry", "Run status panel", "Phase",
+                "Elapsed", "Last model"),
+       see=("ETA",)),
+    _e("ETA", "Active Learning > Learning, Features",
+       "Estimated time remaining until the run finishes. It is worked out from "
+       "how long the steps took so far, so it gets better as the run goes on. "
+       "Calculating means there is not enough timing yet.",
+       aliases=("ETA (remaining)", "Estimated time remaining", "Time remaining"),),
+    _e("Backend", "Active Learning > Learning",
+       "The software library that does the heavy computing behind a step, such "
+       "as XGBoost for training or the GPU version of optical flow. ABEL checks "
+       "which ones are installed and picks the fastest that works.",
+       aliases=("Detect backend", "GPU backend", "LightGBM", "scikit-learn"),
+       see=("XGBoost", "GPU")),
+    _e("Representation", "Active Learning > Learning",
+       "The table of features per window that models train on and score. Build "
+       "representations is the pipeline step that assembles it.",
+       aliases=("Representations", "Build representations"), see=("Feature", "Window")),
+    _e("Bootstrap windows", "Active Learning > Learning",
+       "Random windows picked before any model exists, so you have first clips "
+       "to label. No training is needed.",
+       aliases=("Bootstrap", "Random bootstrap"), see=("Random Low-Prob",)),
+    _e("Evaluation artifacts", "Active Learning > Learning",
+       "The charts and score files a run writes after training.",
+       aliases=("Artifacts", "Artifact"), see=("Skip evaluation reports",)),
     _e("Generate Review Clips", "Active Learning > Learning",
        "When on, batch runs also pick and add review clips for each behavior. "
        "Turn off to only train and score.",),
@@ -1246,7 +1305,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Paired", "Statistics options",
        "Compares each subject with itself across groups, such as the same mouse "
        "on Day 1 and Day 2.",
-       aliases=("Unpaired", "Repeated measures"),),
+       aliases=("Unpaired", "Repeated measures", "Within-subject"),),
     _e("Parametric test", "Statistics options",
        "Assumes the data are roughly bell-shaped (Gaussian). When off, ABEL uses "
        "rank-based tests that do not assume this.",
@@ -1286,8 +1345,11 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        "the range likely to hold the true mean.",
        aliases=("SEM", "SD", "95% CI", "Standard error", "Standard deviation",
                 "Confidence interval"),),
-    _e("Show individual data points", "Analytics > Graph settings",
-       "Draws each subject's value on top of the bars.",),
+    _e("Show data points", "Analytics > Graphs, Session Sections, Velocity, "
+       "Behavior Relationships, Social",
+       "Draws each value behind a bar as a dot on top of it, one per session "
+       "or subject. Each page has its own checkbox.",
+       aliases=("Show individual data points",),),
     _e("Copy for Prism", "Analytics",
        "Copies the graph's values as columns you can paste into GraphPad Prism.",
        aliases=("Prism",),),
@@ -1359,7 +1421,7 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
        "states, each with its own mix of behaviors, and finds those states from "
        "the bout sequence.",
        aliases=("Hidden Markov model", "HMM Analysis", "Run HMM", "Hidden state",
-                "State"),
+                "State", "Latent state", "Latent"),
        see=("Viterbi", "Auto-calibrate")),
     _e("Emission", "HMM Analysis",
        "What each hidden state produces: which behaviors are likely while in that "
@@ -1548,6 +1610,211 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Install Update", "Info > About & Updates",
        "Downloads the newest version and restarts ABEL. Unsaved work is lost.",),
 
+    # ── Technical terms ──────────────────────────────────────────────────
+    _e("Ground truth", "Validation",
+       "The answer treated as correct when scoring a model. In ABEL it is the "
+       "reviewer's own label for a window.",
+       see=("Label", "True positive")),
+    _e("Prevalence", "Active Learning > Learning",
+       "How common a behavior is: the share of windows or time that show it. "
+       "Rare behaviors have low prevalence.",
+       aliases=("Expected prevalence", "Class-balance assumption", "Rare positives",
+                "Base rate"),
+       see=("Class imbalance",)),
+    _e("Macro F1", "Info > Methods",
+       "The plain average of the F1 scores of every class, including No "
+       "Behavior. ABEL reports the behavior's own F1 instead.",
+       aliases=("Macro-F1", "Macro-averaged"), see=("F1",)),
+    _e("MCC", "Info > Methods",
+       "Matthews correlation coefficient. One score from -1 to 1 that uses all "
+       "four outcomes: true and false positives and negatives. 0 is no better "
+       "than always guessing the common class.",
+       aliases=("Matthews correlation coefficient",),),
+    _e("ROC-AUC", "Info > Methods",
+       "Area under the ROC curve. A common ranking score that looks too good "
+       "for rare behaviors, which is why ABEL reports PR-AUC.",
+       aliases=("ROC", "ROC curve"), see=("PR-AUC",)),
+    _e("Entropy", "Info > Methods",
+       "A measure of how unsure a set of probabilities is. Highest when every "
+       "option is equally likely. One of the signals behind uncertainty picks.",
+       aliases=("Shannon entropy",), see=("Uncertainty",)),
+    _e("Ensemble", "Info > Methods",
+       "Several models whose answers are combined. Where they disagree, the "
+       "result is less certain.",
+       aliases=("Ensemble disagreement", "Ensemble variance"),),
+    _e("Argmax", "Info > Methods",
+       "The option with the highest value. The winning behavior in a frame is "
+       "the argmax of the behavior probabilities.",
+       see=("Winning Behavior Timeline",)),
+    _e("Pretrained", "Features",
+       "A network already trained on other data before ABEL uses it. R3D is "
+       "pretrained on Kinetics-400, a large set of human action videos.",
+       aliases=("Pre-trained", "Kinetics", "Kinetics-400"), see=("R3D",)),
+    _e("Subsample cap", "Active Learning > Learning",
+       "The most points a UMAP plot uses. Labeled clips are always kept. The "
+       "rest are a random sample taken evenly across sessions, which is what "
+       "stratified means.",
+       aliases=("Subsample", "Subsampled", "Stratified", "Stratified subsample",
+                "Downsample"),
+       see=("UMAP",)),
+    _e("Co-activation", "Active Learning > Learning",
+       "When two behavior models score high on the same window. The "
+       "co-activation matrix in Confound Analysis shows how often each pair "
+       "does.",
+       aliases=("Co-activation matrix",), see=("Confound Analysis", "Confound")),
+    _e("Exemplar", "Targeted Clip Mining",
+       "A good example clip you pick to stand for a behavior. Extract Essence "
+       "learns from your exemplars.",
+       aliases=("Exemplars", "Exemplar-like"), see=("Extract Essence",)),
+    _e("Pool", "Targeted Clip Mining, Analytics",
+       "All the windows ABEL can search or pick from. In Clip Mining it is every "
+       "extracted window in the project. Pooled data means sessions or groups "
+       "combined into one set.",
+       aliases=("Pooled", "Pooling"),),
+    _e("Feature schema", "Model Refinement, Direct Use",
+       "The list of feature columns a project or model uses. Two projects share "
+       "a schema when they compute the same features from the same body parts. "
+       "Imports are blocked when the schemas do not match.",
+       aliases=("Schema", "Feature schema coverage", "Incompatible feature schema"),
+       see=("Keypoint Mapping", "Diagnose Models")),
+    _e("Invariant features", "Features",
+       "Features that do not change with something you do not care about. "
+       "Scale-invariant ones ignore animal size and camera zoom. "
+       "Rotation-invariant ones ignore which way the animal faces.",
+       aliases=("Invariant", "Scale-invariant", "Rotation-invariant",
+                "Translation-invariant", "Orientation-invariant", "Posture descriptors"),
+       see=("Body-length normalization", "Egocentric kinematics")),
+    _e("Focal animal", "Features, Review",
+       "The animal a row of features or a label is about. Its partner is the "
+       "other animal.",
+       aliases=("Focal", "Partner"), see=("Social features",)),
+    _e("Conspecific", "Features",
+       "Another animal of the same species. In a two-mouse session, each mouse's "
+       "conspecific is the other mouse.",
+       aliases=("Conspecifics",),),
+    _e("Bounding box", "Features, Analytics",
+       "The smallest upright rectangle that holds something. Around an animal "
+       "it holds all its body parts, and overlap between two animals' boxes is a "
+       "sign of contact. Around a figure it trims the empty margin.",
+       aliases=("Bounding-box overlap", "Tight bounding box"),),
+    _e("Substrate", "Features",
+       "The floor material the animal stands on, such as bedding. Substrate "
+       "motion features pick up digging and burrowing.",
+       aliases=("Substrate motion", "Substrate change"), see=("Local motion",)),
+    _e("Vertex", "ROI",
+       "One corner point of a drawn zone. Vertices is the plural.",
+       aliases=("Vertices",), see=("Compact Polygon ROIs",)),
+    _e("Decimation", "ROI",
+       "Dropping extra points while you draw a freehand zone, so the outline is "
+       "stored with far fewer points.",
+       aliases=("Capture-time decimation", "Freehand ROI"),
+       see=("Compact Polygon ROIs",)),
+    _e("Regex", "Data Import",
+       "Regular expression. A short text pattern for matching part of a file "
+       "name, such as the letter M followed by digits.",
+       aliases=("Regular expression", "Subject regex", "Session regex"),
+       see=("Filename pattern",)),
+    _e("Codec", "Data Import, Temporal > Review",
+       "The method used to compress a video file, such as H.264 or H.265 "
+       "(HEVC). ABEL cannot open some codecs. Re-encode the video to H.264 MP4 "
+       "with FFmpeg or HandBrake, then import it again.",
+       aliases=("H.264", "H.265", "HEVC", "FFmpeg", "HandBrake", "Re-encode"),),
+    _e("Synthetic waveform", "Temporal > Refinement > Configure Suppression",
+       "A made-up probability trace used to preview how suppression settings "
+       "change the result, without touching your data.",
+       aliases=("Synthetic Waveforms", "Waveform"),
+       see=("Configure Suppression", "Probability trace")),
+    _e("Manual Corrections", "Analytics > Graph settings",
+       "Type a hand-scored value over ABEL's value for any session. Corrected "
+       "values replace whole-session values in the Summary table, graphs, "
+       "statistics and exports, and are flagged on Home and Validation. ABEL's "
+       "own value is kept.",
+       aliases=("Manual correction", "Hand-scored value", "Reset Selected Cells",
+                "Reset This Behavior"),),
+    _e("DPI", "Analytics > Graph settings",
+       "Dots per inch. Sets how sharp an exported figure is. About 300 suits "
+       "print and 100 to 150 suits screens.",
+       aliases=("Dots per inch", "Resolution (figure)"), see=("Export Figure",)),
+    _e("Colormap", "Analytics > Density Analysis, Spatial Heatmap",
+       "The color scale that turns numbers into colors on a heatmap. The "
+       "colorbar beside the map shows which color stands for which value.",
+       aliases=("Colorbar", "Color scale"),),
+    _e("Peak normalization", "Analytics > Density Analysis > Group Comparison",
+       "Divides a density map by its highest value so it runs from 0 to 1. Lets "
+       "groups with different amounts of data be compared.",
+       aliases=("Peak-norm",), see=("Difference map",)),
+    _e("FDR correction", "Analytics > Behavior Relationships",
+       "Benjamini-Hochberg. Adjusts p values when many tests run at once, so "
+       "that few of the results called significant are false.",
+       aliases=("FDR", "FDR-BH", "Benjamini-Hochberg", "False discovery rate",
+                "Raw p-values"),
+       see=("P value", "Permutation test")),
+    _e("Two-sided test", "Statistics",
+       "A test that counts a difference in either direction: A above B or B "
+       "above A.",
+       aliases=("Two-sided", "Two-tailed"),),
+    _e("Binomial test", "Analytics > Social Interaction",
+       "Tests whether one animal wins more displacements than a coin flip would "
+       "give. A small p value means the pair has a real winner.",
+       aliases=("Binomial", "p (binomial)"), see=("Displacement", "Dominance index")),
+    _e("Dominance index", "Analytics > Social Interaction",
+       "How one-sided a pair is, from displacements won and lost. 0 means even "
+       "and 1 means one animal always wins. The signed version for one named "
+       "animal runs from -1 (always loses) to +1 (always wins).",
+       see=("Displacement", "Binomial test")),
+    _e("Convergence", "HMM Analysis, Social Interaction",
+       "When a model fit stops improving and settles on an answer. A fit that "
+       "did not converge is unfinished. Raise the restarts or check the data.",
+       aliases=("Converged", "Converge", "Did not converge"), see=("EM restarts",)),
+    _e("Log-likelihood", "HMM Analysis",
+       "How well a fitted model explains the data. Higher is better. Used to "
+       "compare HMM fits.",
+       aliases=("Log likelihood",), see=("AIC / BIC",)),
+    _e("Censored", "HMM Analysis",
+       "A latency cut short because the session ended before the event "
+       "happened. ABEL leaves sessions that never entered a state out of the "
+       "mean instead of counting them as the session length.",
+       aliases=("Censoring", "Never entered"), see=("Latency", "Min dwell")),
+    _e("Null condition", "HMM Analysis, Export",
+       "A stretch of time with none of the events of interest, used as the "
+       "baseline to compare against. HMM_NoState is one: the stretches no state "
+       "bout covers.",
+       aliases=("Within-subject null condition",), see=("Export State Boutframes",)),
+    _e("Percentile", "Validation > Review Effort, Social Interaction",
+       "The value below which a given share of the data falls. The 90th "
+       "percentile is larger than 90% of the values. The median is the 50th.",
+       aliases=("Percentiles", "90th percentile", "Median"),),
+    _e("UTC", "Validation > Review Effort, HMM Analysis",
+       "Coordinated Universal Time, the world clock with no time zone or "
+       "daylight saving shift. ABEL stores timestamps in UTC, so they can be "
+       "several hours off your local clock.",
+       aliases=("Coordinated Universal Time", "First decision (UTC)",
+                "Last decision (UTC)"),),
+    _e("NaN", "Validation > Feature Audit, Logs",
+       "Not a number. Marks a value that is missing or could not be computed.",
+       aliases=("NaN %", "All-NaN", "Missing value"), see=("Dead feature",)),
+    _e("VRAM", "Active Learning > Learning",
+       "Memory on the graphics card. A run that needs more than the card has "
+       "fails or falls back to the CPU.",
+       aliases=("GPU memory", "Video memory", "Out of memory"), see=("GPU",)),
+    _e("Dependency tier", "Settings > Dependencies",
+       "Tier 1 packages are required for ABEL to run. Tier 2 packages are "
+       "optional and add speed, preprocessing or analytics extras.",
+       aliases=("Tier", "tier1", "tier2"), see=("Install All Dependencies",)),
+    _e("Traceback", "Settings > Logs",
+       "The list of code steps that led to an error, printed in the log. Send "
+       "it with a bug report.",
+       see=("Logs", "Copy Diagnostic Report")),
+    _e("Enrichment", "Settings > Logs",
+       "Computing features for labeled windows that are not on the current "
+       "window grid, so their labels can still be used in training. Shows up in "
+       "the log during training.",
+       aliases=("Enriched", "Enriched segments"), see=("Backfill",)),
+    _e("Backfill", "Settings > Logs",
+       "Filling in values that were missing, after the fact. ABEL backfills R3D "
+       "features for labeled windows that lack them.",
+       aliases=("Backfilling", "Backfilled"), see=("Enrichment", "R3D")),
+
     # ── Files ────────────────────────────────────────────────────────────
     _e("derived folder", "Project folder",
        "Where ABEL keeps what it computes: features, models, labels, bouts and "
@@ -1556,6 +1823,10 @@ ENTRIES: tuple[GlossaryEntry, ...] = (
     _e("Parquet", "Project folder",
        "A compact table file format ABEL uses for features, labels and bouts.",
        aliases=(".parquet",),),
+    _e("JSON and YAML", "Project folder",
+       "Plain text file formats ABEL uses for settings and small tables. They "
+       "open in any text editor.",
+       aliases=("JSON", "YAML", ".json", ".yaml", "Config file"),),
 )
 
 

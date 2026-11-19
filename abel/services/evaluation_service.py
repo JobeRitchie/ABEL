@@ -730,6 +730,35 @@ class EvaluationService:
         ))
         return out, label_map
 
+    @staticmethod
+    def _segment_meta_from_predictions(models_root: Path) -> pd.DataFrame:
+        """Segment metadata rebuilt from the models' prediction files.
+
+        Used when the representation cache is missing. Segment ids have the
+        form ``seg_<animal>_<session_id>_<start>_<end>`` (see
+        ``BehaviorService``), so session, animal and frame range are parsed
+        from the id. Ids that do not match keep only ``segment_id``.
+        """
+        ids: set[str] = set()
+        if models_root.exists():
+            for p in models_root.glob("behavior_model_*/segment_predictions.parquet"):
+                try:
+                    ids.update(pd.read_parquet(p, columns=["segment_id"])["segment_id"].astype(str))
+                except Exception:
+                    logger.debug("Unreadable prediction file %s", p, exc_info=True)
+        if not ids:
+            return pd.DataFrame()
+        df = pd.DataFrame({"segment_id": sorted(ids)})
+        parts = df["segment_id"].str.extract(
+            r"^seg_(?P<animal_id>.+?)_(?P<session_id>session_[0-9A-Za-z]+)_(?P<start_frame>-?\d+)_(?P<end_frame>-?\d+)$"
+        )
+        ok = parts["session_id"].notna()
+        df["session_id"] = parts["session_id"].where(ok, "")
+        df["animal_id"] = parts["animal_id"].where(ok, "")
+        df["start_frame"] = pd.to_numeric(parts["start_frame"], errors="coerce").fillna(-1).astype(int)
+        df["end_frame"] = pd.to_numeric(parts["end_frame"], errors="coerce").fillna(-1).astype(int)
+        return df
+
     def generate_unified_umap(
         self,
         project_root: Path,
@@ -760,25 +789,35 @@ class EvaluationService:
         rep_dir = project_root / "derived" / "representations"
 
         # --- Load segment features -----------------------------------------------
-        seg_path = rep_dir / "segment_features.parquet"
-        if not seg_path.exists():
-            return {"error": "segment_features.parquet not found."}
-
         # Load ONLY metadata columns: segment_features.parquet is 1-2 GB on
         # disk and 10+ GB decompressed. We only need identifier columns here;
         # prediction probabilities are loaded separately per-model below.
         # Skipping raw feature columns also causes _numeric_feature_columns()
         # to return [] which naturally bypasses the expensive pre-subsample PCA.
         _seg_meta_cols = ["segment_id", "session_id", "start_frame", "end_frame", "animal_id"]
-        try:
-            import pyarrow.parquet as _pq
-            _available = set(_pq.read_schema(str(seg_path)).names)
-            _load_cols = [c for c in _seg_meta_cols if c in _available]
-        except Exception:
-            _load_cols = _seg_meta_cols
-        seg_df = pd.read_parquet(seg_path, columns=_load_cols if _load_cols else None)
+        seg_path = rep_dir / "segment_features.parquet"
+        _load_cols: list[str] = _seg_meta_cols
+        seg_df = pd.DataFrame()
+        if seg_path.exists():
+            try:
+                import pyarrow.parquet as _pq
+                _available = set(_pq.read_schema(str(seg_path)).names)
+                _load_cols = [c for c in _seg_meta_cols if c in _available]
+            except Exception:
+                _load_cols = _seg_meta_cols
+            try:
+                seg_df = pd.read_parquet(seg_path, columns=_load_cols if _load_cols else None)
+            except Exception:
+                logger.warning("Unified UMAP: could not read %s; using model predictions instead.", seg_path, exc_info=True)
+                seg_df = pd.DataFrame()
+        # The representation cache is optional here: it is absent after a
+        # session-subset run or a disk cleanup. Every model's prediction file
+        # lists the scored segment ids, and those ids encode the metadata.
         if "segment_id" not in seg_df.columns or seg_df.empty:
-            return {"error": "Segment features are empty or malformed."}
+            seg_df = self._segment_meta_from_predictions(models_root)
+            _load_cols = [c for c in _seg_meta_cols if c in seg_df.columns]
+            if seg_df.empty:
+                return {"error": "No segment features or model predictions found."}
 
         # Include enriched segments (computed on-the-fly for reviewed labels)
         # so that reviewed-label segments are represented in the embedding.
@@ -865,12 +904,23 @@ class EvaluationService:
         merged = seg_df[_meta_cols].copy()
         prob_cols: list[str] = []
         bid_list: list[str] = []
+        skipped_behaviors: list[str] = []
         for bid, md in latest_by_behavior.items():
+            # A model whose training failed or was interrupted can leave no
+            # prediction file or a truncated one. Leave that behavior out of
+            # the map instead of failing the whole embedding.
             pred_path = md / "segment_predictions.parquet"
-            if not pred_path.exists():
+            try:
+                pred = pd.read_parquet(pred_path, columns=["segment_id", "prediction_prob"])
+            except Exception:
+                logger.warning(
+                    "Unified UMAP: skipping %s, no readable predictions in %s.",
+                    bname.get(bid, bid), md.name, exc_info=True,
+                )
+                skipped_behaviors.append(bname.get(bid, bid))
                 continue
-            pred = pd.read_parquet(pred_path)
-            if "segment_id" not in pred.columns or "prediction_prob" not in pred.columns:
+            if pred.empty or not pred["prediction_prob"].notna().any():
+                skipped_behaviors.append(bname.get(bid, bid))
                 continue
             col = f"prob_{bid}"
             pred = pred[["segment_id", "prediction_prob"]].rename(columns={"prediction_prob": col})
@@ -880,6 +930,17 @@ class EvaluationService:
 
         if not prob_cols:
             return {"error": "No valid prediction files found."}
+
+        # Active behaviors with no trained model at all (training failed or was
+        # never run) are also left out; report them so the log says why.
+        for _bid, _name in bname.items():
+            if _bid not in latest_by_behavior and _name not in skipped_behaviors:
+                skipped_behaviors.append(_name)
+        if skipped_behaviors:
+            logger.info(
+                "Unified UMAP: built without %d behavior(s) that have no usable model: %s",
+                len(skipped_behaviors), ", ".join(skipped_behaviors),
+            )
 
         merged[prob_cols] = merged[prob_cols].fillna(0.0)
 
@@ -1607,6 +1668,7 @@ class EvaluationService:
             "out_path": str(out_path) if out_path else None,
             "n_segments": int(len(x)),
             "behaviors_used": [bname.get(b, b) for b in bid_list],
+            "behaviors_skipped": skipped_behaviors,
             "method": method,
         }
         write_json(out_dir / "unified_umap_report.json", result)

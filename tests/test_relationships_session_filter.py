@@ -74,3 +74,28 @@ def test_stale_level_is_ignored_not_excluding_everything(monkeypatch) -> None:
 def test_filter_round_trips_through_settings_json(tmp_path) -> None:
     bms.save_motif_settings(tmp_path, MotifSettings(session_filter={"Phase": "Conditioning"}))
     assert bms.load_motif_settings(tmp_path).session_filter == {"Phase": "Conditioning"}
+
+
+def test_groups_survive_a_graphs_level_filter_on_another_level() -> None:
+    """Graphs filtered to one Phase must not ungroup the panel's other Phase."""
+    from abel.ui.tabs.behavior_analytics_tab import (
+        FACET_COMBINE, FACET_SPLIT, facet_session_labels,
+    )
+
+    p = _panel({"Phase": "Extinction"})
+    host = p._host
+    factors = ["Phase", "Sex"]
+    host._facet_controls = {"Phase": "Conditioning", "Sex": FACET_SPLIT}
+    host._session_groups_for_controls = lambda c: facet_session_labels(
+        host._session_factors, factors, c
+    )[0]
+    # What the panel used to read: only the Graphs-filtered (Conditioning) rows.
+    host._session_groups = host._session_groups_for_controls(host._facet_controls)
+    assert set(host._session_groups) == {"M1 cond", "M2 cond"}
+
+    p._panel_session_groups = lambda: W._panel_session_groups(p)
+    assert W._build_session_group_map(p, {"s2": [], "s4": []}) == {"s2": "F", "s4": "M"}
+
+    # Split and combine choices on the Graphs tab still carry over.
+    host._facet_controls = {"Phase": FACET_COMBINE, "Sex": FACET_COMBINE}
+    assert W._build_session_group_map(p, {"s2": [], "s4": []}) == {"s2": "All", "s4": "All"}

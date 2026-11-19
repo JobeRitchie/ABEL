@@ -2111,7 +2111,7 @@ _GRID_RESOLUTIONS = [("720 px", 720), ("1080 px", 1080), ("1440 px", 1440)]
 
 
 class BehaviorGridPanel(QWidget):
-    """Builds a 5×5 looping montage of strong positive bouts for one behavior."""
+    """Builds a rows×columns looping montage of positive bouts for one behavior."""
 
     def __init__(self, service: ValidationService, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2127,10 +2127,11 @@ class BehaviorGridPanel(QWidget):
         header = QLabel("Behavior Grid")
         header.setStyleSheet("font-size: 16px; font-weight: 700; color: #ECEFF1;")
         subtitle = QLabel(
-            "A 5×5 montage of positive bouts of one behavior, sampled across "
+            "A montage of positive bouts of one behavior, sampled across "
             "sessions, with pose keypoints overlaid. Choose “Strongest bouts” for the "
             "most-confident detections, or “Probability bands” to make each row a "
-            "different probability range. Generate, preview, and export."
+            "different probability range, labelled with its average confidence. "
+            "Generate, preview, and export."
         )
         subtitle.setStyleSheet("color: #90A4AE; font-size: 12px;")
         subtitle.setWordWrap(True)
@@ -2192,13 +2193,24 @@ class BehaviorGridPanel(QWidget):
         self._layout_combo.addItem("Strongest bouts", userData="strongest")
         self._layout_combo.addItem("Probability bands (per row)", userData="bands")
         self._layout_combo.setToolTip(
-            "How the 5×5 grid is filled.\n\n"
+            "How the grid is filled.\n\n"
             "• Strongest bouts: every cell shows the most-confident detections.\n"
             "• Probability bands: each row is a different probability range (top "
             "row = highest-probability bouts, bottom = lowest accepted), so you can "
             "see the full range of what is accepted as positive for this behavior."
         )
         self._layout_combo.currentIndexChanged.connect(self._on_layout_changed)
+
+        self._spin_rows = QSpinBox()
+        self._spin_cols = QSpinBox()
+        for sp in (self._spin_rows, self._spin_cols):
+            sp.setRange(1, 10)
+            sp.setValue(5)
+            sp.valueChanged.connect(self._on_shape_changed)
+        self._spin_rows.setToolTip(
+            "Number of grid rows. In Probability bands layout each row is one band."
+        )
+        self._spin_cols.setToolTip("Number of grid columns (bouts per row).")
 
         self._res_combo = QComboBox()
         for label, _px in _GRID_RESOLUTIONS:
@@ -2231,6 +2243,8 @@ class BehaviorGridPanel(QWidget):
             labelled("Crop:", self._spin_crop),
             labelled("Resolution:", self._res_combo),
             labelled("Layout:", self._layout_combo),
+            labelled("Rows:", self._spin_rows),
+            labelled("Columns:", self._spin_cols),
             self._keypoints_chk,
             labelled("Dot size:", self._spin_kp_size),
             labelled("Border:", self._spin_kp_border),
@@ -2289,8 +2303,15 @@ class BehaviorGridPanel(QWidget):
             kp = float(getattr(settings, "behavior_grid_keypoint_scale", 1.0))
             border = float(getattr(settings, "behavior_grid_keypoint_border_scale", 1.0))
             layout = str(getattr(settings, "behavior_grid_layout", "strongest"))
+            n_rows = int(getattr(settings, "behavior_grid_rows", 5))
+            n_cols = int(getattr(settings, "behavior_grid_cols", 5))
         except Exception:
             crop, kp, border, layout = 1.0, 1.0, 1.0, "strongest"
+            n_rows = n_cols = 5
+        for sp, val in ((self._spin_rows, n_rows), (self._spin_cols, n_cols)):
+            sp.blockSignals(True)
+            sp.setValue(val)
+            sp.blockSignals(False)
         self._spin_crop.blockSignals(True)
         self._spin_crop.setValue(crop)
         self._spin_crop.blockSignals(False)
@@ -2351,6 +2372,18 @@ class BehaviorGridPanel(QWidget):
         except Exception:
             logger.exception("Behavior grid: failed to persist grid layout")
 
+    def _on_shape_changed(self, _value: int) -> None:
+        """Persist the grid's row and column counts."""
+        if self._project_root is None:
+            return
+        try:
+            settings = self._service.load_settings()
+            settings.behavior_grid_rows = int(self._spin_rows.value())
+            settings.behavior_grid_cols = int(self._spin_cols.value())
+            self._service.save_settings(settings)
+        except Exception:
+            logger.exception("Behavior grid: failed to persist grid shape")
+
     def _reload_behaviors(self) -> None:
         self._behavior_combo.blockSignals(True)
         self._behavior_combo.clear()
@@ -2392,6 +2425,8 @@ class BehaviorGridPanel(QWidget):
             keypoint_scale=float(self._spin_kp_size.value()),
             keypoint_border_scale=float(self._spin_kp_border.value()),
             layout=str(self._layout_combo.currentData() or "strongest"),
+            rows=int(self._spin_rows.value()),
+            cols=int(self._spin_cols.value()),
         )
         worker.signals.finished.connect(self._on_generated)
         worker.signals.failed.connect(self._on_generate_failed)

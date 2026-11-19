@@ -232,6 +232,10 @@ class BehaviorModelConfig(BaseModel):
     Requires torch/torchvision plus a reachable video and pose for each session;
     sessions that can't be resolved are simply left without the columns.
     Gated by ``use_video_features``, pixel features off means these are off too."""
+    video_embedding_backbone: str = "r3d_18"
+    """Network behind the appearance embedding: ``"r3d_18"`` (3D video network,
+    16 frames, ``r3d_*`` columns) or ``"resnet18"`` (ImageNet 2D network on 4
+    frames, ``rn18_*`` columns, about 14x faster on GPU)."""
     advanced_roi_features: bool = True
     """When True, every ROI contributes shape-aware features (inside flag, signed
     distance to the boundary, nearest-corner distance, normalized axial/lateral
@@ -815,6 +819,9 @@ class ValidationSettings(BaseModel):
     # probability band (top row = highest-probability bouts, bottom = lowest
     # accepted) so the reviewer sees the full range of what counts as positive.
     behavior_grid_layout: str = "strongest"
+    # Behavior Grid panel: grid shape. In "bands" layout each row is one band.
+    behavior_grid_rows: int = 5
+    behavior_grid_cols: int = 5
 
 
 class ValidationClipRecord(BaseModel):

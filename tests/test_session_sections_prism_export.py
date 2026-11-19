@@ -64,6 +64,9 @@ class _Stub:
     def _get_aggregate(self):
         return "section"
 
+    def _events_mode(self):
+        return False
+
 
 def _host(raw_bouts, summary_rows, groups=None, order=None):
     labels = {r["session_id"]: r["session_label"] for r in summary_rows}
@@ -182,8 +185,8 @@ class TestWorkbook:
     def test_sheet_order_opens_on_chart_metric(self, tmp_path):
         wb = self._export(tmp_path, metric="pct_time")
         assert wb.sheetnames == [
-            "Prism - % Time", "Prism - Bout Count", "Prism - Duration (s)",
-            "Long Format", "README",
+            "Prism - % Time", "Prism - Bout Count", "Prism - Bouts per min",
+            "Prism - Duration (s)", "Long Format", "README",
         ]
 
     def test_individual_block_layout(self, tmp_path):
@@ -213,6 +216,7 @@ class TestWorkbook:
         rows = self._rows(self._export(tmp_path)["Long Format"])
         assert rows[0] == [
             "Session", "Behavior", "Section", "Section Type", "Section Order",
-            "Avg Bout Count", "Avg Duration (s)", "Avg % Time In Section",
+            "Section Length (s)", "Avg Bout Count", "Avg Bouts per Minute",
+            "Avg Duration (s)", "Avg % Time In Section",
         ]
         assert len(rows) == 1 + 3 * 2 * 3

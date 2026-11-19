@@ -472,6 +472,9 @@ class DirectRunService:
                 window_stride_frames=snapshot.segment_stride_frames,
                 excluded_feature_cols=frozenset(snapshot.excluded_feature_cols),
                 use_r3d_features=_use_r3d,
+                video_embedding_backbone=self._resolve_video_backbone(
+                    snapshot, source_project_root,
+                ),
             )
             pose_feat_path = target_project_root / "derived" / "pose_features" / "frame_pose.parquet"
             ctx_feat_path = (
@@ -865,6 +868,25 @@ class DirectRunService:
             source_project_root / "derived" / "context_features"
             / "frame_context.parquet"
         ).exists()
+
+    @staticmethod
+    def _resolve_video_backbone(
+        snapshot: WorkflowSnapshot, source_project_root: Path,
+    ) -> str:
+        """The embedding network the source models were trained on.
+
+        Read from the snapshot's extraction settings, then the source project,
+        never from the target: a target project's own setting must not hand an
+        R3D-trained model ResNet-18 numbers.
+        """
+        from abel.services.r3d_feature_service import (  # noqa: PLC0415
+            normalize_backbone, resolve_project_backbone,
+        )
+
+        fx = getattr(snapshot, "feature_extraction_settings", None) or {}
+        if "video_embedding_backbone" in fx:
+            return normalize_backbone(fx["video_embedding_backbone"])
+        return resolve_project_backbone(source_project_root)
 
     @staticmethod
     def _resolve_use_r3d_features(

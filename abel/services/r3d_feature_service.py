@@ -98,25 +98,118 @@ _model_lock = threading.Lock()
 _MODELS: dict[str, Any] = {}
 
 
+# ── Video embedding backbones ────────────────────────────────────────────
+# Each backbone writes its own column block and its own cache folder, so a
+# trained model's feature list names the network it needs, and switching the
+# project setting can never feed a model one network's numbers under the
+# other's column names.
+#
+# ResNet-18 exists because a 2026-11-19 pilot (ABEL Validation/r3d_speed_pilot)
+# found that an ImageNet ResNet-18 run on 4 frames of the same crop kept 105% of
+# R3D's PR-AUC gain on 3_chamber_social and 77% on DG_EPM, at 14x the GPU
+# throughput.  It sees no motion, so behaviors defined by fast movement that
+# pose misses are where R3D may still earn its cost.
+BACKBONE_R3D = "r3d_18"
+BACKBONE_RESNET18 = "resnet18"
+DEFAULT_BACKBONE = BACKBONE_R3D
+RN18_PREFIX = "rn18_"
+RN18_SAMPLE_FRAMES = 4
+
+BACKBONES: dict[str, dict[str, str]] = {
+    BACKBONE_R3D: {
+        "prefix": R3D_PREFIX,
+        "label": "R3D",
+        "cache_dir": "r3d_features",
+        "cache_version": _CACHE_VERSION,
+        "dense_cache_version": _DENSE_CACHE_VERSION,
+    },
+    BACKBONE_RESNET18: {
+        "prefix": RN18_PREFIX,
+        "label": "ResNet-18",
+        "cache_dir": "rn18_features",
+        "cache_version": "rn18_v1",
+        "dense_cache_version": "rn18_dense_v1",
+    },
+}
+VIDEO_EMBEDDING_PREFIXES: tuple[str, ...] = tuple(b["prefix"] for b in BACKBONES.values())
+
+# Standard torchvision ImageNet statistics, for the 2D backbone.
+_IMAGENET2D_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET2D_STD = (0.229, 0.224, 0.225)
+
+
+def normalize_backbone(name: Any) -> str:
+    """Return a known backbone key; anything unrecognized falls back to R3D-18."""
+    key = str(name or "").strip().lower().replace("-", "").replace("_", "")
+    if key in ("resnet18", "rn18", "resnet"):
+        return BACKBONE_RESNET18
+    return BACKBONE_R3D
+
+
+def embedding_columns(backbone: str = DEFAULT_BACKBONE) -> list[str]:
+    """Column names of one backbone's embedding, in order."""
+    prefix = BACKBONES[normalize_backbone(backbone)]["prefix"]
+    return [f"{prefix}{i:03d}" for i in range(R3D_DIMS)]
+
+
 def r3d_columns() -> list[str]:
-    """Canonical column names, in order."""
-    return [f"{R3D_PREFIX}{i:03d}" for i in range(R3D_DIMS)]
+    """Canonical R3D column names, in order."""
+    return embedding_columns(BACKBONE_R3D)
 
 
 def is_r3d_column(name: str) -> bool:
     return str(name).startswith(R3D_PREFIX)
 
 
-def _get_model(device_name: str):
-    """Return a cached, eval-mode R3D-18 for ``device_name`` (loads once)."""
+def is_video_embedding_column(name: str) -> bool:
+    """True for one dimension of any video embedding (R3D or ResNet-18)."""
+    return str(name).startswith(VIDEO_EMBEDDING_PREFIXES)
+
+
+def backbones_in_columns(cols: Any) -> list[str]:
+    """Backbones whose embedding columns appear in ``cols``, in a stable order."""
+    names = [str(c) for c in (() if cols is None else cols)]
+    return [
+        key for key, spec in BACKBONES.items()
+        if any(n.startswith(spec["prefix"]) for n in names)
+    ]
+
+
+def resolve_project_backbone(project_root: "Path | None") -> str:
+    """The backbone a project's Feature Extraction tab selected (R3D-18 default)."""
+    if project_root is None:
+        return DEFAULT_BACKBONE
+    try:
+        from abel.storage.file_store import read_yaml
+
+        raw = read_yaml(Path(project_root) / "project.yaml", {}) or {}
+        for block in ("feature_extraction", "behavior_model"):
+            cfg = raw.get(block) or {}
+            if "video_embedding_backbone" in cfg:
+                return normalize_backbone(cfg["video_embedding_backbone"])
+    except Exception:
+        logger.debug("Could not read video embedding backbone for %s", project_root, exc_info=True)
+    return DEFAULT_BACKBONE
+
+
+def _get_model(device_name: str, backbone: str = DEFAULT_BACKBONE):
+    """Return a cached, eval-mode backbone for ``device_name`` (loads once)."""
     with _model_lock:
-        model = _MODELS.get(device_name)
+        key = f"{backbone}:{device_name}"
+        model = _MODELS.get(key)
         if model is None:
             import torch
-            from torchvision.models.video import R3D_18_Weights, r3d_18
 
-            model = r3d_18(weights=R3D_18_Weights.DEFAULT).to(torch.device(device_name)).eval()
-            _MODELS[device_name] = model
+            if backbone == BACKBONE_RESNET18:
+                from torchvision.models import ResNet18_Weights, resnet18
+
+                model = resnet18(weights=ResNet18_Weights.DEFAULT)
+            else:
+                from torchvision.models.video import R3D_18_Weights, r3d_18
+
+                model = r3d_18(weights=R3D_18_Weights.DEFAULT)
+            model = model.to(torch.device(device_name)).eval()
+            _MODELS[key] = model
         return model
 
 
@@ -124,16 +217,49 @@ class R3DUnavailable(RuntimeError):
     """Raised when torch/torchvision or the pretrained weights aren't usable."""
 
 
-def _forward_batch(batch: np.ndarray, device_name: str) -> np.ndarray:
+def _forward_resnet18(batch: np.ndarray, device_name: str) -> np.ndarray:
+    """``(n, 16, 112, 112, 3)`` uint8 → ``(n, 512)``: ResNet-18 on 4 frames, averaged.
+
+    Four frames evenly spaced through the clip each pass through the ImageNet
+    trunk to ``layer4``; the spatially pooled vectors are averaged over frames.
+    Frame order is not used, so this is an appearance feature only.
+    """
+    import torch
+
+    dev = torch.device(device_name)
+    model = _get_model(device_name, BACKBONE_RESNET18)
+    half = device_name == "cuda"
+    t_idx = np.linspace(0, batch.shape[1] - 1, num=RN18_SAMPLE_FRAMES).round().astype(int)
+    frames = np.ascontiguousarray(batch[:, t_idx])
+    n, t, h, w, c = frames.shape
+    x = torch.from_numpy(frames).to(dev).reshape(n * t, h, w, c).permute(0, 3, 1, 2).float().div_(255.0)
+    mean = torch.tensor(_IMAGENET2D_MEAN, device=dev).view(1, 3, 1, 1)
+    std = torch.tensor(_IMAGENET2D_STD, device=dev).view(1, 3, 1, 1)
+    x = (x - mean) / std
+    if half:
+        x = x.contiguous(memory_format=torch.channels_last)
+    with torch.no_grad(), torch.autocast("cuda", torch.float16, enabled=half):
+        f = model.maxpool(model.relu(model.bn1(model.conv1(x))))
+        f = model.layer4(model.layer3(model.layer2(model.layer1(f))))
+        pooled = f.float().mean(dim=(2, 3)).view(n, t, -1).mean(dim=1)
+    return pooled.detach().cpu().numpy().astype(np.float32)
+
+
+def _forward_batch(
+    batch: np.ndarray, device_name: str, backbone: str = DEFAULT_BACKBONE
+) -> np.ndarray:
     """``(n, 16, 112, 112, 3)`` uint8 → ``(n, 512)`` float32 on one device.
 
     CUDA runs fp16 under autocast in ``channels_last_3d``; the CPU fallback stays
     fp32 in contiguous layout, where neither helps.
     """
+    if backbone == BACKBONE_RESNET18:
+        return _forward_resnet18(batch, device_name)
+
     import torch
 
     dev = torch.device(device_name)
-    model = _get_model(device_name)
+    model = _get_model(device_name, BACKBONE_R3D)
     half = device_name == "cuda"
     mean = torch.tensor(_IMAGENET_MEAN, device=dev).view(1, 3, 1, 1, 1)
     std = torch.tensor(_IMAGENET_STD, device=dev).view(1, 3, 1, 1, 1)
@@ -155,11 +281,22 @@ def _forward_batch(batch: np.ndarray, device_name: str) -> np.ndarray:
 
 
 class R3DFeatureService:
-    """Compute and cache per-segment R3D-18 appearance embeddings."""
+    """Compute and cache per-segment video appearance embeddings.
 
-    def __init__(self) -> None:
+    ``backbone`` picks the network: R3D-18 (``r3d_*`` columns, the default) or
+    ResNet-18 on 4 frames (``rn18_*``).  Each has its own cache folder.
+    """
+
+    def __init__(self, backbone: str = DEFAULT_BACKBONE) -> None:
         self._imports = ImportService()
         self._pose = PoseProcessingService()
+        self.backbone = normalize_backbone(backbone)
+        spec = BACKBONES[self.backbone]
+        self._label = spec["label"]
+        self._cols = embedding_columns(self.backbone)
+        self._cache_dir = spec["cache_dir"]
+        self._cache_version = spec["cache_version"]
+        self._dense_cache_version = spec["dense_cache_version"]
 
     # ── Public API ───────────────────────────────────────────────────────
     def attach(
@@ -191,7 +328,7 @@ class R3DFeatureService:
 
         manifest = self._imports.load_manifest(project_root)
         if manifest is None:
-            _log("R3D features: no import manifest; skipping.")
+            _log(f"{self._label} features: no import manifest; skipping.")
             return segment_df
 
         frames: list[pd.DataFrame] = []
@@ -199,32 +336,32 @@ class R3DFeatureService:
         n_ok = 0
         for i, session_id in enumerate(sessions, 1):
             grp = segment_df.loc[segment_df["session_id"].astype(str) == session_id]
-            _log(f"R3D features: session {i}/{len(sessions)} ({len(grp)} segments)…")
+            _log(f"{self._label} features: session {i}/{len(sessions)} ({len(grp)} segments)…")
             try:
                 frames.append(self._session_embeddings(project_root, manifest, session_id, grp))
                 n_ok += 1
             except Exception as exc:
                 if strict:
                     raise
-                logger.warning("R3D features skipped for %s: %s", session_id, exc)
-                _log(f"R3D features: skipped {session_id} ({exc}).")
+                logger.warning("%s features skipped for %s: %s", self._label, session_id, exc)
+                _log(f"{self._label} features: skipped {session_id} ({exc}).")
 
         if not frames:
-            _log("R3D features: no session produced embeddings.")
+            _log(f"{self._label} features: no session produced embeddings.")
             return segment_df
         emb = pd.concat(frames, ignore_index=True)
         out = segment_df.merge(emb, on="segment_id", how="left")
-        _log(f"R3D features: {len(emb)} segments embedded across {n_ok}/{len(sessions)} sessions.")
+        _log(f"{self._label} features: {len(emb)} segments embedded across {n_ok}/{len(sessions)} sessions.")
         return out
 
     # ── Per-session extraction (cached) ──────────────────────────────────
     def _cache_path(self, project_root: Path, session_id: str) -> Path:
-        return project_root / "derived" / "r3d_features" / f"{session_id}.parquet"
+        return project_root / "derived" / self._cache_dir / f"{session_id}.parquet"
 
     def _session_embeddings(
         self, project_root: Path, manifest: Any, session_id: str, grp: pd.DataFrame
     ) -> pd.DataFrame:
-        cols = r3d_columns()
+        cols = self._cols
         seg_ids = grp["segment_id"].astype(str).tolist()
         starts = grp["start_frame"].to_numpy(dtype=int)
         ends = grp["end_frame"].to_numpy(dtype=int)
@@ -235,7 +372,7 @@ class R3DFeatureService:
         if cache_path.exists():
             try:
                 cached = pd.read_parquet(cache_path)
-                if str(cached.attrs.get("cache_version", _CACHE_VERSION)) != _CACHE_VERSION:
+                if str(cached.attrs.get("cache_version", self._cache_version)) != self._cache_version:
                     cached = pd.DataFrame()
                 # A segment id survives an identity correction unchanged while the
                 # animal inside its crop box does not, so the id alone cannot say
@@ -273,7 +410,7 @@ class R3DFeatureService:
         merged = merged.drop_duplicates(subset="segment_id", keep="last")
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
-            merged.attrs["cache_version"] = _CACHE_VERSION
+            merged.attrs["cache_version"] = self._cache_version
             merged.attrs["identity_signature"] = identity_sig
             merged.to_parquet(cache_path, index=False)
         except Exception as exc:  # cache is an optimization, never a hard failure
@@ -628,7 +765,8 @@ class R3DFeatureService:
                 raise RuntimeError("no anchor fits the session")
 
             signature = self._dense_signature(
-                manifest, Path(video_path), Path(pose_path), session_id
+                manifest, Path(video_path), Path(pose_path), session_id,
+                cache_version=self._dense_cache_version,
             )
             cached = self._load_dense_anchors(
                 project_root, session_id, window_frames, signature, animal_id=animal_key
@@ -648,11 +786,11 @@ class R3DFeatureService:
                     animal_id=animal_key,
                 )
         except Exception as exc:
-            logger.warning("R3D dense features skipped for %s: %s", session_id, exc)
-            _log(f"R3D dense features: skipped {session_id} ({exc}).")
+            logger.warning("%s dense features skipped for %s: %s", self._label, session_id, exc)
+            _log(f"{self._label} dense features: skipped {session_id} ({exc}).")
             return dense_df
 
-        cols = r3d_columns()
+        cols = self._cols
         centre = starts + (window_frames - 1) / 2.0
         anchor_centre = anchors + (window_frames - 1) / 2.0
         values = np.empty((len(starts), R3D_DIMS), dtype=np.float32)
@@ -718,9 +856,9 @@ class R3DFeatureService:
             start_of = dict(zip(seg["segment_id"].astype(str), seg["start_frame"].astype(int)))
 
             df = pd.read_parquet(cache_path)
-            if str(df.attrs.get("cache_version", _CACHE_VERSION)) != _CACHE_VERSION:
+            if str(df.attrs.get("cache_version", self._cache_version)) != self._cache_version:
                 return {}
-            cols = r3d_columns()
+            cols = self._cols
             if any(c not in df.columns for c in cols):
                 return {}
             rows = df[cols].to_numpy(dtype=np.float32)
@@ -742,7 +880,7 @@ class R3DFeatureService:
         window_frames: int,
         animal_id: "str | None" = None,
     ) -> tuple[Path, Path]:
-        base = project_root / "derived" / "r3d_features" / "dense_anchors"
+        base = project_root / "derived" / self._cache_dir / "dense_anchors"
         # Single-animal sessions keep the original name so their caches stay valid.
         animal = f"__{re.sub(r'[^A-Za-z0-9_.-]+', '_', str(animal_id))}" if animal_id else ""
         stem = f"{session_id}{animal}__w{int(window_frames)}"
@@ -750,7 +888,11 @@ class R3DFeatureService:
 
     @staticmethod
     def _dense_signature(
-        manifest: Any, video_path: Path, pose_path: Path, session_id: str | None = None
+        manifest: Any,
+        video_path: Path,
+        pose_path: Path,
+        session_id: str | None = None,
+        cache_version: str = _DENSE_CACHE_VERSION,
     ) -> dict[str, Any]:
         """What the cached anchors depend on, beyond the window geometry.
 
@@ -760,7 +902,7 @@ class R3DFeatureService:
         pose file, a change to smoothing or a new swap correction all invalidate
         the cache; nothing else does.
         """
-        sig: dict[str, Any] = {"cache_version": _DENSE_CACHE_VERSION}
+        sig: dict[str, Any] = {"cache_version": cache_version}
         for key, path in (("video", video_path), ("pose", pose_path)):
             entry: dict[str, Any] = {"name": Path(path).name}
             try:
@@ -834,7 +976,7 @@ class R3DFeatureService:
             return {}
         try:
             df = pd.read_parquet(parquet_path)
-            cols = r3d_columns()
+            cols = self._cols
             if "start_frame" not in df.columns or any(c not in df.columns for c in cols):
                 return {}
             rows = df[cols].to_numpy(dtype=np.float32)
@@ -862,7 +1004,7 @@ class R3DFeatureService:
             project_root, session_id, window_frames, animal_id
         )
         try:
-            df = pd.DataFrame(emb, columns=r3d_columns())
+            df = pd.DataFrame(emb, columns=self._cols)
             df.insert(0, "start_frame", np.asarray(anchors, dtype=int))
             df = df.drop_duplicates(subset="start_frame", keep="last")
             atomic_write_parquet(df, parquet_path, index=False)
@@ -873,7 +1015,7 @@ class R3DFeatureService:
                 "n_anchors": int(len(df)),
                 "signature": signature,
             })
-            log(f"R3D dense features: cached {len(df)} anchors for {session_id}.")
+            log(f"{self._label} dense features: cached {len(df)} anchors for {session_id}.")
         except Exception as exc:  # a cache is an optimization, never a hard failure
             logger.debug("Could not write R3D dense cache for %s: %s", session_id, exc)
 
@@ -912,11 +1054,11 @@ class R3DFeatureService:
                 filled[i] = True
         todo = anchors[~filled]
         if not len(todo):
-            log(f"R3D dense features: {session_id} fully covered by cache.")
+            log(f"{self._label} dense features: {session_id} fully covered by cache.")
             return emb
 
         log(
-            f"R3D dense features: {session_id} embedding {len(todo)} anchors "
+            f"{self._label} dense features: {session_id} embedding {len(todo)} anchors "
             f"({len(anchors) - len(todo)} reused)…"
         )
         offsets = np.linspace(0, window_frames - 1, num=N_SAMPLE_FRAMES, dtype=int)
@@ -998,8 +1140,7 @@ class R3DFeatureService:
         return stack
 
     # ── Batched forward ──────────────────────────────────────────────────
-    @staticmethod
-    def _embed(clips: np.ndarray) -> np.ndarray:
+    def _embed(self, clips: np.ndarray) -> np.ndarray:
         """``(n, 16, 112, 112, 3)`` uint8 → ``(n, 512)`` float32."""
         try:
             import torch
@@ -1019,12 +1160,12 @@ class R3DFeatureService:
                     acquired = _gpu_lock.acquire(timeout=120.0)
                     if not acquired:
                         device_name = "cpu"
-                out.append(_forward_batch(batch, device_name))
+                out.append(_forward_batch(batch, device_name, self.backbone))
             except Exception as exc:
                 if device_name == "cuda":
                     device_name = "cpu"
-                    logger.warning("R3D GPU forward failed (%s); falling back to CPU.", exc)
-                    out.append(_forward_batch(batch, "cpu"))
+                    logger.warning("%s GPU forward failed (%s); falling back to CPU.", self._label, exc)
+                    out.append(_forward_batch(batch, "cpu", self.backbone))
                 else:
                     raise R3DUnavailable(str(exc)) from exc
             finally:

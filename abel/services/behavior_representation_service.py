@@ -222,6 +222,11 @@ class RepresentationConfig:
     # R3D appearance embeddings.  Gated additionally on context/video features
     # being present at all: no pixels means no appearance features.
     use_r3d_features: bool = True
+    # Which network fills the appearance embedding: "r3d_18" (``r3d_*`` columns)
+    # or "resnet18" (``rn18_*``).  ``None`` reads the project's Feature
+    # Extraction setting at build time, so every caller follows the tab without
+    # having to pass it through.
+    video_embedding_backbone: str | None = None
     # DEPRECATED / no-op: feature exclusions are applied at training time, not
     # baked into the representation, so the cache stays valid across exclusion
     # changes.  Retained only for call-site compatibility.  See
@@ -368,13 +373,22 @@ class BehaviorRepresentationService:
         # the toggle is inert on any project that already has a cache, turning
         # it off would keep serving the r3d_* columns, and turning it on would
         # never add them.
-        return {
+        sig = {
             "window_size_frames": int(config.window_size_frames),
             "window_stride_frames": int(config.window_stride_frames),
             "feature_version": str(config.feature_version),
             "model_version": str(config.model_version),
             "use_r3d_features": bool(config.use_r3d_features),
         }
+        # The backbone changes which embedding columns the cache holds.  Only a
+        # non-default backbone is recorded, so caches built before the setting
+        # existed (all R3D) stay valid.
+        from abel.services.r3d_feature_service import DEFAULT_BACKBONE, normalize_backbone
+
+        backbone = normalize_backbone(config.video_embedding_backbone)
+        if config.use_r3d_features and backbone != DEFAULT_BACKBONE:
+            sig["video_embedding_backbone"] = backbone
+        return sig
 
     @staticmethod
     def _canonicalize_distance_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -711,6 +725,14 @@ class BehaviorRepresentationService:
         # cache to *exist* (e.g. pre-building during feature extraction), not
         # the dataframes.  Returns empty frames in that case.
         config = config or RepresentationConfig()
+        if config.video_embedding_backbone is None:
+            from dataclasses import replace as _dc_replace
+
+            from abel.services.r3d_feature_service import resolve_project_backbone
+
+            config = _dc_replace(
+                config, video_embedding_backbone=resolve_project_backbone(project_root)
+            )
 
         def _progress(msg: str) -> None:
             if progress_cb is not None:
@@ -1075,14 +1097,14 @@ class BehaviorRepresentationService:
             try:
                 from abel.services.r3d_feature_service import R3DFeatureService
 
-                segment_df = R3DFeatureService().attach(
+                segment_df = R3DFeatureService(config.video_embedding_backbone).attach(
                     project_root, segment_df, progress_cb=progress_cb
                 )
             except Exception as exc:
                 # Appearance features are additive: a project without torch, or
                 # with unreachable video, must still produce a representation.
-                logger.warning("R3D appearance features skipped: %s", exc)
-                _progress(f"Representation: R3D appearance features skipped ({exc}).")
+                logger.warning("Video appearance features skipped: %s", exc)
+                _progress(f"Representation: video appearance features skipped ({exc}).")
 
         _progress(
             f"Representation: completed frame_rows={len(frame_df)}, segment_rows={len(segment_df)}."

@@ -139,7 +139,7 @@ def data_freshness(project: ProjectRef, df: pd.DataFrame | None = None) -> dict:
     if df is None:
         df = load_training_frame(project)
     own = df.loc[~is_imported(df)] if len(df) else df
-    r3d = [c for c in own.columns if str(c).startswith("r3d_")]
+    r3d = [c for c in own.columns if str(c).startswith(("r3d_", "rn18_"))]
     # A project that switched R3D off keeps its old columns; they are unused, not stale.
     if r3d and len(own) and bool(getattr(project, "use_r3d_features", True)):
         block = own[r3d].to_numpy(dtype="float32", na_value=np.nan)

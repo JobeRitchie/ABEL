@@ -1051,7 +1051,7 @@ class ModelRefinementService:
     # a mismatch makes otherwise-aligned columns not directly comparable.
     _DIAG_CFG_KEYS = (
         "segment_window_frames", "segment_stride_frames",
-        "use_video_features", "use_r3d_features",
+        "use_video_features", "use_r3d_features", "video_embedding_backbone",
     )
     _DIAG_INVARIANT_KEYS = (
         "enable_egocentric_kinematics", "enable_body_length_normalization",
@@ -1208,6 +1208,10 @@ class ModelRefinementService:
             for key in ("use_video_features", "use_r3d_features"):
                 if key in fx:
                     cfg[key] = bool(fx[key])
+            if "video_embedding_backbone" in fx:
+                from abel.services.r3d_feature_service import normalize_backbone
+
+                cfg["video_embedding_backbone"] = normalize_backbone(fx["video_embedding_backbone"])
         return cfg
 
     @classmethod

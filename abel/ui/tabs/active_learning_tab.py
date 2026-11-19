@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
-from PySide6.QtCore import QThreadPool, Qt, Signal, Slot
+from PySide6.QtCore import QEvent, QThreadPool, Qt, Signal, Slot
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -133,6 +133,26 @@ _PRED_COLS = frozenset({
     "uncertainty_score", "uncertainty_entropy", "uncertainty_margin",
     "density_outlier_score",
 })
+
+
+def _latest_label_per_reviewer(labels_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep each reviewer's most recent label per segment.
+
+    Rows are ordered by ``timestamp`` when present (stable, so file order breaks
+    ties), else by file order. ``temporal_feedback`` rows are kept untouched.
+    """
+    if labels_df.empty or "reviewer_id" not in labels_df.columns:
+        return labels_df
+    df = labels_df
+    if "timestamp" in df.columns:
+        order = pd.to_datetime(df["timestamp"], errors="coerce")
+        df = df.assign(_ts=order).sort_values("_ts", kind="stable", na_position="first").drop(columns="_ts")
+    reviewer = df["reviewer_id"].astype(str)
+    feedback = df[reviewer == "temporal_feedback"]
+    rest = df[reviewer != "temporal_feedback"]
+    rest = rest.assign(_rid=rest["reviewer_id"].astype(str), _sid=rest["segment_id"].astype(str))
+    rest = rest.drop_duplicates(subset=["_sid", "_rid"], keep="last").drop(columns=["_sid", "_rid"])
+    return pd.concat([rest, feedback]).sort_index()
 
 
 class PipelineCancelledError(OperationCancelled):
@@ -748,7 +768,13 @@ class ActiveLearningTab(QWidget):
         self._update_viz_help_tooltip()
         self._viz_preview = QLabel("Run training/evaluation to generate a separation graph.")
         self._viz_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._viz_preview.setMinimumHeight(200)
+        # Explicit minimum width: otherwise QLabel's minimum size is the
+        # current pixmap, so the label could never shrink below the last
+        # scaled image.
+        self._viz_preview.setMinimumSize(1, 200)
+        # Rescale the image whenever the label itself resizes (Graph Size
+        # change, splitter drag), not only when the whole tab resizes.
+        self._viz_preview.installEventFilter(self)
         self._viz_preview.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
@@ -4297,6 +4323,7 @@ class ActiveLearningTab(QWidget):
                             f"Unified UMAP complete: {umap_result.get('n_segments', 0)} segments, "
                             f"{umap_result.get('method', 'PCA')}."
                         )
+                        self._log_umap_skipped(umap_result)
                 except Exception as exc:
                     self._append_log(f"Unified UMAP failed: {exc}")
             else:
@@ -5045,10 +5072,19 @@ class ActiveLearningTab(QWidget):
                 f"Unified UMAP complete: {umap_result.get('n_segments', 0)} segments, "
                 f"{umap_result.get('method', 'PCA')}."
             )
+            self._log_umap_skipped(umap_result)
             out_path = umap_result.get("out_path")
             if out_path:
                 self._show_image_in_viz_preview(Path(out_path))
         self._refresh_visualization_preview()
+
+    def _log_umap_skipped(self, umap_result: dict[str, Any]) -> None:
+        skipped = umap_result.get("behaviors_skipped") or []
+        if skipped:
+            self._append_log(
+                "Unified UMAP left out behavior(s) with no usable model: "
+                + ", ".join(str(s) for s in skipped) + "."
+            )
 
     def _on_inline_umap_failed(self, traceback_text: str) -> None:
         self._set_busy(False)
@@ -5165,6 +5201,7 @@ class ActiveLearningTab(QWidget):
         behaviors = payload.get("behaviors_used", [])
         self._status.setText(f"Unified UMAP complete ({method}, {n_segments} segments).")
         self._append_log(f"Unified {method}: {n_segments} segments, behaviors={behaviors}.")
+        self._log_umap_skipped(payload)
         if out_path:
             self._append_log(f"Saved: {out_path}")
             self._show_image_in_viz_preview(Path(out_path))
@@ -7800,7 +7837,33 @@ class ActiveLearningTab(QWidget):
         """
         if enriched_df is None or enriched_df.empty or self._project_root is None:
             return enriched_df, False
-        r3d_cols = [c for c in segment_df.columns if c.startswith("r3d_")]
+        from abel.services.r3d_feature_service import (
+            BACKBONES, R3DFeatureService, backbones_in_columns,
+        )
+
+        out = enriched_df
+        changed = False
+        # Each embedding the segment grid carries (R3D, ResNet-18) is backfilled
+        # with its own network, so the enriched rows match the grid's columns.
+        for backbone in backbones_in_columns(segment_df.columns):
+            out, did = self._backfill_embedding_for_enriched(
+                out, segment_df, backbone, BACKBONES[backbone], R3DFeatureService, progress_cb,
+            )
+            changed = changed or did
+        return out, changed
+
+    def _backfill_embedding_for_enriched(
+        self,
+        enriched_df: pd.DataFrame,
+        segment_df: pd.DataFrame,
+        backbone: str,
+        spec: dict,
+        service_cls,
+        progress_cb: Callable[[str], None] | None = None,
+    ) -> tuple[pd.DataFrame, bool]:
+        """Backfill one backbone's embedding block (see ``_backfill_r3d_for_enriched``)."""
+        label = spec["label"]
+        r3d_cols = [c for c in segment_df.columns if c.startswith(spec["prefix"])]
         if not r3d_cols:
             return enriched_df, False
         req = {"segment_id", "session_id", "start_frame", "end_frame"}
@@ -7816,14 +7879,12 @@ class ActiveLearningTab(QWidget):
 
         subset = enriched_df.loc[needs, ["segment_id", "session_id", "start_frame", "end_frame"]].copy()
         if progress_cb:
-            progress_cb(f"Attaching R3D features to {len(subset)} enriched segment(s)…")
+            progress_cb(f"Attaching {label} features to {len(subset)} enriched segment(s)…")
         try:
-            from abel.services.r3d_feature_service import R3DFeatureService
-
-            embedded = R3DFeatureService().attach(self._project_root, subset, progress_cb=progress_cb)
+            embedded = service_cls(backbone).attach(self._project_root, subset, progress_cb=progress_cb)
         except Exception:
             logger.warning(
-                "Enrichment: R3D backfill failed; enriched rows keep placeholder values.", exc_info=True
+                "Enrichment: %s backfill failed; enriched rows keep placeholder values.", label, exc_info=True
             )
             return enriched_df, False
 
@@ -7847,8 +7908,8 @@ class ActiveLearningTab(QWidget):
 
         out.loc[resolved.index, embedded_r3d_cols] = update.loc[resolved.to_numpy(), embedded_r3d_cols].to_numpy()
         logger.info(
-            "Enrichment: backfilled R3D for %d/%d segment(s) needing it.",
-            len(resolved), int(needs.sum()),
+            "Enrichment: backfilled %s for %d/%d segment(s) needing it.",
+            label, len(resolved), int(needs.sum()),
         )
         return out, True
 
@@ -8166,6 +8227,13 @@ class ActiveLearningTab(QWidget):
         req = {"segment_id", "review_label", "reviewer_id", "confidence"}
         if not req.issubset(set(labels_df.columns)):
             return pd.DataFrame()
+
+        # A reviewer who relabels a clip means the newer label. Older saves
+        # appended instead of replacing, so keep only each reviewer's latest
+        # label per segment; otherwise the stale one makes the clip "ambiguous"
+        # and it never trains. Temporal feedback can legitimately write several
+        # labels to one tile, so its rows are left as they are.
+        labels_df = _latest_label_per_reviewer(labels_df)
 
         grouped = labels_df.groupby("segment_id", as_index=False).agg(
             review_labels=("review_label", lambda s: [str(v) for v in s if str(v)]),
@@ -9601,7 +9669,7 @@ class ActiveLearningTab(QWidget):
         logger.error("%s failed:\n%s", task_name, traceback_text)
 
     def _render_visualization_pixmap(self) -> None:
-        pix = self._viz_pixmap_original
+        pix = getattr(self, "_viz_pixmap_original", None)
         if pix is None or pix.isNull():
             return
         target = self._viz_preview.size()
@@ -9842,6 +9910,11 @@ class ActiveLearningTab(QWidget):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._render_visualization_pixmap()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is getattr(self, "_viz_preview", None) and event.type() == QEvent.Type.Resize:
+            self._render_visualization_pixmap()
+        return super().eventFilter(obj, event)
 
     @Slot(int, int, str, str)
     # ── Stage-aware pipeline timeline (rich progress + ETA) ─────────────

@@ -5,8 +5,10 @@ from __future__ import annotations
 import concurrent.futures as cf
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 import re
+import sys
 import threading
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -96,6 +98,34 @@ class ContextFeatureConfig:
     the animal is.  Disable only to reproduce pre-0.8 feature sets exactly."""
 
 
+# Network locations already warned about. Module level because a new service is
+# built for every session, so an instance-level set repeated the warning.
+_WARNED_NETWORK_VIDEO_ROOTS: set[str] = set()
+_DRIVE_REMOTE = 4
+
+
+def _network_video_root(video_path: str | Path) -> str | None:
+    """Return the drive or share holding ``video_path`` if it is a network location.
+
+    Local and USB drives return None: measured read speed on those (300+ MB/s)
+    is far above what video decoding consumes, so they never limit extraction.
+    """
+    root = os.path.splitdrive(str(video_path))[0]
+    if not root:
+        return None
+    if root.startswith(("\\\\", "//")):
+        return root
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW(root + "\\")
+    except Exception:
+        return None
+    return root.upper() if drive_type == _DRIVE_REMOTE else None
+
+
 class ContextFeatureService:
     """Extract optical-flow, substrate motion, and spatial context features."""
 
@@ -104,7 +134,6 @@ class ContextFeatureService:
         self._provenance = ProvenanceService()
         self._rois = ROIService()
         self._flow_backend_cache: dict[bool, str] = {}
-        self._warned_external_drive_pairs: set[tuple[str, str]] = set()
 
     @staticmethod
     def _pixels_per_mm_for_session(project_root: Path, session_id: str) -> float | None:
@@ -1380,23 +1409,19 @@ class ContextFeatureService:
                 self._flow_backend_cache[True] = "cpu"
         logger.info("Context features using optical-flow backend: %s", flow_backend)
 
-        # -- External-drive I/O warning -----------------------------------------
+        # -- Network-drive I/O warning ------------------------------------------
         try:
-            _vid_drive = Path(video_path).drive.lower()
-            _proj_drive = Path(project_root).drive.lower()
-            if _vid_drive and _vid_drive != _proj_drive:
-                _pair = (_vid_drive, _proj_drive)
-                if _pair not in self._warned_external_drive_pairs:
-                    self._warned_external_drive_pairs.add(_pair)
-                    _io_msg = (
-                        f"Video is on drive {_vid_drive.upper()} while project is on "
-                        f"{_proj_drive.upper()}, reading from an external or network "
-                        "drive can be the main bottleneck. Copy videos to the project "
-                        "raw/videos/ folder and re-import for much faster processing."
-                    )
-                    logger.warning("Context features: %s", _io_msg)
-                    if progress_cb is not None:
-                        progress_cb(0, 1, _io_msg)
+            _net_root = _network_video_root(video_path)
+            if _net_root and _net_root not in _WARNED_NETWORK_VIDEO_ROOTS:
+                _WARNED_NETWORK_VIDEO_ROOTS.add(_net_root)
+                _io_msg = (
+                    f"Video is on network drive {_net_root}. Reading over a slow "
+                    "connection can slow extraction. If it is slow, copy the "
+                    "videos to a local drive and re-import."
+                )
+                logger.warning("Context features: %s", _io_msg)
+                if progress_cb is not None:
+                    progress_cb(0, 1, _io_msg)
         except Exception:
             pass
 

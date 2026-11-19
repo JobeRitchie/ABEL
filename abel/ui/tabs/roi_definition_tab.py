@@ -28,6 +28,8 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -590,6 +592,140 @@ class _ROICanvas(QWidget):
 # ROI Definition Tab
 # ---------------------------------------------------------------------------
 
+class _SubjectPickDialog(QDialog):
+    """Tick the subject / session entries that should receive the current ROI.
+
+    *entries* is ``(key, label, has_roi)`` per row.  Nothing starts ticked, so
+    an accidental Enter copies nowhere.
+    """
+
+    def __init__(
+        self,
+        entries: list[tuple[str, str, bool]],
+        source_label: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Copy Current ROI to Selected Subjects")
+
+        intro = QLabel(
+            f"Tick the entries that should get the zones and Subject Crop "
+            f"shown for {source_label}." if source_label else
+            "Tick the entries that should get the zones and Subject Crop "
+            "currently shown."
+        )
+        intro.setWordWrap(True)
+
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("Filter by subject or session")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.textChanged.connect(self._apply_filter)
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        for key, label, has_roi in entries:
+            item = QListWidgetItem(f"{'✓' if has_roi else '○'}  {label}")
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setData(Qt.ItemDataRole.UserRole + 1, has_roi)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setForeground(QColor("#66BB6A" if has_roi else "#B0BEC5"))
+            self._list.addItem(item)
+        self._list.itemChanged.connect(self._on_item_changed)
+
+        all_btn = QPushButton("Tick All")
+        all_btn.clicked.connect(lambda: self._set_visible(lambda _it: True))
+        none_btn = QPushButton("Tick None")
+        none_btn.clicked.connect(lambda: self._set_visible(lambda _it: False))
+        empty_btn = QPushButton("Tick Without ROI")
+        empty_btn.setToolTip("Tick only the listed entries that have no ROI yet.")
+        empty_btn.clicked.connect(
+            lambda: self._set_visible(
+                lambda it: not it.data(Qt.ItemDataRole.UserRole + 1)
+            )
+        )
+        pick_row = QHBoxLayout()
+        for b in (all_btn, none_btn, empty_btn):
+            pick_row.addWidget(b)
+        pick_row.addStretch(1)
+
+        self._summary = QLabel()
+        self._summary.setWordWrap(True)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addWidget(self._filter)
+        layout.addWidget(self._list, 1)
+        layout.addLayout(pick_row)
+        layout.addWidget(self._summary)
+        layout.addWidget(self._buttons)
+
+        # Size from the font and the longest label, not fixed pixels.
+        fm = self.fontMetrics()
+        widest = max((fm.horizontalAdvance(lbl) for _k, lbl, _h in entries), default=0)
+        rows = min(max(len(entries), 6), 18)
+        self.resize(
+            max(widest + fm.averageCharWidth() * 14, fm.averageCharWidth() * 52),
+            fm.lineSpacing() * (rows + 12),
+        )
+        self._update_summary()
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
+
+    def _set_visible(self, want) -> None:
+        """Set the tick on every row the filter currently shows."""
+        self._list.blockSignals(True)
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if not item.isHidden():
+                item.setCheckState(
+                    Qt.CheckState.Checked if want(item) else Qt.CheckState.Unchecked
+                )
+        self._list.blockSignals(False)
+        self._update_summary()
+
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        # Ticking one row of a Shift/Ctrl selection ticks the whole selection.
+        selected = self._list.selectedItems()
+        if item in selected and len(selected) > 1:
+            self._list.blockSignals(True)
+            for other in selected:
+                other.setCheckState(item.checkState())
+            self._list.blockSignals(False)
+        self._update_summary()
+
+    def _checked(self) -> list[QListWidgetItem]:
+        return [
+            self._list.item(i) for i in range(self._list.count())
+            if self._list.item(i).checkState() == Qt.CheckState.Checked
+        ]
+
+    def selected_keys(self) -> list[str]:
+        return [str(it.data(Qt.ItemDataRole.UserRole)) for it in self._checked()]
+
+    def _update_summary(self) -> None:
+        checked = self._checked()
+        n = len(checked)
+        overwrite = sum(1 for it in checked if it.data(Qt.ItemDataRole.UserRole + 1))
+        text = f"{n} of {self._list.count()} ticked."
+        if overwrite:
+            text += f" {overwrite} already have an ROI and will be overwritten."
+        self._summary.setText(text)
+        ok = self._buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok.setText(f"Copy to {n}" if n else "Copy")
+        ok.setEnabled(n > 0)
+
+
 class ROIDefinitionTab(QWidget):
     """Define project/subject ROIs used by context features.
 
@@ -761,6 +897,14 @@ class ROIDefinitionTab(QWidget):
         )
         self._copy_all_btn.clicked.connect(self._copy_to_all_subjects)
 
+        self._copy_selected_btn = QPushButton("Copy Current ROI to Selected Subjects...")
+        self._copy_selected_btn.setToolTip(
+            "Pick which subject / session entries get the target zones and\n"
+            "Subject Crop currently shown. Useful when only some videos share\n"
+            "this camera position."
+        )
+        self._copy_selected_btn.clicked.connect(self._copy_to_selected_subjects)
+
         self._auto_load_video_cb = QPushButton("Auto-Load Subject Video")
         self._auto_load_video_cb.setCheckable(True)
         self._auto_load_video_cb.setChecked(True)
@@ -774,6 +918,7 @@ class ROIDefinitionTab(QWidget):
         subject_layout.addWidget(self._subject_list)
         subject_layout.addLayout(nav_row)
         subject_layout.addWidget(self._copy_all_btn)
+        subject_layout.addWidget(self._copy_selected_btn)
         subject_layout.addWidget(self._auto_load_video_cb)
         self._subject_box = subject_box
 
@@ -1787,9 +1932,6 @@ class ROIDefinitionTab(QWidget):
             return
 
         target_zones = self._read_all_target_zones()
-        crop = self._read_roi_spins(
-            (self._crop_x, self._crop_y, self._crop_w, self._crop_h)
-        )
 
         reply = QMessageBox.question(
             self,
@@ -1802,20 +1944,76 @@ class ROIDefinitionTab(QWidget):
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        cfg = self._rois.load(self._project_root)
-        cfg.setdefault("subject_rois", {})
-        for subject_id, session_id in pairs:
-            key = self._subject_session_key(subject_id, session_id)
-            cfg["subject_rois"][key] = {
-                "target_zones": [dict(z) for z in target_zones],
-                "subject_crop": dict(crop),
-            }
-        self._rois.save(self._project_root, cfg)
+        self._copy_current_roi_to(
+            [self._subject_session_key(subj, sess) for subj, sess in pairs]
+        )
         self._current_subject_dirty = False
         self._refresh_subject_list()
         QMessageBox.information(
             self, "Copy Complete", f"ROI settings copied to {len(pairs)} subject/session entries."
         )
+
+    def _copy_current_roi_to(self, keys: list[str]) -> int:
+        """Write the zones and crop on screen to each subject key in *keys*."""
+        if not self._project_root or not keys:
+            return 0
+        target_zones = self._read_all_target_zones()
+        crop = self._read_roi_spins(
+            (self._crop_x, self._crop_y, self._crop_w, self._crop_h)
+        )
+        cfg = self._rois.load(self._project_root)
+        cfg.setdefault("subject_rois", {})
+        for key in keys:
+            cfg["subject_rois"][key] = {
+                "target_zones": [dict(z) for z in target_zones],
+                "subject_crop": dict(crop),
+            }
+        self._rois.save(self._project_root, cfg)
+        return len(keys)
+
+    def _copy_to_selected_subjects(self) -> None:
+        if not self._project_root:
+            QMessageBox.warning(self, "No Project", "Open a project first.")
+            return
+        current_key = self._current_subject_id()
+        cfg = self._rois.load(self._project_root)
+        subject_rois = cfg.get("subject_rois", {})
+        entries: list[tuple[str, str, bool]] = []
+        for subject_id, session_id in self._subject_sessions():
+            key = self._subject_session_key(subject_id, session_id)
+            if key == current_key:
+                continue
+            sroi = subject_rois.get(key, {})
+            zones = sroi.get("target_zones", [sroi.get("target_zone", {})])
+            first = zones[0] if zones else {}
+            has_roi = (first.get("w", 0) or 0) > 0 and (first.get("h", 0) or 0) > 0
+            entries.append(
+                (key, self._subject_item_label(subject_id, session_id), has_roi)
+            )
+        if not entries:
+            QMessageBox.warning(
+                self, "No Other Subjects",
+                "There are no other subject / session entries to copy to.",
+            )
+            return
+
+        source_label = ""
+        if current_key:
+            source_label = self._subject_item_label(*self._split_subject_key(current_key))
+        dlg = _SubjectPickDialog(entries, source_label, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        keys = dlg.selected_keys()
+        if not keys:
+            return
+        # Keep the entry on screen in step with the copies made from it.
+        if current_key:
+            keys = [current_key, *keys]
+        self._copy_current_roi_to(keys)
+        self._current_subject_dirty = False
+        self._refresh_subject_list()
+        copied = len(keys) - (1 if current_key else 0)
+        self._status.setText(f"ROI copied to {copied} selected subject/session entries.")
 
     # ── Save ──────────────────────────────────────────────────────────
 

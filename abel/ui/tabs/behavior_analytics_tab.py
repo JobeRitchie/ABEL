@@ -107,6 +107,7 @@ from abel.services.behavioral_motif_service import (
 )
 from abel.ui.flow_layout import FlowLayout
 from abel.ui.mpl_theme import style_navigation_toolbar
+from abel.ui.plot_points import make_points_toggle, overlay_points
 from abel.ui.stats_options_dialog import StatsOptionsWidget, StatsReportDialog, describe_test
 from abel.services.group_stats_options import StatsOptions
 from abel.services.import_service import ImportService
@@ -115,6 +116,13 @@ from abel.services.project_merge_service import ProjectMergeService
 from abel.services.pose_processing_service import PoseProcessingService
 from abel.services.roi_service import ROIService
 from abel.services import roi_behavior_service
+from abel.services.section_events import (
+    SectionEventTable,
+    load_section_events,
+    mean_section_durations,
+    section_metrics,
+    write_section_events_template,
+)
 from abel.services.subject_rename_service import (
     ANCHORS_KEY,
     SessionLabels,
@@ -1127,6 +1135,7 @@ class BehaviorAnalyticsTab(QWidget):
         self._group_order.clear()
         self._factor_level_order.clear()
         self._group_colors.clear()
+        self._sections_tab.set_event_state(None)
         self._pose_cache.clear()
         self._pose_vel_cache.clear()
         self._roi_mask_cache.clear()
@@ -1197,6 +1206,7 @@ class BehaviorAnalyticsTab(QWidget):
             "stats_options": self._stats_options.to_dict(),
             "section_definitions": self._sections_tab.get_sections_state(),
             "section_custom_presets": self._sections_tab.get_custom_presets(),
+            "section_event_timing": self._sections_tab.get_event_state(),
             ANCHORS_KEY: self._group_state_anchors,
         }
         anchor_group_state(state, self._session_labels)
@@ -1298,6 +1308,7 @@ class BehaviorAnalyticsTab(QWidget):
         custom_presets = state.get("section_custom_presets")
         if custom_presets:
             self._sections_tab.set_custom_presets(custom_presets)
+        self._sections_tab.set_event_state(state.get("section_event_timing"))
 
     def _open_level_order_dialog(self) -> None:
         """Open a dialog to set the display order of levels within each factor."""
@@ -6037,6 +6048,10 @@ class _GraphsWidget(QWidget):
         action_row1.addWidget(self._graph_stats_btn)
         action_row1.addWidget(self._groups_btn)
         action_row1.addWidget(self._level_order_btn)
+        self._points_chk = make_points_toggle(
+            self._host._graph_settings, "show_indiv_points", self.update_graph,
+        )
+        action_row1.addWidget(self._points_chk)
         action_row1.addStretch(1)
 
         action_row2 = QHBoxLayout()
@@ -7575,13 +7590,10 @@ class _GraphsWidget(QWidget):
                error_kw=yerr_kw, zorder=3)
         # Individual data points
         if gs.get("show_indiv_points", True):
-            rng = np.random.default_rng(1)
             for gi, gname in enumerate(group_names):
                 vals = sess_agg.loc[sess_agg["group"] == gname, metric].to_numpy()
-                jitter = rng.uniform(-0.14, 0.14, len(vals)) * bar_spacing
-                ax.scatter(np.full(len(vals), gi) + jitter, vals,
-                           color="white", edgecolors="black", linewidths=0.7,
-                           s=40, zorder=5)
+                overlay_points(ax, gi, vals, spread=0.14 * bar_spacing,
+                               size=40, linewidth=0.7)
         # Value labels above bars
         for i, (m, eb) in enumerate(zip(g_means, g_ebs)):
             ax.text(i, m + eb + float(np.max(g_means)) * 0.02, f"{m:.1f}",
@@ -8244,12 +8256,10 @@ class _GraphsWidget(QWidget):
                error_kw={"elinewidth": _eblw, "capthick": _eblw} if error_style != "None" else {},
                zorder=3)
         if gs.get("show_indiv_points", True):
-            rng = np.random.default_rng(1)
             for gi, gname in enumerate(group_names):
                 vals = sess_agg.loc[sess_agg["group"] == gname, metric].to_numpy()
-                jitter = rng.uniform(-0.12, 0.12, len(vals)) * bar_spacing
-                ax.scatter(np.full(len(vals), gi) + jitter, vals,
-                           color="white", edgecolors="black", linewidths=0.5, s=25, zorder=5)
+                overlay_points(ax, gi, vals, spread=0.12 * bar_spacing,
+                               size=25, linewidth=0.5)
         # Significance from the values plotted here (see Statistics...)
         if gs.get("show_stats", True):
             res = self._run_graph_stats(sess_agg, metric, group_names, title or ylabel)
@@ -8454,12 +8464,6 @@ class _GraphsWidget(QWidget):
         eb_lw_spin.setSuffix(" pt")
         eb_lw_spin.setToolTip("Thickness of the vertical error bar lines.")
 
-        indiv_points_check = QCheckBox("Show individual data points", dlg)
-        indiv_points_check.setChecked(gs.get("show_indiv_points", False))
-        indiv_points_check.setToolTip(
-            "Overlay individual subject data points on top of bar/line charts."
-        )
-
         show_stats_check = QCheckBox("Show statistics on graph", dlg)
         show_stats_check.setChecked(gs.get("show_stats", True))
         show_stats_check.setToolTip(
@@ -8515,7 +8519,6 @@ class _GraphsWidget(QWidget):
         form.addRow("Bar spacing:", bar_spacing_spin)
         form.addRow("Error bar cap width:", eb_capsize_spin)
         form.addRow("Error bar line thickness:", eb_lw_spin)
-        form.addRow(indiv_points_check)
         form.addRow(show_stats_check)
         form.addRow(force_fit_check)
         form.addRow("Max display width:", max_w_spin)
@@ -8554,7 +8557,6 @@ class _GraphsWidget(QWidget):
         gs["bar_spacing"] = bar_spacing_spin.value()
         gs["eb_capsize"] = eb_capsize_spin.value()
         gs["eb_linewidth"] = eb_lw_spin.value()
-        gs["show_indiv_points"] = indiv_points_check.isChecked()
         gs["show_stats"] = show_stats_check.isChecked()
         gs["force_fit"] = force_fit_check.isChecked()
         gs["max_w"] = max_w_spin.value()
@@ -13034,6 +13036,11 @@ class _BehaviorMotifWidget(QWidget):
 
         top_row = QHBoxLayout()
         top_row.addWidget(self._status_lbl, 1)
+        self._points_chk = make_points_toggle(
+            self._motif_graph_settings, "show_indiv_points",
+            self._redraw_current_motif_panel, default=False,
+        )
+        top_row.addWidget(self._points_chk)
         top_row.addWidget(self._motif_comparisons_btn)
         top_row.addWidget(self._motif_redraw_btn)
         top_row.addWidget(self._graph_size_btn)
@@ -13903,7 +13910,7 @@ class _BehaviorMotifWidget(QWidget):
 
     def _refresh_group_combos(self) -> None:
         """Populate the Group A / Group B dropdowns with current group names."""
-        groups = sorted({g for g in self._host._session_groups.values() if g})
+        groups = sorted({g for g in self._panel_session_groups().values() if g})
         for combo in (self._tr_group_a_combo, self._tr_group_b_combo):
             prev = combo.currentText()
             combo.blockSignals(True)
@@ -14013,10 +14020,26 @@ class _BehaviorMotifWidget(QWidget):
             and self._session_passes_filter(label_map.get(sid, sid), flt)
         }
 
+    def _panel_session_groups(self) -> dict[str, str]:
+        """Session label -> group for this panel's analyses.
+
+        Splits on the factors the Graphs tab splits on, but ignores any
+        specific-level filter set there.  This panel chooses its sessions with
+        its own "Use sessions" row, so a Graphs filter on a different level
+        (Cohort = CAB there, Cohort = DG here) would leave every analyzed
+        session without a group and blank the per-group views.
+        """
+        host = self._host
+        controls = {
+            f: (mode if mode in (FACET_COMBINE, FACET_SPLIT) else FACET_COMBINE)
+            for f, mode in (getattr(host, "_facet_controls", None) or {}).items()
+        }
+        return host._session_groups_for_controls(controls)
+
     def _build_session_group_map(
         self, sequences: dict[str, list]
     ) -> dict[str, str]:
-        groups = self._host._session_groups
+        groups = self._panel_session_groups()
         label_map = self._host._session_label_by_session
         return {
             sid: grp
@@ -14400,6 +14423,14 @@ class _BehaviorMotifWidget(QWidget):
                        alpha=0.85,
                        capsize=_mgs_cs,
                        error_kw={"elinewidth": _mgs_lw, "capthick": _mgs_lw} if error_style != "None" else {})
+                if mgs.get("show_indiv_points", False):
+                    for p_idx in range(len(pairs)):
+                        overlay_points(ax, x[p_idx] + offset, vals[:, p_idx],
+                                       spread=0.3 * width * bar_spacing, size=14,
+                                       edgecolor=_PALETTE[gi % len(_PALETTE)])
+                        _top = float(np.nanmax(vals[:, p_idx])) if len(vals) else 0.0
+                        if _top > _bar_tops_tr[p_idx]:
+                            _bar_tops_tr[p_idx] = _top
             # Significance stars from permutation test (filtered by selected comparisons)
             active_pval_mats = self._pval_mat_filtered(pval_mats)
             if active_pval_mats and mgs.get("show_stats", True):
@@ -15286,6 +15317,8 @@ class _BehaviorMotifWidget(QWidget):
                     if vals:
                         arr = np.array(vals)
                         x_max = max(x_max, float(arr.mean()) + (arr.std(ddof=1) / np.sqrt(len(arr)) if len(arr) > 1 else 0.0))
+                        if mgs.get("show_indiv_points", False):
+                            x_max = max(x_max, float(arr.max()))
             x_max *= 1.25  # headroom
 
         for row_i, it in enumerate(items):
@@ -15329,10 +15362,12 @@ class _BehaviorMotifWidget(QWidget):
                 ax_bar = self._mo_fig.add_subplot(gs_layout[row_i, 1])
                 means_g: list[float] = []
                 sems_g: list[float] = []
+                vals_g: list[list[float]] = []
                 for grp in groups:
                     per_sess = it.get("per_session", {})
                     vals = [float(v) for sid, v in per_sess.items()
                             if session_group_map.get(sid) == grp]
+                    vals_g.append(vals)
                     if vals:
                         arr = np.array(vals)
                         means_g.append(float(arr.mean()))
@@ -15353,6 +15388,11 @@ class _BehaviorMotifWidget(QWidget):
                     capsize=_eng_cs,
                     error_kw={"elinewidth": _eng_lw, "capthick": _eng_lw} if _engram_error_style != "None" else {},
                 )
+                if mgs.get("show_indiv_points", False):
+                    for gi, gv in enumerate(vals_g):
+                        overlay_points(ax_bar, gi, gv, horizontal=True,
+                                       spread=0.2, size=8, linewidth=0.5,
+                                       edgecolor=colors_g[gi])
                 ax_bar.set_xlim(0, x_max)
                 ax_bar.set_yticks(y_pos)
                 ax_bar.set_yticklabels(
@@ -15634,7 +15674,7 @@ class _BehaviorMotifWidget(QWidget):
         }
         animal_scope = self._host._animal_scope
         input_fingerprint = hmm_input_fingerprint(
-            sequences, bids, settings_snap, self._host._session_groups,
+            sequences, bids, settings_snap, self._panel_session_groups(),
             animal_scope=animal_scope,
         )
 
@@ -16195,6 +16235,16 @@ class _BehaviorMotifWidget(QWidget):
                              fontsize=gs["title_fontsize"])
                 if sids:
                     ax.legend(fontsize="xx-small", ncol=2)
+            elif not groups:
+                ax.set_axis_off()
+                ax.text(
+                    0.5, 0.5,
+                    "None of the fitted sessions has a group.\n"
+                    "Assign factor levels in the Summary tab and re-run the HMM,\n"
+                    "or set the split to By session.",
+                    ha="center", va="center", transform=ax.transAxes,
+                    fontsize=gs["axis_fontsize"],
+                )
             else:
                 width = min(0.80, 0.70 * _hmm_bar_spacing) / max(len(groups), 1)
                 # Build per-group raw occupancy arrays for _eb_val
@@ -16221,6 +16271,11 @@ class _BehaviorMotifWidget(QWidget):
                            alpha=0.85,
                            capsize=_hmm_cs,
                            error_kw={"elinewidth": _hmm_lw, "capthick": _hmm_lw} if _hmm_error_style != "None" else {})
+                    if _hmm_mgs.get("show_indiv_points", False) and occ_arr.shape[0] > 0:
+                        for st in range(n_states):
+                            overlay_points(ax, x[st] + offset, occ_arr[:, st],
+                                           spread=0.3 * width * _hmm_bar_spacing, size=14,
+                                           edgecolor=_PALETTE[gi % len(_PALETTE)])
                 # Add significance stars if pval_occ available (filtered by selected comparisons)
                 active_pval_occ = self._pval_mat_filtered(
                     {k: np.array(v) for k, v in pval_occ_raw.items()}
@@ -16482,7 +16537,7 @@ class _BehaviorMotifWidget(QWidget):
                 for sid, evs in sequences.items()
             }
             return hmm_input_fingerprint(
-                sequences, bids, self._settings, self._host._session_groups,
+                sequences, bids, self._settings, self._panel_session_groups(),
                 animal_scope=self._host._animal_scope,
             )
         except Exception:
@@ -16720,6 +16775,11 @@ class _BehaviorMotifWidget(QWidget):
                              "capthick": float(mgs.get("eb_linewidth", 1.0))}
                    if error_style != "None" else {})
             max_bar = max(max_bar, float((means + errs).max()) if n_states else 0.0)
+            if mgs.get("show_indiv_points", False):
+                for st in range(n_states):
+                    overlay_points(ax, x[st] + offset, arr[:, st],
+                                   spread=0.3 * width * bar_spacing, size=14,
+                                   edgecolor=_PALETTE[gi % len(_PALETTE)])
             for st in range(n_states):
                 n_cens = int(censored[grp][st])
                 if n_cens:
@@ -16980,8 +17040,9 @@ class _BehaviorMotifWidget(QWidget):
                 ev = _pd.DataFrame(ev_rows)
                 lm = self._host._session_label_by_session
                 ev["session_label"] = ev["session_id"].map(lambda x: lm.get(x, x))
+                ev_groups = self._panel_session_groups()
                 ev["group"] = ev["session_label"].map(
-                    lambda x: self._host._session_groups.get(x, "")
+                    lambda x: ev_groups.get(x, "")
                 )
                 ev["state_label"] = ev["state"].map(default_state_label)
                 ev_path = chosen.with_name(chosen.stem + "_evidence.csv")
@@ -17112,9 +17173,6 @@ class _BehaviorMotifWidget(QWidget):
         eb_lw_spin.setSuffix(" pt")
         eb_lw_spin.setToolTip("Thickness of the vertical error bar lines.")
 
-        indiv_points_check = QCheckBox("Overlay individual subject points", dlg)
-        indiv_points_check.setChecked(gs.get("show_indiv_points", False))
-        indiv_points_check.setToolTip("Jittered scatter dots showing each session's value on motif bar charts.")
 
         show_stats_check = QCheckBox("Show statistics on graph", dlg)
         show_stats_check.setChecked(gs.get("show_stats", True))
@@ -17137,7 +17195,6 @@ class _BehaviorMotifWidget(QWidget):
         form.addRow("Bar spacing:", bar_spacing_spin)
         form.addRow("Error bar cap width:", eb_capsize_spin)
         form.addRow("Error bar line thickness:", eb_lw_spin)
-        form.addRow(indiv_points_check)
         form.addRow(show_stats_check)
         form.addRow(force_fit_check)
 
@@ -17159,7 +17216,6 @@ class _BehaviorMotifWidget(QWidget):
         gs["bar_spacing"] = bar_spacing_spin.value()
         gs["eb_capsize"] = eb_capsize_spin.value()
         gs["eb_linewidth"] = eb_lw_spin.value()
-        gs["show_indiv_points"] = indiv_points_check.isChecked()
         gs["show_stats"] = show_stats_check.isChecked()
         gs["force_fit"] = force_fit_check.isChecked()
         # Apply the default size to heatmap/motif/HMM canvases.
@@ -17580,6 +17636,7 @@ class _BehaviorMotifWidget(QWidget):
             per_session: dict[str, Any] = result.get("per_session", {})
             normalize = self._tr_norm_cb.isChecked()
             rows: list[dict[str, Any]] = []
+            tr_groups = self._panel_session_groups()
             for sid, mat in per_session.items():
                 if normalize:
                     from abel.services.behavioral_motif_service import normalize_transition_matrix
@@ -17587,7 +17644,7 @@ class _BehaviorMotifWidget(QWidget):
                 else:
                     dm = mat
                 lm = self._host._session_label_by_session
-                grp = self._host._session_groups.get(lm.get(sid, sid), "")
+                grp = tr_groups.get(lm.get(sid, sid), "")
                 for i, bna in enumerate(bnames):
                     for j, bnb in enumerate(bnames):
                         rel = f"{bna} -> {bnb}"
@@ -17726,12 +17783,13 @@ class _BehaviorMotifWidget(QWidget):
                     r2[f"to_{j}"] = trans_mat[i][j] if trans_mat and i < len(trans_mat) else 0.0
                 rows3.append(r2)
             lm = self._host._session_label_by_session
+            hmm_groups = self._panel_session_groups()
             for sid, fracs in result.get("session_occupancy", {}).items():
                 r3: dict[str, Any] = {"state": -1, "type": "occupancy",
                                        "occupancy_method": str(
                                            result.get("occupancy_method", "viterbi")),
                                        "session_id": sid, "session_label": lm.get(sid, sid),
-                                       "group": self._host._session_groups.get(lm.get(sid, sid), "")}
+                                       "group": hmm_groups.get(lm.get(sid, sid), "")}
                 for st, frac in enumerate(fracs):
                     r3[f"state_{st}_frac"] = frac
                 rows3.append(r3)
@@ -17748,7 +17806,7 @@ class _BehaviorMotifWidget(QWidget):
                 fps_by_session=self._host._fps_by_session(),
                 frame_offsets=offsets,
                 session_labels=lm,
-                session_groups=self._host._session_groups,
+                session_groups=hmm_groups,
                 behavior_names=result.get("bid_to_name", {}) or {},
             ):
                 rows3.append({"type": "state_bout", **row})
@@ -17757,7 +17815,7 @@ class _BehaviorMotifWidget(QWidget):
                 r4: dict[str, Any] = {
                     "state": -1, "type": "state_bout_summary",
                     "session_id": sid, "session_label": lm.get(sid, sid),
-                    "group": self._host._session_groups.get(lm.get(sid, sid), ""),
+                    "group": hmm_groups.get(lm.get(sid, sid), ""),
                     "covered_s": summ.get("covered_s", 0.0),
                 }
                 for st in range(n_states):
@@ -17772,7 +17830,7 @@ class _BehaviorMotifWidget(QWidget):
                 r5: dict[str, Any] = {
                     "state": -1, "type": "state_latency",
                     "session_id": sid, "session_label": lm.get(sid, sid),
-                    "group": self._host._session_groups.get(lm.get(sid, sid), ""),
+                    "group": hmm_groups.get(lm.get(sid, sid), ""),
                     "min_dwell_s": min_dwell,
                     "observed_s": rec.get("observed_s", float("nan")),
                 }
@@ -17837,6 +17895,12 @@ class _SessionSectionsWidget(QWidget):
         "QPushButton:hover:!checked{background:#263238;}"
     )
     _HEATMAP_BINS_PER_SECTION = 20
+    _METRIC_LABELS = {
+        "n_bouts": "Bout Count",
+        "rate_per_min": "Bouts per Minute",
+        "duration_s": "Duration (s)",
+        "pct_time": "% Time in Section",
+    }
 
     # ── Built-in section presets ──────────────────────────────────────
     _BUILTIN_PRESETS: list[dict] = [
@@ -18322,6 +18386,47 @@ class _SessionSectionsWidget(QWidget):
         self._host = host
         self._updating = False
         self._custom_presets: list[dict] = []  # persisted via host group state
+        # Per-subject event timing: each subject's sections come from an
+        # event file instead of the shared fixed durations.  The fixed
+        # definitions are kept aside so switching back restores them.
+        self._event_table: SectionEventTable | None = None
+        self._fixed_sections_backup: list[dict] | None = None
+
+        # ── Timing source ─────────────────────────────────────────────
+        self._timing_combo = QComboBox()
+        self._timing_combo.addItem("Fixed durations (same for every subject)", "fixed")
+        self._timing_combo.addItem("Per-subject event times (from file)", "events")
+        self._timing_combo.setToolTip(
+            "Fixed durations: every subject gets the same sections, counted from t=0.\n"
+            "Per-subject event times: each subject's sections start and end at the\n"
+            "frames listed for that subject in an event file (one row per subject,\n"
+            "'<Section> Start' / '<Section> End' columns in video frames)."
+        )
+        self._timing_combo.currentIndexChanged.connect(self._on_timing_mode_changed)
+        self._load_events_btn = QPushButton("Load Event File…")
+        self._load_events_btn.setStyleSheet(self._BTN_STYLE)
+        self._load_events_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self._load_events_btn.setToolTip(
+            "Load an .xlsx or .csv event file. In a workbook the 'Section Events'\n"
+            "sheet is used when present, otherwise the first sheet."
+        )
+        self._load_events_btn.clicked.connect(self._choose_event_file)
+        self._events_status = QLabel("")
+        self._events_status.setWordWrap(True)
+        self._events_status.setStyleSheet("color:#90a4ae;font-size:10px;")
+        self._events_status.setVisible(False)
+        timing_row = QHBoxLayout()
+        timing_row.setSpacing(4)
+        timing_row.addWidget(self._timing_combo, 1)
+        timing_row.addWidget(self._load_events_btn)
+        self._timing_help_btn = QPushButton("How It Works…")
+        self._timing_help_btn.setStyleSheet(self._BTN_STYLE)
+        self._timing_help_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self._timing_help_btn.setToolTip(
+            "Explains per-subject event times and saves a blank event file template."
+        )
+        self._timing_help_btn.clicked.connect(self._show_timing_help)
+        timing_row.addWidget(self._timing_help_btn)
 
         # ── Section-definition table ──────────────────────────────────
         self._section_table = QTableWidget(0, 2)
@@ -18398,6 +18503,9 @@ class _SessionSectionsWidget(QWidget):
         )
         _hint.setWordWrap(True)
         _hint.setStyleSheet("color:#90a4ae;font-size:10px;")
+        self._fixed_hint = _hint
+        sb_layout.addLayout(timing_row)
+        sb_layout.addWidget(self._events_status)
         sb_layout.addLayout(preset_row)
         sb_layout.addWidget(_hint)
         sb_layout.addWidget(self._section_table)
@@ -18432,7 +18540,16 @@ class _SessionSectionsWidget(QWidget):
             [("By Section (Bar)", "bar"), ("Across Sections (Line)", "line"), ("Heatmap", "heatmap")]
         )
         metric_row, self._metric_grp, self._metric_btns = _toggle_row(
-            [("Bout Count", "n_bouts"), ("Duration (s)", "duration_s"), ("% Time", "pct_time")]
+            [
+                ("Bout Count", "n_bouts"),
+                ("Bouts/min", "rate_per_min"),
+                ("Duration (s)", "duration_s"),
+                ("% Time", "pct_time"),
+            ]
+        )
+        self._metric_btns["rate_per_min"].setToolTip(
+            "Bouts per minute of section. Use this or % Time when sections\n"
+            "differ in length between subjects (per-subject event times)."
         )
         mode_row, self._mode_grp, self._mode_btns = _toggle_row(
             [("Individual Sessions", "individual"), ("By Group", "group")]
@@ -18593,6 +18710,10 @@ class _SessionSectionsWidget(QWidget):
         action_row.addWidget(self._export_data_btn)
         action_row.addWidget(self._graph_settings_btn)
         action_row.addWidget(self._level_order_btn_sec)
+        self._points_chk = make_points_toggle(
+            self._host._graph_settings, "sections_show_points", self._update_plot,
+        )
+        action_row.addWidget(self._points_chk)
         action_row.addStretch(1)
 
         # ── Aggregate toggle ──────────────────────────────────────────
@@ -18867,6 +18988,312 @@ class _SessionSectionsWidget(QWidget):
         ]
         self._rebuild_preset_combo()
 
+    # ── Per-subject event timing ──────────────────────────────────────
+
+    def _events_mode(self) -> bool:
+        return self._timing_combo.currentData() == "events"
+
+    def get_event_state(self) -> dict:
+        return {
+            "mode": "events" if self._events_mode() else "fixed",
+            "table": self._event_table.to_state() if self._event_table else None,
+        }
+
+    def set_event_state(self, state: dict | None) -> None:
+        """Restore event timing from persisted state (None resets to fixed)."""
+        state = state if isinstance(state, dict) else {}
+        self._event_table = SectionEventTable.from_state(state.get("table"))
+        want_events = state.get("mode") == "events"
+        self._timing_combo.blockSignals(True)
+        if want_events and not self._events_mode():
+            self._fixed_sections_backup = self._read_fixed_table()
+        if not want_events and self._events_mode():
+            self._write_fixed_table(self._fixed_sections_backup or [])
+            self._fixed_sections_backup = None
+        self._timing_combo.setCurrentIndex(1 if want_events else 0)
+        self._timing_combo.blockSignals(False)
+        self._apply_timing_ui()
+
+    def _on_timing_mode_changed(self) -> None:
+        if self._events_mode():
+            self._fixed_sections_backup = self._read_fixed_table()
+            if self._event_table is None:
+                self._apply_timing_ui()
+                self._choose_event_file()
+                return
+        else:
+            self._write_fixed_table(self._fixed_sections_backup or [])
+            self._fixed_sections_backup = None
+        self._apply_timing_ui()
+        self._host._save_group_state()
+
+    def _choose_event_file(self) -> None:
+        start_dir = str(self._host._project_root or "")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Section Event File", start_dir,
+            "Event files (*.xlsx *.xls *.csv *.tsv);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            table = load_section_events(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Could Not Read Event File", str(exc))
+            return
+        self._event_table = table
+        if not self._events_mode():
+            self._timing_combo.blockSignals(True)
+            self._fixed_sections_backup = self._read_fixed_table()
+            self._timing_combo.setCurrentIndex(1)
+            self._timing_combo.blockSignals(False)
+        self._apply_timing_ui()
+        self._host._save_group_state()
+
+    _TIMING_HELP_HTML = """
+<h3>Session Sections timing</h3>
+<p><b>Fixed durations</b> cut every subject's session into the same sections,
+counted from the start of the analysis. Use it when every subject got its
+stimuli at the same times.</p>
+<p><b>Per-subject event times</b> give each subject its own section starts and
+ends, read from an event file. Use it when stimuli were given by hand and the
+timing drifts between subjects, so a shared timeline would put boundaries in
+the wrong place.</p>
+<h4>The event file</h4>
+<ul>
+<li>An .xlsx or .csv file with one row per subject. The <b>Subject</b> column
+must match the subject (or session) name in ABEL. Case and spaces at the ends
+do not matter.</li>
+<li>Each section has a <b>&lt;Section&gt; Start</b> and a
+<b>&lt;Section&gt; End</b> column, for example <i>Home Cage Start</i> and
+<i>Home Cage End</i>. Sections run in column order.</li>
+<li>Times are <b>video frames</b> from the first frame of the video, the same
+numbers a boutframes sheet uses. ABEL applies each subject's prechop and frame
+rate for you.</li>
+<li>A blank Start uses the previous section's End (the first section starts at
+frame 0). A blank End uses the next section's Start (the last section runs to
+the end of the video).</li>
+<li>Other columns, such as notes or cohort, are ignored. In a workbook ABEL
+reads the <i>Section Events</i> sheet, or the first sheet if there is none.</li>
+</ul>
+<h4>How subjects are measured</h4>
+<ul>
+<li>Each subject is measured inside its own sections. Bout count, duration,
+% time and bouts per minute all use that subject's section length.</li>
+<li>Section lengths differ between subjects, so compare <b>% Time</b> or
+<b>Bouts/min</b> rather than raw bout counts.</li>
+<li>Subjects with no row in the file, and sections a subject has no times for,
+are left out. They are never counted as zero.</li>
+<li>The heatmap splits each subject's own sections into equal time bins so
+the timelines line up.</li>
+</ul>
+<p>Your fixed-duration sections are kept and come back when you switch the
+timing back to fixed durations.</p>
+<p><b>Save Template</b> writes a blank event file with one row per subject in
+this project and a Start/End column pair for each section currently listed.</p>
+"""
+
+    def _show_timing_help(self) -> None:
+        from PySide6.QtWidgets import QTextBrowser
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Session Sections: Per-Subject Event Times")
+        lay = QVBoxLayout(dlg)
+        text = QTextBrowser(dlg)
+        text.setOpenExternalLinks(False)
+        text.setHtml(self._TIMING_HELP_HTML)
+        lay.addWidget(text, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, dlg)
+        save_btn = buttons.addButton(
+            "Save Template…", QDialogButtonBox.ButtonRole.ActionRole,
+        )
+        save_btn.clicked.connect(lambda: self._save_event_template(dlg))
+        buttons.rejected.connect(dlg.reject)
+        lay.addWidget(buttons)
+        fm = dlg.fontMetrics()
+        dlg.resize(fm.averageCharWidth() * 90, fm.lineSpacing() * 34)
+        dlg.exec()
+
+    def _template_subjects(self) -> list[str]:
+        """Subject names in this project, in the Analytics order."""
+        host = self._host
+        names: list[str] = []
+        try:
+            names = [str(n) for n in host.ordered_session_labels()]
+        except Exception:
+            names = []
+        if not names:
+            names = sorted({str(v) for v in host._subject_by_session.values() if v})
+        return list(dict.fromkeys(names))
+
+    def _save_event_template(self, parent=None) -> None:
+        start_dir = str(self._host._project_root or "")
+        default = os.path.join(start_dir, "Section Events Template.xlsx") if start_dir else (
+            "Section Events Template.xlsx"
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            parent or self, "Save Event File Template", default,
+            "Excel workbook (*.xlsx);;CSV (*.csv)",
+        )
+        if not path:
+            return
+        if self._events_mode() and self._event_table is not None:
+            names = list(self._event_table.section_names)
+        else:
+            names = [d["name"] for d in self._read_fixed_table()]
+        try:
+            out = write_section_events_template(path, names, self._template_subjects())
+        except Exception as exc:
+            QMessageBox.warning(parent or self, "Could Not Save Template", str(exc))
+            return
+        QMessageBox.information(
+            parent or self, "Template Saved",
+            f"Saved the event file template to:\n{out}\n\n"
+            "Fill in the frames, then load it with Load Event File.",
+        )
+
+    def _event_subject_for_session(self, sid: str) -> str | None:
+        if self._event_table is None:
+            return None
+        return self._event_table.match_subject(
+            self._host._subject_by_session.get(sid),
+            self._host._session_label_by_session.get(sid),
+        )
+
+    def _event_bounds_by_session(
+        self, *, with_session_end: bool = True,
+    ) -> dict[str, list[tuple[float, float] | None]]:
+        """Each matched session's section bounds in seconds on the analysis clock."""
+        table = self._event_table
+        if table is None:
+            return {}
+        sids = set(self._host._session_label_by_session) | set(self._host._subject_by_session)
+        out: dict[str, list[tuple[float, float] | None]] = {}
+        for sid in sorted(str(s) for s in sids):
+            subj = self._event_subject_for_session(sid)
+            if subj is None:
+                continue
+            fps = float(self._host._session_fps(sid) or 0.0)
+            if fps <= 0:
+                continue
+            end_s = None
+            if with_session_end:
+                try:
+                    end_s = float(self._host._graphs_tab._session_analysis_end_s(sid)) or None
+                except Exception:
+                    end_s = None
+            out[sid] = table.bounds_seconds(
+                subj, fps,
+                prechop_frames=float(self._host._analysis_prechop_for_session(sid)),
+                session_end_s=end_s,
+            )
+        return out
+
+    def _read_fixed_table(self) -> list[dict]:
+        out: list[dict] = []
+        for row in range(self._section_table.rowCount()):
+            name_item = self._section_table.item(row, 0)
+            out.append({
+                "name": name_item.text() if name_item else f"Section {row + 1}",
+                "duration": self._get_section_duration(row),
+            })
+        return out
+
+    def _write_fixed_table(self, sections: list[dict]) -> None:
+        self._section_table.blockSignals(True)
+        self._section_table.setRowCount(0)
+        for i, sec in enumerate(sections):
+            self._section_table.insertRow(i)
+            self._section_table.setItem(
+                i, 0, QTableWidgetItem(str(sec.get("name") or f"Section {i + 1}"))
+            )
+            dur_item = QTableWidgetItem(str(sec.get("duration", 60)))
+            dur_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            self._section_table.setItem(i, 1, dur_item)
+        self._section_table.blockSignals(False)
+
+    def _event_mean_durations(self) -> list[float]:
+        table = self._event_table
+        if table is None:
+            return []
+        subj_fps: dict[str, float] = {}
+        for sid in self._host._subject_by_session:
+            subj = self._event_subject_for_session(str(sid))
+            if subj is not None:
+                subj_fps[subj] = float(self._host._session_fps(str(sid)) or 0.0)
+        return mean_section_durations(table, subj_fps, subj_fps)
+
+    def _apply_timing_ui(self) -> None:
+        """Show the controls for the active timing source and refill the table."""
+        events = self._events_mode()
+        for w in (
+            self._preset_combo, self._load_preset_btn, self._save_preset_btn,
+            self._add_section_btn, self._remove_section_btn,
+        ):
+            w.setEnabled(not events)
+        if not events:
+            self._update_delete_btn_state()
+        else:
+            self._delete_preset_btn.setEnabled(False)
+        self._load_events_btn.setVisible(events)
+        self._events_status.setVisible(events)
+        self._fixed_hint.setVisible(not events)
+        self._section_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers if events
+            else QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
+        self._section_table.setHorizontalHeaderLabels(
+            ["Section Name", "Avg Duration (s)" if events else "Duration (s)"]
+        )
+        if events:
+            table = self._event_table
+            names = table.section_names if table else []
+            means = self._event_mean_durations() if table else []
+            self._write_fixed_table([
+                {"name": n, "duration": round(d, 1) if d > 0 else "to end"}
+                for n, d in zip(names, means)
+            ])
+            self._refresh_events_status()
+        self._update_total_label()
+        self._refresh_section_filter()
+
+    def _refresh_events_status(self) -> None:
+        table = self._event_table
+        if table is None:
+            self._events_status.setText(
+                "No event file loaded. Click Load Event File and pick a sheet with "
+                "one row per subject and '<Section> Start' / '<Section> End' "
+                "columns in video frames."
+            )
+            return
+        sids = [str(s) for s in self._host._subject_by_session]
+        matched = {sid: self._event_subject_for_session(sid) for sid in sids}
+        used = {s for s in matched.values() if s}
+        missing = sorted(
+            {str(self._host._subject_by_session.get(sid)) for sid, s in matched.items() if not s}
+        )
+        unused = sorted(set(table.subjects) - used)
+        lines = [
+            f"{Path(table.source).name or 'Event file'}: "
+            f"{len(table.section_names)} sections, "
+            f"{len(used)} of {len(set(self._host._subject_by_session.values()))} "
+            "project subjects matched."
+        ]
+        if missing:
+            lines.append("No event times (left out): " + ", ".join(missing))
+        if unused:
+            lines.append(
+                f"{len(unused)} file rows match no project subject: "
+                + ", ".join(unused[:12]) + (" …" if len(unused) > 12 else "")
+            )
+        problems = table.problems()
+        if problems:
+            lines.append("Check: " + "; ".join(problems[:5]))
+        self._events_status.setText("\n".join(lines))
+
     # ── Section management ────────────────────────────────────────────
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
@@ -18910,6 +19337,10 @@ class _SessionSectionsWidget(QWidget):
 
     def get_sections_state(self) -> list[dict]:
         """Return section definitions as a list of dicts for persistence."""
+        if self._events_mode():
+            # The table shows the event file's sections; keep the user's
+            # fixed definitions on disk untouched.
+            return list(self._fixed_sections_backup or [])
         out: list[dict] = []
         for row in range(self._section_table.rowCount()):
             name_item = self._section_table.item(row, 0)
@@ -18921,6 +19352,9 @@ class _SessionSectionsWidget(QWidget):
 
     def set_sections_state(self, sections: list[dict]) -> None:
         """Repopulate the section table from persisted state."""
+        if self._events_mode():
+            self._fixed_sections_backup = [dict(s) for s in sections]
+            return
         self._section_table.blockSignals(True)
         self._section_table.setRowCount(0)
         for i, sec in enumerate(sections):
@@ -18953,6 +19387,12 @@ class _SessionSectionsWidget(QWidget):
         self._host._save_group_state()
 
     def _update_total_label(self) -> None:
+        if self._events_mode():
+            self._total_dur_label.setText(
+                "Durations are the average across matched subjects; each "
+                "subject uses its own event times."
+            )
+            return
         total = sum(
             self._get_section_duration(r)
             for r in range(self._section_table.rowCount())
@@ -18969,7 +19409,17 @@ class _SessionSectionsWidget(QWidget):
             return 0.0
 
     def _get_sections(self) -> list[tuple[str, float]]:
-        """Return [(name, duration_s), ...] for each valid defined section."""
+        """Return [(name, duration_s), ...] for each valid defined section.
+
+        With per-subject event timing every file section is returned and the
+        duration is the mean across matched subjects (0 for an open-ended
+        last section); per-subject bounds come from _event_bounds_by_session.
+        """
+        if self._events_mode():
+            table = self._event_table
+            if table is None:
+                return []
+            return list(zip(table.section_names, self._event_mean_durations()))
         out: list[tuple[str, float]] = []
         for row in range(self._section_table.rowCount()):
             name_item = self._section_table.item(row, 0)
@@ -19144,6 +19594,24 @@ class _SessionSectionsWidget(QWidget):
             boundaries.append((t, t + dur, sec_name, idx))
             t += dur
 
+        # Per-subject event timing: each session gets its own boundaries and
+        # a session missing from the event file is left out, not zeroed.
+        event_bounds = (
+            self._event_bounds_by_session() if self._events_mode() else None
+        )
+
+        def _session_boundaries(sid_str: str) -> list[tuple[float, float, str, int]] | None:
+            if event_bounds is None:
+                return boundaries
+            per = event_bounds.get(sid_str)
+            if per is None:
+                return None
+            return [
+                (b[0], b[1], name, idx)
+                for idx, ((name, _d), b) in enumerate(zip(sections, per))
+                if b is not None
+            ]
+
         checked_bids = set(self._checked_behavior_ids())
         checked_sessions = self._host._summary_tab._checked_subjects()
         rows: list[dict] = []
@@ -19168,21 +19636,19 @@ class _SessionSectionsWidget(QWidget):
                 )
                 if checked_sessions and sess_label not in checked_sessions:
                     continue
+                sess_bounds = _session_boundaries(sid_str)
+                if sess_bounds is None:
+                    continue
                 fps = self._host._session_fps(sid_str)
                 start_s = grp["start_frame"].to_numpy(dtype=float) / fps
                 # end_frame is the bout's last frame, so the bout ends one
                 # frame later (the convention the Summary durations use).
                 end_s = (grp["end_frame"].to_numpy(dtype=float) + 1.0) / fps
 
-                for sec_start, sec_end, sec_name, sec_idx in boundaries:
-                    overlap = np.maximum(
-                        0.0,
-                        np.minimum(end_s, sec_end) - np.maximum(start_s, sec_start),
+                for sec_start, sec_end, sec_name, sec_idx in sess_bounds:
+                    n, dur_s, pct_time, rate = section_metrics(
+                        start_s, end_s, sec_start, sec_end
                     )
-                    n = int((overlap > 0.0).sum())
-                    dur_s = float(overlap.sum())
-                    sec_dur = sec_end - sec_start
-                    pct_time = (dur_s / sec_dur * 100.0) if sec_dur > 0 else 0.0
                     rows.append(
                         {
                             "session_id": sid_str,
@@ -19192,8 +19658,10 @@ class _SessionSectionsWidget(QWidget):
                             "section_idx": sec_idx,
                             "section_name": sec_name,
                             "n_bouts": n,
+                            "rate_per_min": rate,
                             "duration_s": dur_s,
                             "pct_time": pct_time,
+                            "section_s": sec_end - sec_start,
                         }
                     )
 
@@ -19211,8 +19679,11 @@ class _SessionSectionsWidget(QWidget):
             sess_label = self._host._session_label_by_session.get(sid_str, sid_str)
             if checked_sessions and sess_label not in checked_sessions:
                 continue
+            sess_bounds = _session_boundaries(sid_str)
+            if sess_bounds is None:
+                continue
             seen.add((sid_str, bid))
-            for _s0, _s1, sec_name, sec_idx in boundaries:
+            for s0, s1, sec_name, sec_idx in sess_bounds:
                 rows.append(
                     {
                         "session_id": sid_str,
@@ -19222,8 +19693,10 @@ class _SessionSectionsWidget(QWidget):
                         "section_idx": sec_idx,
                         "section_name": sec_name,
                         "n_bouts": 0,
+                        "rate_per_min": 0.0,
                         "duration_s": 0.0,
                         "pct_time": 0.0,
+                        "section_s": s1 - s0,
                     }
                 )
 
@@ -19350,7 +19823,11 @@ class _SessionSectionsWidget(QWidget):
     def on_data_loaded(self) -> None:
         """Called when new analytics data is loaded."""
         self._refresh_behavior_selector()
-        self._refresh_section_filter()
+        if self._events_mode():
+            # Subject matches and average lengths depend on the loaded sessions.
+            self._apply_timing_ui()
+        else:
+            self._refresh_section_filter()
         self._refresh_factor_selector()
         self._refresh_group_filter()
 
@@ -19431,6 +19908,9 @@ class _SessionSectionsWidget(QWidget):
                 "section_idx": type_order.index(trial_type),
                 "section_name": trial_type,
                 "n_bouts": float(grp["n_bouts"].mean()),
+                "rate_per_min": (
+                    float(grp["rate_per_min"].mean()) if "rate_per_min" in grp.columns else 0.0
+                ),
                 "duration_s": float(grp["duration_s"].mean()),
                 "pct_time": float(grp["pct_time"].mean()) if "pct_time" in grp.columns else 0.0,
             })
@@ -19574,6 +20054,7 @@ class _SessionSectionsWidget(QWidget):
             )
             .agg(
                 n_bouts=("n_bouts", "mean"),
+                rate_per_min=("rate_per_min", "mean"),
                 duration_s=("duration_s", "mean"),
                 pct_time=("pct_time", "mean"),
             )
@@ -19598,7 +20079,11 @@ class _SessionSectionsWidget(QWidget):
                 ax = self._figure.add_subplot(111)
                 ax.text(
                     0.5, 0.5,
-                    "No sections defined.\nAdd sections in the panel on the left.",
+                    (
+                        "No event file loaded.\nClick Load Event File on the left."
+                        if self._events_mode()
+                        else "No sections defined.\nAdd sections in the panel on the left."
+                    ),
                     ha="center", va="center", transform=ax.transAxes,
                     color="#90a4ae", fontsize=11,
                 )
@@ -19779,11 +20264,7 @@ class _SessionSectionsWidget(QWidget):
         self._figure.clear()
         self._figure.set_facecolor(fig_bg)
 
-        metric_label = (
-            "Bout Count" if metric == "n_bouts"
-            else "% Time in Section" if metric == "pct_time"
-            else "Duration (s)"
-        )
+        metric_label = self._METRIC_LABELS.get(metric, "Duration (s)")
 
         # Use the tab-local factor for group mode
         host_groups = (
@@ -19833,6 +20314,10 @@ class _SessionSectionsWidget(QWidget):
                             "capthick": gs.get("eb_linewidth", 1.0),
                         },
                     )
+                    if gs.get("sections_show_points", True):
+                        for xi, sn in enumerate(section_names):
+                            overlay_points(ax, x[xi], piv[sn].to_numpy(dtype=float),
+                                           spread=0.15, size=18)
                 else:
                     all_groups = self._host._ordered_group_list(
                         set(host_groups.values()),
@@ -19870,6 +20355,13 @@ class _SessionSectionsWidget(QWidget):
                             },
                             label=grp_name,
                         )
+                        if gs.get("sections_show_points", True):
+                            for xi, sn in enumerate(section_names):
+                                overlay_points(
+                                    ax, x[xi] + offset,
+                                    grp_piv[sn].to_numpy(dtype=float),
+                                    spread=0.3 * bar_w, size=14,
+                                )
 
             ax.set_xticks(x)
             ax.set_xticklabels(
@@ -19932,12 +20424,8 @@ class _SessionSectionsWidget(QWidget):
         self._figure.clear()
         self._figure.set_facecolor(fig_bg)
 
-        metric_label = (
-            "Bout Count" if metric == "n_bouts"
-            else "% Time in Section" if metric == "pct_time"
-            else "Duration (s)"
-        )
-        show_pts = gs.get("show_indiv_points", True)
+        metric_label = self._METRIC_LABELS.get(metric, "Duration (s)")
+        show_pts = gs.get("sections_show_points", True)
         x = np.arange(len(section_names))
 
         host_groups = (
@@ -20099,11 +20587,7 @@ class _SessionSectionsWidget(QWidget):
             self._canvas.draw()
             return
 
-        metric_label = (
-            "Bout Count" if metric == "n_bouts"
-            else "% Time in Section" if metric == "pct_time"
-            else "Duration (s)"
-        )
+        metric_label = self._METRIC_LABELS.get(metric, "Duration (s)")
 
         # Build timeline intervals from the original section definitions.
         # This keeps heatmaps time-resolved even when aggregate mode is
@@ -20124,16 +20608,26 @@ class _SessionSectionsWidget(QWidget):
             name in raw_name_set for name in selected_names
         )
 
+        # Per-subject event timing: section lengths differ per subject (and an
+        # open-ended last section has no average length), so every selected
+        # section is kept and each subject's own section is split into the
+        # same number of bins (a time-normalized timeline).
+        events = self._events_mode() and self._event_table is not None
+        event_bounds = self._event_bounds_by_session() if events else {}
+        event_idx = (
+            {n: i for i, n in enumerate(self._event_table.section_names)} if events else {}
+        )
+
         timeline_sections: list[tuple[str, float, float]] = []
         if select_by_exact_name:
             sel_set = set(selected_names)
             for raw_name, raw_base, s0, s1 in raw_intervals:
-                if raw_name in sel_set and s1 > s0:
+                if raw_name in sel_set and (s1 > s0 or events):
                     timeline_sections.append((raw_name, s0, s1))
         else:
             sel_set = set(selected_names)
             for raw_name, raw_base, s0, s1 in raw_intervals:
-                if raw_base in sel_set and s1 > s0:
+                if raw_base in sel_set and (s1 > s0 or events):
                     timeline_sections.append((raw_name, s0, s1))
 
         if not timeline_sections:
@@ -20178,6 +20672,11 @@ class _SessionSectionsWidget(QWidget):
         session_labels = [
             s for s in sess_order if (not checked_sessions or s in checked_sessions)
         ]
+        if events:
+            with_events = {
+                self._host._session_label_by_session.get(sid, sid) for sid in event_bounds
+            }
+            session_labels = [s for s in session_labels if s in with_events]
 
         if not session_labels:
             self._figure.clear()
@@ -20196,11 +20695,33 @@ class _SessionSectionsWidget(QWidget):
         sid_to_label = self._host._session_label_by_session
         label_to_sid = {lbl: sid for sid, lbl in sid_to_label.items()}
 
+        def _event_bins(sid: str) -> tuple[np.ndarray, np.ndarray]:
+            """This subject's bin edges; NaN where a section is missing."""
+            per = event_bounds.get(str(sid)) or []
+            b0s: list[float] = []
+            b1s: list[float] = []
+            for sec_name, _s0, _s1 in timeline_sections:
+                i = event_idx.get(sec_name)
+                b = per[i] if i is not None and i < len(per) else None
+                if b is None:
+                    b0s += [np.nan] * bins_per_sec
+                    b1s += [np.nan] * bins_per_sec
+                    continue
+                edges = np.linspace(b[0], b[1], bins_per_sec + 1)
+                b0s += list(edges[:-1])
+                b1s += list(edges[1:])
+            return np.array(b0s, dtype=float), np.array(b1s, dtype=float)
+
         def _subject_time_vector(bid: str, session_label: str) -> np.ndarray:
             out = np.zeros(total_bins, dtype=float)
             sid = label_to_sid.get(session_label)
             if sid is None:
                 return out
+            if events:
+                sub_starts, sub_ends = _event_bins(sid)
+                out[np.isnan(sub_starts)] = np.nan
+            else:
+                sub_starts, sub_ends = bin_starts, bin_ends
             bdf = self._host._raw_bouts.get(bid)
             if bdf is None or bdf.empty:
                 return out
@@ -20216,13 +20737,17 @@ class _SessionSectionsWidget(QWidget):
             starts = sdf["start_frame"].to_numpy(dtype=float) / fps
             ends = (sdf["end_frame"].to_numpy(dtype=float) + 1.0) / fps
 
-            for i, (b0, b1) in enumerate(zip(bin_starts, bin_ends, strict=False)):
+            for i, (b0, b1) in enumerate(zip(sub_starts, sub_ends, strict=False)):
+                if np.isnan(b0) or np.isnan(b1):
+                    continue
                 overlap = np.maximum(
                     0.0,
                     np.minimum(ends, b1) - np.maximum(starts, b0),
                 )
                 if metric == "n_bouts":
                     out[i] = float((overlap > 0.0).sum())
+                elif metric == "rate_per_min":
+                    out[i] = float((overlap > 0.0).sum()) / max((b1 - b0) / 60.0, 1e-9)
                 else:
                     dur = float(overlap.sum())
                     if metric == "pct_time":
@@ -20273,7 +20798,8 @@ class _SessionSectionsWidget(QWidget):
                 for s_idx, sess in enumerate(sessions_here):
                     mat[s_idx, :] = _subject_time_vector(bid, sess)
 
-                vmax = mat.max() if mat.max() > 0 else 1.0
+                _mx = float(np.nanmax(mat)) if np.isfinite(mat).any() else 0.0
+                vmax = _mx if _mx > 0 else 1.0
                 im = ax.imshow(
                     mat, aspect="auto", cmap=cmap_name,
                     interpolation="nearest", vmin=0, vmax=vmax,
@@ -20297,7 +20823,10 @@ class _SessionSectionsWidget(QWidget):
                     str(beh_name), fontsize=gs.get("title_fontsize", 12)
                 )
                 ax.set_xlabel(
-                    "Time Across Selected Sections", fontsize=gs.get("axis_fontsize", 10)
+                    (
+                        "Each Subject's Own Sections (time-normalized)" if events
+                        else "Time Across Selected Sections"
+                    ), fontsize=gs.get("axis_fontsize", 10)
                 )
                 ax.set_ylabel(
                     "Subject", fontsize=gs.get("axis_fontsize", 10)
@@ -20341,9 +20870,14 @@ class _SessionSectionsWidget(QWidget):
                     subj_mat = np.vstack([
                         _subject_time_vector(bid, sess) for sess in grp_sessions
                     ])
-                    mat[r_idx, :] = subj_mat.mean(axis=0)
+                    import warnings as _warnings  # noqa: PLC0415
+                    with _warnings.catch_warnings():
+                        # A bin no subject in the group reaches stays blank.
+                        _warnings.simplefilter("ignore", RuntimeWarning)
+                        mat[r_idx, :] = np.nanmean(subj_mat, axis=0)
 
-                vmax = mat.max() if mat.max() > 0 else 1.0
+                _mx = float(np.nanmax(mat)) if np.isfinite(mat).any() else 0.0
+                vmax = _mx if _mx > 0 else 1.0
                 im = ax.imshow(
                     mat, aspect="auto", cmap=cmap_name,
                     interpolation="nearest", vmin=0, vmax=vmax,
@@ -20363,7 +20897,10 @@ class _SessionSectionsWidget(QWidget):
                 ax.set_yticklabels(row_labels, fontsize=gs.get("tick_fontsize", 8))
                 ax.set_title(str(beh_name), fontsize=gs.get("title_fontsize", 12))
                 ax.set_xlabel(
-                    "Time Across Selected Sections", fontsize=gs.get("axis_fontsize", 10)
+                    (
+                        "Each Subject's Own Sections (time-normalized)" if events
+                        else "Time Across Selected Sections"
+                    ), fontsize=gs.get("axis_fontsize", 10)
                 )
                 ax.set_ylabel(
                     "Group", fontsize=gs.get("axis_fontsize", 10)
@@ -20419,10 +20956,6 @@ class _SessionSectionsWidget(QWidget):
             "None = no error bars"
         )
         form.addRow("Error bar style:", error_cb)
-
-        indiv_chk = QCheckBox("Show individual data points", dlg)
-        indiv_chk.setChecked(bool(gs.get("show_indiv_points", True)))
-        form.addRow("", indiv_chk)
 
         eb_cap = QSpinBox(dlg)
         eb_cap.setRange(0, 20)
@@ -20481,7 +21014,6 @@ class _SessionSectionsWidget(QWidget):
         gs["tick_fontsize"] = tick_fs.value()
         gs["legend_fontsize"] = legend_fs.value()
         gs["error_style"] = str(error_cb.currentData() or "SEM")
-        gs["show_indiv_points"] = indiv_chk.isChecked()
         gs["eb_capsize"] = eb_cap.value()
         gs["eb_linewidth"] = eb_lw.value()
         gs["dpi"] = dpi_spin.value()
@@ -20510,6 +21042,7 @@ class _SessionSectionsWidget(QWidget):
     # Exported metrics in chart-button order: (data column, label).
     _EXPORT_METRICS = (
         ("n_bouts", "Bout Count"),
+        ("rate_per_min", "Bouts per min"),
         ("duration_s", "Duration (s)"),
         ("pct_time", "% Time"),
     )
@@ -20600,7 +21133,9 @@ class _SessionSectionsWidget(QWidget):
             "section_name",
             "section_type",
             "section_order",
+            "section_s",
             "n_bouts",
+            "rate_per_min",
             "duration_s",
             "pct_time",
         ]
@@ -20620,13 +21155,18 @@ class _SessionSectionsWidget(QWidget):
             "section_name": "Section",
             "section_type": "Section Type",
             "section_order": "Section Order",
+            "section_s": "Section Length (s)",
             "n_bouts": "Avg Bout Count",
+            "rate_per_min": "Avg Bouts per Minute",
             "duration_s": "Avg Duration (s)",
             "pct_time": "Avg % Time In Section",
         })
 
         # Light rounding keeps precision while avoiding noisy floats.
-        for col in ["Avg Bout Count", "Avg Duration (s)", "Avg % Time In Section"]:
+        for col in [
+            "Section Length (s)", "Avg Bout Count", "Avg Bouts per Minute",
+            "Avg Duration (s)", "Avg % Time In Section",
+        ]:
             if col in out.columns:
                 out[col] = out[col].astype(float).round(4)
 
@@ -20814,6 +21354,17 @@ class _SessionSectionsWidget(QWidget):
             "behavior x section.",
             "",
             "View settings",
+            "Section timing: "
+            + (
+                "per-subject event times from "
+                + (Path(self._event_table.source).name if self._event_table else "an event file")
+                + ". Each subject's sections start and end at its own event "
+                "frames, so section lengths differ between subjects; compare "
+                "Bouts per min or % Time rather than raw counts. Subjects not in "
+                "the event file are left out."
+                if self._events_mode()
+                else "fixed durations from t=0, the same for every subject"
+            ),
             "Aggregate: "
             + ("By Trial Type (each value is the subject's mean across that "
                "type's sections)" if self._get_aggregate() == "type"
@@ -21335,6 +21886,10 @@ class _VelocityWidget(QWidget):
         action_row2.addWidget(_sc_lbl)
         action_row2.addWidget(self._scale_spin)
         action_row2.addWidget(self._graph_settings_btn)
+        self._points_chk = make_points_toggle(
+            self._host._graph_settings, "velocity_show_points", self._update,
+        )
+        action_row2.addWidget(self._points_chk)
         action_row2.addStretch(1)
 
         action_row3 = QHBoxLayout()
@@ -21989,10 +22544,9 @@ class _VelocityWidget(QWidget):
                 x, vals, yerr=errs, color=colors, alpha=0.85,
                 capsize=cs, error_kw={"elinewidth": lw, "capthick": lw},
             )
-            if gs.get("show_indiv_points", True):
+            if gs.get("velocity_show_points", True):
                 for i, lb in enumerate(labels):
-                    for v in by_sess[lb]:
-                        ax.scatter(i, v, color="black", s=18, zorder=4, alpha=0.55)
+                    overlay_points(ax, i, by_sess[lb], spread=0.18, size=16)
             ax.set_xticks(x)
             ax.set_xticklabels(
                 labels, rotation=35, ha="right",
@@ -22016,10 +22570,9 @@ class _VelocityWidget(QWidget):
                 x, vals, yerr=errs, color=colors, alpha=0.85,
                 capsize=cs, error_kw={"elinewidth": lw, "capthick": lw},
             )
-            if gs.get("show_indiv_points", True):
+            if gs.get("velocity_show_points", True):
                 for i, g in enumerate(grp_list):
-                    for v in by_grp[g]:
-                        ax.scatter(i, v, color="black", s=18, zorder=4, alpha=0.55)
+                    overlay_points(ax, i, by_grp[g], spread=0.18, size=16)
             ax.set_xticks(x)
             ax.set_xticklabels(
                 grp_list, rotation=35, ha="right",
@@ -22694,6 +23247,15 @@ class _VelocityWidget(QWidget):
                     [first_means[i], last_means[i]],
                     color="gray", linewidth=0.9, alpha=0.55,
                 )
+            if gs.get("velocity_show_points", True):
+                for i, lb in enumerate(labels):
+                    bouts = by_sess[lb]
+                    fn = min(n_bouts, len(bouts))
+                    last_start = max(fn, len(bouts) - n_bouts)
+                    overlay_points(ax, x[i] - w / 2, [b[mf] for b in bouts[:fn]],
+                                   spread=0.3 * w, size=12)
+                    overlay_points(ax, x[i] + w / 2, [b[mf] for b in bouts[last_start:]],
+                                   spread=0.3 * w, size=12)
             ax.set_xticks(x)
             ax.set_xticklabels(
                 labels, rotation=35, ha="right",
@@ -22712,9 +23274,12 @@ class _VelocityWidget(QWidget):
             x = np.arange(len(grp_list))
             first_means, last_means = [], []
             first_errs, last_errs = [], []
+            first_pts, last_pts = [], []
             for grp in grp_list:
                 fv = [_first_mean(b) for b in by_grp[grp].values()]
                 lv = [_last_mean(b) for b in by_grp[grp].values()]
+                first_pts.append(fv)
+                last_pts.append(lv)
                 first_means.append(float(np.mean(fv)) if fv else 0.0)
                 last_means.append(float(np.mean(lv)) if lv else 0.0)
                 first_errs.append(_eb_val(np.array(fv), error_style) if fv else 0.0)
@@ -22733,6 +23298,10 @@ class _VelocityWidget(QWidget):
                 error_kw={"elinewidth": lw_eb, "capthick": lw_eb},
                 label=f"Last {n_bouts}",
             )
+            if gs.get("velocity_show_points", True):
+                for i in range(len(grp_list)):
+                    overlay_points(ax, x[i] - w / 2, first_pts[i], spread=0.3 * w, size=16)
+                    overlay_points(ax, x[i] + w / 2, last_pts[i], spread=0.3 * w, size=16)
             ax.set_xticks(x)
             ax.set_xticklabels(
                 grp_list, rotation=35, ha="right",
@@ -22820,10 +23389,6 @@ class _VelocityWidget(QWidget):
         )
         form.addRow("Error band style:", error_cb)
 
-        indiv_chk = QCheckBox("Show individual data points", dlg)
-        indiv_chk.setChecked(bool(gs.get("show_indiv_points", True)))
-        form.addRow("", indiv_chk)
-
         dpi_spin = QSpinBox(dlg)
         dpi_spin.setRange(50, 600)
         dpi_spin.setSingleStep(50)
@@ -22884,7 +23449,6 @@ class _VelocityWidget(QWidget):
         gs["tick_fontsize"] = tick_fs.value()
         gs["legend_fontsize"] = legend_fs.value()
         gs["error_style"] = str(error_cb.currentData() or "SEM")
-        gs["show_indiv_points"] = indiv_chk.isChecked()
         gs["dpi"] = dpi_spin.value()
         gs["max_w"] = max_w_spin.value()
         gs["max_h"] = max_h_spin.value()

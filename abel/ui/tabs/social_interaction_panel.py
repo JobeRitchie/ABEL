@@ -54,6 +54,7 @@ from abel.services.social_analysis_service import (
     SocialAnalysisService,
 )
 from abel.ui.mpl_theme import style_navigation_toolbar
+from abel.ui.plot_points import make_points_toggle
 from abel.utils.cancellation import cancel_scope, cancellable, is_cancel_traceback
 from abel.utils.run_timeline import format_duration
 from abel.workers.task_worker import TaskWorker
@@ -327,6 +328,10 @@ class SocialInteractionWidget(QWidget):
         if self._facet is not None:
             view_row.addSpacing(12)
             view_row.addWidget(self._facet)
+        self._plot_opts: dict[str, Any] = {"show_points": True}
+        self._points_chk = make_points_toggle(self._plot_opts, "show_points", self._render)
+        view_row.addSpacing(12)
+        view_row.addWidget(self._points_chk)
         view_row.addStretch(1)
         view_row.addWidget(self._stats_btn)
         view_row.addWidget(self._prism_btn)
@@ -1386,8 +1391,9 @@ class SocialInteractionWidget(QWidget):
             m = float(v.mean())
             sem = float(v.std(ddof=1) / np.sqrt(v.size)) if v.size > 1 else 0.0
             ax.bar(gi, m, width=0.6, color=c, alpha=0.35, zorder=2)
-            ax.scatter(gi + rng.uniform(-0.12, 0.12, v.size), v, color=c, s=30, alpha=0.9,
-                       edgecolors="white", linewidths=0.5, zorder=3)
+            if self._plot_opts["show_points"]:
+                ax.scatter(gi + rng.uniform(-0.12, 0.12, v.size), v, color=c, s=30, alpha=0.9,
+                           edgecolors="white", linewidths=0.5, zorder=3)
             ax.errorbar(gi, m, yerr=sem, color="#263238", capsize=6, lw=1.2, zorder=4)
         ax.set_xticks(range(len(groups)))
         ax.set_xticklabels([f"{g or 'All sessions'}\n(n = {by_group[g].size})" for g in groups])
@@ -1397,7 +1403,9 @@ class SocialInteractionWidget(QWidget):
             ax.set_ylim(-1.05, 1.05)
             ax.axhline(0, color="#90a4ae", lw=0.8, zorder=1)
         ax.set_ylabel(axis)
-        title = f"{label} by group (mean ± SEM, one point per session)"
+        title = f"{label} by group (mean ± SEM" + (
+            ", one point per session)" if self._plot_opts["show_points"] else ")"
+        )
         res = self._compare_result(df, key, groups)
         self._compare_stats = (label, res)
         if res is not None and not res.error:
@@ -1544,11 +1552,14 @@ class SocialInteractionWidget(QWidget):
         w = 0.36
         ax.bar(x - w / 2, dom.mean(axis=0), w, color="#37474f", label="Dominant", alpha=0.85)
         ax.bar(x + w / 2, sub.mean(axis=0), w, color="#b0bec5", label="Subordinate", alpha=0.95)
-        for i in range(len(pairs)):
-            for s in range(n):
-                ax.plot([s - w / 2, s + w / 2], [dom[i, s], sub[i, s]], color="#78909c",
-                        lw=0.5, alpha=0.4, marker="o", ms=2)
-        top = float(max(dom.max(), sub.max()))
+        if self._plot_opts["show_points"]:
+            for i in range(len(pairs)):
+                for s in range(n):
+                    ax.plot([s - w / 2, s + w / 2], [dom[i, s], sub[i, s]], color="#78909c",
+                            lw=0.5, alpha=0.4, marker="o", ms=2)
+            top = float(max(dom.max(), sub.max()))
+        else:
+            top = float(max(dom.mean(axis=0).max(), sub.mean(axis=0).max()))
         ax.set_ylim(0, top * 1.12)
         try:
             from scipy.stats import wilcoxon

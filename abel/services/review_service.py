@@ -346,6 +346,30 @@ class ReviewService:
             store.pop(wid, None)
         write_json(self._structured_label_path(), {"windows": store})
 
+    def upsert_segment_label(self, record: ReviewerLabelRecord) -> None:
+        """Save a reviewer's label for a segment, replacing that reviewer's earlier
+        label for the same segment.
+
+        Relabeling a clip (e.g. Escape Attempt, then Rear) must leave one label,
+        not two: two different labels on one segment resolve to ``ambiguous``
+        and the clip is dropped from training. Labels from *other* reviewers are
+        kept so genuine inter-reviewer disagreement still shows up.
+        """
+        if not self._project_root:
+            return
+        path = self._segment_label_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        row = pd.DataFrame([record.model_dump(mode="json")])
+        if path.exists():
+            existing = _read_existing_labels(path)
+            same = existing["segment_id"].astype(str) == str(record.segment_id)
+            if "reviewer_id" in existing.columns:
+                same &= existing["reviewer_id"].astype(str) == str(record.reviewer_id)
+            merged = pd.concat([existing[~same], row], ignore_index=True)
+        else:
+            merged = row
+        atomic_write_parquet(merged, path, index=False)
+
     def append_segment_label(self, record: ReviewerLabelRecord) -> None:
         if not self._project_root:
             return
