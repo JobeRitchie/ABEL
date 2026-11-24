@@ -137,6 +137,10 @@ class PrepResult:
     n_frame_rows: int = 0
     n_segment_rows: int = 0
     gpu_warnings: list[str] = field(default_factory=list)
+    short_pose_sessions: list[dict] = field(default_factory=list)
+    """Sessions whose pose file is too short to give usable features.  One
+    dict per session: ``session_id``, ``subject_id``, ``pose_path``,
+    ``n_frames``, ``min_frames``, ``fps``."""
     timings: dict[str, float] = field(default_factory=dict)
 
 
@@ -617,6 +621,36 @@ class FeaturePrepService:
             except Exception:
                 return 0
 
+    @classmethod
+    def find_short_pose_sessions(
+        cls, project_root: Path, jobs: "list[SessionJob]", config: "PrepConfig",
+    ) -> list[dict]:
+        """Sessions whose pose file is shorter than one second or one segment
+        window.  Such a file extracts, but its windowed features (oscillation
+        energy, rhythm frequency) are meaningless and it yields at most a
+        window or two.  It is almost always a truncated or wrong pose file.
+        """
+        sessions_dir = project_root / "derived" / "pose_features" / "sessions"
+        out: list[dict] = []
+        for job in jobs:
+            rows = cls._parquet_rows(sessions_dir / f"{job.session_id}.parquet")
+            if rows <= 0:
+                continue
+            # The frame table holds one row per (frame, animal).
+            n_frames = rows // max(1, len(job.individuals or []))
+            fps = float(job.fps or 0.0)
+            min_frames = max(int(round(fps)), int(config.segment_window_frames), 1)
+            if n_frames < min_frames:
+                out.append({
+                    "session_id": str(job.session_id),
+                    "subject_id": str(job.subject_id or ""),
+                    "pose_path": str(job.pose_path),
+                    "n_frames": int(n_frames),
+                    "min_frames": int(min_frames),
+                    "fps": fps,
+                })
+        return out
+
     @staticmethod
     def cached_pose_sessions(project_root: Path) -> set[str]:
         d = project_root / "derived" / "pose_features" / "sessions"
@@ -754,6 +788,15 @@ class FeaturePrepService:
             obs.stage_done(STAGE_PREPROCESS)
         else:
             obs.stage_skip(STAGE_PREPROCESS, f"All {len(jobs)} session(s) already cached.")
+
+        # Checked for every session in the run, cached ones included, so the
+        # warning does not vanish on the second run.
+        result.short_pose_sessions = self.find_short_pose_sessions(project_root, jobs, config)
+        for item in result.short_pose_sessions:
+            obs.log(
+                f"⚠ {item['session_id']}: pose file has only {item['n_frames']} frame(s) "
+                f"(needs at least {item['min_frames']}): {item['pose_path']}"
+            )
 
         _check_cancel()
 

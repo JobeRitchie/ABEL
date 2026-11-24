@@ -108,6 +108,45 @@ LOCAL_RADIUS_TOOLTIP = (
 )
 
 
+def short_pose_warning_text(items: list[dict], max_listed: int = 8) -> tuple[str, str, str]:
+    """(headline, body, full file list) for the short pose file warning."""
+    n = len(items)
+    headline = (
+        "1 session has a pose file that is too short."
+        if n == 1 else f"{n} sessions have pose files that are too short."
+    )
+
+    def _line(item: dict) -> str:
+        name = Path(str(item.get("pose_path", ""))).name or "(unknown file)"
+        subject = str(item.get("subject_id") or "").strip()
+        who = f"{subject}, {item.get('session_id')}" if subject else str(item.get("session_id"))
+        return (
+            f"{name}  ({who}): {item.get('n_frames')} frames, "
+            f"needs at least {item.get('min_frames')}"
+        )
+
+    listed = [_line(item) for item in items[:max_listed]]
+    if n > max_listed:
+        listed.append(f"... and {n - max_listed} more. Click Show Details for the full list.")
+    body = (
+        "A pose file needs at least one second of tracking and one full "
+        "segment window. Shorter files were still processed, but their "
+        "movement and rhythm features are not reliable and they produce "
+        "almost no windows to score.\n\n"
+        "This usually means tracking stopped early or the wrong file was "
+        "linked. Re-run pose tracking for these sessions, link the correct "
+        "file, or remove the sessions from the project.\n\n"
+        "Affected files:\n" + "\n".join(listed)
+    )
+    detailed = "\n".join(
+        f"{item.get('session_id')} | {item.get('subject_id') or ''} | "
+        f"{item.get('n_frames')} frames (minimum {item.get('min_frames')}) | "
+        f"{item.get('pose_path')}"
+        for item in items
+    )
+    return headline, body, detailed
+
+
 class _SignalPrepObserver:
     """Bridges :class:`FeaturePrepService` progress (worker thread) to the tab's
     Qt signals, which Qt delivers safely on the GUI thread.
@@ -1705,6 +1744,25 @@ class PoseFeaturesTab(QWidget):
         self._finish_prep_ui(msg)
         QTimer.singleShot(0, self._refresh_sessions)
         self._refresh_clips_for_processed_sessions()
+        self._warn_short_pose_files(getattr(result, "short_pose_sessions", None) or [])
+
+    def _warn_short_pose_files(self, items: list[dict]) -> None:
+        """Tell the user which pose files are too short to be useful."""
+        if not items:
+            return
+        text, informative, detailed = short_pose_warning_text(items)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Pose Files Too Short")
+        box.setText(text)
+        box.setInformativeText(informative)
+        box.setDetailedText(detailed)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        # open(), not exec(): the clip refresh that follows must not wait on
+        # the dialog.
+        self._short_pose_box = box
+        box.open()
 
     def _refresh_clips_for_processed_sessions(self) -> None:
         """Re-cut the clips of the sessions this run rebuilt features for.

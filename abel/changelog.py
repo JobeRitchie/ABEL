@@ -11,6 +11,11 @@ VERSION_DATE = "November 24, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.36.1", "November 24, 2026", [
+        'Fixed feature extraction failing with "All arrays must be of the same length" when a pose file had less than one second of tracking. One very short session stopped the whole run. This is a different cause from the 0.36.0 fix.',
+        'New: Pose Files Too Short warning. After feature extraction, a window lists every session whose pose file is shorter than one second or one segment window, with the file name and frame count. Show Details gives the full paths.',
+        'Fixed probability smoothing in Temporal Refinement returning the wrong length for a trace shorter than the smoothing window.',
+    ]),
     ("0.36.0", "November 24, 2026", [
         'Changed: ResNet-18 is now the default Video Appearance Embedding for new projects. In testing it matched or beat R3D-18 at about 10x the speed. A project that already built R3D features stays on R3D unless you change it.',
         'Fixed feature extraction failing with "All arrays must be of the same length". It happened without GPU optical flow when a video had fewer frames than its pose file, and on every session when the optical flow stride was set to 1.',

@@ -89,3 +89,94 @@ def test_compute_frame_pose_features_contains_expected_columns() -> None:
     assert "forepaw_movement_frequency" in df.columns
     assert "forepaw_autocorr_peak" in df.columns
     assert float(df["forepaw_speed"].mean()) > 0.0
+
+
+def test_pose_file_shorter_than_rhythmicity_window(tmp_path: Path) -> None:
+    """A pose file with fewer frames than the 1 s rhythmicity window (an
+    18-frame clip at 30 fps) must still extract.  ``np.convolve(mode="same")``
+    returned window-length oscillation-energy columns, so the frame table
+    failed with "All arrays must be of the same length"."""
+    import pytest
+
+    parts = ["nose", "left_ear", "right_ear", "neck", "center_body", "tail_base", "tail_tip"]
+    cols = pd.MultiIndex.from_product(
+        [["DLC_scorer"], parts, ["x", "y", "likelihood"]],
+        names=["scorer", "bodyparts", "coords"],
+    )
+    svc = PoseProcessingService()
+    for n in (18, 29, 30, 45):
+        rng = np.random.default_rng(n)
+        data = np.empty((n, len(cols)))
+        for k in range(len(parts)):
+            data[:, 3 * k] = 100.0 + 10.0 * k + rng.normal(0, 2, n)
+            data[:, 3 * k + 1] = 200.0 + rng.normal(0, 2, n)
+            data[:, 3 * k + 2] = 0.99
+        pose_path = tmp_path / f"pose_{n}.csv"
+        pd.DataFrame(data, columns=cols).to_csv(pose_path)
+
+        df = svc.extract_and_save_frame_pose_features(
+            tmp_path, pose_path, 30.0, "MouseA0", f"session_{n}", f"video_{n}",
+        )
+        assert len(df) == n
+        # No paw keypoints here, so the forepaw energy is NaN by design.
+        assert np.isfinite(df["nose_oscillation_energy"]).all()
+
+    # Sessions at least one window long keep the exact mode="same" values.
+    for n, w in ((30, 30), (45, 30), (40, 7), (9, 4)):
+        arr = np.random.default_rng(n).random(n)
+        expected = np.convolve(arr, np.ones(w), mode="same") / float(w)
+        assert PoseProcessingService._centered_window_mean(arr, w) == pytest.approx(expected)
+    assert len(PoseProcessingService._centered_window_mean(np.zeros(0), 30)) == 0
+
+
+def test_smooth_probabilities_keeps_length_of_short_trace() -> None:
+    from abel.temporal_refinement.bout_postprocess import smooth_probabilities
+
+    short = np.linspace(0.0, 1.0, 3, dtype=np.float32)
+    assert len(smooth_probabilities(short, window=9)) == 3
+    long = np.random.default_rng(0).random(50).astype(np.float32)
+    expected = np.convolve(long, np.ones(5, dtype=np.float32) / 5.0, mode="same")
+    assert np.allclose(smooth_probabilities(long, window=5), expected)
+
+
+def test_short_pose_sessions_are_reported_with_their_files(tmp_path: Path) -> None:
+    """Prep flags pose files shorter than one second or one segment window,
+    and the warning text names every affected file."""
+    from abel.services.feature_prep_service import (
+        FeaturePrepService, PrepConfig, SessionJob,
+    )
+    from abel.ui.tabs.pose_features_tab import short_pose_warning_text
+
+    sessions = tmp_path / "derived" / "pose_features" / "sessions"
+    sessions.mkdir(parents=True)
+    rows = {"short": 18, "ok": 900, "pair": 40}  # "pair": 2 animals, 20 frames
+    for sid, n in rows.items():
+        pd.DataFrame({"frame": np.arange(n)}).to_parquet(sessions / f"{sid}.parquet", index=False)
+
+    def _job(sid: str, individuals: list[str] | None = None) -> SessionJob:
+        return SessionJob(
+            session_id=sid, subject_id=f"Mouse_{sid}",
+            pose_path=tmp_path / f"{sid}DLC.csv", video_path=None, fps=30.0,
+            individuals=individuals or [],
+        )
+
+    jobs = [_job("short"), _job("ok"), _job("pair", ["a", "b"]), _job("not_extracted")]
+    found = FeaturePrepService.find_short_pose_sessions(
+        tmp_path, jobs, PrepConfig(segment_window_frames=15),
+    )
+    assert [(f["session_id"], f["n_frames"], f["min_frames"]) for f in found] == [
+        ("short", 18, 30), ("pair", 20, 30),
+    ]
+
+    headline, body, detailed = short_pose_warning_text(found)
+    assert headline.startswith("2 sessions")
+    for sid in ("short", "pair"):
+        assert f"{sid}DLC.csv" in body
+        assert str(tmp_path / f"{sid}DLC.csv") in detailed
+    assert "okDLC.csv" not in body
+    assert "18 frames" in body
+
+    many = [dict(found[0], session_id=f"s{i}") for i in range(12)]
+    _, body_many, detailed_many = short_pose_warning_text(many)
+    assert "and 4 more" in body_many
+    assert detailed_many.count("\n") == 11

@@ -18,7 +18,10 @@ def smooth_probabilities(
 
     if method == "moving_average":
         kernel = np.ones(w, dtype=np.float32) / float(w)
-        return np.convolve(x, kernel, mode="same").astype(np.float32)
+        # "full" then a centered slice: mode="same" returns the kernel's
+        # length when the trace is shorter than the window.
+        start = (w - 1) // 2
+        return np.convolve(x, kernel, mode="full")[start : start + x.size].astype(np.float32)
     if method == "median":
         half = w // 2
         out = np.zeros_like(x)

@@ -823,6 +823,25 @@ class PoseProcessingService:
         return np.diff(arr, prepend=arr[0]) * fps
 
     @staticmethod
+    def _centered_window_mean(arr: np.ndarray, window: int) -> np.ndarray:
+        """Zero-padded centered moving average, always ``len(arr)`` long.
+
+        ``np.convolve(..., mode="same")`` returns ``max(len(arr), window)``
+        samples, so a pose file shorter than the window (a few-frame clip)
+        came back longer than the session and broke the frame table.  Slicing
+        the "full" result gives the same values for long sessions and the
+        right length for short ones.
+        """
+        arr = np.asarray(arr, dtype=float)
+        n = len(arr)
+        w = max(1, int(window))
+        if n == 0:
+            return np.zeros(0, dtype=float)
+        full = np.convolve(arr, np.ones(w), mode="full")
+        start = (w - 1) // 2
+        return full[start : start + n] / float(w)
+
+    @staticmethod
     def _window_autocorr_peak(arr: np.ndarray, window: int) -> np.ndarray:
         n = len(arr)
         if not np.any(np.isfinite(arr)):
@@ -979,7 +998,7 @@ class PoseProcessingService:
         forepaw_oscillation_power = np.square(forepaw_speed - _nanmean_or_nan(forepaw_speed))
         forepaw_autocorr_peak = self._window_autocorr_peak(forepaw_speed, dt_window)
         paw_scrape_frequency = self._window_frequency(forepaw_speed, fps=fps, window=dt_window)
-        oscillation_energy = np.convolve(forepaw_oscillation_power, np.ones(dt_window), mode="same") / float(dt_window)
+        oscillation_energy = self._centered_window_mean(forepaw_oscillation_power, dt_window)
 
         # ── Nose kinematics (parallel to forepaw features) ───────────────
         # Useful for overhead-camera setups where paw keypoints are absent
@@ -987,7 +1006,7 @@ class PoseProcessingService:
         nose_oscillation_power = np.square(nose_velocity - _nanmean_or_nan(nose_velocity))
         nose_autocorr_peak = self._window_autocorr_peak(nose_velocity, dt_window)
         nose_movement_frequency = self._window_frequency(nose_velocity, fps=fps, window=dt_window)
-        nose_oscillation_energy = np.convolve(nose_oscillation_power, np.ones(dt_window), mode="same") / float(dt_window)
+        nose_oscillation_energy = self._centered_window_mean(nose_oscillation_power, dt_window)
 
         base = {
             "frame": frame,
