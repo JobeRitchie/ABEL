@@ -7,10 +7,17 @@ entry here and update ``VERSION_DATE`` to that release's date.
 from __future__ import annotations
 
 # Date of the current ``abel.__version__`` release.
-VERSION_DATE = "November 19, 2026"
+VERSION_DATE = "November 24, 2026"
 
 # (version, date, [bullet lines]), newest first.
 CHANGELOG: list[tuple[str, str, list[str]]] = [
+    ("0.36.0", "November 24, 2026", [
+        'Changed: ResNet-18 is now the default Video Appearance Embedding for new projects. In testing it matched or beat R3D-18 at about 10x the speed. A project that already built R3D features stays on R3D unless you change it.',
+        'Fixed feature extraction failing with "All arrays must be of the same length". It happened without GPU optical flow when a video had fewer frames than its pose file, and on every session when the optical flow stride was set to 1.',
+        'The feature extraction log now says when a video is shorter than its pose file and how many frames get no video features.',
+        'Faster retraining after review. A reviewed clip that matches an extracted window reuses its video embedding, and the rest are read by jumping between clips. The video is no longer decoded from start to end.',
+        'Fixed Human Labels counts in the Validation tab. Each reviewed clip was counted twice, and a relabeled clip was still counted under its old behavior. Each clip now counts once, under its newest label.',
+    ]),
     ("0.35.0", "November 19, 2026", [
         'New: Video Appearance Embedding in Pose Features. Pick R3D-18 or ResNet-18. ResNet-18 is about 14x faster on GPU and keeps posture and appearance, but does not see motion. Models remember the network they were trained on.',
         "New: Per-subject event times in Session Sections. Read each subject's section start and end frames from an .xlsx or .csv file. Includes help and a Save Template button.",

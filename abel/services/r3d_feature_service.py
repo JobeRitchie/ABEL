@@ -86,6 +86,10 @@ _CACHE_VERSION = "r3d_v1"
 _DENSE_CACHE_VERSION = "r3d_dense_v1"
 # Decoded batches allowed to wait for the forward thread (~39 MB each).
 _STREAM_QUEUE_BATCHES = 4
+# Gap between wanted frames beyond which the decoder jumps instead of reading
+# through.  A jump re-decodes from the previous keyframe, so short gaps are
+# cheaper to read.
+_SEEK_GAP_FRAMES = 600
 # Frames held as 112x112 crops at once during the dense pass (~310 MB).
 _STACK_CHUNK = 8192
 
@@ -111,7 +115,10 @@ _MODELS: dict[str, Any] = {}
 # pose misses are where R3D may still earn its cost.
 BACKBONE_R3D = "r3d_18"
 BACKBONE_RESNET18 = "resnet18"
-DEFAULT_BACKBONE = BACKBONE_R3D
+# New projects use ResNet-18: on 3-chamber, EPM and two wet dog shake sets it
+# matched or beat R3D at about 10-14x the speed.  A project that already built
+# R3D features and never saved a choice keeps R3D (see resolve_project_backbone).
+DEFAULT_BACKBONE = BACKBONE_RESNET18
 RN18_PREFIX = "rn18_"
 RN18_SAMPLE_FRAMES = 4
 
@@ -176,7 +183,12 @@ def backbones_in_columns(cols: Any) -> list[str]:
 
 
 def resolve_project_backbone(project_root: "Path | None") -> str:
-    """The backbone a project's Feature Extraction tab selected (R3D-18 default)."""
+    """The backbone a project's Feature Extraction tab selected.
+
+    With no saved choice, a project that already has R3D embeddings stays on
+    R3D, so its features and retrained models do not silently change network;
+    any other project gets the ResNet-18 default.
+    """
     if project_root is None:
         return DEFAULT_BACKBONE
     try:
@@ -189,10 +201,12 @@ def resolve_project_backbone(project_root: "Path | None") -> str:
                 return normalize_backbone(cfg["video_embedding_backbone"])
     except Exception:
         logger.debug("Could not read video embedding backbone for %s", project_root, exc_info=True)
+    if (Path(project_root) / "derived" / "r3d_features").exists():
+        return BACKBONE_R3D
     return DEFAULT_BACKBONE
 
 
-def _get_model(device_name: str, backbone: str = DEFAULT_BACKBONE):
+def _get_model(device_name: str, backbone: str = BACKBONE_R3D):
     """Return a cached, eval-mode backbone for ``device_name`` (loads once)."""
     with _model_lock:
         key = f"{backbone}:{device_name}"
@@ -246,7 +260,7 @@ def _forward_resnet18(batch: np.ndarray, device_name: str) -> np.ndarray:
 
 
 def _forward_batch(
-    batch: np.ndarray, device_name: str, backbone: str = DEFAULT_BACKBONE
+    batch: np.ndarray, device_name: str, backbone: str = BACKBONE_R3D
 ) -> np.ndarray:
     """``(n, 16, 112, 112, 3)`` uint8 → ``(n, 512)`` float32 on one device.
 
@@ -287,7 +301,7 @@ class R3DFeatureService:
     ResNet-18 on 4 frames (``rn18_*``).  Each has its own cache folder.
     """
 
-    def __init__(self, backbone: str = DEFAULT_BACKBONE) -> None:
+    def __init__(self, backbone: str = BACKBONE_R3D) -> None:
         self._imports = ImportService()
         self._pose = PoseProcessingService()
         self.backbone = normalize_backbone(backbone)
@@ -657,9 +671,28 @@ class R3DFeatureService:
                 lo, hi = int(idx.min()), int(idx.max())
                 cap.set(cv2.CAP_PROP_POS_FRAMES, lo)
                 frame_no = lo
+                wanted_sorted = np.fromiter(sorted(wanted), dtype=np.int64)
+                can_seek = True
+                reads = 0
                 while frame_no <= hi:
-                    if not frame_no & 255:
+                    if not reads & 255:
                         checkpoint()
+                    reads += 1
+                    # Reviewed clips are scattered through a session.  Reading
+                    # every frame between them decoded about 180x more video
+                    # than the clips use, so a long gap is jumped instead.
+                    if can_seek and frame_no not in wanted:
+                        nxt = int(wanted_sorted[np.searchsorted(wanted_sorted, frame_no)])
+                        if nxt - frame_no > _SEEK_GAP_FRAMES:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, nxt)
+                            pos = int(round(cap.get(cv2.CAP_PROP_POS_FRAMES)))
+                            if frame_no <= pos <= nxt:
+                                frame_no = pos
+                            else:
+                                # The container can't report where the jump
+                                # landed: go back and read straight through.
+                                can_seek = False
+                                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no)
                     ok, frame = cap.read()
                     if not ok:
                         break

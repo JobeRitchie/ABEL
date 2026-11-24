@@ -768,8 +768,15 @@ class ContextFeatureService:
                 prev_gray = gray
 
             # Interpolate strided flow features back to per-frame resolution.
+            # Every column must come back one value per frame read.  Flow is
+            # missing for some frames whenever it was not computed on all of
+            # them: a stride above 1, the very first frame of the video (no
+            # previous frame), or a video that ends a few frames into the chunk
+            # and leaves a single flow sample.  np.interp fills all of those,
+            # holding the nearest sample flat at the ends.
             n_output = len(local_surface_energy)
-            if temporal_stride > 1 and len(_strided_flow_indices) > 1:
+            _flow_is_sparse = 0 < len(_strided_flow_indices) < n_output
+            if _flow_is_sparse:
                 x_strided = np.array(_strided_flow_indices, dtype=float)
                 x_full = np.arange(n_output, dtype=float)
                 flow_mag_paw_l = np.interp(x_full, x_strided, _sf_mag_paw_l).tolist()
@@ -795,7 +802,7 @@ class ContextFeatureService:
                 flow_entropy_local = [0.0] * n_output
             # Extra-ROI flow interpolation
             for _ei in range(_n_extra):
-                if _strided_flow_indices and len(_strided_flow_indices) > 1 and temporal_stride > 1:
+                if _flow_is_sparse:
                     _x_s = np.array(_strided_flow_indices, dtype=float)
                     _x_f = np.arange(n_output, dtype=float)
                     flow_mag_extras[_ei] = np.interp(_x_f, _x_s, _sf_mag_extras[_ei]).tolist()
@@ -1572,6 +1579,15 @@ class ContextFeatureService:
         ]
 
         n = len(local_surface_energy)
+        if n < pose.n_frames:
+            _short_msg = (
+                f"video has {n} readable frame(s) but the pose file has "
+                f"{pose.n_frames}; the last {pose.n_frames - n} frame(s) get no "
+                "video features."
+            )
+            logger.warning("Context features for session %s: %s", session_id, _short_msg)
+            if progress_cb is not None:
+                progress_cb(0, 1, _short_msg)
         paw_centroid_x = (paw_l_x[:n] + paw_r_x[:n]) / 2.0
         paw_centroid_y = (paw_l_y[:n] + paw_r_y[:n]) / 2.0
 

@@ -7877,7 +7877,20 @@ class ActiveLearningTab(QWidget):
         if not needs.any():
             return enriched_df, False
 
+        # A reviewed clip that covers exactly a grid window (same session, frames
+        # and animal) has the same crop, so it takes the grid row's embedding
+        # instead of decoding the video again.
+        reused = self._reuse_grid_embedding(enriched_df, segment_df, needs, r3d_cols)
+        if reused is not None:
+            enriched_df, n_reused = reused
+            needs = enriched_df[r3d_cols].fillna(0.0).eq(0.0).all(axis=1)
+            logger.info("Enrichment: reused the grid %s embedding for %d segment(s).", label, n_reused)
+            if not needs.any():
+                return enriched_df, True
+
         subset = enriched_df.loc[needs, ["segment_id", "session_id", "start_frame", "end_frame"]].copy()
+        if "animal_id" in enriched_df.columns:
+            subset["animal_id"] = enriched_df.loc[needs, "animal_id"]
         if progress_cb:
             progress_cb(f"Attaching {label} features to {len(subset)} enriched segment(s)…")
         try:
@@ -7886,11 +7899,11 @@ class ActiveLearningTab(QWidget):
             logger.warning(
                 "Enrichment: %s backfill failed; enriched rows keep placeholder values.", label, exc_info=True
             )
-            return enriched_df, False
+            return enriched_df, reused is not None
 
         embedded_r3d_cols = [c for c in r3d_cols if c in embedded.columns]
         if not embedded_r3d_cols:
-            return enriched_df, False
+            return enriched_df, reused is not None
 
         out = enriched_df.copy()
         for c in r3d_cols:
@@ -7904,7 +7917,7 @@ class ActiveLearningTab(QWidget):
         target_ids = out.loc[needs, "segment_id"]
         resolved = target_ids[target_ids.isin(update.index)]
         if resolved.empty:
-            return enriched_df, False
+            return enriched_df, reused is not None
 
         out.loc[resolved.index, embedded_r3d_cols] = update.loc[resolved.to_numpy(), embedded_r3d_cols].to_numpy()
         logger.info(
@@ -7912,6 +7925,57 @@ class ActiveLearningTab(QWidget):
             label, len(resolved), int(needs.sum()),
         )
         return out, True
+
+    @staticmethod
+    def _reuse_grid_embedding(
+        enriched_df: pd.DataFrame,
+        segment_df: pd.DataFrame,
+        needs: pd.Series,
+        emb_cols: list[str],
+    ) -> tuple[pd.DataFrame, int] | None:
+        """Copy grid embeddings onto enriched rows covering the same window.
+
+        Returns ``(updated df, rows filled)``, or ``None`` when nothing matched.
+        A window matches on session, start and end frame, plus the animal when
+        the grid holds more than one animal per window.
+        """
+        keys = ["session_id", "start_frame", "end_frame"]
+        if not set(keys).issubset(segment_df.columns) or segment_df.empty:
+            return None
+        if segment_df.duplicated(keys).any():
+            if "animal_id" not in segment_df.columns or "animal_id" not in enriched_df.columns:
+                return None
+            keys = [*keys, "animal_id"]
+
+        def _key_frame(df: pd.DataFrame) -> pd.DataFrame:
+            out = pd.DataFrame({
+                "session_id": df["session_id"].astype(str).to_numpy(),
+                "start_frame": pd.to_numeric(df["start_frame"], errors="coerce").to_numpy(),
+                "end_frame": pd.to_numeric(df["end_frame"], errors="coerce").to_numpy(),
+            })
+            if "animal_id" in keys:
+                out["animal_id"] = df["animal_id"].astype(str).to_numpy()
+            return out
+
+        want = _key_frame(enriched_df.loc[needs])
+        want["_row"] = enriched_df.index[needs.to_numpy()]
+        grid = _key_frame(segment_df)
+        grid["_pos"] = np.arange(len(segment_df))
+        grid = grid.drop_duplicates(keys, keep=False)
+        hit = want.merge(grid, on=keys, how="inner")
+        if hit.empty:
+            return None
+        values = segment_df.iloc[hit["_pos"].to_numpy()][emb_cols].to_numpy(dtype=np.float32)
+        # A grid row with no embedding (video unreachable at extraction) is no use.
+        ok = np.isfinite(values).all(axis=1) & (values != 0.0).any(axis=1)
+        if not ok.any():
+            return None
+        out = enriched_df.copy()
+        for c in emb_cols:
+            if c not in out.columns:
+                out[c] = np.nan
+        out.loc[hit["_row"].to_numpy()[ok], emb_cols] = values[ok]
+        return out, int(ok.sum())
 
     @staticmethod
     def _sessions_without_pose(

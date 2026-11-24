@@ -435,8 +435,13 @@ class ValidationService:
     def _label_counts_by_behavior(self) -> tuple[dict[str, int], int]:
         """Count labels per behavior (``no_behavior`` is its own key), plus the grand total.
 
-        Combines accepted review decisions and reviewer segment labels so the
-        overview reflects all human labeling.  The total drives one-vs-rest
+        One label per labeled window, resolved the way training resolves it.
+        A reviewed clip is written to BOTH stores (its decision and a reviewer
+        segment label under the same id), and the segment-label file is
+        append-only, so summing the two counted every clip twice and kept
+        counting a relabeled clip under its old behavior.  The last
+        segment-label row per segment wins; an accepted decision only counts
+        when its clip has no segment label.  The total drives one-vs-rest
         negative counts (a behavior's negatives are every label that isn't it).
         """
         counts: dict[str, int] = defaultdict(int)
@@ -444,12 +449,14 @@ class ValidationService:
         def _key(label: str) -> str:
             return NO_BEHAVIOR_ID if _is_no_behavior(label) else label
 
+        latest: dict[str, str] = {}
+        for rec in self._reviews.load_segment_labels():
+            latest[str(rec.segment_id)] = str(rec.review_label or "").strip()
         for d in self._reviews.load_decisions():
             label = str(d.behavior_label or "").strip()
             if d.decision == ReviewDecisionType.ACCEPT and label:
-                counts[_key(label)] += 1
-        for rec in self._reviews.load_segment_labels():
-            label = str(rec.review_label or "").strip()
+                latest.setdefault(str(d.clip_id), label)
+        for label in latest.values():
             if label:
                 counts[_key(label)] += 1
         total = sum(counts.values())

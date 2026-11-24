@@ -549,3 +549,31 @@ def test_model_overview_falls_back_to_macro_for_legacy_models(tmp_path: Path) ->
     assert row["metrics_basis"] == "macro"
     assert abs(row["frame_f1"] - 0.77) < 1e-9
     assert row.get("raw_tp") is None
+
+
+def test_label_counts_one_label_per_clip(tmp_path: Path) -> None:
+    """A reviewed clip lives in both label stores and must be counted once.
+
+    The segment-label file is append-only, so a relabeled clip counts only
+    under its newest label.
+    """
+    from abel.models.schemas import ReviewDecisionType, ReviewerLabelRecord
+    from abel.services.review_service import ReviewService
+
+    reviews = ReviewService()
+    reviews.set_project(tmp_path)
+    reviews.upsert_decisions_bulk(
+        [
+            {"clip_id": "seg_a", "decision": ReviewDecisionType.ACCEPT, "behavior_label": "dart"},
+            {"clip_id": "seg_b", "decision": ReviewDecisionType.ACCEPT, "behavior_label": "rear"},
+            {"clip_id": "clip_only", "decision": ReviewDecisionType.ACCEPT, "behavior_label": "rear"},
+        ]
+    )
+    for seg, label in [("seg_a", "pinched"), ("seg_a", "dart"), ("seg_b", "rear")]:
+        reviews.append_segment_label(ReviewerLabelRecord(segment_id=seg, review_label=label, reviewer_id="r"))
+
+    svc = ValidationService()
+    svc.set_project(tmp_path)
+    counts, total = svc._label_counts_by_behavior()
+    assert counts == {"dart": 1, "rear": 2}
+    assert total == 3

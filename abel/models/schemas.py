@@ -232,7 +232,7 @@ class BehaviorModelConfig(BaseModel):
     Requires torch/torchvision plus a reachable video and pose for each session;
     sessions that can't be resolved are simply left without the columns.
     Gated by ``use_video_features``, pixel features off means these are off too."""
-    video_embedding_backbone: str = "r3d_18"
+    video_embedding_backbone: str = "resnet18"
     """Network behind the appearance embedding: ``"r3d_18"`` (3D video network,
     16 frames, ``r3d_*`` columns) or ``"resnet18"`` (ImageNet 2D network on 4
     frames, ``rn18_*`` columns, about 14x faster on GPU)."""

@@ -38,7 +38,9 @@ def test_backbone_names_and_columns() -> None:
 
 
 def test_project_backbone_resolution(tmp_path: Path) -> None:
-    assert rfs.resolve_project_backbone(tmp_path) == "r3d_18"  # no project.yaml
+    assert rfs.resolve_project_backbone(tmp_path) == "resnet18"  # new project: default
+    (tmp_path / "derived" / "r3d_features").mkdir(parents=True)
+    assert rfs.resolve_project_backbone(tmp_path) == "r3d_18"  # existing R3D project, no saved choice
     write_yaml(tmp_path / "project.yaml", {"feature_extraction": {"video_embedding_backbone": "resnet18"}})
     assert rfs.resolve_project_backbone(tmp_path) == "resnet18"
 
@@ -178,12 +180,25 @@ def test_tab_restores_and_saves_backbone(_app, tmp_path: Path) -> None:
     assert fx["video_embedding_backbone"] == "r3d_18"
 
 
-def test_tab_defaults_to_r3d_and_greys_out(_app, tmp_path: Path) -> None:
+def test_tab_defaults_to_resnet18_and_greys_out(_app, tmp_path: Path) -> None:
     project = _project(tmp_path, use_video_features=False)
     tab = _tab(project)
-    assert tab._p_backbone_r3d.isChecked()
+    assert tab._p_backbone_rn18.isChecked()
     assert not tab._p_backbone_r3d.isEnabled()
     tab._p_use_video.setChecked(True)
     assert tab._p_backbone_rn18.isEnabled()
     tab._p_use_r3d.setChecked(False)
     assert not tab._p_backbone_rn18.isEnabled()
+
+
+def test_tab_keeps_r3d_for_existing_r3d_project(_app, tmp_path: Path) -> None:
+    project = _project(tmp_path, use_video_features=True)
+    (project / "derived" / "r3d_features").mkdir(parents=True)
+    tab = _tab(project)
+    assert tab._p_backbone_r3d.isChecked()
+
+
+def test_resnet18_listed_first(_app, tmp_path: Path) -> None:
+    tab = _tab(_project(tmp_path))
+    buttons = tab._p_backbone_group.buttons()
+    assert buttons[0] is tab._p_backbone_rn18

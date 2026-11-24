@@ -414,7 +414,7 @@ class PoseFeaturesTab(QWidget):
             "Columns r3d_000 to r3d_511.\n\n"
             "Cost: about a minute of GPU time per 1000 segments, much slower on CPU."
         )
-        self._p_backbone_rn18 = QRadioButton("ResNet-18 (2D image network, 4 frames, about 14x faster)")
+        self._p_backbone_rn18 = QRadioButton("ResNet-18 (2D image network, 4 frames, about 10x faster; default)")
         self._p_backbone_rn18.setToolTip(
             "ResNet-18, trained on ImageNet photos. Looks at 4 frames from each segment "
             "separately and averages them, so it describes posture and appearance but "
@@ -423,14 +423,14 @@ class PoseFeaturesTab(QWidget):
             "gain at about 14x the GPU speed. Behaviors defined by fast movement "
             "(shakes, twitches) may still need R3D."
         )
-        self._p_backbone_r3d.setChecked(True)
+        self._p_backbone_rn18.setChecked(True)
         self._p_backbone_group = QButtonGroup(embed_box)
-        self._p_backbone_group.addButton(self._p_backbone_r3d)
         self._p_backbone_group.addButton(self._p_backbone_rn18)
+        self._p_backbone_group.addButton(self._p_backbone_r3d)
         backbone_label = QLabel("Network:")
         embed_layout.addWidget(backbone_label)
-        embed_layout.addWidget(self._p_backbone_r3d)
         embed_layout.addWidget(self._p_backbone_rn18)
+        embed_layout.addWidget(self._p_backbone_r3d)
         self._p_backbone_note = QLabel(
             "Switching network rebuilds the segment features on the next extraction. "
             "Existing models keep using the network they were trained with."
@@ -930,9 +930,17 @@ class PoseFeaturesTab(QWidget):
         return BACKBONE_RESNET18 if self._p_backbone_rn18.isChecked() else BACKBONE_R3D
 
     def _set_backbone(self, name) -> None:
-        from abel.services.r3d_feature_service import BACKBONE_RESNET18, normalize_backbone
+        from abel.services.r3d_feature_service import (
+            BACKBONE_RESNET18, normalize_backbone, resolve_project_backbone,
+        )
 
-        if normalize_backbone(name) == BACKBONE_RESNET18:
+        # No saved choice: the same rule the extraction run uses (R3D only for a
+        # project that already built R3D features, ResNet-18 otherwise).
+        backbone = (
+            resolve_project_backbone(self._project_root) if name is None
+            else normalize_backbone(name)
+        )
+        if backbone == BACKBONE_RESNET18:
             self._p_backbone_rn18.setChecked(True)
         else:
             self._p_backbone_r3d.setChecked(True)

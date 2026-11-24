@@ -289,3 +289,57 @@ def test_consolidation_runs_when_the_merged_file_is_missing(tmp_path):
     mono.unlink()
     assert F._consolidate_if_changed(mono, run, tmp_path) is True
     assert mono.exists()
+
+
+# ── Scattered clips: long gaps are jumped, not decoded ───────────────────
+@pytest.mark.parametrize("starts", [np.array([0, 60, 130]), np.array([120, 5]), np.array([40])])
+def test_jumping_gaps_gives_the_same_clips(video, starts, monkeypatch):
+    ends = starts + 14
+    tracks, animal_row = _tracks(), np.zeros(len(starts), dtype=int)
+    want, want_kept = _reference_clips(video, starts, ends, tracks, animal_row)
+
+    seeks: list[int] = []
+    real_capture = cv2.VideoCapture
+
+    class _Counting:
+        def __init__(self, *a):
+            self._cap = real_capture(*a)
+
+        def set(self, prop, value):
+            if prop == cv2.CAP_PROP_POS_FRAMES:
+                seeks.append(int(value))
+            return self._cap.set(prop, value)
+
+        def __getattr__(self, name):
+            return getattr(self._cap, name)
+
+    monkeypatch.setattr(cv2, "VideoCapture", _Counting)
+    monkeypatch.setattr(r3d, "_SEEK_GAP_FRAMES", 10)
+    clips, kept = R3DFeatureService._decode_clips(video, starts, ends, tracks, animal_row)
+    assert kept == want_kept and np.array_equal(clips, want)
+    assert len(seeks) == len(starts)  # the opening seek plus one per gap
+
+
+def test_a_jump_that_lands_elsewhere_falls_back_to_reading(video, monkeypatch):
+    starts = np.array([0, 60, 130])
+    ends = starts + 14
+    tracks, animal_row = _tracks(), np.zeros(3, dtype=int)
+    want, want_kept = _reference_clips(video, starts, ends, tracks, animal_row)
+    real_capture = cv2.VideoCapture
+
+    class _Lying:
+        def __init__(self, *a):
+            self._cap = real_capture(*a)
+
+        def get(self, prop):
+            if prop == cv2.CAP_PROP_POS_FRAMES:
+                return -1.0
+            return self._cap.get(prop)
+
+        def __getattr__(self, name):
+            return getattr(self._cap, name)
+
+    monkeypatch.setattr(cv2, "VideoCapture", _Lying)
+    monkeypatch.setattr(r3d, "_SEEK_GAP_FRAMES", 10)
+    clips, kept = R3DFeatureService._decode_clips(video, starts, ends, tracks, animal_row)
+    assert kept == want_kept and np.array_equal(clips, want)

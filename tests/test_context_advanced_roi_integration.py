@@ -22,9 +22,7 @@ from abel.storage.file_store import write_json, write_yaml
 cv2 = pytest.importorskip("cv2")
 
 # Long enough that the service's 8-way frame chunking yields chunks comfortably
-# larger than the optical-flow temporal stride, as in a real session.  Much
-# shorter clips trip a pre-existing length mismatch in the flow interpolation
-# that is unrelated to the ROI features under test here.
+# larger than the optical-flow temporal stride, as in a real session.
 N_FRAMES = 240
 W, H = 160, 120
 BODY_PARTS = ("nose", "ear_left", "ear_right", "body_mid", "tail_base")

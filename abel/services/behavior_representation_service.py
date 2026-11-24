@@ -383,10 +383,10 @@ class BehaviorRepresentationService:
         # The backbone changes which embedding columns the cache holds.  Only a
         # non-default backbone is recorded, so caches built before the setting
         # existed (all R3D) stay valid.
-        from abel.services.r3d_feature_service import DEFAULT_BACKBONE, normalize_backbone
+        from abel.services.r3d_feature_service import BACKBONE_R3D, normalize_backbone
 
         backbone = normalize_backbone(config.video_embedding_backbone)
-        if config.use_r3d_features and backbone != DEFAULT_BACKBONE:
+        if config.use_r3d_features and backbone != BACKBONE_R3D:
             sig["video_embedding_backbone"] = backbone
         return sig
 

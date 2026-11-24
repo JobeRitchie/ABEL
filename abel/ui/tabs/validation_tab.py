@@ -608,11 +608,13 @@ class ValidationOverviewPanel(QWidget):
             "honest held-out split."
         ),
         "Pos labels": (
-            "Human labels for this behavior across the whole project (accepted "
-            "review decisions + reviewer segment labels).\n\n"
-            "This is the label pool, not the modeled rows, it will not match "
-            "Train + Val, because a label only becomes a row once its segment has "
-            "extracted features. Hover a cell for the negative and total counts."
+            "Clips currently labeled as this behavior across the whole project, "
+            "one label per clip (a relabeled clip counts only under its newest "
+            "label).\n\n"
+            "This is the live label pool. It equals Train + Val right after a "
+            "retrain. It differs when you have labeled or relabeled clips since "
+            "the model was trained, or when a labeled segment has no extracted "
+            "features. Hover a cell for the negative and total counts."
         ),
         "Bouts": (
             "Bouts detected in the full inference traces using this behavior's "
@@ -874,12 +876,11 @@ class ValidationOverviewPanel(QWidget):
             neg = int(data.get("n_negative_labels", 0) or 0)
             _tip(
                 "Pos labels",
-                f"{pos} human labels for this behavior.\n"
-                f"{neg} labels for every other behavior, out of {pos + neg} in the "
+                f"{pos} clips labeled as this behavior.\n"
+                f"{neg} labeled as every other behavior, out of {pos + neg} in the "
                 "project.\n\n"
-                "This is the whole label pool. It will not equal Train + Val, a "
-                "label only becomes a modeled row once its segment has extracted "
-                "features.",
+                "This is the live label pool. It equals Train + Val right after a "
+                "retrain, and drifts from it as you label or relabel clips.",
             )
             _tip(
                 "Model",
